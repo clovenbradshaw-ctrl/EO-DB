@@ -845,6 +845,299 @@ body {
 
 .connection-dot.connected { background: var(--ins); }
 
+/* ── Login Modal ── */
+.login-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.login-overlay.hidden { display: none; }
+
+.login-card {
+  background: var(--bg1);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 32px;
+  width: 380px;
+  max-width: 90vw;
+}
+
+.login-title {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--white);
+  margin-bottom: 4px;
+}
+
+.login-title span { color: var(--accent); }
+
+.login-subtitle {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-bottom: 20px;
+}
+
+.login-field {
+  margin-bottom: 12px;
+}
+
+.login-field label {
+  display: block;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-faint);
+  margin-bottom: 4px;
+}
+
+.login-field input {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 10px 12px;
+  color: var(--text);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.login-field input:focus { border-color: var(--accent); }
+.login-field input::placeholder { color: var(--text-faint); }
+
+.login-btn {
+  width: 100%;
+  padding: 12px;
+  margin-top: 8px;
+  background: var(--accent);
+  color: var(--bg);
+  border: none;
+  border-radius: 4px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  transition: filter 0.15s;
+}
+
+.login-btn:hover { filter: brightness(1.1); }
+.login-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.login-error {
+  margin-top: 12px;
+  padding: 8px 12px;
+  background: rgba(239,68,68,0.1);
+  border: 1px solid rgba(239,68,68,0.25);
+  border-radius: 4px;
+  color: var(--danger);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  display: none;
+}
+
+.login-error.visible { display: block; }
+
+.login-skip {
+  display: block;
+  text-align: center;
+  margin-top: 12px;
+  font-size: 10px;
+  color: var(--text-faint);
+  cursor: pointer;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.login-skip:hover { color: var(--text-dim); }
+
+/* ── Topbar user area ── */
+.topbar-user-btn {
+  padding: 4px 12px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--accent);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.topbar-user-btn:hover { background: var(--bg4); }
+
+.topbar-logout {
+  padding: 4px 8px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text-faint);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.topbar-logout:hover { color: var(--danger); border-color: var(--danger); }
+
+/* ── Settings Panel ── */
+.settings-panel {
+  flex-direction: column;
+}
+
+.settings-body {
+  flex: 1;
+  overflow: auto;
+  padding: 24px;
+  display: flex;
+  justify-content: center;
+}
+
+.settings-form {
+  width: 100%;
+  max-width: 640px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.settings-section {
+  background: var(--bg1);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 20px;
+}
+
+.settings-section-title {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-faint);
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+}
+
+.settings-row-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.settings-list {
+  margin-top: 8px;
+}
+
+.settings-list-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  margin-bottom: 6px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+}
+
+.settings-list-item-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.settings-list-item-id { color: var(--text); }
+.settings-list-item-meta { color: var(--text-faint); font-size: 9px; }
+
+.settings-delete-btn {
+  padding: 4px 8px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text-faint);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.settings-delete-btn:hover { color: var(--danger); border-color: var(--danger); }
+
+.settings-add-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.settings-add-input {
+  flex: 1;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px 10px;
+  color: var(--text);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  outline: none;
+}
+
+.settings-add-input:focus { border-color: var(--accent); }
+.settings-add-input::placeholder { color: var(--text-faint); }
+
+.settings-add-btn {
+  padding: 8px 14px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+
+.settings-add-btn:hover { background: var(--bg4); color: var(--accent); }
+
+.settings-session-field {
+  display: flex;
+  justify-content: space-between;
+  padding: 4px 0;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+}
+
+.settings-session-key { color: var(--text-dim); }
+.settings-session-val { color: var(--text); }
+
+.settings-empty {
+  color: var(--text-faint);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  padding: 8px 0;
+  font-style: italic;
+}
+
 /* ── Scrollbar ── */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
@@ -870,9 +1163,8 @@ body {
     <span class="status-item">targets <b>12</b></span>
     <span class="status-item">edges <b>2</b></span>
   </div>
-  <div class="topbar-user">
-    <div class="user-avatar">ML</div>
-    @admin:amino
+  <div class="topbar-user" id="topbarUser">
+    <button class="topbar-user-btn" onclick="showLogin()">Sign In</button>
   </div>
 </div>
 
@@ -891,6 +1183,7 @@ body {
   <div class="nav-tab" onclick="switchTab('log')">Log</div>
   <div class="nav-tab" onclick="switchTab('graph')">Graph</div>
   <div class="nav-tab" onclick="switchTab('compose')" style="color:var(--ins);">+ Compose</div>
+  <div class="nav-tab" onclick="switchTab('settings')">Settings</div>
 </div>
 
 <!-- Main Content -->
@@ -1024,6 +1317,84 @@ body {
     </div>
   </div>
 
+  <!-- ═══ Settings Panel ═══ -->
+  <div id="panel-settings" class="panel settings-panel">
+    <div class="settings-body">
+      <div class="settings-form">
+
+        <!-- Current Session -->
+        <div class="settings-section">
+          <div class="settings-section-title">Current Session</div>
+          <div id="settingsSession">
+            <div class="settings-empty">Not signed in</div>
+          </div>
+        </div>
+
+        <!-- Auth Gating -->
+        <div class="settings-section">
+          <div class="settings-section-title">Auth Gating</div>
+          <div class="settings-row">
+            <label class="toggle-switch">
+              <input type="checkbox" id="authGatingToggle" onchange="toggleAuthGating()">
+              <span class="toggle-slider"></span>
+            </label>
+            <div>
+              <div class="settings-row-label" id="authGatingLabel">Auth gating disabled — all authenticated users can access</div>
+              <div class="toggle-hint">When enabled, only accounts in the allowlist can access this database</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Allowed Accounts -->
+        <div class="settings-section">
+          <div class="settings-section-title">Allowed Accounts</div>
+          <div id="settingsAccountsList" class="settings-list"></div>
+          <div class="settings-add-row">
+            <input class="settings-add-input" id="addAccountId" placeholder="@user:homeserver.com">
+            <input class="settings-add-input" id="addAccountLabel" placeholder="Label (optional)" style="max-width:160px;">
+            <button class="settings-add-btn" onclick="addAccount()">Add</button>
+          </div>
+        </div>
+
+        <!-- Allowed Homeservers -->
+        <div class="settings-section">
+          <div class="settings-section-title">Allowed Homeservers</div>
+          <div id="settingsHomeserversList" class="settings-list"></div>
+          <div class="settings-add-row">
+            <input class="settings-add-input" id="addHomeserverUrl" placeholder="https://matrix.example.com">
+            <button class="settings-add-btn" onclick="addHomeserver()">Add</button>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- Login Modal -->
+<div class="login-overlay hidden" id="loginOverlay">
+  <div class="login-card">
+    <div class="login-title">EO<span>///</span>DB</div>
+    <div class="login-subtitle">Sign in with your Matrix account</div>
+
+    <div class="login-field">
+      <label>Homeserver</label>
+      <input id="loginHomeserver" placeholder="https://matrix.example.com" value="">
+    </div>
+    <div class="login-field">
+      <label>Username</label>
+      <input id="loginUser" placeholder="username" autocomplete="username">
+    </div>
+    <div class="login-field">
+      <label>Password</label>
+      <input id="loginPassword" type="password" placeholder="password" autocomplete="current-password">
+    </div>
+
+    <button class="login-btn" id="loginBtn" onclick="doLogin()">Sign In</button>
+    <div class="login-error" id="loginError"></div>
+    <div class="login-skip" onclick="hideLogin()">Continue without signing in</div>
+  </div>
 </div>
 
 <!-- Replay Bar -->
@@ -1035,6 +1406,120 @@ body {
 </div>
 
 <script>
+// ── Auth State ──
+let matrixToken = localStorage.getItem('eo_matrix_token');
+let matrixUserId = localStorage.getItem('eo_matrix_user_id');
+let matrixDisplayName = localStorage.getItem('eo_matrix_displayname');
+
+function authHeaders() {
+  const h = { 'Content-Type': 'application/json' };
+  if (matrixToken) h['Authorization'] = 'Bearer ' + matrixToken;
+  return h;
+}
+
+function updateTopbarUser() {
+  const el = document.getElementById('topbarUser');
+  if (matrixToken && matrixUserId) {
+    const name = matrixDisplayName || matrixUserId;
+    const initials = matrixDisplayName
+      ? matrixDisplayName.split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2)
+      : matrixUserId.slice(1, 3).toUpperCase();
+    el.innerHTML = `
+      <div class="user-avatar">${initials}</div>
+      <span>${name}</span>
+      <button class="topbar-logout" onclick="doLogout()">Logout</button>
+    `;
+  } else {
+    el.innerHTML = '<button class="topbar-user-btn" onclick="showLogin()">Sign In</button>';
+  }
+}
+
+function showLogin() {
+  document.getElementById('loginOverlay').classList.remove('hidden');
+  document.getElementById('loginUser').focus();
+}
+
+function hideLogin() {
+  document.getElementById('loginOverlay').classList.add('hidden');
+  document.getElementById('loginError').classList.remove('visible');
+}
+
+async function doLogin() {
+  const btn = document.getElementById('loginBtn');
+  const errEl = document.getElementById('loginError');
+  errEl.classList.remove('visible');
+  btn.disabled = true;
+  btn.textContent = 'Signing in...';
+
+  const user = document.getElementById('loginUser').value.trim();
+  const password = document.getElementById('loginPassword').value;
+
+  if (!user || !password) {
+    errEl.textContent = 'Username and password are required';
+    errEl.classList.add('visible');
+    btn.disabled = false;
+    btn.textContent = 'Sign In';
+    return;
+  }
+
+  try {
+    // Step 1: Login
+    const loginRes = await fetch(`${serverUrl}/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user, password }),
+    });
+    const loginData = await loginRes.json();
+    if (!loginRes.ok) throw new Error(loginData.error || 'Login failed');
+
+    matrixToken = loginData.access_token;
+    matrixUserId = loginData.user_id;
+    localStorage.setItem('eo_matrix_token', matrixToken);
+    localStorage.setItem('eo_matrix_user_id', matrixUserId);
+
+    // Step 2: Fetch profile (displayname)
+    try {
+      const profileRes = await fetch(`${serverUrl}/auth/profile`, {
+        headers: { 'Authorization': 'Bearer ' + matrixToken },
+      });
+      if (profileRes.ok) {
+        const profileData = await profileRes.json();
+        matrixDisplayName = profileData.displayname || null;
+        if (matrixDisplayName) {
+          localStorage.setItem('eo_matrix_displayname', matrixDisplayName);
+        }
+      }
+    } catch { /* profile is best-effort */ }
+
+    hideLogin();
+    updateTopbarUser();
+    await fetchLiveLog();
+  } catch (e) {
+    errEl.textContent = e.message;
+    errEl.classList.add('visible');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Sign In';
+  }
+}
+
+function doLogout() {
+  matrixToken = null;
+  matrixUserId = null;
+  matrixDisplayName = null;
+  localStorage.removeItem('eo_matrix_token');
+  localStorage.removeItem('eo_matrix_user_id');
+  localStorage.removeItem('eo_matrix_displayname');
+  updateTopbarUser();
+}
+
+// Allow Enter key to submit login
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !document.getElementById('loginOverlay').classList.contains('hidden')) {
+    doLogin();
+  }
+});
+
 // ── Data (starts with mock, replaced by live data on connect) ──
 let LOG = [
   { seq:4201, op:"INS", target:"app.tblClients.rec001", operand:{name:"Maria Garcia",status:"active"}, agent:"@intake:amino", ts:"2025-03-27T09:12:00Z" },
@@ -1083,8 +1568,15 @@ async function connectToServer() {
 
 async function fetchLiveLog() {
   try {
-    const res = await fetch(`${serverUrl}/log?limit=10000`);
+    const res = await fetch(`${serverUrl}/log?limit=10000`, { headers: authHeaders() });
     const data = await res.json();
+    if (!res.ok) {
+      // If auth required, prompt login
+      if (res.status === 401 || res.status === 403) {
+        if (!matrixToken) showLogin();
+        return;
+      }
+    }
     if (data.events && data.events.length > 0) {
       LOG = data.events;
       replayIndex = LOG.length - 1;
@@ -1308,7 +1800,7 @@ async function submitEvent() {
 
     const res = await fetch(`${serverUrl}/webhook`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders(),
       body: JSON.stringify(event)
     });
 
@@ -1382,6 +1874,7 @@ function switchTab(tab) {
   document.querySelector(`.nav-tab[onclick*="${tab}"]`).classList.add('active');
   document.getElementById(`panel-${tab}`).classList.add('active');
   if (tab === 'graph') renderGraph();
+  if (tab === 'settings') loadSettings();
 }
 
 function formatTarget(target) {
@@ -1595,7 +2088,174 @@ function updateReplay() {
   if (currentTab === 'graph') renderGraph();
 }
 
+// ── Settings ──
+let settingsConfig = null;
+
+async function loadSettings() {
+  // Update session info
+  const sessionEl = document.getElementById('settingsSession');
+  if (matrixToken && matrixUserId) {
+    sessionEl.innerHTML = `
+      <div class="settings-session-field"><span class="settings-session-key">User ID</span><span class="settings-session-val">${matrixUserId}</span></div>
+      <div class="settings-session-field"><span class="settings-session-key">Display Name</span><span class="settings-session-val">${matrixDisplayName || '—'}</span></div>
+      <div style="margin-top:12px;">
+        <button class="topbar-logout" onclick="doLogout()" style="padding:6px 12px;">Sign Out</button>
+      </div>
+    `;
+  } else {
+    sessionEl.innerHTML = `
+      <div class="settings-empty">Not signed in</div>
+      <div style="margin-top:8px;">
+        <button class="topbar-user-btn" onclick="showLogin()">Sign In</button>
+      </div>
+    `;
+  }
+
+  if (!isConnected || !matrixToken) return;
+
+  try {
+    const res = await fetch(`${serverUrl}/admin/matrix-auth`, { headers: authHeaders() });
+    if (!res.ok) return;
+    settingsConfig = await res.json();
+    renderSettingsConfig();
+  } catch (e) {
+    console.error('Failed to load settings:', e);
+  }
+}
+
+function renderSettingsConfig() {
+  if (!settingsConfig) return;
+
+  // Auth gating toggle
+  document.getElementById('authGatingToggle').checked = settingsConfig.enabled;
+  document.getElementById('authGatingLabel').textContent = settingsConfig.enabled
+    ? 'Auth gating enabled — only allowlisted accounts can access'
+    : 'Auth gating disabled — all authenticated users can access';
+
+  // Allowed accounts
+  const accountsEl = document.getElementById('settingsAccountsList');
+  if (settingsConfig.allowed_accounts.length === 0) {
+    accountsEl.innerHTML = '<div class="settings-empty">No accounts in allowlist</div>';
+  } else {
+    accountsEl.innerHTML = settingsConfig.allowed_accounts.map(a => `
+      <div class="settings-list-item">
+        <div class="settings-list-item-info">
+          <span class="settings-list-item-id">${a.user_id}</span>
+          <span class="settings-list-item-meta">${a.label ? a.label + ' — ' : ''}added ${a.added_at.slice(0,10)} by ${a.added_by}</span>
+        </div>
+        <button class="settings-delete-btn" onclick="removeAccount('${a.user_id}')">Remove</button>
+      </div>
+    `).join('');
+  }
+
+  // Allowed homeservers
+  const hsEl = document.getElementById('settingsHomeserversList');
+  if (settingsConfig.allowed_homeservers.length === 0) {
+    hsEl.innerHTML = '<div class="settings-empty">No homeserver restrictions (all accepted)</div>';
+  } else {
+    hsEl.innerHTML = settingsConfig.allowed_homeservers.map(h => `
+      <div class="settings-list-item">
+        <span class="settings-list-item-id">${h}</span>
+        <button class="settings-delete-btn" onclick="removeHomeserver('${h}')">Remove</button>
+      </div>
+    `).join('');
+  }
+}
+
+async function toggleAuthGating() {
+  const enabled = document.getElementById('authGatingToggle').checked;
+  try {
+    const res = await fetch(`${serverUrl}/admin/matrix-auth/enabled`, {
+      method: 'PUT',
+      headers: authHeaders(),
+      body: JSON.stringify({ enabled }),
+    });
+    if (res.ok) {
+      settingsConfig = await res.json();
+      renderSettingsConfig();
+    }
+  } catch (e) {
+    console.error('Failed to toggle auth gating:', e);
+  }
+}
+
+async function addAccount() {
+  const userId = document.getElementById('addAccountId').value.trim();
+  const label = document.getElementById('addAccountLabel').value.trim();
+  if (!userId) return;
+
+  try {
+    const res = await fetch(`${serverUrl}/admin/matrix-auth/accounts`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({ user_id: userId, label: label || undefined }),
+    });
+    if (res.ok) {
+      settingsConfig = await res.json();
+      renderSettingsConfig();
+      document.getElementById('addAccountId').value = '';
+      document.getElementById('addAccountLabel').value = '';
+    } else {
+      const data = await res.json();
+      alert(data.error || 'Failed to add account');
+    }
+  } catch (e) {
+    console.error('Failed to add account:', e);
+  }
+}
+
+async function removeAccount(userId) {
+  try {
+    const res = await fetch(`${serverUrl}/admin/matrix-auth/accounts/${encodeURIComponent(userId)}`, {
+      method: 'DELETE',
+      headers: authHeaders(),
+    });
+    if (res.ok) {
+      settingsConfig = await res.json();
+      renderSettingsConfig();
+    }
+  } catch (e) {
+    console.error('Failed to remove account:', e);
+  }
+}
+
+async function addHomeserver() {
+  const hs = document.getElementById('addHomeserverUrl').value.trim();
+  if (!hs) return;
+
+  try {
+    const res = await fetch(`${serverUrl}/admin/matrix-auth/homeservers`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({ homeserver: hs }),
+    });
+    if (res.ok) {
+      settingsConfig = await res.json();
+      renderSettingsConfig();
+      document.getElementById('addHomeserverUrl').value = '';
+    }
+  } catch (e) {
+    console.error('Failed to add homeserver:', e);
+  }
+}
+
+async function removeHomeserver(hs) {
+  try {
+    const res = await fetch(`${serverUrl}/admin/matrix-auth/homeservers/${encodeURIComponent(hs)}`, {
+      method: 'DELETE',
+      headers: authHeaders(),
+    });
+    if (res.ok) {
+      settingsConfig = await res.json();
+      renderSettingsConfig();
+    }
+  } catch (e) {
+    console.error('Failed to remove homeserver:', e);
+  }
+}
+
 // ── Init ──
+updateTopbarUser();
 renderHorizon();
 renderLog();
 
