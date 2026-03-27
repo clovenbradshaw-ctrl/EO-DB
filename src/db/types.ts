@@ -112,10 +112,3 @@ export interface SignalEntry {
   computed_at: string;
 }
 
-// Population-tracked pattern registration
-export interface PatternRegistration extends EvaRegistration {
-  pattern: true;
-  over: string;
-  where?: Record<string, any>;
-  population_targets: string[];
-}

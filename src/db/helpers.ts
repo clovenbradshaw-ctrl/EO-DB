@@ -1,6 +1,5 @@
 import { EoDb } from './level.js';
 import { getState } from './state.js';
-import { getEdgesTo } from './graph.js';
 import type { EoState } from './types.js';
 
 /**
@@ -28,25 +27,4 @@ export async function resolveAlias(db: EoDb, target: string): Promise<string> {
  */
 export async function checkExists(db: EoDb, target: string): Promise<EoState | null> {
   return getState(db, target);
-}
-
-/**
- * SEG capacity: Read partition/boundary metadata from state.
- * Returns the boundary info if the target has been SEG'd, null otherwise.
- */
-export async function checkBoundary(db: EoDb, target: string): Promise<{ boundary: string; reason?: string } | null> {
-  const state = await getState(db, target);
-  if (state?.last_op === 'SEG' && state.value?.boundary) {
-    return state.value as { boundary: string; reason?: string };
-  }
-  return null;
-}
-
-/**
- * CON capacity: Find all targets that depend on the given target
- * by walking the reverse graph (targets that point TO this one).
- */
-export async function findDependents(db: EoDb, target: string): Promise<string[]> {
-  const reverseEdges = await getEdgesTo(db, target);
-  return reverseEdges.map(e => e.source);
 }
