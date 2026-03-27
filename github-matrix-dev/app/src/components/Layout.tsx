@@ -6,6 +6,9 @@ import { createStore } from '../db/encrypted-store';
 import { deriveKey } from '../lib/crypto';
 import { ClientList } from './ClientList';
 import { RecordView } from './RecordView';
+import { ConnectionStatus, useConnectionState } from './ConnectionStatus';
+import { ErrorBoundary } from './ErrorBoundary';
+import { SyncProgress } from './SyncProgress';
 
 interface LayoutProps {
   session: MatrixSession;
@@ -18,6 +21,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
   const ready = useEoStore((s) => s.ready);
   const lastSeq = useEoStore((s) => s.lastSeq);
   const [selected, setSelected] = useState<string | null>(null);
+  const connectionState = useConnectionState();
 
   // Initialize encrypted store on mount
   useEffect(() => {
@@ -54,6 +58,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
           <span style={styles.section}>Case Management</span>
         </div>
         <div style={styles.headerRight}>
+          <ConnectionStatus state={connectionState} />
           <div style={styles.seqBadge}>seq: {lastSeq}</div>
           <span style={styles.user}>{session.userId}</span>
           <button onClick={handleLogout} style={styles.logoutBtn}>Sign out</button>
@@ -64,20 +69,22 @@ export function Layout({ session, onLogout }: LayoutProps) {
           {ready ? (
             <ClientList selected={selected} onSelect={setSelected} />
           ) : (
-            <div style={styles.loading}>Initializing...</div>
+            <SyncProgress message="Initializing store..." detail="Deriving encryption key" />
           )}
         </aside>
         <main style={styles.main}>
-          {selected ? (
-            <RecordView target={selected} onNavigate={setSelected} />
-          ) : (
-            <div style={styles.empty}>
-              <div style={styles.emptyText}>Select a client to view their record</div>
-              <div style={styles.emptySub}>
-                You'll see their case details, the context around them, and patterns across similar cases
+          <ErrorBoundary>
+            {selected ? (
+              <RecordView target={selected} onNavigate={setSelected} />
+            ) : (
+              <div style={styles.empty}>
+                <div style={styles.emptyText}>Select a client to view their record</div>
+                <div style={styles.emptySub}>
+                  You'll see their case details, the context around them, and patterns across similar cases
+                </div>
               </div>
-            </div>
-          )}
+            )}
+          </ErrorBoundary>
         </main>
       </div>
     </div>
