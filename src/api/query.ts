@@ -23,6 +23,7 @@ export function registerQueryRoutes(app: FastifyInstance, db: EoDb): void {
       prefix: query.prefix === 'true',
       signals: query.signals === 'true',
       grounds: query.grounds !== 'false',
+      ancestry: query.ancestry !== 'false',
       nearby: query.nearby !== 'false',
       governance: query.governance !== 'false',
       trajectory: query.trajectory !== 'false',

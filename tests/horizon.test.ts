@@ -329,3 +329,85 @@ describe('Layer 5: Trajectory', () => {
     expect(result.trajectory).toBeUndefined();
   });
 });
+
+// --- Ancestry: The Ontology Chain ---
+
+describe('Ancestry', () => {
+  it('climbs from field to record to collection to app', async () => {
+    // Build the hierarchy
+    await processEvent(db, ev({ op: 'DEF', target: 'app', operand: { timezone: 'America/Chicago', firm: 'Amino' } }));
+    await processEvent(db, ev({ op: 'DEF', target: 'app.tblCases', operand: { reviewCycle: 'biweekly' } }));
+    await processEvent(db, ev({ target: 'app.tblCases.rec101', operand: { type: 'H1B', filed: '2025-06-01' } }));
+    await processEvent(db, ev({ op: 'DEF', target: 'app.tblCases.rec101.fldStatus', operand: 'pending' }));
+
+    const result = await horizonGet(db, 'app.tblCases.rec101.fldStatus') as HorizonResponse;
+    expect(result.ancestry).toBeDefined();
+    expect(result.ancestry!.length).toBe(3); // rec101, tblCases, app
+
+    // Depth 1 = parent (rec101)
+    const rec101 = result.ancestry!.find(a => a.target === 'app.tblCases.rec101');
+    expect(rec101).toBeDefined();
+    expect(rec101!.depth).toBe(1);
+    expect(rec101!.figure?.value).toEqual({ type: 'H1B', filed: '2025-06-01' });
+
+    // Depth 2 = grandparent (tblCases)
+    const tblCases = result.ancestry!.find(a => a.target === 'app.tblCases');
+    expect(tblCases).toBeDefined();
+    expect(tblCases!.depth).toBe(2);
+    expect(tblCases!.figure?.value).toEqual({ reviewCycle: 'biweekly' });
+
+    // Depth 3 = root (app)
+    const app = result.ancestry!.find(a => a.target === 'app');
+    expect(app).toBeDefined();
+    expect(app!.depth).toBe(3);
+    expect(app!.figure?.value).toEqual({ timezone: 'America/Chicago', firm: 'Amino' });
+  });
+
+  it('each ancestor carries its own grounds from above', async () => {
+    await processEvent(db, ev({ op: 'DEF', target: 'app', operand: { firm: 'Amino' } }));
+    await processEvent(db, ev({ op: 'DEF', target: 'app.tbl', operand: { region: 'Nashville' } }));
+    await processEvent(db, ev({ target: 'app.tbl.rec001', operand: { name: 'Maria' } }));
+
+    const result = await horizonGet(db, 'app.tbl.rec001') as HorizonResponse;
+
+    // tbl's grounds should include app's firm
+    const tblAncestor = result.ancestry!.find(a => a.target === 'app.tbl');
+    expect(tblAncestor!.grounds.some(g => g.key === 'firm')).toBe(true);
+  });
+
+  it('reports children_count at each ancestor', async () => {
+    await processEvent(db, ev({ target: 'cnt.tbl.rec001', operand: {} }));
+    await processEvent(db, ev({ target: 'cnt.tbl.rec002', operand: {} }));
+    await processEvent(db, ev({ target: 'cnt.tbl.rec003', operand: {} }));
+    await processEvent(db, ev({ op: 'DEF', target: 'cnt.tbl.rec001.fldX', operand: 'val' }));
+
+    const result = await horizonGet(db, 'cnt.tbl.rec001.fldX') as HorizonResponse;
+    const tbl = result.ancestry!.find(a => a.target === 'cnt.tbl');
+    expect(tbl!.children_count).toBe(3); // 3 records under cnt.tbl
+  });
+
+  it('reports nearby_count (siblings at same level)', async () => {
+    await processEvent(db, ev({ target: 'sib.tbl.rec001', operand: {} }));
+    await processEvent(db, ev({ target: 'sib.tbl.rec002', operand: {} }));
+    await processEvent(db, ev({ target: 'sib.tbl.rec003', operand: {} }));
+
+    const result = await horizonGet(db, 'sib.tbl.rec001') as HorizonResponse;
+    // tbl is the parent; its nearby_count is siblings of tbl under sib
+    // rec001 is the target; ancestry[0] is tbl
+    const tbl = result.ancestry!.find(a => a.target === 'sib.tbl');
+    // tbl has 0 siblings (it's the only collection under sib)
+    expect(tbl!.nearby_count).toBe(0);
+  });
+
+  it('returns empty ancestry for single-segment target', async () => {
+    await processEvent(db, ev({ op: 'DEF', target: 'root', operand: { x: 1 } }));
+    const result = await horizonGet(db, 'root') as HorizonResponse;
+    expect(result.ancestry).toEqual([]);
+  });
+
+  it('disabled with ancestry=false', async () => {
+    await processEvent(db, ev({ target: 'nochain.rec' }));
+    const result = await horizonGet(db, 'nochain.rec', { ancestry: false }) as HorizonResponse;
+    expect(result.ancestry).toBeUndefined();
+  });
+});

@@ -59,11 +59,22 @@ export type EoEventInput = Omit<EoEvent, 'seq'>;
 export interface HorizonResponse {
   target: string;
   figure: EoState | null;                   // what this target IS
+  ancestry?: AncestryEntry[];                // the ontology chain — parent figures up to root
   grounds: GroundEntry[];                    // ambient conditions pervading this region
   nearby?: NearbyEntry[];                    // similar records in the same collection
   governance?: GovernanceEntry[];            // EVA policies that govern this target
   trajectory?: LoggableOperator[];           // compact operator history shape
   signals?: SignalEntry[];                   // statistical patterns (on-demand, expensive)
+}
+
+// An ancestor in the ontology chain — each level is a mini-Horizon
+export interface AncestryEntry {
+  target: string;                            // the ancestor target path
+  figure: EoState | null;                    // projected state at this ancestor
+  grounds: GroundEntry[];                    // this ancestor's own ambient conditions from above
+  nearby_count: number;                      // how many siblings at this level
+  children_count: number;                    // how many direct children under this ancestor
+  depth: number;                             // 1 = parent, 2 = grandparent, etc.
 }
 
 // A ground condition inherited from an ancestor prefix

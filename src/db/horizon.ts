@@ -5,11 +5,12 @@ import { resolveAlias } from './helpers.js';
 import { readLogForTarget } from './log.js';
 import type {
   EoState, EvaRegistration, HorizonResponse, GroundEntry, SignalEntry,
-  NearbyEntry, GovernanceEntry, LoggableOperator,
+  NearbyEntry, GovernanceEntry, LoggableOperator, AncestryEntry,
 } from './types.js';
 
 export interface HorizonOpts {
   prefix?: boolean;
+  ancestry?: boolean;  // default true — the ontology chain
   signals?: boolean;
   grounds?: boolean;    // default true
   nearby?: boolean;     // default true
@@ -45,6 +46,9 @@ export async function horizonGet(
   const figure = await getFigureState(db, resolved);
   if (!figure) return null;
 
+  // Ancestry: the ontology chain — each parent as a mini-Horizon
+  const ancestry = opts?.ancestry !== false ? await getAncestry(db, resolved) : undefined;
+
   // Layer 2: Grounds (default on)
   const grounds = opts?.grounds !== false ? await getGrounds(db, resolved) : [];
 
@@ -60,7 +64,7 @@ export async function horizonGet(
   // Layer 6: Signals (expensive, on-demand only)
   const signals = opts?.signals ? await detectSignals(db, resolved) : undefined;
 
-  return { target: resolved, figure, grounds, nearby, governance, trajectory, signals };
+  return { target: resolved, figure, ancestry, grounds, nearby, governance, trajectory, signals };
 }
 
 async function horizonGetByPrefix(db: EoDb, prefix: string, opts?: HorizonOpts): Promise<HorizonResponse[]> {
@@ -159,6 +163,78 @@ async function getGrounds(db: EoDb, target: string): Promise<GroundEntry[]> {
   }
 
   return grounds;
+}
+
+// ─── Ancestry: The Ontology Chain ──────────────────────────────────
+// Climb up the target path. Each ancestor is a mini-Horizon:
+// its own figure, its own grounds from above, count of siblings and children.
+// fldStatus → rec101 → tblCases → app
+// Cheap: one state lookup + one prefix count per ancestor level.
+
+async function getAncestry(db: EoDb, target: string): Promise<AncestryEntry[]> {
+  const parts = target.split('.');
+  if (parts.length <= 1) return [];
+
+  const ancestry: AncestryEntry[] = [];
+
+  for (let depth = parts.length - 1; depth >= 1; depth--) {
+    const ancestorTarget = parts.slice(0, depth).join('.');
+    const distance = parts.length - depth;
+
+    // This ancestor's figure
+    const figure = await getState(db, ancestorTarget);
+
+    // This ancestor's own grounds (from levels above it)
+    const ancestorParts = ancestorTarget.split('.');
+    const ancestorGrounds: GroundEntry[] = [];
+    const ancestorKeys = new Set<string>();
+    if (figure?.value && typeof figure.value === 'object') {
+      Object.keys(figure.value).forEach(k => ancestorKeys.add(k));
+    }
+    for (let gd = ancestorParts.length - 1; gd >= 1; gd--) {
+      const gAncestor = ancestorParts.slice(0, gd).join('.');
+      const gDist = ancestorParts.length - gd;
+      const gState = await getState(db, gAncestor);
+      if (gState?.value && typeof gState.value === 'object' && !gState.value._alias) {
+        for (const [key, value] of Object.entries(gState.value)) {
+          if (!key.startsWith('_') && !ancestorKeys.has(key)) {
+            ancestorGrounds.push({ source: gAncestor, key, value, distance: gDist });
+          }
+        }
+      }
+    }
+
+    // Count children under this ancestor (direct children = one segment deeper)
+    const childPrefix = ancestorTarget + '.';
+    const allChildren = await getStateByPrefix(db, childPrefix);
+    const directChildren = allChildren.filter(s => {
+      const childParts = s.target.split('.');
+      return childParts.length === depth + 1 && !s.value?._alias;
+    });
+
+    // Count siblings (peers at the same level, under the same parent)
+    let nearbyCount = 0;
+    if (depth >= 2) {
+      const parentTarget = parts.slice(0, depth - 1).join('.');
+      const sibPrefix = parentTarget + '.';
+      const siblings = await getStateByPrefix(db, sibPrefix);
+      nearbyCount = siblings.filter(s => {
+        const sp = s.target.split('.');
+        return sp.length === depth && s.target !== ancestorTarget && !s.value?._alias;
+      }).length;
+    }
+
+    ancestry.push({
+      target: ancestorTarget,
+      figure: figure && !figure.value?._alias ? figure : null,
+      grounds: ancestorGrounds,
+      nearby_count: nearbyCount,
+      children_count: directChildren.length,
+      depth: distance,
+    });
+  }
+
+  return ancestry;
 }
 
 // ─── Layer 3: Nearby ───────────────────────────────────────────────
