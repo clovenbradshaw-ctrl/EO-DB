@@ -1,4 +1,6 @@
 import type { FastifyRequest, FastifyReply } from 'fastify';
+import type { EoDb } from '../db/level.js';
+import { isAccountAllowed } from './matrix-auth-config.js';
 
 export interface MatrixUser {
   user_id: string;
@@ -16,9 +18,17 @@ const CACHE_TTL = 300_000; // 5 minutes
 let matrixHomeserver = process.env.EO_MATRIX_HOMESERVER || 'https://app.aminoimmigration.com';
 let webhookSecret = process.env.EO_WEBHOOK_SECRET || '';
 
+/** The DB handle used by authMiddleware for allowlist checks. */
+let authDb: EoDb | null = null;
+
 export function setAuthConfig(config: { homeserver?: string; webhookSecret?: string }): void {
   if (config.homeserver) matrixHomeserver = config.homeserver;
   if (config.webhookSecret) webhookSecret = config.webhookSecret;
+}
+
+/** Provide the DB reference so the middleware can check the account allowlist. */
+export function setAuthDb(db: EoDb): void {
+  authDb = db;
 }
 
 export function clearTokenCache(): void {
@@ -60,6 +70,18 @@ export interface AuthenticatedRequest extends FastifyRequest {
   matrixUser?: MatrixUser;
 }
 
+/**
+ * Verify that the authenticated user is on the account allowlist.
+ * Skipped when Matrix auth gating is disabled or no DB is attached.
+ */
+async function enforceAllowlist(user_id: string): Promise<void> {
+  if (!authDb) return;
+  const allowed = await isAccountAllowed(authDb, user_id);
+  if (!allowed) {
+    throw new Error('Account not in allowlist');
+  }
+}
+
 export async function authMiddleware(
   request: AuthenticatedRequest,
   reply: FastifyReply
@@ -82,8 +104,14 @@ export async function authMiddleware(
       reply.code(401).send({ error: 'Invalid Authorization format' });
       return;
     }
-  } catch (e) {
-    reply.code(401).send({ error: 'Authentication failed' });
+
+    // Enforce account allowlist (when Matrix auth gating is enabled)
+    await enforceAllowlist(request.matrixUser!.user_id);
+  } catch (e: any) {
+    const message = e.message === 'Account not in allowlist'
+      ? 'Account not authorized for this database'
+      : 'Authentication failed';
+    reply.code(403).send({ error: message });
     return;
   }
 }

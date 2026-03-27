@@ -2,11 +2,12 @@ import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import { createDb, type EoDb } from './db/level.js';
 import { Feed } from './db/feed.js';
-import { authMiddleware, setAuthConfig } from './auth/matrix.js';
+import { authMiddleware, setAuthConfig, setAuthDb } from './auth/matrix.js';
 import { registerHealthRoute, registerQueryRoutes } from './api/query.js';
 import { registerWebhookRoutes } from './api/webhook.js';
 import { registerOpsRoutes } from './api/ops.js';
 import { registerSyncRoute } from './api/sync.js';
+import { registerAdminRoutes } from './api/admin.js';
 
 const PORT = parseInt(process.env.EO_PORT || '3000', 10);
 const DATA_DIR = process.env.EO_DATA_DIR || './data';
@@ -21,6 +22,7 @@ async function start(): Promise<void> {
   const feed = new Feed();
 
   setAuthConfig({ homeserver: HOMESERVER, webhookSecret: WEBHOOK_SECRET });
+  setAuthDb(db);
 
   // CORS
   await app.register(cors, { origin: true });
@@ -37,6 +39,7 @@ async function start(): Promise<void> {
     registerWebhookRoutes(protectedApp, db, feed);
     registerOpsRoutes(protectedApp, db, feed);
     registerQueryRoutes(protectedApp, db);
+    registerAdminRoutes(protectedApp, db);
   });
 
   // Graceful shutdown
