@@ -125,14 +125,14 @@ describe('Full Lifecycle E2E', () => {
 
     // --- Verify GET /horizon ---
     res = await get('/horizon/app.tblCases.rec101.fldStatus');
-    expect(res.json().state.value).toBe('approved');
+    expect(res.json().figure.value).toBe('approved');
 
     res = await get('/horizon/app.tblClients.rec001');
-    expect(res.json().state.last_op).toBe('SEG');
-    expect(res.json().boundary).toEqual({ boundary: 'exclude', reason: 'archived' });
+    expect(res.json().figure.last_op).toBe('SEG');
+    expect(res.json().figure.value).toEqual({ boundary: 'exclude', reason: 'archived' });
 
     res = await get('/horizon/schema.tblCases.fldUrgency');
-    expect(res.json().state.value).toEqual({ type: 'select' });
+    expect(res.json().figure.value).toEqual({ type: 'select' });
 
     // --- Verify GET /log ---
     res = await get('/log?since=0');
@@ -171,7 +171,7 @@ describe('Helix Ordering', () => {
     expect(res.statusCode).toBe(200);
 
     const state = await get('/horizon/auto.created');
-    expect(state.json().state.value).toBe('hello');
+    expect(state.json().figure.value).toBe('hello');
   });
 
   it('CON with non-existent endpoint returns error', async () => {
@@ -191,8 +191,8 @@ describe('Helix Ordering', () => {
 
     // GET alias resolves to merged
     const res = await get('/horizon/syn.A');
-    expect(res.json().state.target).toBe('syn.merged');
-    expect(res.json().state.value).toHaveProperty('z', 3);
+    expect(res.json().target).toBe('syn.merged');
+    expect(res.json().figure.value).toHaveProperty('z', 3);
   });
 });
 
@@ -292,13 +292,13 @@ describe('Dependent Recomputation Integration', () => {
 
     // Check formula has _computed
     let res = await get('/horizon/dep.formula');
-    expect(res.json().state.value._computed).toBeDefined();
+    expect(res.json().figure.value._computed).toBeDefined();
 
     // Change source — should trigger recomputation
     await post('/ops/def', { target: 'dep.source', operand: { val: 20 } });
 
     res = await get('/horizon/dep.formula');
-    expect(res.json().state.value._computed.inputs['dep.source']).toEqual({ val: 20 });
+    expect(res.json().figure.value._computed.inputs['dep.source']).toEqual({ val: 20 });
 
     // Verify recomputation didn't add log entries
     res = await get('/log?since=0');

@@ -893,51 +893,84 @@ function executeFormulaFunction(formula: any, inputs: Record<string, any>): any 
 
 ---
 
-## 7. Horizon — Read-Time Evaluation
+## 7. Horizon — Three-Layer Read-Time Evaluation
+
+The Horizon returns three layers per target:
+
+- **Figure** — what the target IS. Projected state with alias resolution and Horizon-computed EVA.
+- **Ground** — what the target is IN. Ambient conditions inherited from ancestor prefixes (existing DEFs at higher-level targets).
+- **Signal** — what the target is PART OF. Emergent patterns detected across populations. Computed on demand, ephemeral, never stored.
+
+No new operators, fold cases, or keyspaces. The log and fold are unchanged. The Horizon reads deeper.
+
+### 7.1 Response Format
 
 ```typescript
-// src/db/horizon.ts
-
-/**
- * Get the projected value at a target, handling:
- * - Alias resolution (SYN merges)
- * - Horizon-computed EVA targets (evaluate at read time)
- * - Regular state lookup
- */
-async function horizonGet(db: Level, target: string): Promise<any> {
-  const state = await getState(db, target);
-  if (!state) return null;
-
-  // Alias resolution
-  if (state.value?._alias) {
-    return horizonGet(db, state.value._alias);
-  }
-
-  // Check if this target is Horizon-computed
-  let evaReg: EvaRegistration | null = null;
-  try {
-    evaReg = await db.get(`eva:${target}`);
-  } catch (e) {
-    // not EVA-active, return state as-is
-  }
-
-  if (evaReg && evaReg.mode === 'horizon') {
-    // Evaluate at read time
-    const inputs: Record<string, any> = {};
-    for (const dep of evaReg.dependencies) {
-      const depState = await getState(db, dep);
-      inputs[dep] = depState?.value;
-    }
-    // Add external variables
-    inputs['_now'] = new Date().toISOString();
-    inputs['_today'] = new Date().toISOString().split('T')[0];
-
-    const result = executeFormulaFunction(evaReg.formula, inputs);
-    return { ...state, value: { ...state.value, _computed: result } };
-  }
-
-  return state;
+interface HorizonResponse {
+  target: string;
+  figure: EoState | null;         // Layer 1: projected state
+  grounds: GroundEntry[];          // Layer 2: ambient conditions from ancestor prefixes
+  signals?: SignalEntry[];         // Layer 3: emergent patterns (only when ?signals=true)
 }
+
+interface GroundEntry {
+  source: string;                  // ancestor target where the DEF lives
+  key: string;                     // field/property name
+  value: any;                      // ambient value
+  distance: number;                // prefix levels up (1 = parent, 2 = grandparent)
+}
+
+interface SignalEntry {
+  description: string;             // human-readable pattern description
+  measure: string;                 // what was measured
+  value: any;                      // computed statistic
+  population: string;              // prefix that was analyzed
+  n: number;                       // population size
+  computed_at: string;             // ISO timestamp
+}
+```
+
+### 7.2 Layer 1: Figure
+
+```typescript
+async function getFigureState(db: Level, target: string): Promise<EoState | null> {
+  // Alias resolution, Horizon-computed EVA — same as original horizonGet
+}
+```
+
+### 7.3 Layer 2: Grounds
+
+Walk up the prefix hierarchy collecting ancestor-level state. Override rule: if the figure has an explicit value for a field that also exists as a ground, the figure's value wins (CSS cascade).
+
+```typescript
+async function getGrounds(db: Level, target: string): Promise<GroundEntry[]> {
+  // For "app.tblClients.rec001", check:
+  //   - state at "app.tblClients" (distance=1)
+  //   - state at "app" (distance=2)
+  // Each ancestor's object keys become ground entries, unless overridden by figure
+}
+```
+
+### 7.4 Layer 3: Signals
+
+On-demand population analytics. Only runs when `?signals=true`. Ephemeral — SIG-level operation.
+
+```typescript
+async function detectSignals(db: Level, target: string): Promise<SignalEntry[]> {
+  // Look at the collection the target belongs to
+  // Compute basic population statistics (count, outlier detection on numeric fields)
+  // Surface anything deviating significantly from population mean (|z| > 1.5)
+}
+```
+
+### 7.5 API Query Parameters
+
+```
+GET /horizon/:target
+  ?prefix=true     → return array of HorizonResponse for all targets under prefix
+  ?signals=true    → include Layer 3 signal detection (expensive)
+  ?grounds=false   → exclude Layer 2 ground inheritance (for performance)
+```
 ```
 
 ---

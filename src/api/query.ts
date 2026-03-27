@@ -17,9 +17,17 @@ export function registerQueryRoutes(app: FastifyInstance, db: EoDb): void {
   // GET /horizon/:target
   app.get('/horizon/:target', async (request: AuthenticatedRequest, reply) => {
     const { target } = request.params as { target: string };
-    const { prefix } = request.query as { prefix?: string };
+    const { prefix, signals, grounds } = request.query as {
+      prefix?: string;
+      signals?: string;
+      grounds?: string;
+    };
 
-    const result = await horizonGet(db, target, { prefix: prefix === 'true' });
+    const result = await horizonGet(db, target, {
+      prefix: prefix === 'true',
+      signals: signals === 'true',
+      grounds: grounds !== 'false', // default true
+    });
     if (result === null) {
       return reply.code(404).send({ error: 'Target not found' });
     }

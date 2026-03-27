@@ -189,7 +189,7 @@ describe('GET /horizon/:target', () => {
   it('returns projected state', async () => {
     const res = await app.inject({ method: 'GET', url: '/horizon/app.rec001', headers: authHeaders() });
     expect(res.statusCode).toBe(200);
-    expect(res.json().state.value.name).toBe('Maria');
+    expect(res.json().figure.value.name).toBe('Maria');
   });
 
   it('returns array with prefix=true', async () => {

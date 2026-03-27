@@ -52,3 +52,40 @@ export interface Subscription {
 
 // Input event (before seq assignment)
 export type EoEventInput = Omit<EoEvent, 'seq'>;
+
+// --- Three-Layer Horizon ---
+
+// Three-layer Horizon response
+export interface HorizonResponse {
+  target: string;
+  figure: EoState | null;
+  grounds: GroundEntry[];
+  signals?: SignalEntry[];
+}
+
+// A ground condition inherited from an ancestor prefix
+export interface GroundEntry {
+  source: string;
+  key: string;
+  value: any;
+  distance: number;
+}
+
+// An ephemeral signal detected by population analysis
+export interface SignalEntry {
+  description: string;
+  measure: string;
+  value: any;
+  population: string;
+  predicate?: Record<string, any>;
+  n: number;
+  computed_at: string;
+}
+
+// Population-tracked pattern registration
+export interface PatternRegistration extends EvaRegistration {
+  pattern: true;
+  over: string;
+  where?: Record<string, any>;
+  population_targets: string[];
+}

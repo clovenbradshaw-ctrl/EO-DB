@@ -59,6 +59,17 @@ Build and test in this exact order. Do not skip ahead. Each phase must pass its 
 - The formula executor is a placeholder — return the formula definition and gathered inputs. Do not build a full formula parser yet.
 - Write tests for alias resolution and Horizon-computed evaluation
 
+### Phase 3b: Three-Layer Horizon
+- Implement `getGrounds` — prefix-walk collecting ancestor-level state. Respect override rule (child value wins over ancestor).
+- Implement `detectSignals` — placeholder population analytics. Return basic statistics over numeric fields in the target's collection. Only runs when `opts.signals === true`.
+- Modify `horizonGet` to return `HorizonResponse` with figure, grounds, and optional signals.
+- Write tests:
+  - DEF at collection level is returned as ground for record-level reads
+  - DEF at app level is returned as ground for deeper reads
+  - Figure value overrides ancestor ground with same key
+  - Signals only computed when requested
+  - Empty signals array when population too small
+
 ### Phase 4: Changefeed
 - Implement the Feed class with subscribe, unsubscribe, notify (§8)
 - Implement glob matching for target patterns (§8)
