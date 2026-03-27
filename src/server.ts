@@ -8,6 +8,7 @@ import { registerWebhookRoutes } from './api/webhook.js';
 import { registerOpsRoutes } from './api/ops.js';
 import { registerSyncRoute } from './api/sync.js';
 import { registerAdminRoutes } from './api/admin.js';
+import { registerAuthRoutes } from './api/auth.js';
 
 const PORT = parseInt(process.env.EO_PORT || '3000', 10);
 const DATA_DIR = process.env.EO_DATA_DIR || './data';
@@ -29,6 +30,9 @@ async function start(): Promise<void> {
 
   // Health endpoint (no auth)
   registerHealthRoute(app, db);
+
+  // Auth proxy routes (login/whoami/profile — no EO auth required)
+  registerAuthRoutes(app, HOMESERVER);
 
   // WebSocket sync (has its own auth via query param)
   registerSyncRoute(app, db, feed);
