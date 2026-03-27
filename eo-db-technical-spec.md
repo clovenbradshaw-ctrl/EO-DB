@@ -374,6 +374,36 @@ async function traverse(db: Level, start: string, depth: number): Promise<{
 
 The fold is the core of the database. It processes incoming events and updates projected state, the CON graph, and EVA-active formula results.
 
+### 6.0 Operator Helix — Cumulative Capacity Model
+
+The nine operators are **not independent handlers**. They form a cumulative helix where each operator inherits every capacity below it. The fold's operator dispatch is a call hierarchy, not a flat switch statement.
+
+**Inheritance chain:** `NUL < SIG < INS < SEG < CON < SYN < DEF < EVA < REC`
+
+Each handler may invoke the handlers below it:
+
+| Operator | Inherited Capacities | Cost Profile |
+|----------|---------------------|-------------|
+| **INS** | NUL (observe/existence check), SIG (coordinate targeting) | Microseconds — 1-2 key operations |
+| **SEG** | + INS (confirm target exists before partitioning) | Milliseconds — boundary metadata |
+| **CON** | + SEG (partition awareness), INS (existence check on both endpoints) | Milliseconds — bidirectional index updates, may trigger recomputation |
+| **SYN** | + CON (merge edges), SEG (dissolve boundaries), INS (mint merged identity) | Milliseconds — graph restructuring |
+| **DEF** | + SYN (alias resolution), SEG (boundary respect), CON (dependency recomputation), INS (auto-instantiation) | Tens of ms — recomputation cascades possible |
+| **EVA** | All above — reads formula (DEF), walks graph (CON), resolves aliases (SYN), respects boundaries (SEG), checks existence (INS), observes state (NUL), then computes | Tens of ms — exercises full dependency graph |
+| **REC** | All nine capacities — dispatches sub-operations through the handler hierarchy atomically | Tens of ms — compound frame changes |
+
+**Cost gradient:** Low operators (INS) are cheap and frequent. High operators (DEF, EVA, REC) are expensive but rare. The database's average cost per event is dominated by cheap operators, with occasional expensive bursts.
+
+**Implementation pattern:** Shared helix utilities are defined in `src/db/helpers.ts`:
+- `resolveAlias(db, target)` — SYN capacity: follow `_alias` chain to canonical target
+- `checkExists(db, target)` — INS capacity: verify target is instantiated
+- `checkBoundary(db, target)` — SEG capacity: read partition metadata
+- `gatherDependencies(db, target)` — CON capacity: walk reverse graph for dependents
+
+Higher operators call these utilities before executing their own logic. The fold processes operators sequentially — events must arrive in helix-consistent order. You cannot DEF a target that hasn't been INS'd (unless DEF auto-instantiates via its inherited INS capacity).
+
+---
+
 ```typescript
 // src/db/fold.ts
 
@@ -451,9 +481,11 @@ async function executeOperator(db: Level, event: EoEvent): Promise<void> {
 
 ### 6.2 INS — Instantiate
 
+> **Inherited capacities:** NUL (encounters keyspace to check existence), SIG (directs attention to specific coordinate). Three operations total — the cheapest loggable operator.
+
 ```typescript
 async function executeINS(db: Level, event: EoEvent): Promise<void> {
-  // Check if target already exists
+  // NUL capacity: observe the keyspace to check for duplicates
   const existing = await getState(db, event.target);
   if (existing) {
     throw new Error(`Target already instantiated: ${event.target}`);
@@ -473,15 +505,32 @@ async function executeINS(db: Level, event: EoEvent): Promise<void> {
 
 ### 6.3 DEF — Define Value or Register Computation
 
+> **Inherited capacities:** SYN (alias resolution — if target was merged, write goes to canonical target), SEG (boundary respect — if target was SEG'd out, write still lands in log but Horizon knows to exclude), CON (dependency-triggered recomputation — walks reverse graph to find EVA-active dependents), INS (auto-instantiation — if target doesn't exist, DEF may mint it rather than reject). DEF is the workhorse operator: same write, vastly more work, because it stands on eight layers of infrastructure.
+
 ```typescript
 async function executeDEF(db: Level, event: EoEvent): Promise<void> {
-  const existing = await getState(db, event.target);
+  // SYN capacity: resolve alias if target was merged
+  const target = await resolveAlias(db, event.target);
 
-  // Merge operand into existing state (field-level merge for objects)
-  const merged = mergeOperand(existing?.value, event.operand);
+  // INS capacity: auto-instantiate if target doesn't exist
+  const existing = await getState(db, target);
+  if (!existing) {
+    await setState(db, {
+      target,
+      value: {},
+      last_seq: event.seq,
+      last_op: 'INS',
+      last_agent: event.agent,
+      last_ts: event.ts
+    });
+  }
+
+  // DEF's own logic: merge operand into existing state (field-level merge for objects)
+  const currentState = existing || { value: {} };
+  const merged = mergeOperand(currentState.value, event.operand);
 
   await setState(db, {
-    target: event.target,
+    target,
     value: merged,
     last_seq: event.seq,
     last_op: 'DEF',
@@ -491,8 +540,9 @@ async function executeDEF(db: Level, event: EoEvent): Promise<void> {
 
   // Check if operand is a function definition (formula field)
   if (isFormulaOperand(event.operand)) {
-    await registerEvaActive(db, event.target, event.operand);
+    await registerEvaActive(db, target, event.operand);
   }
+  // CON capacity: recomputation of dependents happens in processEvent after executeOperator returns
 }
 
 /**
@@ -562,9 +612,21 @@ function formulaReferencesExternal(formula: string): boolean {
 
 ### 6.4 CON — Connect
 
+> **Inherited capacities:** INS (existence check on both endpoints — can't connect targets that don't exist), SEG (partition awareness — knows which keyspace regions the endpoints are in). CON is moderately expensive: it updates bidirectional indexes and may trigger downstream recomputation via the reverse graph.
+
 ```typescript
 async function executeCON(db: Level, event: EoEvent): Promise<void> {
   const operand = event.operand;
+
+  // INS capacity: verify both endpoints exist
+  if (operand.added) {
+    for (const dest of operand.added) {
+      const destExists = await getState(db, dest);
+      if (!destExists) {
+        throw new Error(`CON target does not exist: ${dest}`);
+      }
+    }
+  }
 
   // operand format: { added?: string[], removed?: string[], edge_type?: string }
   if (operand.added) {
@@ -599,8 +661,16 @@ async function executeCON(db: Level, event: EoEvent): Promise<void> {
 
 ### 6.5 SEG — Segment (Boundary)
 
+> **Inherited capacities:** INS (confirms target exists before partitioning — can't draw a boundary on something that hasn't been instantiated), NUL (encounters the collection), SIG (identifies which targets are inside).
+
 ```typescript
 async function executeSEG(db: Level, event: EoEvent): Promise<void> {
+  // INS capacity: confirm target exists
+  const existing = await getState(db, event.target);
+  if (!existing) {
+    throw new Error(`SEG target does not exist: ${event.target}`);
+  }
+
   // SEG draws or dissolves a boundary.
   // In the append-only model, "deletion" is SEG — partitioning something
   // out of the active set.
@@ -621,6 +691,8 @@ async function executeSEG(db: Level, event: EoEvent): Promise<void> {
 
 ### 6.6 SYN — Synthesis (Merge)
 
+> **Inherited capacities:** CON (uses graph to find edges for merging), SEG (dissolves boundary between merged targets), INS (mints merged target identity), NUL (observes both targets). When SYN merges two targets, it observes both (NUL), attends to them (SIG), confirms they exist (INS), recognizes their boundary (SEG), sees their connections (CON), then creates the merged entity.
+
 ```typescript
 async function executeSYN(db: Level, event: EoEvent): Promise<void> {
   // operand format: { merge: [targetA, targetB], into: mergedTarget }
@@ -629,6 +701,12 @@ async function executeSYN(db: Level, event: EoEvent): Promise<void> {
 
   if (operand.merge) {
     const [a, b] = operand.merge;
+    // INS capacity: confirm both targets exist
+    const stateAExists = await getState(db, a);
+    const stateBExists = await getState(db, b);
+    if (!stateAExists || !stateBExists) {
+      throw new Error(`SYN merge targets must both exist: ${a}, ${b}`);
+    }
     const stateA = await getState(db, a);
     const stateB = await getState(db, b);
 
@@ -673,6 +751,18 @@ async function executeSYN(db: Level, event: EoEvent): Promise<void> {
 
 ### 6.7 EVA — Evaluate
 
+> **Inherited capacities:** All eight below. EVA is where cumulative power peaks before REC. A single EVA fold step:
+> 1. Reads the formula definition — inherited from DEF (what holds at this target)
+> 2. Walks the dependency graph — inherited from CON (what connects to what)
+> 3. Resolves aliases on every dependency — inherited from SYN (merged targets resolve correctly)
+> 4. Respects partition boundaries — inherited from SEG (archived dependencies excluded per policy)
+> 5. Checks that each dependency exists — inherited from INS (no phantom targets)
+> 6. Gathers the current value at each dependency — inherited from NUL (observe state)
+> 7. Computes the formula — EVA's own capacity
+> 8. Writes the result to projected state — inherited from DEF
+>
+> A relational database doing the same work would need JOINs, WHERE subqueries, view resolution, existence checks, SELECTs, computed columns, and UPDATEs — seven separate SQL operations. EO does it in one fold step.
+
 ```typescript
 async function executeEVA(db: Level, event: EoEvent): Promise<void> {
   // EVA sets evaluation policy or conflict resolution strategy.
@@ -690,6 +780,8 @@ async function executeEVA(db: Level, event: EoEvent): Promise<void> {
 ```
 
 ### 6.8 REC — Recontextualize (Atomic Frame Change)
+
+> **Inherited capacities:** Everything. REC inherits all eight prior capacities and adds frame restructuring. A single REC event can instantiate new schema targets (INS), partition old ones out (SEG), rewire relationships (CON), merge entities (SYN), set new values (DEF), update evaluation policies (EVA) — all atomically, all in one log entry, all replayable as one unit. Without the helix, REC would just be a transaction wrapper. With the helix, REC provides frame separation — the fold knows everything inside the REC belongs to the same frame change.
 
 ```typescript
 async function executeREC(db: Level, event: EoEvent): Promise<void> {
@@ -801,52 +893,119 @@ function executeFormulaFunction(formula: any, inputs: Record<string, any>): any 
 
 ---
 
-## 7. Horizon — Read-Time Evaluation
+## 7. Horizon — The File Cabinet
+
+The relational model freed the query from the file cabinet. But the file cabinet gave you context for free — you opened a drawer and immediately saw the drawer you were in, the nearby folders, and the policy sheet taped inside. SQL returns one row, stripped of everything that surrounded it.
+
+The Horizon restores what the file cabinet gave: you open a record, and the database shows the record, the ambient conditions, the similar records, the rules that apply, and the shape of the record's history. No JOINs. No subqueries. The caseworker doesn't need to know they want context. It's just there because the database already has the structure.
+
+### 7.0 Cost Model
+
+Five cheap layers (microseconds of additional read time each):
+1. **Figure** — what this target IS. One state lookup.
+2. **Ground** — what this target is IN. Walk up the prefix hierarchy (2-3 ancestor lookups).
+3. **Nearby** — what's next to it. One prefix scan + in-memory field comparison.
+4. **Governance** — what rules apply. Scan `eva:` keyspace for matching registrations.
+5. **Trajectory** — where it's been. Filter log for this target, extract operator sequence.
+
+One expensive layer (on-demand only):
+6. **Signals** — statistical patterns across populations. Full population scan + aggregation.
+
+### 7.1 Response Format
 
 ```typescript
-// src/db/horizon.ts
-
-/**
- * Get the projected value at a target, handling:
- * - Alias resolution (SYN merges)
- * - Horizon-computed EVA targets (evaluate at read time)
- * - Regular state lookup
- */
-async function horizonGet(db: Level, target: string): Promise<any> {
-  const state = await getState(db, target);
-  if (!state) return null;
-
-  // Alias resolution
-  if (state.value?._alias) {
-    return horizonGet(db, state.value._alias);
-  }
-
-  // Check if this target is Horizon-computed
-  let evaReg: EvaRegistration | null = null;
-  try {
-    evaReg = await db.get(`eva:${target}`);
-  } catch (e) {
-    // not EVA-active, return state as-is
-  }
-
-  if (evaReg && evaReg.mode === 'horizon') {
-    // Evaluate at read time
-    const inputs: Record<string, any> = {};
-    for (const dep of evaReg.dependencies) {
-      const depState = await getState(db, dep);
-      inputs[dep] = depState?.value;
-    }
-    // Add external variables
-    inputs['_now'] = new Date().toISOString();
-    inputs['_today'] = new Date().toISOString().split('T')[0];
-
-    const result = executeFormulaFunction(evaReg.formula, inputs);
-    return { ...state, value: { ...state.value, _computed: result } };
-  }
-
-  return state;
+interface HorizonResponse {
+  target: string;
+  figure: EoState | null;                   // what this target IS
+  grounds: GroundEntry[];                    // ambient conditions pervading this region
+  nearby?: NearbyEntry[];                    // similar records in the same collection
+  governance?: GovernanceEntry[];            // EVA policies that govern this target
+  trajectory?: LoggableOperator[];           // compact operator history shape
+  signals?: SignalEntry[];                   // statistical patterns (on-demand, expensive)
 }
 ```
+
+### 7.2 Layer 1: Figure
+
+Projected state with alias resolution and Horizon-computed EVA. Same as before.
+
+### 7.3 Layer 2: Grounds
+
+Walk up the prefix hierarchy collecting ancestor-level state. Override rule: if the figure has an explicit value for a field that also exists as a ground, the figure's value wins (CSS cascade). For `app.tblClients.rec001`, check `app.tblClients` (distance=1) and `app` (distance=2).
+
+### 7.4 Layer 3: Nearby
+
+Records in the same collection sharing structural traits with this one. Same case type, same filing period, same caseworker, same linked client. Not a statistical analysis — a proximity read. One prefix scan plus field-value matching against the current target's values. Also checks CON linkage: records linked to the same targets are nearby.
+
+### 7.5 Layer 4: Governance
+
+EVA policies and formula registrations that apply to this region of the key-space. Not just inherited DEF values (those are grounds) — but evaluation rules: "Email conflicts on client records resolve by latest." "Case deadline formulas use business days." Already in the `eva:` keyspace. The Horizon already reads them for fold computation. Now it shows them in the read response.
+
+### 7.6 Layer 5: Trajectory
+
+The shape of this record's journey. Not the full log — that's the event stream. But the operator sequence compressed to its contour: `INS → DEF → CON → DEF → EVA → SEG`. Consecutive same-ops are collapsed. The operator types tell the story without replaying history.
+
+### 7.7 Layer 6: Signals (on-demand)
+
+On-demand population analytics. Only runs when `?signals=true`. Computes basic statistics over numeric fields in the target's collection. Surfaces outliers (|z| > 1.5). Ephemeral — SIG-level operation, never stored.
+
+### 7.8 API Query Parameters
+
+```
+GET /horizon/:target
+  ?prefix=true       → array of HorizonResponse for all targets under prefix
+  ?signals=true      → include signal detection (expensive, on-demand only)
+  ?ancestry=false    → exclude ancestry chain
+  ?grounds=false     → exclude grounds
+  ?nearby=false      → exclude nearby
+  ?governance=false  → exclude governance
+  ?trajectory=false  → exclude trajectory
+```
+
+Default: ancestry, grounds, nearby, governance, and trajectory are all ON. Signals are OFF. The cheap layers are always present. The expensive layer is opt-in.
+
+### 7.9 Explorer Presentation Model
+
+The admin explorer shows Horizon layers as **one record with depth of field**, not as six sections. Six layers presented as six sections is a UX failure. Six layers presented as one record with smart annotations is what the database actually sees — one observation at varying depths of focus.
+
+**Visual hierarchy does the work:**
+
+- **Figure** — full contrast, full brightness. The record's fields in a grid.
+- **Trajectory** — one line under the target path. Operator badges with timestamps. The record's heartbeat.
+- **Grounds** — one context line: `regulatoryHold: active · Nashville · biweekly`. Inherited ambient conditions.
+- **Nearby** — one sentence: `Similar: Carlos Mendez (H1B, Nashville, @sara), Aisha Patel (H1B)`.
+- **Governance** — tiny inline badges on governed fields: `⊨ latest` on email, `ƒ filed+180` on deadline.
+- **Signals** — one quiet footnote: `daysOpen 45 — above average (28, n=4)`. Expands on click.
+
+Everything fits one screen. No tabs. No toggles. Expand any layer for detail, but the default is: everything visible, nothing demands attention unless notable.
+
+**The target sidebar is an ontology tree**, not a flat list of dot-paths:
+
+```
+▼ app.tblClients                    4 records
+  ├ regulatoryHold: active          ← ground, visible in sidebar
+  ├ defaultRegion: Nashville
+  ├ rec001  Maria Garcia            ← figure, click to view
+  ├ rec002  Carlos Mendez
+  ├ rec003  Aisha Patel
+  └ rec004  Wei Zhang
+
+▼ app.tblCases                      4 records
+  ├ reviewCycle: biweekly           ← ground
+  ├ rec101  H1B · approved
+  ├ rec102  L1A · pending
+  └ rec103  H1B · under review
+
+▶ app                               ← application-level
+  ├ timezone: America/Chicago       ← ground
+  └ firm: Amino Immigration
+```
+
+Grounds are already visible in navigation. When you click `rec001`, the grounds section confirms what the tree already showed. The user has context before they click.
+
+**CON edges show inline** as clickable field values, not in a separate graph section. The `fldCases` field shows `rec101 → H1B approved`. Click to navigate.
+
+**Click any log event** to open its target's Horizon. The log is the timeline. The Horizon is what you see when you focus on a point in it.
 
 ---
 

@@ -38,24 +38,49 @@ Build and test in this exact order. Do not skip ahead. Each phase must pass its 
 - Write tests: log.test.ts, graph.test.ts
 
 ### Phase 2: The fold
-- Implement the nine-case fold (§6): processEvent, executeOperator, and all nine operator handlers
-- INS: create state, reject duplicates (§6.2)
-- DEF: merge operands, detect formula operands, register EVA-active targets (§6.3)
-- CON: add/remove edges, update state with current link set (§6.4)
-- SEG: write boundary state (§6.5)
-- SYN: merge targets, create aliases, merge edges (§6.6)
-- EVA: write evaluation policy (§6.7)
-- REC: apply sub-operations atomically (§6.8)
+- **Operator handlers are NOT independent.** Build them bottom-up in helix order. Each handler may call handlers below it. The helix is: NUL < SIG < INS < SEG < CON < SYN < DEF < EVA < REC.
+- Implement shared helix utilities first (`src/db/helpers.ts`): `resolveAlias()` (SYN capacity), `checkExists()` (INS capacity), `checkBoundary()` (SEG capacity), `gatherDependencies()` (CON capacity)
+- Implement the nine-case fold (§6): processEvent, executeOperator, and all operator handlers in helix order
+- INS: check existence (NUL capacity), create state, reject duplicates (§6.2)
+- SEG: check target exists (INS capacity), write boundary state (§6.5)
+- CON: check both endpoints exist (INS capacity), respect partitions (SEG capacity), add/remove edges, update state with current link set (§6.4)
+- SYN: use CON graph to find edges, dissolve SEG boundaries, mint merged identity (INS capacity), merge targets, create aliases, merge edges (§6.6)
+- DEF: resolve aliases (SYN capacity), respect boundaries (SEG capacity), auto-instantiate if target doesn't exist (INS capacity), merge operands, detect formula operands, register EVA-active targets, trigger recomputation via CON graph (§6.3)
+- EVA: full 8-step inherited pipeline — reads formula (DEF), walks graph (CON), resolves aliases (SYN), respects boundaries (SEG), checks existence (INS), observes state (NUL), computes, writes result (DEF). Write evaluation policy (§6.7)
+- REC: dispatches sub-operations through the same handler hierarchy atomically. Can invoke any combination of all other operators. Provides frame separation. (§6.8)
 - Implement idempotency via client_event_id (§6 top)
 - Implement dependent recomputation: after any state change, walk CON graph in reverse to find EVA-active targets, recompute fold-computed formulas (§6.9)
 - Implement EVA classification: when DEF stores a formula operand, inspect it for external references (time functions). If all inputs internal → fold-computed. If any input external → horizon-computed (§6.3)
-- Write tests: fold.test.ts covering all nine operators, idempotency, dependent recomputation
+- Write tests: fold.test.ts covering all operators, helix inheritance, idempotency, dependent recomputation
 
 ### Phase 3: Horizon
 - Implement horizonGet: alias resolution, Horizon-computed evaluation at read time (§7)
 - Horizon-computed targets inject current time as `_now` and `_today` inputs
 - The formula executor is a placeholder — return the formula definition and gathered inputs. Do not build a full formula parser yet.
 - Write tests for alias resolution and Horizon-computed evaluation
+
+### Phase 3b: File-Cabinet Horizon (Six Layers + Ancestry)
+- **Layer 1 — Figure:** Already implemented in Phase 3. Projected state with alias resolution and Horizon-computed EVA.
+- **Layer 2 — Grounds:** Implement `getGrounds` — prefix-walk collecting ancestor-level state. Respect override rule (child value wins over ancestor).
+- **Layer 3 — Nearby:** Implement `getNearby` — one prefix scan of sibling records + in-memory field-value comparison against the current target. Also check CON linkage (records linked to the same targets are nearby). Cap at 10 results.
+- **Layer 4 — Governance:** Implement `getGovernance` — scan `eva:` keyspace for registrations on this target (direct), same collection (collection scope), or ancestor prefixes (ancestor scope). These are already indexed.
+- **Layer 5 — Trajectory:** Implement `getTrajectory` — filter log for this target, extract operator sequence, collapse consecutive same-ops. `INS → DEF → DEF → CON` becomes `INS, DEF, CON`.
+- **Layer 6 — Signals:** Implement `detectSignals` — population analytics over numeric fields. Only runs when `opts.signals === true`. Expensive, on-demand.
+- **Ancestry:** Implement `getAncestry` — climb the dot-path from this target to root. Each ancestor is a mini-Horizon: its own figure, its own grounds from above, children count, sibling count. `fldStatus → rec101 → tblCases → app`.
+- Modify `horizonGet` to return `HorizonResponse` with all layers. Layers 1-5 + ancestry default ON. Signals default OFF.
+- Write tests:
+  - DEF at collection level is returned as ground for record-level reads
+  - DEF at app level is returned as ground for deeper reads
+  - Figure value overrides ancestor ground with same key
+  - Nearby finds records sharing field values in same collection
+  - Nearby finds records sharing CON linkage
+  - Governance returns EVA policies on this target and collection
+  - Trajectory returns compact collapsed operator sequence
+  - Ancestry climbs from field to record to collection to app
+  - Each ancestor carries its own grounds
+  - Ancestry reports children_count and nearby_count
+  - Signals only computed when requested
+  - Each layer can be individually disabled via opts
 
 ### Phase 4: Changefeed
 - Implement the Feed class with subscribe, unsubscribe, notify (§8)
@@ -91,16 +116,30 @@ Build and test in this exact order. Do not skip ahead. Each phase must pass its 
 - On disconnect: clean up Feed subscription
 - Write tests: sync.test.ts
 
-### Phase 8: Admin interface
-- Copy the attached `eo-db-admin.html` to `src/admin/index.html`
-- Serve it at GET /admin (no auth — the interface handles its own Matrix login)
-- Modify the HTML to connect to the live API instead of using mock data:
-  - On load: prompt for Matrix access token (or read from localStorage)
-  - Fetch /horizon?prefix=true with auth header to populate the state table
-  - Fetch /log?since=0 to populate the log view
-  - Open WebSocket to /sync for real-time updates
-  - The replay slider should fetch /log and re-fold client-side to show historical state
-  - Graph view should fetch /edges for connected targets
+### Phase 8: Admin explorer interface
+- **Two admin interfaces exist:**
+  - `eo-db-admin-dev.html` — the dark-themed DBA tool (state tables, raw log, graph viz, replay slider). Keep as-is for developer use.
+  - `src/admin/index.html` — the Horizon-aware explorer. This is the primary admin interface.
+- Serve the explorer at GET /admin (no auth — the interface handles its own Matrix login).
+- **The explorer presents Horizon layers as one record with depth of field, not six sections:**
+  - Figure fields in a grid at full contrast.
+  - Trajectory as a one-line heartbeat strip under the target path: `INS → DEF → CON → DEF → EVA → SEG` with timestamps.
+  - Grounds as a single context line: `regulatoryHold: active · Nashville · biweekly`.
+  - Nearby as a sentence: `Similar: Carlos Mendez (H1B, Nashville, @sara)`.
+  - Governance as inline badges on governed fields: `⊨ latest` on email, `ƒ filed+180` on deadline.
+  - Signals as a quiet footnote: `daysOpen 45 — above average (28, n=4)`. Expands on click.
+  - Ancestry navigable via breadcrumb: `app > tblClients > rec001 > fldEmail`. Click any level to see that ancestor's Horizon.
+- **The sidebar is an ontology tree**, not a flat list:
+  - Collections collapse/expand. Record count shown.
+  - Ground properties visible directly in the tree under each collection.
+  - Click a record to open its Horizon in the center panel.
+  - Application-level grounds shown at the tree root.
+- **Click any log event** to open its target's Horizon. The log is the timeline, the Horizon is the depth.
+- **CON edges show inline** as clickable field values, not in a separate graph section.
+- On load: prompt for Matrix access token (or read from localStorage).
+- Fetch /horizon with ancestry + all layers to populate the explorer.
+- Open WebSocket to /sync for real-time updates.
+- The DBA view (`eo-db-admin-dev.html`) remains available at GET /admin/dev for raw database inspection.
 
 ### Phase 9: Server entry point
 - Wire everything together in src/server.ts
@@ -117,6 +156,8 @@ Build and test in this exact order. Do not skip ahead. Each phase must pass its 
 ## Critical implementation details
 
 **The fold is the core.** Every event goes through processEvent in fold.ts. The fold assigns the sequence number, appends to the log, executes the operator-specific logic, recomputes dependents, and notifies the feed. Nothing bypasses the fold.
+
+**The operator helix is the fold's call hierarchy.** Operator handlers are cumulative — each inherits all capacities below it. DEF doesn't just write a value: it resolves aliases (SYN), respects boundaries (SEG), can auto-instantiate (INS), and triggers recomputation across the dependency graph (CON). EVA exercises eight inherited capacities in a single fold step. The fold processes operators sequentially because events must arrive in helix-consistent order. Low operators (INS) are cheap (microseconds, 1-2 keys). Middle operators (SEG, CON, SYN) are moderately expensive (milliseconds, index updates). High operators (DEF, EVA, REC) are the most expensive but do the most work per event (tens of ms, recomputation cascades). This cost gradient matches real workload patterns — cheap operators fire most, expensive operators fire least.
 
 **Formula recomputations do not write to the log.** They write results to projected state only. The log records what came from outside (agents, sources). Projected state records consequences (formula results). One upstream DEF that affects 50 formulas produces one log entry and 50 state updates.
 
