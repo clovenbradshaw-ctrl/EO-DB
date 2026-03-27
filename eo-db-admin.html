@@ -553,6 +553,298 @@ body {
   min-width: 140px;
 }
 
+/* ── Compose Panel ── */
+.compose-panel {
+  flex-direction: column;
+}
+
+.compose-body {
+  flex: 1;
+  overflow: auto;
+  padding: 24px;
+  display: flex;
+  justify-content: center;
+}
+
+.compose-form {
+  width: 100%;
+  max-width: 640px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.compose-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.compose-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-faint);
+}
+
+.compose-op-group {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.compose-op-btn {
+  padding: 8px 16px;
+  font-size: 11px;
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 600;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s;
+  border: 1px solid transparent;
+  background: var(--bg);
+}
+
+.compose-op-btn:hover { opacity: 0.85; }
+.compose-op-btn.selected { border-width: 2px; transform: scale(1.05); }
+
+.compose-input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 10px 12px;
+  color: var(--text);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  outline: none;
+  transition: border-color 0.15s;
+  width: 100%;
+}
+
+.compose-input:focus { border-color: var(--accent); }
+.compose-input::placeholder { color: var(--text-faint); }
+
+.compose-textarea {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 10px 12px;
+  color: var(--text);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  outline: none;
+  transition: border-color 0.15s;
+  width: 100%;
+  min-height: 120px;
+  resize: vertical;
+}
+
+.compose-textarea:focus { border-color: var(--accent); }
+.compose-textarea::placeholder { color: var(--text-faint); }
+
+/* Autocomplete */
+.autocomplete-wrap {
+  position: relative;
+}
+
+.autocomplete-list {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  background: var(--bg2);
+  border: 1px solid var(--border2);
+  border-radius: 0 0 4px 4px;
+  max-height: 200px;
+  overflow: auto;
+  z-index: 100;
+  display: none;
+}
+
+.autocomplete-list.open { display: block; }
+
+.autocomplete-item {
+  padding: 8px 12px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--text-dim);
+  cursor: pointer;
+  border-bottom: 1px solid var(--border);
+}
+
+.autocomplete-item:hover,
+.autocomplete-item.highlighted {
+  background: var(--bg3);
+  color: var(--text);
+}
+
+.autocomplete-item .match { color: var(--accent); font-weight: 600; }
+
+/* Logging toggle */
+.compose-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.toggle-switch {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  flex-shrink: 0;
+}
+
+.toggle-switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.toggle-slider {
+  position: absolute;
+  inset: 0;
+  background: var(--bg3);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.toggle-slider::before {
+  content: '';
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  left: 3px;
+  top: 3px;
+  background: var(--text-dim);
+  border-radius: 50%;
+  transition: all 0.2s;
+}
+
+.toggle-switch input:checked + .toggle-slider {
+  background: var(--accent);
+}
+
+.toggle-switch input:checked + .toggle-slider::before {
+  transform: translateX(16px);
+  background: var(--white);
+}
+
+.toggle-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.toggle-hint {
+  font-size: 9px;
+  color: var(--text-faint);
+  font-family: 'JetBrains Mono', monospace;
+}
+
+/* Compose submit */
+.compose-submit {
+  padding: 12px 24px;
+  background: var(--accent);
+  color: var(--bg);
+  border: none;
+  border-radius: 4px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.compose-submit:hover { filter: brightness(1.1); }
+.compose-submit:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.compose-result {
+  padding: 10px 12px;
+  border-radius: 4px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  display: none;
+}
+
+.compose-result.success {
+  display: block;
+  background: rgba(74,222,128,0.1);
+  border: 1px solid rgba(74,222,128,0.25);
+  color: var(--ins);
+}
+
+.compose-result.error {
+  display: block;
+  background: rgba(239,68,68,0.1);
+  border: 1px solid rgba(239,68,68,0.25);
+  color: var(--danger);
+}
+
+/* Operand templates */
+.operand-hint {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  color: var(--text-faint);
+  margin-top: 2px;
+}
+
+/* Connection bar */
+.connection-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 16px;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--border);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  flex-shrink: 0;
+}
+
+.connection-bar input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 4px 8px;
+  color: var(--text);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  outline: none;
+  width: 220px;
+}
+
+.connection-bar input:focus { border-color: var(--accent); }
+
+.connection-bar button {
+  padding: 4px 12px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.connection-bar button:hover { background: var(--bg4); }
+
+.connection-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--danger);
+}
+
+.connection-dot.connected { background: var(--ins); }
+
 /* ── Scrollbar ── */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
@@ -584,11 +876,21 @@ body {
   </div>
 </div>
 
+<!-- Connection Bar -->
+<div class="connection-bar">
+  <div class="connection-dot" id="connDot"></div>
+  <span style="color:var(--text-faint);">Server</span>
+  <input id="serverUrl" value="http://localhost:3000" placeholder="http://localhost:3000">
+  <button onclick="connectToServer()">Connect</button>
+  <span id="connStatus" style="color:var(--text-faint);">disconnected</span>
+</div>
+
 <!-- Nav Tabs -->
 <div class="nav-tabs">
   <div class="nav-tab active" onclick="switchTab('horizon')">Horizon</div>
   <div class="nav-tab" onclick="switchTab('log')">Log</div>
   <div class="nav-tab" onclick="switchTab('graph')">Graph</div>
+  <div class="nav-tab" onclick="switchTab('compose')" style="color:var(--ins);">+ Compose</div>
 </div>
 
 <!-- Main Content -->
@@ -663,6 +965,65 @@ body {
     </div>
   </div>
 
+  <!-- ═══ Compose Panel ═══ -->
+  <div id="panel-compose" class="panel compose-panel">
+    <div class="compose-body">
+      <div class="compose-form">
+
+        <!-- Operator -->
+        <div class="compose-row">
+          <div class="compose-label">Operator</div>
+          <div class="compose-op-group" id="composeOpGroup">
+            <div class="compose-op-btn op-INS" style="background:rgba(74,222,128,0.12);color:var(--ins);" onclick="selectOp('INS')">INS</div>
+            <div class="compose-op-btn op-DEF selected" style="background:rgba(56,189,248,0.12);color:var(--def);border-color:var(--def);" onclick="selectOp('DEF')">DEF</div>
+            <div class="compose-op-btn op-CON" style="background:rgba(167,139,250,0.12);color:var(--con);" onclick="selectOp('CON')">CON</div>
+            <div class="compose-op-btn op-SEG" style="background:rgba(244,114,182,0.12);color:var(--seg);" onclick="selectOp('SEG')">SEG</div>
+            <div class="compose-op-btn op-SYN" style="background:rgba(251,191,36,0.12);color:var(--syn);" onclick="selectOp('SYN')">SYN</div>
+            <div class="compose-op-btn op-EVA" style="background:rgba(52,211,153,0.12);color:var(--eva);" onclick="selectOp('EVA')">EVA</div>
+            <div class="compose-op-btn op-REC" style="background:rgba(251,146,60,0.12);color:var(--rec);" onclick="selectOp('REC')">REC</div>
+          </div>
+        </div>
+
+        <!-- Target with autocomplete -->
+        <div class="compose-row">
+          <div class="compose-label">Target</div>
+          <div class="autocomplete-wrap">
+            <input class="compose-input" id="composeTarget" placeholder="app.tblClients.rec001.fldEmail" oninput="onTargetInput()" onkeydown="onTargetKeydown(event)" autocomplete="off">
+            <div class="autocomplete-list" id="autocompleteList"></div>
+          </div>
+        </div>
+
+        <!-- Operand -->
+        <div class="compose-row">
+          <div class="compose-label">Operand</div>
+          <textarea class="compose-textarea" id="composeOperand" placeholder='value or JSON object, e.g. "approved" or {"name": "Maria"}'></textarea>
+          <div class="operand-hint" id="operandHint">DEF: string value or JSON object to set/merge</div>
+        </div>
+
+        <!-- Logging toggle -->
+        <div class="compose-row">
+          <div class="compose-toggle-row">
+            <label class="toggle-switch">
+              <input type="checkbox" id="loggingToggle" checked>
+              <span class="toggle-slider"></span>
+            </label>
+            <div>
+              <div class="toggle-label" id="loggingLabel">Logging ON — event will be persisted to log</div>
+              <div class="toggle-hint">When OFF, event is sent as SIG (ephemeral, not logged)</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Submit -->
+        <div class="compose-row" style="flex-direction:row;gap:12px;align-items:center;">
+          <button class="compose-submit" id="composeSubmit" onclick="submitEvent()">Send Event</button>
+          <div class="compose-result" id="composeResult"></div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
 </div>
 
 <!-- Replay Bar -->
@@ -674,8 +1035,8 @@ body {
 </div>
 
 <script>
-// ── Mock Data ──
-const LOG = [
+// ── Data (starts with mock, replaced by live data on connect) ──
+let LOG = [
   { seq:4201, op:"INS", target:"app.tblClients.rec001", operand:{name:"Maria Garcia",status:"active"}, agent:"@intake:amino", ts:"2025-03-27T09:12:00Z" },
   { seq:4202, op:"INS", target:"app.tblCases.rec101", operand:{type:"H1B",filed:"2025-06-01"}, agent:"@intake:amino", ts:"2025-03-27T09:12:01Z" },
   { seq:4203, op:"CON", target:"app.tblClients.rec001.fldCases", operand:{added:["app.tblCases.rec101"]}, agent:"@intake:amino", ts:"2025-03-27T09:12:02Z" },
@@ -692,6 +1053,287 @@ const LOG = [
   { seq:4214, op:"DEF", target:"app.tblCases.rec102.fldNotes", operand:"Initial consultation complete", agent:"@caseworker:amino", ts:"2025-03-27T16:30:00Z" },
   { seq:4215, op:"REC", target:"schema.tblCases", operand:{contains:[{op:"DEF",target:"schema.tblCases.fldUrgency",operand:{type:"select"}}],reason:"Added urgency field"}, agent:"@admin:amino", ts:"2025-03-27T17:00:00Z" }
 ];
+
+// ── Server Connection ──
+let serverUrl = 'http://localhost:3000';
+let isConnected = false;
+
+async function connectToServer() {
+  serverUrl = document.getElementById('serverUrl').value.replace(/\/+$/, '');
+  const dot = document.getElementById('connDot');
+  const status = document.getElementById('connStatus');
+
+  try {
+    const res = await fetch(`${serverUrl}/health`);
+    const data = await res.json();
+    if (data.status === 'ok') {
+      isConnected = true;
+      dot.classList.add('connected');
+      status.textContent = `connected — seq ${data.seq}`;
+      status.style.color = 'var(--ins)';
+      await fetchLiveLog();
+    }
+  } catch (e) {
+    isConnected = false;
+    dot.classList.remove('connected');
+    status.textContent = `failed: ${e.message}`;
+    status.style.color = 'var(--danger)';
+  }
+}
+
+async function fetchLiveLog() {
+  try {
+    const res = await fetch(`${serverUrl}/log?limit=10000`);
+    const data = await res.json();
+    if (data.events && data.events.length > 0) {
+      LOG = data.events;
+      replayIndex = LOG.length - 1;
+      updateReplaySlider();
+      refreshAll();
+      updateStatusBar();
+    }
+  } catch (e) {
+    console.error('Failed to fetch log:', e);
+  }
+}
+
+function updateStatusBar() {
+  const state = foldState(replayIndex);
+  const targets = Object.keys(state).length;
+  const conEvents = LOG.filter(e => e.op === 'CON');
+  let edgeCount = 0;
+  conEvents.forEach(e => { if (e.operand && e.operand.added) edgeCount += e.operand.added.length; });
+
+  document.getElementById('currentSeq').textContent = LOG.length > 0 ? LOG[replayIndex].seq : 0;
+  const statusItems = document.querySelectorAll('.status-item');
+  if (statusItems[1]) statusItems[1].innerHTML = `events <b>${LOG.length}</b>`;
+  if (statusItems[2]) statusItems[2].innerHTML = `targets <b>${targets}</b>`;
+  if (statusItems[3]) statusItems[3].innerHTML = `edges <b>${edgeCount}</b>`;
+}
+
+function updateReplaySlider() {
+  const slider = document.getElementById('replaySlider');
+  slider.max = Math.max(0, LOG.length - 1);
+  slider.value = replayIndex;
+  if (LOG.length > 0) {
+    const e = LOG[replayIndex];
+    document.getElementById('replaySeq').textContent = `seq ${e.seq}`;
+    document.getElementById('replayTs').textContent = formatTs(e.ts);
+  }
+}
+
+function refreshAll() {
+  renderHorizon();
+  renderLog();
+  if (currentTab === 'graph') renderGraph();
+}
+
+// ── Autocomplete ──
+function getKnownTargets() {
+  const targets = new Set();
+  LOG.forEach(e => {
+    targets.add(e.target);
+    // Also add parent paths for prefix suggestions
+    const parts = e.target.split('.');
+    for (let i = 1; i < parts.length; i++) {
+      targets.add(parts.slice(0, i).join('.'));
+    }
+  });
+  return Array.from(targets).sort();
+}
+
+let acIndex = -1;
+
+function onTargetInput() {
+  const input = document.getElementById('composeTarget');
+  const list = document.getElementById('autocompleteList');
+  const val = input.value.toLowerCase();
+
+  if (!val) {
+    list.classList.remove('open');
+    return;
+  }
+
+  const targets = getKnownTargets().filter(t => t.toLowerCase().includes(val));
+  if (targets.length === 0) {
+    list.classList.remove('open');
+    return;
+  }
+
+  acIndex = -1;
+  list.innerHTML = targets.slice(0, 15).map((t, i) => {
+    const idx = t.toLowerCase().indexOf(val);
+    const before = t.slice(0, idx);
+    const match = t.slice(idx, idx + val.length);
+    const after = t.slice(idx + val.length);
+    return `<div class="autocomplete-item" data-index="${i}" onmousedown="pickAutocomplete('${t}')">${before}<span class="match">${match}</span>${after}</div>`;
+  }).join('');
+  list.classList.add('open');
+}
+
+function onTargetKeydown(e) {
+  const list = document.getElementById('autocompleteList');
+  const items = list.querySelectorAll('.autocomplete-item');
+  if (!list.classList.contains('open') || items.length === 0) return;
+
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    acIndex = Math.min(acIndex + 1, items.length - 1);
+    items.forEach((it, i) => it.classList.toggle('highlighted', i === acIndex));
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    acIndex = Math.max(acIndex - 1, 0);
+    items.forEach((it, i) => it.classList.toggle('highlighted', i === acIndex));
+  } else if (e.key === 'Enter' && acIndex >= 0) {
+    e.preventDefault();
+    const target = items[acIndex].textContent;
+    pickAutocomplete(target);
+  } else if (e.key === 'Escape') {
+    list.classList.remove('open');
+  } else if (e.key === 'Tab' && acIndex >= 0) {
+    e.preventDefault();
+    const target = items[acIndex].textContent;
+    pickAutocomplete(target);
+  }
+}
+
+function pickAutocomplete(target) {
+  document.getElementById('composeTarget').value = target;
+  document.getElementById('autocompleteList').classList.remove('open');
+}
+
+// Close autocomplete on outside click
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.autocomplete-wrap')) {
+    document.getElementById('autocompleteList').classList.remove('open');
+  }
+});
+
+// ── Compose ──
+let selectedOp = 'DEF';
+
+const OP_HINTS = {
+  INS: 'INS: JSON object with initial field values, e.g. {"name": "Maria", "status": "active"}',
+  DEF: 'DEF: string value or JSON object to set/merge',
+  CON: 'CON: {"added": ["app.tblCases.rec101"], "removed": [], "edge_type": "has_case"}',
+  SEG: 'SEG: {"boundary": "exclude", "reason": "archived"}',
+  SYN: 'SYN: {"merge": ["app.tblClients.rec001", "app.tblClients.rec002"], "into": "app.tblClients.merged001"}',
+  EVA: 'EVA: {"strategy": "latest"} or {"strategy": "formula", "formula": "..."}',
+  REC: 'REC: {"contains": [{"op": "DEF", "target": "...", "operand": "..."}], "reason": "..."}'
+};
+
+const OP_TEMPLATES = {
+  INS: '{\n  "name": "",\n  "status": "active"\n}',
+  DEF: '',
+  CON: '{\n  "added": [],\n  "removed": []\n}',
+  SEG: '{\n  "boundary": "exclude",\n  "reason": ""\n}',
+  SYN: '{\n  "merge": [],\n  "into": ""\n}',
+  EVA: '{\n  "strategy": "latest"\n}',
+  REC: '{\n  "contains": [\n    {"op": "DEF", "target": "", "operand": ""}\n  ],\n  "reason": ""\n}'
+};
+
+function selectOp(op) {
+  selectedOp = op;
+  document.querySelectorAll('.compose-op-btn').forEach(btn => {
+    btn.classList.remove('selected');
+    btn.style.borderColor = 'transparent';
+  });
+  const btn = document.querySelector(`.compose-op-btn.op-${op}`);
+  btn.classList.add('selected');
+  const colorVar = getComputedStyle(document.documentElement).getPropertyValue(`--${op.toLowerCase()}`).trim();
+  btn.style.borderColor = colorVar;
+
+  document.getElementById('operandHint').textContent = OP_HINTS[op] || '';
+
+  // Auto-fill template if operand is empty
+  const operandEl = document.getElementById('composeOperand');
+  if (!operandEl.value.trim()) {
+    operandEl.value = OP_TEMPLATES[op] || '';
+  }
+}
+
+function updateLoggingLabel() {
+  const on = document.getElementById('loggingToggle').checked;
+  document.getElementById('loggingLabel').textContent = on
+    ? 'Logging ON — event will be persisted to log'
+    : 'Logging OFF — event sent as SIG (ephemeral)';
+}
+
+document.getElementById('loggingToggle').addEventListener('change', updateLoggingLabel);
+
+async function submitEvent() {
+  const resultEl = document.getElementById('composeResult');
+  resultEl.className = 'compose-result';
+  resultEl.style.display = 'none';
+
+  const target = document.getElementById('composeTarget').value.trim();
+  if (!target) {
+    resultEl.className = 'compose-result error';
+    resultEl.textContent = 'Target is required';
+    resultEl.style.display = 'block';
+    return;
+  }
+
+  let operand;
+  const rawOperand = document.getElementById('composeOperand').value.trim();
+  if (!rawOperand && selectedOp !== 'INS') {
+    operand = null;
+  } else {
+    try {
+      operand = JSON.parse(rawOperand);
+    } catch {
+      // Treat as plain string
+      operand = rawOperand;
+    }
+  }
+
+  const logging = document.getElementById('loggingToggle').checked;
+  const op = logging ? selectedOp : 'SIG';
+
+  const event = { op, target, operand };
+
+  // If SIG wrapping, include the original op in meta
+  if (!logging) {
+    event.meta = { intended_op: selectedOp };
+  }
+
+  const submitBtn = document.getElementById('composeSubmit');
+  submitBtn.disabled = true;
+  submitBtn.textContent = 'Sending...';
+
+  try {
+    if (!isConnected) {
+      throw new Error('Not connected to server. Click Connect first.');
+    }
+
+    const res = await fetch(`${serverUrl}/webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(event)
+    });
+
+    const data = await res.json();
+
+    if (!res.ok) {
+      throw new Error(data.error || `HTTP ${res.status}`);
+    }
+
+    resultEl.className = 'compose-result success';
+    resultEl.textContent = `Event sent — seq ${data.seq}`;
+    resultEl.style.display = 'block';
+
+    // Refresh data
+    await fetchLiveLog();
+
+  } catch (e) {
+    resultEl.className = 'compose-result error';
+    resultEl.textContent = e.message;
+    resultEl.style.display = 'block';
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.textContent = 'Send Event';
+  }
+}
 
 // Derive projected state by folding
 function foldState(upToIndex) {
@@ -956,6 +1598,9 @@ function updateReplay() {
 // ── Init ──
 renderHorizon();
 renderLog();
+
+// Auto-connect on load
+connectToServer();
 </script>
 </body>
 </html>
