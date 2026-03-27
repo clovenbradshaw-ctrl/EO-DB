@@ -893,74 +893,72 @@ function executeFormulaFunction(formula: any, inputs: Record<string, any>): any 
 
 ---
 
-## 7. Horizon — Three-Layer Read-Time Evaluation
+## 7. Horizon — The File Cabinet
 
-The Horizon returns three layers per target:
+The relational model freed the query from the file cabinet. But the file cabinet gave you context for free — you opened a drawer and immediately saw the drawer you were in, the nearby folders, and the policy sheet taped inside. SQL returns one row, stripped of everything that surrounded it.
 
-- **Figure** — what the target IS. Projected state with alias resolution and Horizon-computed EVA.
-- **Ground** — what the target is IN. Ambient conditions inherited from ancestor prefixes (existing DEFs at higher-level targets).
-- **Signal** — what the target is PART OF. Emergent patterns detected across populations. Computed on demand, ephemeral, never stored.
+The Horizon restores what the file cabinet gave: you open a record, and the database shows the record, the ambient conditions, the similar records, the rules that apply, and the shape of the record's history. No JOINs. No subqueries. The caseworker doesn't need to know they want context. It's just there because the database already has the structure.
 
-No new operators, fold cases, or keyspaces. The log and fold are unchanged. The Horizon reads deeper.
+### 7.0 Cost Model
+
+Five cheap layers (microseconds of additional read time each):
+1. **Figure** — what this target IS. One state lookup.
+2. **Ground** — what this target is IN. Walk up the prefix hierarchy (2-3 ancestor lookups).
+3. **Nearby** — what's next to it. One prefix scan + in-memory field comparison.
+4. **Governance** — what rules apply. Scan `eva:` keyspace for matching registrations.
+5. **Trajectory** — where it's been. Filter log for this target, extract operator sequence.
+
+One expensive layer (on-demand only):
+6. **Signals** — statistical patterns across populations. Full population scan + aggregation.
 
 ### 7.1 Response Format
 
 ```typescript
 interface HorizonResponse {
   target: string;
-  figure: EoState | null;         // Layer 1: projected state
-  grounds: GroundEntry[];          // Layer 2: ambient conditions from ancestor prefixes
-  signals?: SignalEntry[];         // Layer 3: emergent patterns (only when ?signals=true)
-}
-
-interface GroundEntry {
-  source: string;                  // ancestor target where the DEF lives
-  key: string;                     // field/property name
-  value: any;                      // ambient value
-  distance: number;                // prefix levels up (1 = parent, 2 = grandparent)
-}
-
-interface SignalEntry {
-  description: string;             // human-readable pattern description
-  measure: string;                 // what was measured
-  value: any;                      // computed statistic
-  population: string;              // prefix that was analyzed
-  n: number;                       // population size
-  computed_at: string;             // ISO timestamp
+  figure: EoState | null;                   // what this target IS
+  grounds: GroundEntry[];                    // ambient conditions pervading this region
+  nearby?: NearbyEntry[];                    // similar records in the same collection
+  governance?: GovernanceEntry[];            // EVA policies that govern this target
+  trajectory?: LoggableOperator[];           // compact operator history shape
+  signals?: SignalEntry[];                   // statistical patterns (on-demand, expensive)
 }
 ```
 
 ### 7.2 Layer 1: Figure
 
-```typescript
-async function getFigureState(db: Level, target: string): Promise<EoState | null> {
-  // Alias resolution, Horizon-computed EVA — same as original horizonGet
-}
-```
+Projected state with alias resolution and Horizon-computed EVA. Same as before.
 
 ### 7.3 Layer 2: Grounds
 
-Walk up the prefix hierarchy collecting ancestor-level state. Override rule: if the figure has an explicit value for a field that also exists as a ground, the figure's value wins (CSS cascade).
+Walk up the prefix hierarchy collecting ancestor-level state. Override rule: if the figure has an explicit value for a field that also exists as a ground, the figure's value wins (CSS cascade). For `app.tblClients.rec001`, check `app.tblClients` (distance=1) and `app` (distance=2).
 
-```typescript
-async function getGrounds(db: Level, target: string): Promise<GroundEntry[]> {
-  // For "app.tblClients.rec001", check:
-  //   - state at "app.tblClients" (distance=1)
-  //   - state at "app" (distance=2)
-  // Each ancestor's object keys become ground entries, unless overridden by figure
-}
+### 7.4 Layer 3: Nearby
+
+Records in the same collection sharing structural traits with this one. Same case type, same filing period, same caseworker, same linked client. Not a statistical analysis — a proximity read. One prefix scan plus field-value matching against the current target's values. Also checks CON linkage: records linked to the same targets are nearby.
+
+### 7.5 Layer 4: Governance
+
+EVA policies and formula registrations that apply to this region of the key-space. Not just inherited DEF values (those are grounds) — but evaluation rules: "Email conflicts on client records resolve by latest." "Case deadline formulas use business days." Already in the `eva:` keyspace. The Horizon already reads them for fold computation. Now it shows them in the read response.
+
+### 7.6 Layer 5: Trajectory
+
+The shape of this record's journey. Not the full log — that's the event stream. But the operator sequence compressed to its contour: `INS → DEF → CON → DEF → EVA → SEG`. Consecutive same-ops are collapsed. The operator types tell the story without replaying history.
+
+### 7.7 Layer 6: Signals (on-demand)
+
+On-demand population analytics. Only runs when `?signals=true`. Computes basic statistics over numeric fields in the target's collection. Surfaces outliers (|z| > 1.5). Ephemeral — SIG-level operation, never stored.
+
+### 7.8 API Query Parameters
+
 ```
-
-### 7.4 Layer 3: Signals
-
-On-demand population analytics. Only runs when `?signals=true`. Ephemeral — SIG-level operation.
-
-```typescript
-async function detectSignals(db: Level, target: string): Promise<SignalEntry[]> {
-  // Look at the collection the target belongs to
-  // Compute basic population statistics (count, outlier detection on numeric fields)
-  // Surface anything deviating significantly from population mean (|z| > 1.5)
-}
+GET /horizon/:target
+  ?prefix=true       → array of HorizonResponse for all targets under prefix
+  ?signals=true      → include Layer 6 signal detection (expensive)
+  ?grounds=false     → exclude Layer 2
+  ?nearby=false      → exclude Layer 3
+  ?governance=false  → exclude Layer 4
+  ?trajectory=false  → exclude Layer 5
 ```
 
 ### 7.5 API Query Parameters

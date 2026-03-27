@@ -194,3 +194,138 @@ describe('Layer 3: Signals', () => {
     expect(outlier!.value.z_score).toBeGreaterThan(1.5);
   });
 });
+
+// --- Layer 3: Nearby (the drawer) ---
+
+describe('Layer 3: Nearby', () => {
+  it('finds records sharing field values in same collection', async () => {
+    await processEvent(db, ev({ target: 'app.cases.rec001', operand: { type: 'H1B', caseworker: '@maria' } }));
+    await processEvent(db, ev({ target: 'app.cases.rec002', operand: { type: 'H1B', caseworker: '@john' } }));
+    await processEvent(db, ev({ target: 'app.cases.rec003', operand: { type: 'L1A', caseworker: '@maria' } }));
+
+    const result = await horizonGet(db, 'app.cases.rec001') as HorizonResponse;
+    expect(result.nearby).toBeDefined();
+    expect(result.nearby!.length).toBeGreaterThan(0);
+
+    // rec002 shares type:H1B, rec003 shares caseworker:@maria
+    const rec002 = result.nearby!.find(n => n.target === 'app.cases.rec002');
+    expect(rec002).toBeDefined();
+    expect(rec002!.shared).toContain('type:H1B');
+
+    const rec003 = result.nearby!.find(n => n.target === 'app.cases.rec003');
+    expect(rec003).toBeDefined();
+    expect(rec003!.shared).toContain('caseworker:@maria');
+  });
+
+  it('finds records sharing CON linkage', async () => {
+    // Two cases linked to the same client
+    await processEvent(db, ev({ target: 'app.clients.c001', operand: { name: 'Maria' } }));
+    await processEvent(db, ev({ target: 'app.cases.rec001', operand: { type: 'H1B' } }));
+    await processEvent(db, ev({ target: 'app.cases.rec002', operand: { type: 'L1A' } }));
+    await processEvent(db, ev({ op: 'CON', target: 'app.cases.rec001', operand: { added: ['app.clients.c001'] } }));
+    await processEvent(db, ev({ op: 'CON', target: 'app.cases.rec002', operand: { added: ['app.clients.c001'] } }));
+
+    const result = await horizonGet(db, 'app.cases.rec001') as HorizonResponse;
+    const rec002 = result.nearby!.find(n => n.target === 'app.cases.rec002');
+    expect(rec002).toBeDefined();
+    expect(rec002!.shared.some(s => s.startsWith('linked:'))).toBe(true);
+  });
+
+  it('excludes self from nearby', async () => {
+    await processEvent(db, ev({ target: 'app.tbl.self', operand: { x: 1 } }));
+    const result = await horizonGet(db, 'app.tbl.self') as HorizonResponse;
+    expect(result.nearby!.every(n => n.target !== 'app.tbl.self')).toBe(true);
+  });
+
+  it('returns empty when no siblings exist', async () => {
+    await processEvent(db, ev({ target: 'lonely.tbl.only', operand: {} }));
+    const result = await horizonGet(db, 'lonely.tbl.only') as HorizonResponse;
+    expect(result.nearby).toEqual([]);
+  });
+
+  it('disabled with nearby=false', async () => {
+    await processEvent(db, ev({ target: 'off.tbl.rec', operand: {} }));
+    const result = await horizonGet(db, 'off.tbl.rec', { nearby: false }) as HorizonResponse;
+    expect(result.nearby).toBeUndefined();
+  });
+});
+
+// --- Layer 4: Governance (the policy sheet) ---
+
+describe('Layer 4: Governance', () => {
+  it('returns EVA policies on this target', async () => {
+    await processEvent(db, ev({ target: 'app.clients.rec001.fldEmail' }));
+    await processEvent(db, ev({
+      op: 'DEF', target: 'app.clients.rec001.fldEmail',
+      operand: { formula: 'VALIDATE(email)' },
+    }));
+
+    const result = await horizonGet(db, 'app.clients.rec001.fldEmail') as HorizonResponse;
+    expect(result.governance).toBeDefined();
+    const direct = result.governance!.find(g => g.scope === 'direct');
+    expect(direct).toBeDefined();
+  });
+
+  it('returns EVA policies from same collection', async () => {
+    await processEvent(db, ev({ target: 'app.cases.rec001' }));
+    // Create a formula target in the same collection
+    await processEvent(db, ev({ target: 'app.cases.rec099.deadline' }));
+    await processEvent(db, ev({
+      op: 'DEF', target: 'app.cases.rec099.deadline',
+      operand: { formula: 'DAYS_UNTIL(filed + 180)' },
+    }));
+
+    const result = await horizonGet(db, 'app.cases.rec001') as HorizonResponse;
+    expect(result.governance).toBeDefined();
+    const collectionGov = result.governance!.filter(g => g.scope === 'collection');
+    expect(collectionGov.length).toBeGreaterThan(0);
+  });
+
+  it('disabled with governance=false', async () => {
+    await processEvent(db, ev({ target: 'nogov.tbl.rec' }));
+    const result = await horizonGet(db, 'nogov.tbl.rec', { governance: false }) as HorizonResponse;
+    expect(result.governance).toBeUndefined();
+  });
+});
+
+// --- Layer 5: Trajectory (the journey) ---
+
+describe('Layer 5: Trajectory', () => {
+  it('returns compact operator sequence', async () => {
+    await processEvent(db, ev({ target: 'traj.rec001', operand: { name: 'Maria' } }));
+    await processEvent(db, ev({ op: 'DEF', target: 'traj.rec001', operand: { status: 'pending' } }));
+    await processEvent(db, ev({ op: 'DEF', target: 'traj.rec001', operand: { status: 'approved' } }));
+
+    const result = await horizonGet(db, 'traj.rec001') as HorizonResponse;
+    expect(result.trajectory).toBeDefined();
+    // INS → DEF → DEF collapses consecutive DEFs to: INS, DEF
+    expect(result.trajectory).toEqual(['INS', 'DEF']);
+  });
+
+  it('preserves operator variety in trajectory', async () => {
+    await processEvent(db, ev({ target: 'traj2.rec001', operand: { name: 'Maria' } }));
+    await processEvent(db, ev({ target: 'traj2.link' }));
+    await processEvent(db, ev({ op: 'DEF', target: 'traj2.rec001', operand: { status: 'active' } }));
+    await processEvent(db, ev({ op: 'CON', target: 'traj2.rec001', operand: { added: ['traj2.link'] } }));
+    await processEvent(db, ev({ op: 'DEF', target: 'traj2.rec001', operand: { email: 'a@b.com' } }));
+    await processEvent(db, ev({ op: 'SEG', target: 'traj2.rec001', operand: { boundary: 'exclude' } }));
+
+    const result = await horizonGet(db, 'traj2.rec001') as HorizonResponse;
+    // INS, DEF, CON, DEF, SEG
+    expect(result.trajectory).toEqual(['INS', 'DEF', 'CON', 'DEF', 'SEG']);
+  });
+
+  it('empty trajectory for unknown target', async () => {
+    await processEvent(db, ev({ op: 'DEF', target: 'traj3.auto', operand: 'x' }));
+    // DEF auto-instantiated this target, so there IS a log entry for the DEF
+    const result = await horizonGet(db, 'traj3.auto') as HorizonResponse;
+    expect(result.trajectory).toBeDefined();
+    expect(result.trajectory!.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('disabled with trajectory=false', async () => {
+    await processEvent(db, ev({ target: 'notraj.rec' }));
+    const result = await horizonGet(db, 'notraj.rec', { trajectory: false }) as HorizonResponse;
+    expect(result.trajectory).toBeUndefined();
+  });
+});

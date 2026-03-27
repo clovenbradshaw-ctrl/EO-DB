@@ -53,14 +53,17 @@ export interface Subscription {
 // Input event (before seq assignment)
 export type EoEventInput = Omit<EoEvent, 'seq'>;
 
-// --- Three-Layer Horizon ---
+// --- Horizon: The File Cabinet ---
+// Six layers: Figure, Ground, Nearby, Governance, Trajectory (cheap), Signals (expensive/on-demand)
 
-// Three-layer Horizon response
 export interface HorizonResponse {
   target: string;
-  figure: EoState | null;
-  grounds: GroundEntry[];
-  signals?: SignalEntry[];
+  figure: EoState | null;                   // what this target IS
+  grounds: GroundEntry[];                    // ambient conditions pervading this region
+  nearby?: NearbyEntry[];                    // similar records in the same collection
+  governance?: GovernanceEntry[];            // EVA policies that govern this target
+  trajectory?: LoggableOperator[];           // compact operator history shape
+  signals?: SignalEntry[];                   // statistical patterns (on-demand, expensive)
 }
 
 // A ground condition inherited from an ancestor prefix
@@ -69,6 +72,22 @@ export interface GroundEntry {
   key: string;
   value: any;
   distance: number;
+}
+
+// A nearby record sharing structural traits with the current target
+export interface NearbyEntry {
+  target: string;
+  shared: string[];                          // shared traits: "type:H1B", "caseworker:@maria"
+  distance: number;                          // 1 = shares most traits, higher = fewer shared
+}
+
+// An EVA policy or formula registration governing this region
+export interface GovernanceEntry {
+  target: string;                            // the EVA-registered target
+  strategy?: string;                         // conflict resolution strategy if EVA policy
+  formula?: any;                             // formula definition if formula target
+  mode?: 'fold' | 'horizon';                 // computation mode
+  scope: 'direct' | 'collection' | 'ancestor'; // how this governance applies
 }
 
 // An ephemeral signal detected by population analysis
