@@ -682,6 +682,79 @@ body {
 
 .autocomplete-item .match { color: var(--accent); font-weight: 600; }
 
+/* CON direction toggle */
+.con-direction-group {
+  display: flex;
+  gap: 6px;
+}
+
+.con-direction-btn {
+  padding: 6px 14px;
+  font-size: 11px;
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 600;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s;
+  border: 1px solid transparent;
+  background: rgba(167,139,250,0.08);
+  color: var(--text-dim);
+}
+
+.con-direction-btn:hover { opacity: 0.85; }
+.con-direction-btn.selected {
+  border-color: var(--con);
+  color: var(--con);
+  background: rgba(167,139,250,0.18);
+}
+
+/* CON multi-target inputs */
+.con-target-entry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.con-target-entry .autocomplete-wrap {
+  flex: 1;
+}
+
+.con-remove-btn {
+  background: none;
+  border: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+
+.con-remove-btn:hover {
+  color: var(--seg);
+  background: rgba(244,114,182,0.12);
+}
+
+.con-add-target-btn {
+  background: none;
+  border: 1px dashed var(--border2);
+  border-radius: 4px;
+  padding: 6px 12px;
+  color: var(--text-faint);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.15s;
+  width: 100%;
+}
+
+.con-add-target-btn:hover {
+  border-color: var(--con);
+  color: var(--con);
+}
+
 /* Logging toggle */
 .compose-toggle-row {
   display: flex;
@@ -1277,8 +1350,18 @@ body {
           </div>
         </div>
 
-        <!-- Target with autocomplete -->
-        <div class="compose-row">
+        <!-- CON Direction Toggle (hidden unless CON selected) -->
+        <div class="compose-row" id="conDirectionRow" style="display:none;">
+          <div class="compose-label">Direction</div>
+          <div class="con-direction-group">
+            <div class="con-direction-btn selected" id="conDirTwoWay" onclick="selectConDirection('two-way')">Two-way</div>
+            <div class="con-direction-btn" id="conDirOneWay" onclick="selectConDirection('one-way')">One-way</div>
+          </div>
+          <div class="operand-hint" id="conDirectionHint">Two-way: all targets are mutually connected</div>
+        </div>
+
+        <!-- Target with autocomplete (used for one-way source OR non-CON ops) -->
+        <div class="compose-row" id="targetRow">
           <div class="compose-label">Target</div>
           <div class="autocomplete-wrap">
             <input class="compose-input" id="composeTarget" placeholder="app.tblClients.rec001.fldEmail" oninput="onTargetInput()" onkeydown="onTargetKeydown(event)" autocomplete="off">
@@ -1286,8 +1369,29 @@ body {
           </div>
         </div>
 
+        <!-- CON Two-way Targets (multiple target inputs, hidden unless CON two-way) -->
+        <div class="compose-row" id="conTargetsRow" style="display:none;">
+          <div class="compose-label">Targets</div>
+          <div id="conTargetsList">
+            <div class="con-target-entry">
+              <div class="autocomplete-wrap">
+                <input class="compose-input con-target-input" placeholder="app.tblClients.rec001" oninput="onConTargetInput(this)" onkeydown="onConTargetKeydown(event, this)" autocomplete="off">
+                <div class="autocomplete-list con-autocomplete-list"></div>
+              </div>
+            </div>
+            <div class="con-target-entry">
+              <div class="autocomplete-wrap">
+                <input class="compose-input con-target-input" placeholder="app.tblCases.rec101" oninput="onConTargetInput(this)" onkeydown="onConTargetKeydown(event, this)" autocomplete="off">
+                <div class="autocomplete-list con-autocomplete-list"></div>
+              </div>
+            </div>
+          </div>
+          <button class="con-add-target-btn" onclick="addConTarget()">+ Add target</button>
+          <div class="operand-hint">Each target will be connected to all other targets</div>
+        </div>
+
         <!-- Operand -->
-        <div class="compose-row">
+        <div class="compose-row" id="operandRow">
           <div class="compose-label">Operand</div>
           <textarea class="compose-textarea" id="composeOperand" placeholder='value or JSON object, e.g. "approved" or {"name": "Maria"}'></textarea>
           <div class="operand-hint" id="operandHint">DEF: string value or JSON object to set/merge</div>
@@ -1703,11 +1807,13 @@ document.addEventListener('click', (e) => {
 
 // ── Compose ──
 let selectedOp = 'DEF';
+let conDirection = 'two-way';
 
 const OP_HINTS = {
   INS: 'INS: JSON object with initial field values, e.g. {"name": "Maria", "status": "active"}',
   DEF: 'DEF: string value or JSON object to set/merge',
-  CON: 'CON: {"added": ["app.tblCases.rec101"], "removed": [], "edge_type": "has_case"}',
+  CON_ONE_WAY: 'CON (one-way): target is the source, operand lists destinations',
+  CON_TWO_WAY: 'CON (two-way): all listed targets will be mutually connected',
   SEG: 'SEG: {"boundary": "exclude", "reason": "archived"}',
   SYN: 'SYN: {"merge": ["app.tblClients.rec001", "app.tblClients.rec002"], "into": "app.tblClients.merged001"}',
   EVA: 'EVA: {"strategy": "latest"} or {"strategy": "formula", "formula": "..."}',
@@ -1735,14 +1841,136 @@ function selectOp(op) {
   const colorVar = getComputedStyle(document.documentElement).getPropertyValue(`--${op.toLowerCase()}`).trim();
   btn.style.borderColor = colorVar;
 
-  document.getElementById('operandHint').textContent = OP_HINTS[op] || '';
+  // Show/hide CON-specific UI
+  const isCON = op === 'CON';
+  document.getElementById('conDirectionRow').style.display = isCON ? '' : 'none';
 
-  // Auto-fill template if operand is empty
-  const operandEl = document.getElementById('composeOperand');
-  if (!operandEl.value.trim()) {
-    operandEl.value = OP_TEMPLATES[op] || '';
+  if (isCON) {
+    updateConLayout();
+  } else {
+    // Non-CON: show standard target + operand
+    document.getElementById('targetRow').style.display = '';
+    document.getElementById('conTargetsRow').style.display = 'none';
+    document.getElementById('operandRow').style.display = '';
+    document.getElementById('operandHint').textContent = OP_HINTS[op] || '';
+
+    // Auto-fill template if operand is empty
+    const operandEl = document.getElementById('composeOperand');
+    if (!operandEl.value.trim()) {
+      operandEl.value = OP_TEMPLATES[op] || '';
+    }
   }
 }
+
+function selectConDirection(dir) {
+  conDirection = dir;
+  document.getElementById('conDirTwoWay').classList.toggle('selected', dir === 'two-way');
+  document.getElementById('conDirOneWay').classList.toggle('selected', dir === 'one-way');
+  document.getElementById('conDirectionHint').textContent = dir === 'two-way'
+    ? 'Two-way: all targets are mutually connected'
+    : 'One-way: source target connects to destinations in operand';
+  updateConLayout();
+}
+
+function updateConLayout() {
+  if (conDirection === 'two-way') {
+    // Two-way: show multi-target list, hide single target + operand
+    document.getElementById('targetRow').style.display = 'none';
+    document.getElementById('conTargetsRow').style.display = '';
+    document.getElementById('operandRow').style.display = 'none';
+  } else {
+    // One-way: show single target + operand (destinations in operand)
+    document.getElementById('targetRow').style.display = '';
+    document.getElementById('conTargetsRow').style.display = 'none';
+    document.getElementById('operandRow').style.display = '';
+    document.getElementById('operandHint').textContent = OP_HINTS.CON_ONE_WAY;
+    const operandEl = document.getElementById('composeOperand');
+    if (!operandEl.value.trim()) {
+      operandEl.value = OP_TEMPLATES.CON || '';
+    }
+  }
+}
+
+// CON multi-target management
+function addConTarget() {
+  const list = document.getElementById('conTargetsList');
+  const entry = document.createElement('div');
+  entry.className = 'con-target-entry';
+  entry.innerHTML = `
+    <div class="autocomplete-wrap">
+      <input class="compose-input con-target-input" placeholder="app.tblName.recXXX" oninput="onConTargetInput(this)" onkeydown="onConTargetKeydown(event, this)" autocomplete="off">
+      <div class="autocomplete-list con-autocomplete-list"></div>
+    </div>
+    <button class="con-remove-btn" onclick="removeConTarget(this)" title="Remove target">&times;</button>
+  `;
+  list.appendChild(entry);
+}
+
+function removeConTarget(btn) {
+  const entry = btn.closest('.con-target-entry');
+  const list = document.getElementById('conTargetsList');
+  // Keep at least 2 targets
+  if (list.children.length > 2) {
+    entry.remove();
+  }
+}
+
+// Autocomplete for CON multi-target inputs
+function onConTargetInput(input) {
+  const val = input.value.trim().toLowerCase();
+  const list = input.closest('.autocomplete-wrap').querySelector('.con-autocomplete-list');
+  if (!val) { list.classList.remove('open'); return; }
+
+  const targets = getKnownTargets().filter(t => t.toLowerCase().includes(val)).slice(0, 15);
+  if (!targets.length) { list.classList.remove('open'); return; }
+
+  list.innerHTML = targets.map((t, i) => {
+    const idx = t.toLowerCase().indexOf(val);
+    const before = t.slice(0, idx);
+    const match = t.slice(idx, idx + val.length);
+    const after = t.slice(idx + val.length);
+    return `<div class="autocomplete-item" data-index="${i}" onmousedown="pickConAutocomplete(this, '${t}')">${before}<span class="match">${match}</span>${after}</div>`;
+  }).join('');
+  list.classList.add('open');
+}
+
+function pickConAutocomplete(item, value) {
+  const wrap = item.closest('.autocomplete-wrap');
+  wrap.querySelector('.con-target-input').value = value;
+  wrap.querySelector('.con-autocomplete-list').classList.remove('open');
+}
+
+function onConTargetKeydown(e, input) {
+  const list = input.closest('.autocomplete-wrap').querySelector('.con-autocomplete-list');
+  const items = list.querySelectorAll('.autocomplete-item');
+  let highlighted = list.querySelector('.autocomplete-item.highlighted');
+  let idx = highlighted ? parseInt(highlighted.dataset.index) : -1;
+
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    idx = Math.min(idx + 1, items.length - 1);
+    items.forEach(it => it.classList.remove('highlighted'));
+    if (items[idx]) items[idx].classList.add('highlighted');
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    idx = Math.max(idx - 1, 0);
+    items.forEach(it => it.classList.remove('highlighted'));
+    if (items[idx]) items[idx].classList.add('highlighted');
+  } else if (e.key === 'Enter' && highlighted) {
+    e.preventDefault();
+    input.value = highlighted.textContent;
+    list.classList.remove('open');
+  } else if (e.key === 'Escape') {
+    list.classList.remove('open');
+  }
+}
+
+// Close CON autocomplete on outside click
+document.addEventListener('mousedown', function(e) {
+  if (!e.target.closest('.con-target-entry')) {
+    document.querySelectorAll('.con-autocomplete-list').forEach(l => l.classList.remove('open'));
+  }
+});
 
 function updateLoggingLabel() {
   const on = document.getElementById('loggingToggle').checked;
@@ -1758,36 +1986,8 @@ async function submitEvent() {
   resultEl.className = 'compose-result';
   resultEl.style.display = 'none';
 
-  const target = document.getElementById('composeTarget').value.trim();
-  if (!target) {
-    resultEl.className = 'compose-result error';
-    resultEl.textContent = 'Target is required';
-    resultEl.style.display = 'block';
-    return;
-  }
-
-  let operand;
-  const rawOperand = document.getElementById('composeOperand').value.trim();
-  if (!rawOperand && selectedOp !== 'INS') {
-    operand = null;
-  } else {
-    try {
-      operand = JSON.parse(rawOperand);
-    } catch {
-      // Treat as plain string
-      operand = rawOperand;
-    }
-  }
-
   const logging = document.getElementById('loggingToggle').checked;
   const op = logging ? selectedOp : 'SIG';
-
-  const event = { op, target, operand };
-
-  // If SIG wrapping, include the original op in meta
-  if (!logging) {
-    event.meta = { intended_op: selectedOp };
-  }
 
   const submitBtn = document.getElementById('composeSubmit');
   submitBtn.disabled = true;
@@ -1798,24 +1998,76 @@ async function submitEvent() {
       throw new Error('Not connected to server. Click Connect first.');
     }
 
-    const res = await fetch(`${serverUrl}/webhook`, {
-      method: 'POST',
-      headers: authHeaders(),
-      body: JSON.stringify(event)
-    });
+    // CON two-way: collect targets and send pairwise events
+    if (selectedOp === 'CON' && conDirection === 'two-way') {
+      const inputs = document.querySelectorAll('#conTargetsList .con-target-input');
+      const targets = Array.from(inputs).map(i => i.value.trim()).filter(Boolean);
+      if (targets.length < 2) {
+        throw new Error('Two-way CON requires at least 2 targets');
+      }
+      // Check for duplicates
+      const unique = new Set(targets);
+      if (unique.size !== targets.length) {
+        throw new Error('Duplicate targets are not allowed');
+      }
 
-    const data = await res.json();
+      // Send a CON event for each target, connecting it to all others
+      const seqs = [];
+      for (const source of targets) {
+        const dests = targets.filter(t => t !== source);
+        const event = { op, target: source, operand: { added: dests } };
+        if (!logging) event.meta = { intended_op: selectedOp };
 
-    if (!res.ok) {
-      throw new Error(data.error || `HTTP ${res.status}`);
+        const res = await fetch(`${serverUrl}/webhook`, {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify(event)
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        seqs.push(data.seq);
+      }
+
+      resultEl.className = 'compose-result success';
+      resultEl.textContent = `Two-way CON sent — ${targets.length} events (seq ${seqs.join(', ')})`;
+      resultEl.style.display = 'block';
+      await fetchLiveLog();
+
+    } else {
+      // Standard path: single target + operand (all ops, and CON one-way)
+      const target = document.getElementById('composeTarget').value.trim();
+      if (!target) {
+        throw new Error('Target is required');
+      }
+
+      let operand;
+      const rawOperand = document.getElementById('composeOperand').value.trim();
+      if (!rawOperand && selectedOp !== 'INS') {
+        operand = null;
+      } else {
+        try {
+          operand = JSON.parse(rawOperand);
+        } catch {
+          operand = rawOperand;
+        }
+      }
+
+      const event = { op, target, operand };
+      if (!logging) event.meta = { intended_op: selectedOp };
+
+      const res = await fetch(`${serverUrl}/webhook`, {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify(event)
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+
+      resultEl.className = 'compose-result success';
+      resultEl.textContent = `Event sent — seq ${data.seq}`;
+      resultEl.style.display = 'block';
+      await fetchLiveLog();
     }
-
-    resultEl.className = 'compose-result success';
-    resultEl.textContent = `Event sent — seq ${data.seq}`;
-    resultEl.style.display = 'block';
-
-    // Refresh data
-    await fetchLiveLog();
 
   } catch (e) {
     resultEl.className = 'compose-result error';
