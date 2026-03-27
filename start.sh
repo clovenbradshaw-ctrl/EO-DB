@@ -12,7 +12,12 @@ echo "Fetching latest version from GitHub..."
 git fetch origin main
 git checkout main
 git reset --hard origin/main
-echo "Updated to latest version."
+echo ""
+echo "=== EO///DB Version ==="
+echo "  Commit:  $(git rev-parse --short HEAD)"
+echo "  Date:    $(git log -1 --format='%ci')"
+echo "  Message: $(git log -1 --format='%s')"
+echo "========================"
 
 # Install/update dependencies
 echo "Installing dependencies..."
