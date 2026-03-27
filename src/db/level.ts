@@ -32,7 +32,7 @@ export async function getCurrentSeq(db: EoDb): Promise<number> {
     const buf = await db.get('meta:seq');
     return unpack(buf) as number;
   } catch (e: any) {
-    if (e.code !== 'LEVEL_NOT_FOUND') return 0;
+    if (e.code === 'LEVEL_NOT_FOUND') return 0;
     throw e;
   }
 }
