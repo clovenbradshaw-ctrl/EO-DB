@@ -1,0 +1,840 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EO///DB — Horizon</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Instrument+Serif&family=Outfit:wght@200;300;400;500;600&display=swap');
+
+*{margin:0;padding:0;box-sizing:border-box}
+
+:root {
+  --bg: #07080c;
+  --bg1: #0c0e16;
+  --bg2: #12151f;
+  --bg3: #1a1e2e;
+  --bg4: #232840;
+  --border: #1e2336;
+  --border2: #2d3352;
+  --text: #b8bed4;
+  --text-dim: #636a8a;
+  --text-faint: #3d4360;
+  --white: #e2e6f4;
+  --figure: #38bdf8;
+  --figure-glow: rgba(56,189,248,0.08);
+  --ground: #a78bfa;
+  --ground-glow: rgba(167,139,250,0.06);
+  --signal: #fb923c;
+  --signal-glow: rgba(251,146,60,0.06);
+  --ins: #4ade80;
+  --def: #38bdf8;
+  --con: #a78bfa;
+  --seg: #f472b6;
+  --eva: #34d399;
+  --rec: #fb923c;
+}
+
+body {
+  font-family: 'Outfit', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  height: 100vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Topbar ── */
+.topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 24px; height: 44px;
+  background: var(--bg1); border-bottom: 1px solid var(--border);
+}
+.topbar-logo {
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 700; font-size: 13px; color: var(--white); letter-spacing: 3px;
+}
+.topbar-logo span { color: var(--figure); }
+.topbar-right {
+  display: flex; align-items: center; gap: 20px;
+  font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--text-dim);
+}
+.live-dot {
+  width: 5px; height: 5px; border-radius: 50%; background: var(--ins);
+  box-shadow: 0 0 8px var(--ins); animation: pulse 2s infinite;
+}
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+
+/* ── Main Layout ── */
+.main-layout {
+  flex: 1; display: flex; overflow: hidden;
+}
+
+/* ── Left: Target List ── */
+.target-list {
+  width: 300px; border-right: 1px solid var(--border);
+  background: var(--bg1); display: flex; flex-direction: column; flex-shrink: 0;
+}
+.target-list-header {
+  padding: 14px 18px; border-bottom: 1px solid var(--border);
+  font-family: 'JetBrains Mono', monospace; font-size: 9px;
+  font-weight: 600; text-transform: uppercase; letter-spacing: 1px;
+  color: var(--text-faint);
+}
+.target-search {
+  margin: 10px 12px; padding: 8px 12px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+  color: var(--text); font-family: 'Outfit', sans-serif; font-size: 12px;
+  outline: none; transition: border-color .2s;
+}
+.target-search:focus { border-color: var(--figure); }
+.target-search::placeholder { color: var(--text-faint); }
+
+.target-scroll { flex: 1; overflow-y: auto; }
+
+.target-item {
+  padding: 10px 18px; cursor: pointer;
+  border-bottom: 1px solid var(--border);
+  transition: all .12s;
+}
+.target-item:hover { background: var(--bg2); }
+.target-item.active { background: var(--figure-glow); border-left: 2px solid var(--figure); }
+
+.target-item-path {
+  font-family: 'JetBrains Mono', monospace; font-size: 10px;
+  color: var(--text-dim); margin-bottom: 2px;
+}
+.target-item-name {
+  font-weight: 500; font-size: 13px; color: var(--white);
+}
+.target-item-meta {
+  display: flex; align-items: center; gap: 8px; margin-top: 4px;
+}
+.op-dot {
+  display: inline-block; padding: 1px 5px; border-radius: 3px;
+  font-family: 'JetBrains Mono', monospace; font-size: 8px; font-weight: 600;
+}
+.op-INS { background: rgba(74,222,128,.1); color: var(--ins); }
+.op-DEF { background: rgba(56,189,248,.1); color: var(--def); }
+.op-CON { background: rgba(167,139,250,.1); color: var(--con); }
+.op-SEG { background: rgba(244,114,182,.1); color: var(--seg); }
+.op-EVA { background: rgba(52,211,153,.1); color: var(--eva); }
+.op-REC { background: rgba(251,146,60,.1); color: var(--rec); }
+
+.target-item-ts {
+  font-family: 'JetBrains Mono', monospace; font-size: 9px; color: var(--text-faint);
+}
+
+/* ── Center: Horizon Depth View ── */
+.horizon-view {
+  flex: 1; display: flex; flex-direction: column; overflow: hidden;
+  position: relative;
+}
+
+.horizon-empty {
+  flex: 1; display: flex; align-items: center; justify-content: center;
+  flex-direction: column; gap: 12px;
+}
+.horizon-empty-icon {
+  width: 60px; height: 60px; border-radius: 50%;
+  border: 1px solid var(--border2);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 24px; color: var(--text-faint);
+}
+.horizon-empty-text {
+  font-size: 13px; color: var(--text-dim); font-weight: 300;
+}
+.horizon-empty-sub {
+  font-size: 11px; color: var(--text-faint); font-weight: 300;
+}
+
+.depth-container {
+  flex: 1; overflow-y: auto; padding: 0;
+  display: none;
+}
+.depth-container.active { display: block; }
+
+/* ── Depth layers ── */
+.depth-layer {
+  padding: 24px 32px;
+  position: relative;
+  animation: layerIn .4s ease-out both;
+}
+.depth-layer:nth-child(2) { animation-delay: .08s; }
+.depth-layer:nth-child(3) { animation-delay: .16s; }
+
+@keyframes layerIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* Figure Layer */
+.layer-figure {
+  border-bottom: 1px solid var(--border);
+}
+.layer-figure::before {
+  content: '';
+  position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+  background: var(--figure);
+  box-shadow: 0 0 12px var(--figure), 0 0 30px rgba(56,189,248,.15);
+}
+
+.layer-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 1.5px; margin-bottom: 16px;
+  display: flex; align-items: center; gap: 8px;
+}
+.layer-label-figure { color: var(--figure); }
+.layer-label-ground { color: var(--ground); }
+.layer-label-signal { color: var(--signal); }
+
+.layer-label-sub {
+  font-weight: 300; letter-spacing: 0; text-transform: none;
+  color: var(--text-faint); font-size: 9px;
+}
+
+.figure-title {
+  font-family: 'Instrument Serif', serif;
+  font-size: 28px; color: var(--white); margin-bottom: 4px;
+  font-weight: 400;
+}
+.figure-target {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; color: var(--text-dim); margin-bottom: 20px;
+}
+
+.figure-fields {
+  display: grid; grid-template-columns: 1fr 1fr;
+  gap: 0;
+}
+.figure-field {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+.figure-field:nth-child(odd) { padding-right: 24px; border-right: 1px solid var(--border); }
+.figure-field:nth-child(even) { padding-left: 24px; }
+
+.field-key {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px; font-weight: 500; text-transform: uppercase;
+  letter-spacing: .5px; color: var(--text-faint); margin-bottom: 4px;
+}
+.field-val {
+  font-size: 15px; color: var(--white); font-weight: 400;
+}
+.field-val-formula {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px; color: var(--eva); font-style: italic;
+}
+.field-val-link {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; color: var(--con);
+  cursor: pointer; text-decoration: underline;
+  text-decoration-color: rgba(167,139,250,.3);
+}
+.field-val-excluded {
+  color: var(--seg); font-size: 12px;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.figure-provenance {
+  display: flex; align-items: center; gap: 12px;
+  margin-top: 16px; padding-top: 12px;
+  font-family: 'JetBrains Mono', monospace; font-size: 10px;
+  color: var(--text-faint);
+}
+.prov-agent { color: var(--text-dim); }
+.prov-seq { color: var(--figure); }
+
+/* Ground Layer */
+.layer-ground {
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, var(--ground-glow) 0%, transparent 100%);
+}
+.layer-ground::before {
+  content: '';
+  position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+  background: var(--ground);
+  opacity: .5;
+}
+
+.ground-cards {
+  display: flex; flex-wrap: wrap; gap: 10px;
+}
+.ground-card {
+  padding: 10px 14px;
+  background: rgba(167,139,250,.04);
+  border: 1px solid rgba(167,139,250,.12);
+  border-radius: 8px;
+  min-width: 180px;
+  transition: all .15s;
+}
+.ground-card:hover {
+  background: rgba(167,139,250,.08);
+  border-color: rgba(167,139,250,.25);
+}
+.ground-card-source {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px; color: var(--ground); opacity: .7;
+  margin-bottom: 4px;
+}
+.ground-card-key {
+  font-size: 10px; color: var(--text-dim);
+  font-family: 'JetBrains Mono', monospace;
+  text-transform: uppercase; letter-spacing: .3px;
+  margin-bottom: 2px;
+}
+.ground-card-val {
+  font-size: 14px; color: var(--white); font-weight: 400;
+}
+.ground-card-distance {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 8px; color: var(--text-faint); margin-top: 4px;
+}
+
+/* Signal Layer */
+.layer-signal {
+  background: linear-gradient(180deg, var(--signal-glow) 0%, transparent 100%);
+}
+.layer-signal::before {
+  content: '';
+  position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+  background: var(--signal);
+  opacity: .35;
+}
+
+.signal-cards {
+  display: flex; flex-direction: column; gap: 10px;
+}
+.signal-card {
+  padding: 14px 16px;
+  background: rgba(251,146,60,.03);
+  border: 1px solid rgba(251,146,60,.1);
+  border-radius: 8px;
+  transition: all .15s;
+  position: relative;
+  overflow: hidden;
+}
+.signal-card:hover {
+  background: rgba(251,146,60,.06);
+  border-color: rgba(251,146,60,.2);
+}
+.signal-card-ephemeral {
+  position: absolute; top: 8px; right: 10px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 7px; text-transform: uppercase; letter-spacing: 1px;
+  color: var(--signal); opacity: .5;
+}
+.signal-card-desc {
+  font-size: 13px; color: var(--white); font-weight: 400;
+  margin-bottom: 8px; max-width: 85%;
+}
+.signal-card-stats {
+  display: flex; gap: 20px;
+  font-family: 'JetBrains Mono', monospace; font-size: 10px;
+}
+.signal-stat-label { color: var(--text-faint); }
+.signal-stat-val { color: var(--signal); font-weight: 500; }
+
+.signal-card-bar {
+  margin-top: 10px; height: 4px;
+  background: var(--bg3); border-radius: 2px;
+  overflow: hidden; position: relative;
+}
+.signal-card-bar-fill {
+  height: 100%; border-radius: 2px;
+  background: linear-gradient(90deg, var(--signal), rgba(251,146,60,.4));
+  transition: width .6s ease-out;
+}
+.signal-card-bar-marker {
+  position: absolute; top: -3px; width: 2px; height: 10px;
+  background: var(--white); border-radius: 1px;
+  transition: left .6s ease-out;
+}
+
+.signal-track-btn {
+  margin-top: 10px;
+  padding: 5px 10px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px; font-weight: 500;
+  text-transform: uppercase; letter-spacing: .5px;
+  background: transparent;
+  border: 1px solid rgba(251,146,60,.2);
+  color: var(--signal); border-radius: 4px;
+  cursor: pointer; transition: all .15s;
+  opacity: .6;
+}
+.signal-track-btn:hover {
+  background: rgba(251,146,60,.08);
+  border-color: rgba(251,146,60,.4);
+  opacity: 1;
+}
+
+.signal-empty {
+  font-size: 11px; color: var(--text-faint); font-weight: 300;
+  padding: 8px 0;
+  font-style: italic;
+}
+
+/* ── Right: Event Stream ── */
+.event-stream {
+  width: 280px; border-left: 1px solid var(--border);
+  background: var(--bg1); display: flex; flex-direction: column; flex-shrink: 0;
+}
+.event-stream-header {
+  padding: 14px 16px; border-bottom: 1px solid var(--border);
+  font-family: 'JetBrains Mono', monospace; font-size: 9px;
+  font-weight: 600; text-transform: uppercase; letter-spacing: 1px;
+  color: var(--text-faint);
+  display: flex; align-items: center; justify-content: space-between;
+}
+.event-count {
+  font-weight: 400; color: var(--text-dim);
+}
+
+.event-scroll { flex: 1; overflow-y: auto; }
+
+.event-entry {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  transition: background .1s;
+  cursor: pointer;
+}
+.event-entry:hover { background: var(--bg2); }
+.event-entry-top {
+  display: flex; align-items: center; gap: 6px; margin-bottom: 4px;
+}
+.event-entry-seq {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px; color: var(--text-faint);
+}
+.event-entry-target {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px; color: var(--text-dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  flex: 1;
+}
+.event-entry-operand {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px; color: var(--text-faint);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  max-width: 100%;
+}
+.event-entry-bottom {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-top: 4px;
+}
+.event-entry-agent {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px; color: var(--text-faint);
+}
+.event-entry-ts {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px; color: var(--text-faint);
+}
+
+/* ── Scrollbars ── */
+::-webkit-scrollbar { width: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--bg4); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--border2); }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-logo">EO<span>///</span>DB</div>
+  <div class="topbar-right">
+    <div style="display:flex;align-items:center;gap:6px;">
+      <div class="live-dot"></div>
+      <span>seq 4221</span>
+    </div>
+    <span>12 targets · 2 edges · 3 grounds</span>
+    <span style="color:var(--text);">@admin:amino</span>
+  </div>
+</div>
+
+<div class="main-layout">
+
+  <!-- ── Left: Target List ── -->
+  <div class="target-list">
+    <div class="target-list-header">Targets</div>
+    <input class="target-search" placeholder="Filter by path or value..." id="targetSearch" oninput="filterTargets()">
+    <div class="target-scroll" id="targetScroll"></div>
+  </div>
+
+  <!-- ── Center: Horizon ── -->
+  <div class="horizon-view">
+    <div class="horizon-empty" id="emptyState">
+      <div class="horizon-empty-icon">◎</div>
+      <div class="horizon-empty-text">Select a target to observe</div>
+      <div class="horizon-empty-sub">The Horizon shows figure, ground, and signal</div>
+    </div>
+    <div class="depth-container" id="depthContainer"></div>
+  </div>
+
+  <!-- ── Right: Event Stream ── -->
+  <div class="event-stream">
+    <div class="event-stream-header">
+      Event log
+      <span class="event-count" id="eventCount">15 events</span>
+    </div>
+    <div class="event-scroll" id="eventScroll"></div>
+  </div>
+
+</div>
+
+<script>
+// ── Data ──
+const LOG = [
+  { seq:4201, op:"INS", target:"app.tblClients.rec001", operand:{name:"Maria Garcia",status:"active"}, agent:"@intake", ts:"2025-03-27T09:12:00Z" },
+  { seq:4202, op:"INS", target:"app.tblCases.rec101", operand:{type:"H1B",filed:"2025-06-01"}, agent:"@intake", ts:"2025-03-27T09:12:01Z" },
+  { seq:4203, op:"CON", target:"app.tblClients.rec001.fldCases", operand:{added:["app.tblCases.rec101"]}, agent:"@intake", ts:"2025-03-27T09:12:02Z" },
+  { seq:4204, op:"DEF", target:"app.tblCases.rec101.fldStatus", operand:"pending", agent:"@caseworker", ts:"2025-03-27T09:15:00Z" },
+  { seq:4205, op:"DEF", target:"app.tblClients.rec001.fldEmail", operand:"maria@old.com", agent:"@intake", ts:"2025-03-27T09:15:30Z" },
+  { seq:4206, op:"DEF", target:"app.tblClients.rec001.fldEmail", operand:"maria@new.com", agent:"@caseworker", ts:"2025-03-27T10:30:00Z" },
+  { seq:4207, op:"DEF", target:"app.tblCases.rec101.fldStatus", operand:"approved", agent:"@caseworker", ts:"2025-03-27T14:00:00Z" },
+  { seq:4208, op:"EVA", target:"app.tblClients.rec001.fldEmail", operand:{strategy:"latest"}, agent:"@admin", ts:"2025-03-27T14:01:00Z" },
+  { seq:4209, op:"DEF", target:"app.tblCases.rec101.fldDeadline", operand:{formula:"DAYS_UNTIL(filed + 180)"}, agent:"@admin", ts:"2025-03-27T14:05:00Z" },
+  { seq:4210, op:"INS", target:"app.tblClients.rec002", operand:{name:"Carlos Mendez",status:"active"}, agent:"@intake", ts:"2025-03-27T15:00:00Z" },
+  { seq:4211, op:"INS", target:"app.tblCases.rec102", operand:{type:"L1A",filed:"2025-07-15"}, agent:"@intake", ts:"2025-03-27T15:00:01Z" },
+  { seq:4212, op:"CON", target:"app.tblClients.rec002.fldCases", operand:{added:["app.tblCases.rec102"]}, agent:"@intake", ts:"2025-03-27T15:00:02Z" },
+  { seq:4213, op:"SEG", target:"app.tblClients.rec001", operand:{boundary:"exclude",reason:"archived"}, agent:"@admin", ts:"2025-03-27T16:00:00Z" },
+  { seq:4214, op:"DEF", target:"app.tblCases.rec102.fldNotes", operand:"Initial consultation complete", agent:"@caseworker", ts:"2025-03-27T16:30:00Z" },
+  { seq:4215, op:"DEF", target:"app.tblCases.rec102.fldDaysOpen", operand:12, agent:"@system", ts:"2025-03-27T16:30:05Z" },
+  { seq:4216, op:"DEF", target:"app.tblCases.rec101.fldDaysOpen", operand:45, agent:"@system", ts:"2025-03-27T16:30:06Z" },
+  // Ground-level DEFs
+  { seq:4217, op:"DEF", target:"app.tblClients", operand:{regulatoryHold:true,defaultRegion:"Nashville",intakePolicy:"standard"}, agent:"@admin", ts:"2025-03-27T08:00:00Z" },
+  { seq:4218, op:"DEF", target:"app", operand:{timezone:"America/Chicago",firm:"Amino Immigration",established:2019}, agent:"@admin", ts:"2025-03-27T07:00:00Z" },
+  { seq:4219, op:"DEF", target:"app.tblCases", operand:{defaultPriority:"normal",reviewCycle:"biweekly"}, agent:"@admin", ts:"2025-03-27T08:01:00Z" },
+  { seq:4220, op:"DEF", target:"app.tblClients.rec002.fldPhone", operand:"615-555-0142", agent:"@intake", ts:"2025-03-27T15:01:00Z" },
+  { seq:4221, op:"DEF", target:"app.tblCases.rec101.fldResolutionDays", operand:38, agent:"@system", ts:"2025-03-27T17:00:00Z" },
+];
+
+// Fold
+function fold() {
+  const state = {};
+  for (const e of LOG) {
+    if (!state[e.target]) state[e.target] = { target: e.target, value: null, last_seq:0, last_op:'', last_agent:'', last_ts:'' };
+    if (e.op === 'INS') state[e.target].value = e.operand;
+    else if (e.op === 'CON') state[e.target].value = e.operand;
+    else if (e.op === 'DEF' && typeof state[e.target].value === 'object' && state[e.target].value && typeof e.operand === 'object' && e.operand && !e.operand.formula)
+      state[e.target].value = { ...state[e.target].value, ...e.operand };
+    else state[e.target].value = e.operand;
+    state[e.target].last_seq = e.seq;
+    state[e.target].last_op = e.op;
+    state[e.target].last_agent = e.agent;
+    state[e.target].last_ts = e.ts;
+  }
+  return state;
+}
+
+const STATE = fold();
+
+// Get grounds for a target
+function getGrounds(target) {
+  const parts = target.split('.');
+  const grounds = [];
+  const figureKeys = new Set();
+  const s = STATE[target];
+  if (s?.value && typeof s.value === 'object') Object.keys(s.value).forEach(k => figureKeys.add(k));
+
+  for (let d = parts.length - 1; d >= 1; d--) {
+    const ancestor = parts.slice(0, d).join('.');
+    const distance = parts.length - d;
+    const as = STATE[ancestor];
+    if (as?.value && typeof as.value === 'object' && !Array.isArray(as.value) && as.last_op !== 'INS') {
+      for (const [k, v] of Object.entries(as.value)) {
+        if (!figureKeys.has(k)) grounds.push({ source: ancestor, key: k, value: v, distance });
+      }
+    }
+  }
+  return grounds;
+}
+
+// Detect signals for a target
+function detectSignals(target) {
+  const parts = target.split('.');
+  if (parts.length < 2) return [];
+  const prefix = parts.slice(0, 2).join('.');
+  const signals = [];
+
+  // Collect numeric field values across population
+  const fieldVals = {};
+  for (const [t, s] of Object.entries(STATE)) {
+    if (t.startsWith(prefix + '.') && t.split('.').length === 4 && typeof s.value === 'number') {
+      const field = t.split('.')[3];
+      if (!fieldVals[field]) fieldVals[field] = [];
+      fieldVals[field].push({ target: t, value: s.value });
+    }
+  }
+
+  for (const [field, entries] of Object.entries(fieldVals)) {
+    if (entries.length < 2) continue;
+    const vals = entries.map(e => e.value);
+    const mean = vals.reduce((a,b) => a+b, 0) / vals.length;
+    const std = Math.sqrt(vals.reduce((a,b) => a + (b-mean)**2, 0) / vals.length);
+    if (std === 0) continue;
+    const mine = entries.find(e => e.target.startsWith(target));
+    if (mine) {
+      const z = (mine.value - mean) / std;
+      if (Math.abs(z) > 0.5) {
+        signals.push({
+          desc: `${field} is ${z > 0 ? 'above' : 'below'} population average`,
+          field, z: z, myVal: mine.value, mean, n: entries.length,
+          population: prefix
+        });
+      }
+    }
+  }
+
+  // Count signal
+  const recs = Object.keys(STATE).filter(t => t.startsWith(prefix + '.') && t.split('.').length === 3);
+  signals.push({
+    desc: `${recs.length} entities in ${prefix.split('.')[1]}`,
+    field: 'count', z: 0, myVal: recs.length, mean: recs.length, n: recs.length,
+    population: prefix
+  });
+
+  return signals;
+}
+
+// ── Rendering ──
+let selectedTarget = null;
+
+function isRecordLevel(t) {
+  const p = t.split('.');
+  return p.length === 3 && p[2].startsWith('rec');
+}
+function isFieldLevel(t) { return t.split('.').length === 4; }
+
+function getDisplayName(target) {
+  const s = STATE[target];
+  if (s?.value?.name) return s.value.name;
+  return target.split('.').pop();
+}
+
+function renderTargets() {
+  const search = document.getElementById('targetSearch').value.toLowerCase();
+  const scroll = document.getElementById('targetScroll');
+
+  // Group by collection
+  const collections = {};
+  for (const t of Object.keys(STATE)) {
+    if (t.split('.').length < 3) continue; // skip app-level and collection-level
+    if (!isRecordLevel(t)) continue;
+    const col = t.split('.').slice(0, 2).join('.');
+    if (!collections[col]) collections[col] = [];
+    collections[col].push(t);
+  }
+
+  let html = '';
+  for (const [col, targets] of Object.entries(collections).sort()) {
+    const filtered = targets.filter(t => {
+      if (!search) return true;
+      const s = STATE[t];
+      return t.toLowerCase().includes(search) || JSON.stringify(s?.value).toLowerCase().includes(search);
+    });
+    if (filtered.length === 0) continue;
+
+    html += `<div style="padding:8px 18px;font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--text-faint);background:var(--bg);border-bottom:1px solid var(--border);letter-spacing:.5px;text-transform:uppercase;">${col.split('.')[1]}</div>`;
+    for (const t of filtered.sort()) {
+      const s = STATE[t];
+      const active = selectedTarget === t ? 'active' : '';
+      const name = getDisplayName(t);
+      const isSeg = s.last_op === 'SEG';
+      html += `<div class="target-item ${active}" onclick="selectTarget('${t}')">
+        <div class="target-item-path">${t}</div>
+        <div class="target-item-name" ${isSeg ? 'style="opacity:.4;text-decoration:line-through;"' : ''}>${name}</div>
+        <div class="target-item-meta">
+          <span class="op-dot op-${s.last_op}">${s.last_op}</span>
+          <span class="target-item-ts">${s.last_ts.replace('T',' ').slice(0,16)}</span>
+        </div>
+      </div>`;
+    }
+  }
+  scroll.innerHTML = html;
+}
+
+function selectTarget(target) {
+  selectedTarget = target;
+  renderTargets();
+  renderHorizon();
+}
+
+function filterTargets() { renderTargets(); }
+
+function renderHorizon() {
+  const empty = document.getElementById('emptyState');
+  const container = document.getElementById('depthContainer');
+
+  if (!selectedTarget) {
+    empty.style.display = 'flex';
+    container.classList.remove('active');
+    return;
+  }
+
+  empty.style.display = 'none';
+  container.classList.add('active');
+
+  const s = STATE[selectedTarget];
+  const grounds = getGrounds(selectedTarget);
+  const signals = detectSignals(selectedTarget);
+
+  let html = '';
+
+  // ═══ Layer 1: Figure ═══
+  html += `<div class="depth-layer layer-figure">`;
+  html += `<div class="layer-label layer-label-figure">Figure <span class="layer-label-sub">— what this target is</span></div>`;
+
+  const name = getDisplayName(selectedTarget);
+  html += `<div class="figure-title">${name}</div>`;
+  html += `<div class="figure-target">${selectedTarget}</div>`;
+
+  // Gather all field-level state for this record
+  const prefix = selectedTarget + '.';
+  const fields = {};
+  // Direct value on the target itself
+  if (s?.value && typeof s.value === 'object' && !Array.isArray(s.value) && !s.value.formula && !s.value.boundary) {
+    for (const [k, v] of Object.entries(s.value)) fields[k] = { value: v, source: selectedTarget, state: s };
+  }
+  // Field-level children
+  for (const [t, fs] of Object.entries(STATE)) {
+    if (t.startsWith(prefix) && t.split('.').length === selectedTarget.split('.').length + 1) {
+      const fieldName = t.split('.').pop();
+      fields[fieldName] = { value: fs.value, source: t, state: fs };
+    }
+  }
+
+  // Check if SEG excluded
+  if (s?.last_op === 'SEG' && s?.value?.boundary === 'exclude') {
+    html += `<div style="margin-bottom:16px;">
+      <span class="field-val-excluded">⊘ EXCLUDED — ${s.value.reason || 'partitioned out of active set'}</span>
+    </div>`;
+  }
+
+  html += `<div class="figure-fields">`;
+  const fieldEntries = Object.entries(fields);
+  for (const [k, f] of fieldEntries) {
+    let valHtml;
+    if (f.value && typeof f.value === 'object' && f.value.formula) {
+      valHtml = `<div class="field-val-formula">ƒ ${f.value.formula}</div>`;
+    } else if (f.value && typeof f.value === 'object' && f.value.added) {
+      valHtml = f.value.added.map(l =>
+        `<div class="field-val-link" onclick="selectTarget('${l}')">${l.split('.').pop()}</div>`
+      ).join('');
+    } else if (typeof f.value === 'object' && f.value !== null) {
+      valHtml = `<div class="field-val" style="font-size:12px;font-family:'JetBrains Mono',monospace;color:var(--text-dim);">${JSON.stringify(f.value)}</div>`;
+    } else {
+      valHtml = `<div class="field-val">${f.value ?? '<span style="color:var(--text-faint);">∅</span>'}</div>`;
+    }
+    html += `<div class="figure-field">
+      <div class="field-key">${k}</div>
+      ${valHtml}
+    </div>`;
+  }
+  // Pad odd count
+  if (fieldEntries.length % 2 === 1) html += `<div class="figure-field"></div>`;
+  html += `</div>`;
+
+  html += `<div class="figure-provenance">
+    <span>last: <span class="op-dot op-${s.last_op}" style="margin-left:4px;">${s.last_op}</span></span>
+    <span class="prov-agent">${s.last_agent}</span>
+    <span class="prov-seq">seq ${s.last_seq}</span>
+    <span>${s.last_ts.replace('T',' ').slice(0,19)}</span>
+  </div>`;
+  html += `</div>`;
+
+  // ═══ Layer 2: Ground ═══
+  html += `<div class="depth-layer layer-ground">`;
+  html += `<div class="layer-label layer-label-ground">Ground <span class="layer-label-sub">— what this target is in</span></div>`;
+  if (grounds.length > 0) {
+    html += `<div class="ground-cards">`;
+    for (const g of grounds) {
+      const distLabel = g.distance === 1 ? 'collection' : g.distance === 2 ? 'application' : `↑${g.distance}`;
+      html += `<div class="ground-card">
+        <div class="ground-card-source">${g.source}</div>
+        <div class="ground-card-key">${g.key}</div>
+        <div class="ground-card-val">${typeof g.value === 'boolean' ? (g.value ? '● yes' : '○ no') : g.value}</div>
+        <div class="ground-card-distance">${distLabel} level</div>
+      </div>`;
+    }
+    html += `</div>`;
+  } else {
+    html += `<div style="font-size:11px;color:var(--text-faint);font-style:italic;">No ambient conditions detected</div>`;
+  }
+  html += `</div>`;
+
+  // ═══ Layer 3: Signal ═══
+  html += `<div class="depth-layer layer-signal">`;
+  html += `<div class="layer-label layer-label-signal">Signal <span class="layer-label-sub">— what this target is part of</span></div>`;
+
+  const realSignals = signals.filter(s => s.field !== 'count' && Math.abs(s.z) > 0.5);
+  const countSignal = signals.find(s => s.field === 'count');
+
+  if (realSignals.length > 0) {
+    html += `<div class="signal-cards">`;
+    for (const sig of realSignals) {
+      const pct = Math.min(100, Math.max(0, ((sig.myVal / (sig.mean * 2)) * 100)));
+      const markerPct = Math.min(95, Math.max(5, pct));
+      html += `<div class="signal-card">
+        <div class="signal-card-ephemeral">ephemeral · SIG</div>
+        <div class="signal-card-desc">${sig.desc}</div>
+        <div class="signal-card-stats">
+          <span><span class="signal-stat-label">this: </span><span class="signal-stat-val">${sig.myVal}</span></span>
+          <span><span class="signal-stat-label">mean: </span><span class="signal-stat-val">${sig.mean.toFixed(1)}</span></span>
+          <span><span class="signal-stat-label">z: </span><span class="signal-stat-val">${sig.z.toFixed(2)}</span></span>
+          <span><span class="signal-stat-label">n: </span><span class="signal-stat-val">${sig.n}</span></span>
+        </div>
+        <div class="signal-card-bar">
+          <div class="signal-card-bar-fill" style="width:${pct}%"></div>
+          <div class="signal-card-bar-marker" style="left:50%"></div>
+        </div>
+        <button class="signal-track-btn">INS → track this pattern</button>
+      </div>`;
+    }
+    html += `</div>`;
+  } else {
+    html += `<div class="signal-empty">No statistically notable patterns detected in this population</div>`;
+  }
+  if (countSignal) {
+    html += `<div style="margin-top:12px;font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-faint);">
+      Population: ${countSignal.myVal} entities in ${countSignal.population.split('.')[1]}
+    </div>`;
+  }
+  html += `</div>`;
+
+  container.innerHTML = html;
+  container.scrollTop = 0;
+}
+
+function renderEvents() {
+  const scroll = document.getElementById('eventScroll');
+  const sorted = [...LOG].reverse();
+
+  scroll.innerHTML = sorted.map(e => `
+    <div class="event-entry" onclick="selectTarget('${e.target.split('.').slice(0,3).join('.')}')">
+      <div class="event-entry-top">
+        <span class="event-entry-seq">${e.seq}</span>
+        <span class="op-dot op-${e.op}">${e.op}</span>
+        <span class="event-entry-target">${e.target}</span>
+      </div>
+      <div class="event-entry-operand">${typeof e.operand === 'string' ? e.operand : JSON.stringify(e.operand)}</div>
+      <div class="event-entry-bottom">
+        <span class="event-entry-agent">${e.agent}</span>
+        <span class="event-entry-ts">${e.ts.replace('T',' ').slice(11,16)}</span>
+      </div>
+    </div>
+  `).join('');
+
+  document.getElementById('eventCount').textContent = LOG.length + ' events';
+}
+
+// ── Init ──
+renderTargets();
+renderEvents();
+</script>
+</body>
+</html>
