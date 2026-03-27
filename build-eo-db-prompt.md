@@ -38,18 +38,20 @@ Build and test in this exact order. Do not skip ahead. Each phase must pass its 
 - Write tests: log.test.ts, graph.test.ts
 
 ### Phase 2: The fold
-- Implement the nine-case fold (§6): processEvent, executeOperator, and all nine operator handlers
-- INS: create state, reject duplicates (§6.2)
-- DEF: merge operands, detect formula operands, register EVA-active targets (§6.3)
-- CON: add/remove edges, update state with current link set (§6.4)
-- SEG: write boundary state (§6.5)
-- SYN: merge targets, create aliases, merge edges (§6.6)
-- EVA: write evaluation policy (§6.7)
-- REC: apply sub-operations atomically (§6.8)
+- **Operator handlers are NOT independent.** Build them bottom-up in helix order. Each handler may call handlers below it. The helix is: NUL < SIG < INS < SEG < CON < SYN < DEF < EVA < REC.
+- Implement shared helix utilities first (`src/db/helpers.ts`): `resolveAlias()` (SYN capacity), `checkExists()` (INS capacity), `checkBoundary()` (SEG capacity), `gatherDependencies()` (CON capacity)
+- Implement the nine-case fold (§6): processEvent, executeOperator, and all operator handlers in helix order
+- INS: check existence (NUL capacity), create state, reject duplicates (§6.2)
+- SEG: check target exists (INS capacity), write boundary state (§6.5)
+- CON: check both endpoints exist (INS capacity), respect partitions (SEG capacity), add/remove edges, update state with current link set (§6.4)
+- SYN: use CON graph to find edges, dissolve SEG boundaries, mint merged identity (INS capacity), merge targets, create aliases, merge edges (§6.6)
+- DEF: resolve aliases (SYN capacity), respect boundaries (SEG capacity), auto-instantiate if target doesn't exist (INS capacity), merge operands, detect formula operands, register EVA-active targets, trigger recomputation via CON graph (§6.3)
+- EVA: full 8-step inherited pipeline — reads formula (DEF), walks graph (CON), resolves aliases (SYN), respects boundaries (SEG), checks existence (INS), observes state (NUL), computes, writes result (DEF). Write evaluation policy (§6.7)
+- REC: dispatches sub-operations through the same handler hierarchy atomically. Can invoke any combination of all other operators. Provides frame separation. (§6.8)
 - Implement idempotency via client_event_id (§6 top)
 - Implement dependent recomputation: after any state change, walk CON graph in reverse to find EVA-active targets, recompute fold-computed formulas (§6.9)
 - Implement EVA classification: when DEF stores a formula operand, inspect it for external references (time functions). If all inputs internal → fold-computed. If any input external → horizon-computed (§6.3)
-- Write tests: fold.test.ts covering all nine operators, idempotency, dependent recomputation
+- Write tests: fold.test.ts covering all operators, helix inheritance, idempotency, dependent recomputation
 
 ### Phase 3: Horizon
 - Implement horizonGet: alias resolution, Horizon-computed evaluation at read time (§7)
@@ -117,6 +119,8 @@ Build and test in this exact order. Do not skip ahead. Each phase must pass its 
 ## Critical implementation details
 
 **The fold is the core.** Every event goes through processEvent in fold.ts. The fold assigns the sequence number, appends to the log, executes the operator-specific logic, recomputes dependents, and notifies the feed. Nothing bypasses the fold.
+
+**The operator helix is the fold's call hierarchy.** Operator handlers are cumulative — each inherits all capacities below it. DEF doesn't just write a value: it resolves aliases (SYN), respects boundaries (SEG), can auto-instantiate (INS), and triggers recomputation across the dependency graph (CON). EVA exercises eight inherited capacities in a single fold step. The fold processes operators sequentially because events must arrive in helix-consistent order. Low operators (INS) are cheap (microseconds, 1-2 keys). Middle operators (SEG, CON, SYN) are moderately expensive (milliseconds, index updates). High operators (DEF, EVA, REC) are the most expensive but do the most work per event (tens of ms, recomputation cascades). This cost gradient matches real workload patterns — cheap operators fire most, expensive operators fire least.
 
 **Formula recomputations do not write to the log.** They write results to projected state only. The log records what came from outside (agents, sources). Projected state records consequences (formula results). One upstream DEF that affects 50 formulas produces one log entry and 50 state updates.
 

@@ -374,6 +374,36 @@ async function traverse(db: Level, start: string, depth: number): Promise<{
 
 The fold is the core of the database. It processes incoming events and updates projected state, the CON graph, and EVA-active formula results.
 
+### 6.0 Operator Helix — Cumulative Capacity Model
+
+The nine operators are **not independent handlers**. They form a cumulative helix where each operator inherits every capacity below it. The fold's operator dispatch is a call hierarchy, not a flat switch statement.
+
+**Inheritance chain:** `NUL < SIG < INS < SEG < CON < SYN < DEF < EVA < REC`
+
+Each handler may invoke the handlers below it:
+
+| Operator | Inherited Capacities | Cost Profile |
+|----------|---------------------|-------------|
+| **INS** | NUL (observe/existence check), SIG (coordinate targeting) | Microseconds — 1-2 key operations |
+| **SEG** | + INS (confirm target exists before partitioning) | Milliseconds — boundary metadata |
+| **CON** | + SEG (partition awareness), INS (existence check on both endpoints) | Milliseconds — bidirectional index updates, may trigger recomputation |
+| **SYN** | + CON (merge edges), SEG (dissolve boundaries), INS (mint merged identity) | Milliseconds — graph restructuring |
+| **DEF** | + SYN (alias resolution), SEG (boundary respect), CON (dependency recomputation), INS (auto-instantiation) | Tens of ms — recomputation cascades possible |
+| **EVA** | All above — reads formula (DEF), walks graph (CON), resolves aliases (SYN), respects boundaries (SEG), checks existence (INS), observes state (NUL), then computes | Tens of ms — exercises full dependency graph |
+| **REC** | All nine capacities — dispatches sub-operations through the handler hierarchy atomically | Tens of ms — compound frame changes |
+
+**Cost gradient:** Low operators (INS) are cheap and frequent. High operators (DEF, EVA, REC) are expensive but rare. The database's average cost per event is dominated by cheap operators, with occasional expensive bursts.
+
+**Implementation pattern:** Shared helix utilities are defined in `src/db/helpers.ts`:
+- `resolveAlias(db, target)` — SYN capacity: follow `_alias` chain to canonical target
+- `checkExists(db, target)` — INS capacity: verify target is instantiated
+- `checkBoundary(db, target)` — SEG capacity: read partition metadata
+- `gatherDependencies(db, target)` — CON capacity: walk reverse graph for dependents
+
+Higher operators call these utilities before executing their own logic. The fold processes operators sequentially — events must arrive in helix-consistent order. You cannot DEF a target that hasn't been INS'd (unless DEF auto-instantiates via its inherited INS capacity).
+
+---
+
 ```typescript
 // src/db/fold.ts
 
@@ -451,9 +481,11 @@ async function executeOperator(db: Level, event: EoEvent): Promise<void> {
 
 ### 6.2 INS — Instantiate
 
+> **Inherited capacities:** NUL (encounters keyspace to check existence), SIG (directs attention to specific coordinate). Three operations total — the cheapest loggable operator.
+
 ```typescript
 async function executeINS(db: Level, event: EoEvent): Promise<void> {
-  // Check if target already exists
+  // NUL capacity: observe the keyspace to check for duplicates
   const existing = await getState(db, event.target);
   if (existing) {
     throw new Error(`Target already instantiated: ${event.target}`);
@@ -473,15 +505,32 @@ async function executeINS(db: Level, event: EoEvent): Promise<void> {
 
 ### 6.3 DEF — Define Value or Register Computation
 
+> **Inherited capacities:** SYN (alias resolution — if target was merged, write goes to canonical target), SEG (boundary respect — if target was SEG'd out, write still lands in log but Horizon knows to exclude), CON (dependency-triggered recomputation — walks reverse graph to find EVA-active dependents), INS (auto-instantiation — if target doesn't exist, DEF may mint it rather than reject). DEF is the workhorse operator: same write, vastly more work, because it stands on eight layers of infrastructure.
+
 ```typescript
 async function executeDEF(db: Level, event: EoEvent): Promise<void> {
-  const existing = await getState(db, event.target);
+  // SYN capacity: resolve alias if target was merged
+  const target = await resolveAlias(db, event.target);
 
-  // Merge operand into existing state (field-level merge for objects)
-  const merged = mergeOperand(existing?.value, event.operand);
+  // INS capacity: auto-instantiate if target doesn't exist
+  const existing = await getState(db, target);
+  if (!existing) {
+    await setState(db, {
+      target,
+      value: {},
+      last_seq: event.seq,
+      last_op: 'INS',
+      last_agent: event.agent,
+      last_ts: event.ts
+    });
+  }
+
+  // DEF's own logic: merge operand into existing state (field-level merge for objects)
+  const currentState = existing || { value: {} };
+  const merged = mergeOperand(currentState.value, event.operand);
 
   await setState(db, {
-    target: event.target,
+    target,
     value: merged,
     last_seq: event.seq,
     last_op: 'DEF',
@@ -491,8 +540,9 @@ async function executeDEF(db: Level, event: EoEvent): Promise<void> {
 
   // Check if operand is a function definition (formula field)
   if (isFormulaOperand(event.operand)) {
-    await registerEvaActive(db, event.target, event.operand);
+    await registerEvaActive(db, target, event.operand);
   }
+  // CON capacity: recomputation of dependents happens in processEvent after executeOperator returns
 }
 
 /**
@@ -562,9 +612,21 @@ function formulaReferencesExternal(formula: string): boolean {
 
 ### 6.4 CON — Connect
 
+> **Inherited capacities:** INS (existence check on both endpoints — can't connect targets that don't exist), SEG (partition awareness — knows which keyspace regions the endpoints are in). CON is moderately expensive: it updates bidirectional indexes and may trigger downstream recomputation via the reverse graph.
+
 ```typescript
 async function executeCON(db: Level, event: EoEvent): Promise<void> {
   const operand = event.operand;
+
+  // INS capacity: verify both endpoints exist
+  if (operand.added) {
+    for (const dest of operand.added) {
+      const destExists = await getState(db, dest);
+      if (!destExists) {
+        throw new Error(`CON target does not exist: ${dest}`);
+      }
+    }
+  }
 
   // operand format: { added?: string[], removed?: string[], edge_type?: string }
   if (operand.added) {
@@ -599,8 +661,16 @@ async function executeCON(db: Level, event: EoEvent): Promise<void> {
 
 ### 6.5 SEG — Segment (Boundary)
 
+> **Inherited capacities:** INS (confirms target exists before partitioning — can't draw a boundary on something that hasn't been instantiated), NUL (encounters the collection), SIG (identifies which targets are inside).
+
 ```typescript
 async function executeSEG(db: Level, event: EoEvent): Promise<void> {
+  // INS capacity: confirm target exists
+  const existing = await getState(db, event.target);
+  if (!existing) {
+    throw new Error(`SEG target does not exist: ${event.target}`);
+  }
+
   // SEG draws or dissolves a boundary.
   // In the append-only model, "deletion" is SEG — partitioning something
   // out of the active set.
@@ -621,6 +691,8 @@ async function executeSEG(db: Level, event: EoEvent): Promise<void> {
 
 ### 6.6 SYN — Synthesis (Merge)
 
+> **Inherited capacities:** CON (uses graph to find edges for merging), SEG (dissolves boundary between merged targets), INS (mints merged target identity), NUL (observes both targets). When SYN merges two targets, it observes both (NUL), attends to them (SIG), confirms they exist (INS), recognizes their boundary (SEG), sees their connections (CON), then creates the merged entity.
+
 ```typescript
 async function executeSYN(db: Level, event: EoEvent): Promise<void> {
   // operand format: { merge: [targetA, targetB], into: mergedTarget }
@@ -629,6 +701,12 @@ async function executeSYN(db: Level, event: EoEvent): Promise<void> {
 
   if (operand.merge) {
     const [a, b] = operand.merge;
+    // INS capacity: confirm both targets exist
+    const stateAExists = await getState(db, a);
+    const stateBExists = await getState(db, b);
+    if (!stateAExists || !stateBExists) {
+      throw new Error(`SYN merge targets must both exist: ${a}, ${b}`);
+    }
     const stateA = await getState(db, a);
     const stateB = await getState(db, b);
 
@@ -673,6 +751,18 @@ async function executeSYN(db: Level, event: EoEvent): Promise<void> {
 
 ### 6.7 EVA — Evaluate
 
+> **Inherited capacities:** All eight below. EVA is where cumulative power peaks before REC. A single EVA fold step:
+> 1. Reads the formula definition — inherited from DEF (what holds at this target)
+> 2. Walks the dependency graph — inherited from CON (what connects to what)
+> 3. Resolves aliases on every dependency — inherited from SYN (merged targets resolve correctly)
+> 4. Respects partition boundaries — inherited from SEG (archived dependencies excluded per policy)
+> 5. Checks that each dependency exists — inherited from INS (no phantom targets)
+> 6. Gathers the current value at each dependency — inherited from NUL (observe state)
+> 7. Computes the formula — EVA's own capacity
+> 8. Writes the result to projected state — inherited from DEF
+>
+> A relational database doing the same work would need JOINs, WHERE subqueries, view resolution, existence checks, SELECTs, computed columns, and UPDATEs — seven separate SQL operations. EO does it in one fold step.
+
 ```typescript
 async function executeEVA(db: Level, event: EoEvent): Promise<void> {
   // EVA sets evaluation policy or conflict resolution strategy.
@@ -690,6 +780,8 @@ async function executeEVA(db: Level, event: EoEvent): Promise<void> {
 ```
 
 ### 6.8 REC — Recontextualize (Atomic Frame Change)
+
+> **Inherited capacities:** Everything. REC inherits all eight prior capacities and adds frame restructuring. A single REC event can instantiate new schema targets (INS), partition old ones out (SEG), rewire relationships (CON), merge entities (SYN), set new values (DEF), update evaluation policies (EVA) — all atomically, all in one log entry, all replayable as one unit. Without the helix, REC would just be a transaction wrapper. With the helix, REC provides frame separation — the fold knows everything inside the REC belongs to the same frame change.
 
 ```typescript
 async function executeREC(db: Level, event: EoEvent): Promise<void> {
