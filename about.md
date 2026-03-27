@@ -2,6 +2,8 @@
 
 **Michael T. Lacy — March 2026**
 
+see also: https://github.com/clovenbradshaw-ctrl/amino-eo
+
 ---
 
 ## 1. The Inversion
