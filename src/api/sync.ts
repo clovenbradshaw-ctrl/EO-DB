@@ -24,7 +24,7 @@ export function registerSyncRoute(app: FastifyInstance, db: EoDb, feed: Feed): v
 
       const token = (request.query as { access_token?: string }).access_token;
       if (!token) {
-        socket.close(4001, 'Missing access_token');
+        socket.close(4401, 'Missing access_token');
         return;
       }
 
@@ -76,6 +76,13 @@ export function registerSyncRoute(app: FastifyInstance, db: EoDb, feed: Feed): v
                 msg.ops
               );
             }
+
+            if (msg.type === 'unsubscribe') {
+              if (feedSubId) {
+                feed.unsubscribe(feedSubId);
+                feedSubId = null;
+              }
+            }
           } catch (e) {
             socket.send(JSON.stringify({ type: 'error', message: 'Invalid message' }));
           }
@@ -88,7 +95,7 @@ export function registerSyncRoute(app: FastifyInstance, db: EoDb, feed: Feed): v
           }
         });
       }).catch(() => {
-        socket.close(4001, 'Invalid access_token');
+        socket.close(4401, 'Invalid access_token');
       });
     });
   });

@@ -352,7 +352,7 @@ async function getGovernance(db: EoDb, target: string): Promise<GovernanceEntry[
     }
 
     // Ancestor: EVA registration is on a parent prefix of this target
-    if (target.startsWith(regTarget + '.') || target.startsWith(regTarget)) {
+    if (target.startsWith(regTarget + '.')) {
       governance.push({
         target: regTarget,
         formula: reg.formula,
