@@ -1,32 +1,70 @@
 #!/usr/bin/env bash
 # Click-to-run launcher for EO///DB
-# Double-click this file in your file manager to start the server.
+# Double-click this file to clone/update, start the server, and open the admin UI.
 
 set -e
 
-# Change to the script's directory so paths resolve correctly
-cd "$(dirname "$(readlink -f "$0")")"
+REPO_URL="https://github.com/clovenbradshaw-ctrl/eo-db.git"
+REPO_DIR="$HOME/eo-db"
 
-# Pull latest version from GitHub
-echo "Fetching latest version from GitHub..."
-git fetch origin main
-git checkout main
-git reset --hard origin/main
+# Clone if first run, otherwise pull latest
+if [ ! -d "$REPO_DIR/.git" ]; then
+  echo "First run — cloning EO///DB..."
+  git clone "$REPO_URL" "$REPO_DIR"
+else
+  echo "Fetching latest version from GitHub..."
+  cd "$REPO_DIR"
+  git fetch origin main
+  git checkout main
+  git reset --hard origin/main
+fi
+
+cd "$REPO_DIR"
+
 echo ""
 echo "=== EO///DB Version ==="
 echo "  Commit:  $(git rev-parse --short HEAD)"
 echo "  Date:    $(git log -1 --format='%ci')"
 echo "  Message: $(git log -1 --format='%s')"
 echo "========================"
+echo ""
 
 # Install/update dependencies
 echo "Installing dependencies..."
 npm install
 
-echo ""
+# Start the server in the background
 echo "Starting EO///DB server..."
-echo "Open http://localhost:3000 in your browser."
+npx tsx src/server.ts &
+SERVER_PID=$!
+
+# Wait for the server to be ready
+echo "Waiting for server to start..."
+for i in $(seq 1 30); do
+  if curl -s http://localhost:3000/health > /dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+
+# Open the admin UI in the default browser
+ADMIN_FILE="$REPO_DIR/eo-db-admin.html"
+echo "Opening admin UI in browser..."
+if command -v xdg-open > /dev/null; then
+  xdg-open "$ADMIN_FILE"
+elif command -v open > /dev/null; then
+  open "$ADMIN_FILE"
+elif command -v start > /dev/null; then
+  start "$ADMIN_FILE"
+else
+  echo "Could not detect browser. Open this file manually:"
+  echo "  $ADMIN_FILE"
+fi
+
+echo ""
+echo "EO///DB is running at http://localhost:3000"
 echo "Press Ctrl+C to stop."
 echo ""
 
-npx tsx src/server.ts
+# Wait for the server process (keeps the terminal open)
+wait $SERVER_PID
