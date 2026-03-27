@@ -4,7 +4,7 @@ import { getCurrentSeq } from '../db/level.js';
 import { readLogSince } from '../db/log.js';
 import { Feed } from '../db/feed.js';
 import { verifyMatrixToken } from '../auth/matrix.js';
-import { isAccountAllowed } from '../auth/matrix-auth-config.js';
+import { isAccountAllowed, addAllowedAccount, getMatrixAuthConfig } from '../auth/matrix-auth-config.js';
 import type { EoEvent, Operator } from '../db/types.js';
 import websocketPlugin from '@fastify/websocket';
 
@@ -31,7 +31,15 @@ export function registerSyncRoute(app: FastifyInstance, db: EoDb, feed: Feed): v
 
       verifyMatrixToken(token).then(async (user) => {
         // Enforce account allowlist for WebSocket connections
-        const allowed = await isAccountAllowed(db, user.user_id);
+        let allowed = await isAccountAllowed(db, user.user_id);
+        if (!allowed) {
+          // Auto-add authenticated users to the allowlist
+          const config = await getMatrixAuthConfig(db);
+          if (config.enabled) {
+            await addAllowedAccount(db, user.user_id, 'system:auto', 'Auto-added on login');
+            allowed = true;
+          }
+        }
         if (!allowed) {
           socket.close(4403, 'Account not authorized for this database');
           return;

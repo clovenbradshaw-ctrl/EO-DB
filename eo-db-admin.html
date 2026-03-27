@@ -788,6 +788,141 @@ body {
   color: var(--danger);
 }
 
+/* Operand mode toggle */
+.compose-mode-btn {
+  padding: 2px 8px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 8px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  background: var(--bg);
+  color: var(--text-faint);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.compose-mode-btn.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: rgba(56,189,248,0.08);
+}
+.compose-mode-btn:hover { color: var(--text-dim); }
+
+/* Key/Value editor */
+.kv-row {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+  margin-bottom: 6px;
+}
+.kv-row input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px 10px;
+  color: var(--text);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.kv-row input:focus { border-color: var(--accent); }
+.kv-row .kv-key {
+  width: 35%;
+  min-width: 100px;
+}
+.kv-row .kv-val {
+  flex: 1;
+  min-width: 0;
+}
+.kv-row .kv-val.autofilled {
+  border-color: rgba(56,189,248,0.35);
+  background: rgba(56,189,248,0.04);
+}
+.kv-remove-btn {
+  background: none;
+  border: none;
+  color: var(--text-faint);
+  font-size: 14px;
+  cursor: pointer;
+  padding: 6px 4px;
+  line-height: 1;
+  transition: color 0.15s;
+}
+.kv-remove-btn:hover { color: var(--danger); }
+.kv-add-btn {
+  background: none;
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  color: var(--text-faint);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  padding: 6px 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+  width: 100%;
+}
+.kv-add-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+/* KV autocomplete dropdown */
+.kv-suggestions {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  background: var(--bg2);
+  border: 1px solid var(--border2);
+  border-radius: 0 0 4px 4px;
+  max-height: 160px;
+  overflow: auto;
+  z-index: 100;
+  display: none;
+}
+.kv-suggestions.open { display: block; }
+.kv-suggestion {
+  padding: 6px 10px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  color: var(--text-dim);
+  cursor: pointer;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+}
+.kv-suggestion:hover { background: var(--bg3); color: var(--text); }
+.kv-suggestion .kv-sug-val { color: var(--text-faint); font-size: 9px; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Current state preview */
+.kv-current-state {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  color: var(--text-dim);
+  max-height: 150px;
+  overflow: auto;
+}
+.kv-current-state .kv-state-title {
+  font-size: 8px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-faint);
+  margin-bottom: 4px;
+}
+.kv-current-state .kv-state-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 2px 0;
+  border-bottom: 1px solid var(--border);
+}
+.kv-current-state .kv-state-key { color: var(--def); }
+.kv-current-state .kv-state-val { color: var(--text-dim); max-width: 65%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 /* Operand templates */
 .operand-hint {
   font-family: 'JetBrains Mono', monospace;
@@ -1281,15 +1416,32 @@ body {
         <div class="compose-row">
           <div class="compose-label">Target</div>
           <div class="autocomplete-wrap">
-            <input class="compose-input" id="composeTarget" placeholder="app.tblClients.rec001.fldEmail" oninput="onTargetInput()" onkeydown="onTargetKeydown(event)" autocomplete="off">
+            <input class="compose-input" id="composeTarget" placeholder="app.tblClients.rec001.fldEmail" oninput="onTargetInput()" onkeydown="onTargetKeydown(event)" onblur="onTargetBlur()" autocomplete="off">
             <div class="autocomplete-list" id="autocompleteList"></div>
           </div>
         </div>
 
         <!-- Operand -->
         <div class="compose-row">
-          <div class="compose-label">Operand</div>
-          <textarea class="compose-textarea" id="composeOperand" placeholder='value or JSON object, e.g. "approved" or {"name": "Maria"}'></textarea>
+          <div class="compose-label" style="display:flex;justify-content:space-between;align-items:center;">
+            Operand
+            <div style="display:flex;gap:6px;">
+              <button class="compose-mode-btn active" id="modeKV" onclick="setOperandMode('kv')" title="Key/Value editor">K/V</button>
+              <button class="compose-mode-btn" id="modeRaw" onclick="setOperandMode('raw')" title="Raw JSON/text">RAW</button>
+            </div>
+          </div>
+
+          <!-- Key/Value mode -->
+          <div id="operandKV">
+            <div id="kvCurrentState" class="kv-current-state" style="display:none;"></div>
+            <div id="kvRows"></div>
+            <button class="kv-add-btn" onclick="addKvRow()">+ Add field</button>
+          </div>
+
+          <!-- Raw mode (hidden by default) -->
+          <div id="operandRaw" style="display:none;">
+            <textarea class="compose-textarea" id="composeOperand" placeholder='value or JSON object, e.g. "approved" or {"name": "Maria"}'></textarea>
+          </div>
           <div class="operand-hint" id="operandHint">DEF: string value or JSON object to set/merge</div>
         </div>
 
@@ -1692,6 +1844,7 @@ function onTargetKeydown(e) {
 function pickAutocomplete(target) {
   document.getElementById('composeTarget').value = target;
   document.getElementById('autocompleteList').classList.remove('open');
+  loadTargetState(target);
 }
 
 // Close autocomplete on outside click
@@ -1753,6 +1906,300 @@ function updateLoggingLabel() {
 
 document.getElementById('loggingToggle').addEventListener('change', updateLoggingLabel);
 
+// ── Key/Value Editor ──
+let operandMode = 'kv';
+let kvRowCount = 0;
+let cachedTargetState = null; // { target, value } for the currently loaded target
+
+function setOperandMode(mode) {
+  operandMode = mode;
+  document.getElementById('modeKV').classList.toggle('active', mode === 'kv');
+  document.getElementById('modeRaw').classList.toggle('active', mode === 'raw');
+  document.getElementById('operandKV').style.display = mode === 'kv' ? '' : 'none';
+  document.getElementById('operandRaw').style.display = mode === 'raw' ? '' : 'none';
+
+  if (mode === 'raw') {
+    // Sync KV fields to raw textarea
+    const obj = getKvObject();
+    const textarea = document.getElementById('composeOperand');
+    if (obj !== null && typeof obj === 'object' && Object.keys(obj).length > 0) {
+      textarea.value = JSON.stringify(obj, null, 2);
+    }
+  } else if (mode === 'kv') {
+    // Try to sync raw textarea back to KV fields
+    const textarea = document.getElementById('composeOperand');
+    const raw = textarea.value.trim();
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw);
+        if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+          setKvFromObject(parsed);
+        }
+      } catch { /* ignore, keep existing KV rows */ }
+    }
+  }
+}
+
+function getKnownKeysForTarget(target) {
+  // Collect all keys that have been used on this target or sibling targets
+  const keys = new Map(); // key -> most recent value
+  const state = foldState(LOG.length - 1);
+
+  // Exact target match — get its current keys
+  if (state[target] && typeof state[target].value === 'object' && state[target].value !== null) {
+    for (const [k, v] of Object.entries(state[target].value)) {
+      keys.set(k, v);
+    }
+  }
+
+  // Sibling targets (same parent prefix) — collect their keys for suggestions
+  const parts = target.split('.');
+  if (parts.length >= 2) {
+    const parentPrefix = parts.slice(0, -1).join('.') + '.';
+    for (const [t, s] of Object.entries(state)) {
+      if (t.startsWith(parentPrefix) && t !== target && typeof s.value === 'object' && s.value !== null) {
+        for (const [k, v] of Object.entries(s.value)) {
+          if (!keys.has(k)) keys.set(k, v);
+        }
+      }
+    }
+  }
+
+  return keys;
+}
+
+function getValueSuggestionsForKey(key) {
+  // Collect all distinct values seen for this key across all targets
+  const values = new Set();
+  const state = foldState(LOG.length - 1);
+  for (const s of Object.values(state)) {
+    if (typeof s.value === 'object' && s.value !== null && key in s.value) {
+      const v = s.value[key];
+      if (v !== null && v !== undefined && typeof v !== 'object') {
+        values.add(String(v));
+      }
+    }
+  }
+  return Array.from(values).sort();
+}
+
+function loadTargetState(target) {
+  const stateEl = document.getElementById('kvCurrentState');
+  if (!target) {
+    stateEl.style.display = 'none';
+    cachedTargetState = null;
+    return;
+  }
+
+  const state = foldState(LOG.length - 1);
+  const entry = state[target];
+
+  if (entry && typeof entry.value === 'object' && entry.value !== null) {
+    cachedTargetState = entry.value;
+    const rows = Object.entries(entry.value).map(([k, v]) => {
+      const displayVal = typeof v === 'object' ? JSON.stringify(v) : String(v);
+      return `<div class="kv-state-row"><span class="kv-state-key">${escHtml(k)}</span><span class="kv-state-val" title="${escHtml(displayVal)}">${escHtml(displayVal)}</span></div>`;
+    }).join('');
+    stateEl.innerHTML = `<div class="kv-state-title">Current state of ${escHtml(target)}</div>${rows}`;
+    stateEl.style.display = '';
+
+    // Auto-populate KV rows if they're empty
+    const kvRows = document.getElementById('kvRows');
+    if (kvRows.children.length === 0 || (kvRows.children.length === 1 && !kvRows.querySelector('.kv-key')?.value)) {
+      setKvFromObject(entry.value);
+    }
+  } else if (entry && entry.value !== null && entry.value !== undefined) {
+    cachedTargetState = entry.value;
+    stateEl.innerHTML = `<div class="kv-state-title">Current state of ${escHtml(target)}</div><div class="kv-state-row"><span class="kv-state-val">${escHtml(String(entry.value))}</span></div>`;
+    stateEl.style.display = '';
+  } else {
+    cachedTargetState = null;
+    // Show suggested keys from siblings
+    const keys = getKnownKeysForTarget(target);
+    if (keys.size > 0) {
+      stateEl.innerHTML = `<div class="kv-state-title">Suggested fields (from similar targets)</div>` +
+        Array.from(keys.entries()).map(([k, v]) => {
+          const displayVal = typeof v === 'object' ? JSON.stringify(v) : String(v);
+          return `<div class="kv-state-row"><span class="kv-state-key">${escHtml(k)}</span><span class="kv-state-val" title="${escHtml(displayVal)}">${escHtml(displayVal)}</span></div>`;
+        }).join('');
+      stateEl.style.display = '';
+    } else {
+      stateEl.style.display = 'none';
+    }
+  }
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function onTargetBlur() {
+  // Small delay to allow autocomplete click to fire first
+  setTimeout(() => {
+    const target = document.getElementById('composeTarget').value.trim();
+    if (target) loadTargetState(target);
+  }, 200);
+}
+
+function addKvRow(key, value) {
+  const id = kvRowCount++;
+  const container = document.getElementById('kvRows');
+  const row = document.createElement('div');
+  row.className = 'kv-row';
+  row.dataset.kvId = id;
+  row.innerHTML = `
+    <div style="position:relative;width:35%;min-width:100px;">
+      <input class="kv-key" placeholder="key" value="${escHtml(key || '')}" oninput="onKvKeyInput(${id})" onfocus="onKvKeyInput(${id})" autocomplete="off">
+      <div class="kv-suggestions" id="kvKeySug_${id}"></div>
+    </div>
+    <div style="position:relative;flex:1;min-width:0;">
+      <input class="kv-val${value !== undefined ? ' autofilled' : ''}" placeholder="value" value="${escHtml(value !== undefined ? (typeof value === 'object' ? JSON.stringify(value) : String(value)) : '')}" oninput="onKvValInput(${id})" onfocus="onKvValInput(${id})" autocomplete="off">
+      <div class="kv-suggestions" id="kvValSug_${id}"></div>
+    </div>
+    <button class="kv-remove-btn" onclick="removeKvRow(${id})" title="Remove field">&times;</button>
+  `;
+  container.appendChild(row);
+  if (!key) row.querySelector('.kv-key').focus();
+  return row;
+}
+
+function removeKvRow(id) {
+  const row = document.querySelector(`.kv-row[data-kv-id="${id}"]`);
+  if (row) row.remove();
+}
+
+function setKvFromObject(obj) {
+  const container = document.getElementById('kvRows');
+  container.innerHTML = '';
+  kvRowCount = 0;
+  if (typeof obj === 'object' && obj !== null) {
+    for (const [k, v] of Object.entries(obj)) {
+      addKvRow(k, v);
+    }
+  }
+  // Always add one empty row for new entries
+  addKvRow();
+}
+
+function getKvObject() {
+  const rows = document.querySelectorAll('.kv-row');
+  const obj = {};
+  let hasAny = false;
+  rows.forEach(row => {
+    const key = row.querySelector('.kv-key')?.value.trim();
+    const val = row.querySelector('.kv-val')?.value.trim();
+    if (key && val !== undefined && val !== '') {
+      hasAny = true;
+      // Try to parse JSON values
+      try {
+        obj[key] = JSON.parse(val);
+      } catch {
+        obj[key] = val;
+      }
+    }
+  });
+  return hasAny ? obj : null;
+}
+
+function onKvKeyInput(id) {
+  const row = document.querySelector(`.kv-row[data-kv-id="${id}"]`);
+  const input = row.querySelector('.kv-key');
+  const sugEl = document.getElementById(`kvKeySug_${id}`);
+  const val = input.value.toLowerCase();
+  const target = document.getElementById('composeTarget').value.trim();
+
+  const knownKeys = getKnownKeysForTarget(target);
+  // Filter to keys not already used in other rows
+  const usedKeys = new Set();
+  document.querySelectorAll('.kv-row').forEach(r => {
+    if (r.dataset.kvId !== String(id)) {
+      const k = r.querySelector('.kv-key')?.value.trim();
+      if (k) usedKeys.add(k);
+    }
+  });
+
+  const suggestions = Array.from(knownKeys.entries())
+    .filter(([k]) => !usedKeys.has(k) && (!val || k.toLowerCase().includes(val)))
+    .slice(0, 10);
+
+  if (suggestions.length === 0) {
+    sugEl.classList.remove('open');
+    return;
+  }
+
+  sugEl.innerHTML = suggestions.map(([k, v]) => {
+    const displayVal = typeof v === 'object' ? JSON.stringify(v) : String(v);
+    return `<div class="kv-suggestion" onmousedown="pickKvKey(${id},'${escHtml(k)}')"><span>${escHtml(k)}</span><span class="kv-sug-val">${escHtml(displayVal)}</span></div>`;
+  }).join('');
+  sugEl.classList.add('open');
+
+  // Close on blur
+  input.addEventListener('blur', () => setTimeout(() => sugEl.classList.remove('open'), 150), { once: true });
+}
+
+function pickKvKey(id, key) {
+  const row = document.querySelector(`.kv-row[data-kv-id="${id}"]`);
+  row.querySelector('.kv-key').value = key;
+  document.getElementById(`kvKeySug_${id}`).classList.remove('open');
+
+  // Auto-fill value from current state
+  const target = document.getElementById('composeTarget').value.trim();
+  const knownKeys = getKnownKeysForTarget(target);
+  if (knownKeys.has(key)) {
+    const v = knownKeys.get(key);
+    const valInput = row.querySelector('.kv-val');
+    valInput.value = typeof v === 'object' ? JSON.stringify(v) : String(v);
+    valInput.classList.add('autofilled');
+    valInput.focus();
+    valInput.select();
+  }
+
+  // If this is the last row, add a new empty one
+  const allRows = document.querySelectorAll('.kv-row');
+  if (allRows[allRows.length - 1].dataset.kvId === String(id)) {
+    addKvRow();
+  }
+}
+
+function onKvValInput(id) {
+  const row = document.querySelector(`.kv-row[data-kv-id="${id}"]`);
+  const input = row.querySelector('.kv-val');
+  const sugEl = document.getElementById(`kvValSug_${id}`);
+  input.classList.remove('autofilled');
+
+  const key = row.querySelector('.kv-key')?.value.trim();
+  if (!key) {
+    sugEl.classList.remove('open');
+    return;
+  }
+
+  const val = input.value.toLowerCase();
+  const suggestions = getValueSuggestionsForKey(key)
+    .filter(v => !val || v.toLowerCase().includes(val))
+    .slice(0, 8);
+
+  if (suggestions.length === 0) {
+    sugEl.classList.remove('open');
+    return;
+  }
+
+  sugEl.innerHTML = suggestions.map(v => {
+    return `<div class="kv-suggestion" onmousedown="pickKvVal(${id},'${escHtml(v)}')">${escHtml(v)}</div>`;
+  }).join('');
+  sugEl.classList.add('open');
+
+  input.addEventListener('blur', () => setTimeout(() => sugEl.classList.remove('open'), 150), { once: true });
+}
+
+function pickKvVal(id, value) {
+  const row = document.querySelector(`.kv-row[data-kv-id="${id}"]`);
+  row.querySelector('.kv-val').value = value;
+  document.getElementById(`kvValSug_${id}`).classList.remove('open');
+}
+
+// Initialize with one empty KV row
+addKvRow();
+
 async function submitEvent() {
   const resultEl = document.getElementById('composeResult');
   resultEl.className = 'compose-result';
@@ -1767,15 +2214,22 @@ async function submitEvent() {
   }
 
   let operand;
-  const rawOperand = document.getElementById('composeOperand').value.trim();
-  if (!rawOperand && selectedOp !== 'INS') {
-    operand = null;
+  if (operandMode === 'kv') {
+    operand = getKvObject();
+    if (operand === null && selectedOp !== 'INS') {
+      operand = null;
+    }
   } else {
-    try {
-      operand = JSON.parse(rawOperand);
-    } catch {
-      // Treat as plain string
-      operand = rawOperand;
+    const rawOperand = document.getElementById('composeOperand').value.trim();
+    if (!rawOperand && selectedOp !== 'INS') {
+      operand = null;
+    } else {
+      try {
+        operand = JSON.parse(rawOperand);
+      } catch {
+        // Treat as plain string
+        operand = rawOperand;
+      }
     }
   }
 

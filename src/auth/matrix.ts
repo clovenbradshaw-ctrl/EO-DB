@@ -1,6 +1,6 @@
 import type { FastifyRequest, FastifyReply } from 'fastify';
 import type { EoDb } from '../db/level.js';
-import { isAccountAllowed } from './matrix-auth-config.js';
+import { isAccountAllowed, addAllowedAccount, getMatrixAuthConfig } from './matrix-auth-config.js';
 
 export interface MatrixUser {
   user_id: string;
@@ -72,13 +72,20 @@ export interface AuthenticatedRequest extends FastifyRequest {
 
 /**
  * Verify that the authenticated user is on the account allowlist.
+ * If auth gating is enabled and the user is not yet on the list,
+ * auto-add them — the model is "authenticated = allowed unless removed".
  * Skipped when Matrix auth gating is disabled or no DB is attached.
  */
 async function enforceAllowlist(user_id: string): Promise<void> {
   if (!authDb) return;
   const allowed = await isAccountAllowed(authDb, user_id);
   if (!allowed) {
-    throw new Error('Account not in allowlist');
+    // Auto-add authenticated users to the allowlist
+    const config = await getMatrixAuthConfig(authDb);
+    if (config.enabled) {
+      await addAllowedAccount(authDb, user_id, 'system:auto', 'Auto-added on login');
+      return; // Now allowed
+    }
   }
 }
 
