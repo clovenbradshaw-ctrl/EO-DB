@@ -102,8 +102,8 @@ describe('WebSocket /sync', () => {
 
   it('sync from 0 returns all events then sync_complete', async () => {
     // Insert some events first
-    await processEvent(db, { op: 'INS', target: 'sync.a', operand: {}, agent: '@test:a', ts: '2025-01-01T00:00:00Z' }, feed);
-    await processEvent(db, { op: 'INS', target: 'sync.b', operand: {}, agent: '@test:a', ts: '2025-01-01T00:00:00Z' }, feed);
+    await processEvent(db, { op: 'INS', target: 'sync.a', operand: {}, agent: '@test:a', ts: '2025-01-01T00:00:00Z', acquired_ts: '2025-01-01T00:00:00Z' }, feed);
+    await processEvent(db, { op: 'INS', target: 'sync.b', operand: {}, agent: '@test:a', ts: '2025-01-01T00:00:00Z', acquired_ts: '2025-01-01T00:00:00Z' }, feed);
 
     const ws = await connectWs();
     await waitForMessage(ws); // connected
@@ -121,9 +121,9 @@ describe('WebSocket /sync', () => {
   });
 
   it('sync from N returns only events after N', async () => {
-    await processEvent(db, { op: 'INS', target: 'sync.1', operand: {}, agent: '@test:a', ts: '2025-01-01T00:00:00Z' }, feed);
-    await processEvent(db, { op: 'INS', target: 'sync.2', operand: {}, agent: '@test:a', ts: '2025-01-01T00:00:00Z' }, feed);
-    await processEvent(db, { op: 'INS', target: 'sync.3', operand: {}, agent: '@test:a', ts: '2025-01-01T00:00:00Z' }, feed);
+    await processEvent(db, { op: 'INS', target: 'sync.1', operand: {}, agent: '@test:a', ts: '2025-01-01T00:00:00Z', acquired_ts: '2025-01-01T00:00:00Z' }, feed);
+    await processEvent(db, { op: 'INS', target: 'sync.2', operand: {}, agent: '@test:a', ts: '2025-01-01T00:00:00Z', acquired_ts: '2025-01-01T00:00:00Z' }, feed);
+    await processEvent(db, { op: 'INS', target: 'sync.3', operand: {}, agent: '@test:a', ts: '2025-01-01T00:00:00Z', acquired_ts: '2025-01-01T00:00:00Z' }, feed);
 
     const ws = await connectWs();
     await waitForMessage(ws); // connected
@@ -146,7 +146,7 @@ describe('WebSocket /sync', () => {
 
     // Now post a new event — should be pushed to the websocket
     const eventPromise = waitForMessage(ws);
-    await processEvent(db, { op: 'INS', target: 'realtime.1', operand: { live: true }, agent: '@test:a', ts: '2025-01-01T00:00:00Z' }, feed);
+    await processEvent(db, { op: 'INS', target: 'realtime.1', operand: { live: true }, agent: '@test:a', ts: '2025-01-01T00:00:00Z', acquired_ts: '2025-01-01T00:00:00Z' }, feed);
 
     const msg = await eventPromise;
     expect(msg.type).toBe('event');
@@ -169,11 +169,11 @@ describe('WebSocket /sync', () => {
     await new Promise(r => setTimeout(r, 50));
 
     // Post a non-matching event
-    await processEvent(db, { op: 'INS', target: 'other.event', operand: {}, agent: '@test:a', ts: '2025-01-01T00:00:00Z' }, feed);
+    await processEvent(db, { op: 'INS', target: 'other.event', operand: {}, agent: '@test:a', ts: '2025-01-01T00:00:00Z', acquired_ts: '2025-01-01T00:00:00Z' }, feed);
 
     // Post a matching event
     const eventPromise = waitForMessage(ws);
-    await processEvent(db, { op: 'INS', target: 'filtered.match', operand: { match: true }, agent: '@test:a', ts: '2025-01-01T00:00:00Z' }, feed);
+    await processEvent(db, { op: 'INS', target: 'filtered.match', operand: { match: true }, agent: '@test:a', ts: '2025-01-01T00:00:00Z', acquired_ts: '2025-01-01T00:00:00Z' }, feed);
 
     const msg = await eventPromise;
     expect(msg.type).toBe('event');
@@ -183,7 +183,7 @@ describe('WebSocket /sync', () => {
 
   it('subscribe with ops filter only receives matching ops', async () => {
     // Create target first
-    await processEvent(db, { op: 'INS', target: 'ops.target', operand: {}, agent: '@test:a', ts: '2025-01-01T00:00:00Z' }, feed);
+    await processEvent(db, { op: 'INS', target: 'ops.target', operand: {}, agent: '@test:a', ts: '2025-01-01T00:00:00Z', acquired_ts: '2025-01-01T00:00:00Z' }, feed);
 
     const ws = await connectWs();
     await waitForMessage(ws); // connected
@@ -196,11 +196,11 @@ describe('WebSocket /sync', () => {
     await new Promise(r => setTimeout(r, 50));
 
     // Post an INS (should NOT match)
-    await processEvent(db, { op: 'INS', target: 'ops.other', operand: {}, agent: '@test:a', ts: '2025-01-01T00:00:00Z' }, feed);
+    await processEvent(db, { op: 'INS', target: 'ops.other', operand: {}, agent: '@test:a', ts: '2025-01-01T00:00:00Z', acquired_ts: '2025-01-01T00:00:00Z' }, feed);
 
     // Post a DEF (should match)
     const eventPromise = waitForMessage(ws);
-    await processEvent(db, { op: 'DEF', target: 'ops.target', operand: 'def-value', agent: '@test:a', ts: '2025-01-01T00:00:00Z' }, feed);
+    await processEvent(db, { op: 'DEF', target: 'ops.target', operand: 'def-value', agent: '@test:a', ts: '2025-01-01T00:00:00Z', acquired_ts: '2025-01-01T00:00:00Z' }, feed);
 
     const msg = await eventPromise;
     expect(msg.type).toBe('event');
@@ -221,7 +221,7 @@ describe('WebSocket /sync', () => {
 
     // Posting events should not throw even though subscriber is gone
     await expect(
-      processEvent(db, { op: 'INS', target: 'after.close', operand: {}, agent: '@test:a', ts: '2025-01-01T00:00:00Z' }, feed)
+      processEvent(db, { op: 'INS', target: 'after.close', operand: {}, agent: '@test:a', ts: '2025-01-01T00:00:00Z', acquired_ts: '2025-01-01T00:00:00Z' }, feed)
     ).resolves.not.toThrow();
   });
 
@@ -242,7 +242,7 @@ describe('WebSocket /sync', () => {
     const p1 = waitForMessage(ws1);
     const p2 = waitForMessage(ws2);
 
-    await processEvent(db, { op: 'INS', target: 'multi.1', operand: {}, agent: '@test:a', ts: '2025-01-01T00:00:00Z' }, feed);
+    await processEvent(db, { op: 'INS', target: 'multi.1', operand: {}, agent: '@test:a', ts: '2025-01-01T00:00:00Z', acquired_ts: '2025-01-01T00:00:00Z' }, feed);
 
     const msg1 = await p1;
     const msg2 = await p2;

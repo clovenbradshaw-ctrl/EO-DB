@@ -10,6 +10,7 @@ function makeEvent(overrides: Partial<EoEvent> = {}): EoEvent {
     operand: 'test@test.com',
     agent: '@test:app.aminoimmigration.com',
     ts: '2025-06-01T00:00:00.000Z',
+    acquired_ts: '2025-06-01T00:00:00.000Z',
     ...overrides,
   };
 }

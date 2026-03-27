@@ -63,6 +63,17 @@ export async function executeOperator(store: EoStore, event: EoEvent): Promise<v
   }
 }
 
+// Builds the common state metadata fields from an event
+function stateFromEvent(event: EoEvent, op: EoEvent['op']) {
+  return {
+    last_seq: event.seq,
+    last_op: op,
+    last_agent: event.agent,
+    last_ts: event.ts,
+    last_acquired_ts: event.acquired_ts,
+  };
+}
+
 // --- INS: Instantiate ---
 async function handleINS(store: EoStore, event: EoEvent): Promise<void> {
   const existing = await checkExists(store, event.target);
@@ -73,10 +84,7 @@ async function handleINS(store: EoStore, event: EoEvent): Promise<void> {
   await setState(store, {
     target: event.target,
     value: event.operand ?? {},
-    last_seq: event.seq,
-    last_op: 'INS',
-    last_agent: event.agent,
-    last_ts: event.ts,
+    ...stateFromEvent(event, 'INS'),
   });
 }
 
@@ -90,10 +98,7 @@ async function handleSEG(store: EoStore, event: EoEvent): Promise<void> {
   await setState(store, {
     target: event.target,
     value: event.operand,
-    last_seq: event.seq,
-    last_op: 'SEG',
-    last_agent: event.agent,
-    last_ts: event.ts,
+    ...stateFromEvent(event, 'SEG'),
   });
 }
 
@@ -131,10 +136,7 @@ async function handleCON(store: EoStore, event: EoEvent): Promise<void> {
   await setState(store, {
     target: event.target,
     value: { linked: currentEdges.map(e => e.dest), edge_type: operand.edge_type },
-    last_seq: event.seq,
-    last_op: 'CON',
-    last_agent: event.agent,
-    last_ts: event.ts,
+    ...stateFromEvent(event, 'CON'),
   });
 }
 
@@ -157,10 +159,7 @@ async function handleSYN(store: EoStore, event: EoEvent): Promise<void> {
     await setState(store, {
       target: mergedTarget,
       value: mergedValue,
-      last_seq: event.seq,
-      last_op: 'SYN',
-      last_agent: event.agent,
-      last_ts: event.ts,
+      ...stateFromEvent(event, 'SYN'),
     });
 
     const edgesFromA = await getEdgesFrom(store, a);
@@ -182,19 +181,13 @@ async function handleSYN(store: EoStore, event: EoEvent): Promise<void> {
     await setState(store, {
       target: a,
       value: { _alias: mergedTarget },
-      last_seq: event.seq,
-      last_op: 'SYN',
-      last_agent: event.agent,
-      last_ts: event.ts,
+      ...stateFromEvent(event, 'SYN'),
     });
     if (b !== mergedTarget) {
       await setState(store, {
         target: b,
         value: { _alias: mergedTarget },
-        last_seq: event.seq,
-        last_op: 'SYN',
-        last_agent: event.agent,
-        last_ts: event.ts,
+        ...stateFromEvent(event, 'SYN'),
       });
     }
   }
@@ -209,10 +202,7 @@ async function handleDEF(store: EoStore, event: EoEvent): Promise<void> {
     existing = {
       target,
       value: {},
-      last_seq: event.seq,
-      last_op: 'INS',
-      last_agent: event.agent,
-      last_ts: event.ts,
+      ...stateFromEvent(event, 'INS'),
     };
     await setState(store, existing);
   }
@@ -222,10 +212,7 @@ async function handleDEF(store: EoStore, event: EoEvent): Promise<void> {
   await setState(store, {
     target,
     value: merged,
-    last_seq: event.seq,
-    last_op: 'DEF',
-    last_agent: event.agent,
-    last_ts: event.ts,
+    ...stateFromEvent(event, 'DEF'),
   });
 
   if (isFormulaOperand(event.operand)) {
@@ -240,10 +227,7 @@ async function handleEVA(store: EoStore, event: EoEvent): Promise<void> {
   await setState(store, {
     target,
     value: event.operand,
-    last_seq: event.seq,
-    last_op: 'EVA',
-    last_agent: event.agent,
-    last_ts: event.ts,
+    ...stateFromEvent(event, 'EVA'),
   });
 }
 
@@ -257,16 +241,14 @@ async function handleREC(store: EoStore, event: EoEvent): Promise<void> {
       seq: event.seq,
       agent: event.agent,
       ts: event.ts,
+      acquired_ts: event.acquired_ts,
     });
   }
 
   await setState(store, {
     target: event.target,
     value: { frame_change: true, sub_ops: subOps.length, reason: event.operand?.reason },
-    last_seq: event.seq,
-    last_op: 'REC',
-    last_agent: event.agent,
-    last_ts: event.ts,
+    ...stateFromEvent(event, 'REC'),
   });
 }
 
@@ -297,13 +279,15 @@ async function evaluateFormula(store: EoStore, registration: EvaRegistration): P
   const result = executeFormulaFunction(registration.formula, inputs);
 
   const existing = await getState(store, registration.target);
+  const now = new Date().toISOString();
   await setState(store, {
     target: registration.target,
     value: { ...existing?.value, _computed: result },
     last_seq: existing?.last_seq || 0,
     last_op: existing?.last_op || 'DEF',
     last_agent: 'system:eva',
-    last_ts: new Date().toISOString(),
+    last_ts: now,
+    last_acquired_ts: now,
   });
 }
 

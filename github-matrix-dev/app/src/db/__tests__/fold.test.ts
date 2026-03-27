@@ -56,16 +56,16 @@ function createTestStore(): EoStore {
 
 // Spec fixtures
 const FIXTURES: EoEventInput[] = [
-  { op: 'INS', target: 'app.tblClients.rec001', operand: { name: 'Maria Garcia', status: 'active' }, agent: '@test:app.aminoimmigration.com', ts: '2025-01-01T00:00:00Z', client_event_id: 'fix-001' },
-  { op: 'INS', target: 'app.tblCases.rec101', operand: { type: 'H1B', filed: '2025-06-01' }, agent: '@test:app.aminoimmigration.com', ts: '2025-01-01T00:01:00Z', client_event_id: 'fix-002' },
-  { op: 'CON', target: 'app.tblClients.rec001.fldCases', operand: { added: ['app.tblCases.rec101'] }, agent: '@test:app.aminoimmigration.com', ts: '2025-01-01T00:02:00Z', client_event_id: 'fix-003' },
-  { op: 'DEF', target: 'app.tblCases.rec101.fldStatus', operand: 'pending', agent: '@test:app.aminoimmigration.com', ts: '2025-01-01T00:03:00Z', client_event_id: 'fix-004' },
-  { op: 'DEF', target: 'app.tblCases.rec101.fldStatus', operand: 'approved', agent: '@test:app.aminoimmigration.com', ts: '2025-01-01T00:04:00Z', client_event_id: 'fix-005' },
-  { op: 'DEF', target: 'app.tblClients.rec001.fldEmail', operand: 'maria@old.com', agent: '@test:app.aminoimmigration.com', ts: '2025-01-01T00:05:00Z', client_event_id: 'fix-006' },
-  { op: 'DEF', target: 'app.tblClients.rec001.fldEmail', operand: 'maria@new.com', agent: '@test:app.aminoimmigration.com', ts: '2025-01-01T00:06:00Z', client_event_id: 'fix-007' },
-  { op: 'EVA', target: 'app.tblClients.rec001.fldEmail', operand: { strategy: 'latest' }, agent: '@test:app.aminoimmigration.com', ts: '2025-01-01T00:07:00Z', client_event_id: 'fix-008' },
-  { op: 'DEF', target: 'app.tblClients', operand: { regulatoryHold: true, defaultRegion: 'Nashville' }, agent: '@test:app.aminoimmigration.com', ts: '2025-01-01T00:08:00Z', client_event_id: 'fix-020' },
-  { op: 'DEF', target: 'app', operand: { timezone: 'America/Chicago', firm: 'Amino Immigration' }, agent: '@test:app.aminoimmigration.com', ts: '2025-01-01T00:09:00Z', client_event_id: 'fix-021' },
+  { op: 'INS', target: 'app.tblClients.rec001', operand: { name: 'Maria Garcia', status: 'active' }, agent: '@test:app.aminoimmigration.com', ts: '2025-01-01T00:00:00Z', acquired_ts: '2025-01-01T00:00:00Z', client_event_id: 'fix-001' },
+  { op: 'INS', target: 'app.tblCases.rec101', operand: { type: 'H1B', filed: '2025-06-01' }, agent: '@test:app.aminoimmigration.com', ts: '2025-01-01T00:01:00Z', acquired_ts: '2025-01-01T00:01:00Z', client_event_id: 'fix-002' },
+  { op: 'CON', target: 'app.tblClients.rec001.fldCases', operand: { added: ['app.tblCases.rec101'] }, agent: '@test:app.aminoimmigration.com', ts: '2025-01-01T00:02:00Z', acquired_ts: '2025-01-01T00:02:00Z', client_event_id: 'fix-003' },
+  { op: 'DEF', target: 'app.tblCases.rec101.fldStatus', operand: 'pending', agent: '@test:app.aminoimmigration.com', ts: '2025-01-01T00:03:00Z', acquired_ts: '2025-01-01T00:03:00Z', client_event_id: 'fix-004' },
+  { op: 'DEF', target: 'app.tblCases.rec101.fldStatus', operand: 'approved', agent: '@test:app.aminoimmigration.com', ts: '2025-01-01T00:04:00Z', acquired_ts: '2025-01-01T00:04:00Z', client_event_id: 'fix-005' },
+  { op: 'DEF', target: 'app.tblClients.rec001.fldEmail', operand: 'maria@old.com', agent: '@test:app.aminoimmigration.com', ts: '2025-01-01T00:05:00Z', acquired_ts: '2025-01-01T00:05:00Z', client_event_id: 'fix-006' },
+  { op: 'DEF', target: 'app.tblClients.rec001.fldEmail', operand: 'maria@new.com', agent: '@test:app.aminoimmigration.com', ts: '2025-01-01T00:06:00Z', acquired_ts: '2025-01-01T00:06:00Z', client_event_id: 'fix-007' },
+  { op: 'EVA', target: 'app.tblClients.rec001.fldEmail', operand: { strategy: 'latest' }, agent: '@test:app.aminoimmigration.com', ts: '2025-01-01T00:07:00Z', acquired_ts: '2025-01-01T00:07:00Z', client_event_id: 'fix-008' },
+  { op: 'DEF', target: 'app.tblClients', operand: { regulatoryHold: true, defaultRegion: 'Nashville' }, agent: '@test:app.aminoimmigration.com', ts: '2025-01-01T00:08:00Z', acquired_ts: '2025-01-01T00:08:00Z', client_event_id: 'fix-020' },
+  { op: 'DEF', target: 'app', operand: { timezone: 'America/Chicago', firm: 'Amino Immigration' }, agent: '@test:app.aminoimmigration.com', ts: '2025-01-01T00:09:00Z', acquired_ts: '2025-01-01T00:09:00Z', client_event_id: 'fix-021' },
 ];
 
 describe('Fold engine (browser port)', () => {

@@ -122,7 +122,8 @@ interface EoDatabase {
       target: string;
       operand: any;
       agent: string;
-      ts: string;
+      ts: string;             // submission timestamp — when the agent/user submitted this event
+      acquired_ts: string;    // acquisition timestamp — when the system received this event
       meta?: Record<string, any>;
       synced: boolean;        // true once confirmed in room history
     };

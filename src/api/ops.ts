@@ -10,13 +10,14 @@ const OPS: LoggableOperator[] = ['INS', 'DEF', 'CON', 'SEG', 'SYN', 'EVA', 'REC'
 export function registerOpsRoutes(app: FastifyInstance, db: EoDb, feed: Feed): void {
   for (const op of OPS) {
     app.post(`/ops/${op.toLowerCase()}`, async (request: AuthenticatedRequest, reply) => {
-      const body = request.body as { target?: string; operand?: any; client_event_id?: string };
+      const body = request.body as { target?: string; operand?: any; ts?: string; client_event_id?: string };
 
       if (!body.target) {
         return reply.code(400).send({ error: 'Missing required field: target' });
       }
 
       const agent = request.matrixUser?.user_id || 'unknown';
+      const now = new Date().toISOString();
 
       try {
         const seq = await processEvent(db, {
@@ -24,7 +25,8 @@ export function registerOpsRoutes(app: FastifyInstance, db: EoDb, feed: Feed): v
           target: body.target,
           operand: body.operand,
           agent,
-          ts: new Date().toISOString(),
+          ts: body.ts || now,
+          acquired_ts: now,
           client_event_id: body.client_event_id,
         }, feed);
         return reply.send({ seq });

@@ -256,6 +256,7 @@ async function ingestRecord(
       },
       agent,
       ts: new Date().toISOString(),
+      acquired_ts: new Date().toISOString(),
       client_event_id: clientEventId,
     }, feed);
     return 'ingested';
@@ -335,6 +336,7 @@ export async function hydrationSync(
         operand: { name: base.name, _airtable: { type: 'base', base_id: base.id } },
         agent,
         ts: new Date().toISOString(),
+        acquired_ts: new Date().toISOString(),
         client_event_id: `at-base:${base.id}`,
       }, feed);
     } catch { /* ignore if exists */ }
@@ -355,6 +357,7 @@ export async function hydrationSync(
           },
           agent,
           ts: new Date().toISOString(),
+          acquired_ts: new Date().toISOString(),
           client_event_id: `at-table:${base.id}:${table.id}`,
         }, feed);
       } catch { /* ignore */ }
