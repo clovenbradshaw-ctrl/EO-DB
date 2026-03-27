@@ -7,12 +7,18 @@ set -e
 # Change to the script's directory so paths resolve correctly
 cd "$(dirname "$(readlink -f "$0")")"
 
-# Install dependencies if node_modules is missing
-if [ ! -d "node_modules" ]; then
-  echo "Installing dependencies..."
-  npm install
-fi
+# Pull latest version from GitHub
+echo "Fetching latest version from GitHub..."
+git fetch origin main
+git checkout main
+git reset --hard origin/main
+echo "Updated to latest version."
 
+# Install/update dependencies
+echo "Installing dependencies..."
+npm install
+
+echo ""
 echo "Starting EO///DB server..."
 echo "Open http://localhost:3000 in your browser."
 echo "Press Ctrl+C to stop."
