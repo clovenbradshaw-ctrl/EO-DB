@@ -244,10 +244,11 @@ body {
   color: var(--text);
   cursor: pointer;
 }
-.target-path:hover { color: var(--accent); text-decoration: underline; }
 
-.target-seg { color: var(--text-faint); }
-.target-leaf { color: var(--white); font-weight: 500; }
+.target-seg { color: var(--text-faint); cursor: pointer; }
+.target-seg:hover { color: var(--accent); text-decoration: underline; }
+.target-leaf { color: var(--white); font-weight: 500; cursor: pointer; }
+.target-leaf:hover { color: var(--accent); text-decoration: underline; }
 
 .val-str { color: var(--def); }
 .val-obj { color: var(--text-dim); font-size: 10px; }
@@ -1796,7 +1797,42 @@ function onTargetKeydown(e) {
 function pickAutocomplete(target) {
   document.getElementById('composeTarget').value = target;
   document.getElementById('autocompleteList').classList.remove('open');
+  autoFillOperandKeys(target);
 }
+
+// Auto-fill operand with keys from the target's current state
+function autoFillOperandKeys(target) {
+  const operandEl = document.getElementById('composeOperand');
+  // Only auto-fill if operand is empty or matches a previous auto-fill / template
+  if (operandEl.value.trim() && !operandEl.dataset.autoFilled) return;
+
+  // Only applies to operators that use key-value operands
+  if (selectedOp !== 'DEF' && selectedOp !== 'INS') return;
+
+  const state = foldState(replayIndex);
+  const existing = state[target];
+
+  if (!existing || !existing.value || typeof existing.value !== 'object' || Array.isArray(existing.value)) return;
+
+  const keys = Object.keys(existing.value);
+  if (keys.length === 0) return;
+
+  const template = {};
+  keys.forEach(k => { template[k] = ''; });
+  operandEl.value = JSON.stringify(template, null, 2);
+  operandEl.dataset.autoFilled = '1';
+}
+
+// Clear auto-fill flag when user manually edits operand
+document.getElementById('composeOperand').addEventListener('input', function() {
+  delete this.dataset.autoFilled;
+});
+
+// Auto-fill when target input loses focus (for manually typed targets)
+document.getElementById('composeTarget').addEventListener('blur', function() {
+  const target = this.value.trim();
+  if (target) autoFillOperandKeys(target);
+});
 
 // Close autocomplete on outside click
 document.addEventListener('click', (e) => {
@@ -1856,8 +1892,22 @@ function selectOp(op) {
 
     // Auto-fill template if operand is empty
     const operandEl = document.getElementById('composeOperand');
-    if (!operandEl.value.trim()) {
-      operandEl.value = OP_TEMPLATES[op] || '';
+    if (!operandEl.value.trim() || operandEl.dataset.autoFilled) {
+      // Try state-based auto-keys first for DEF/INS
+      const target = document.getElementById('composeTarget').value.trim();
+      if (target && (op === 'DEF' || op === 'INS')) {
+        operandEl.value = '';
+        operandEl.dataset.autoFilled = '1';
+        autoFillOperandKeys(target);
+        // If auto-fill didn't populate (no state), fall back to template
+        if (!operandEl.value.trim()) {
+          delete operandEl.dataset.autoFilled;
+          operandEl.value = OP_TEMPLATES[op] || '';
+        }
+      } else {
+        delete operandEl.dataset.autoFilled;
+        operandEl.value = OP_TEMPLATES[op] || '';
+      }
     }
   }
 }
@@ -2131,8 +2181,12 @@ function switchTab(tab) {
 
 function formatTarget(target) {
   const parts = target.split('.');
-  const segs = parts.slice(0, -1).map(p => `<span class="target-seg">${p}.</span>`).join('');
-  return segs + `<span class="target-leaf">${parts[parts.length-1]}</span>`;
+  const segs = parts.slice(0, -1).map((p, i) => {
+    const path = parts.slice(0, i + 1).join('.');
+    return `<span class="target-seg" onclick="event.stopPropagation(); navigateToPath('${path}')">${p}.</span>`;
+  }).join('');
+  const leafPath = target;
+  return segs + `<span class="target-leaf" onclick="event.stopPropagation(); navigateToPath('${leafPath}')">${parts[parts.length-1]}</span>`;
 }
 
 function formatValue(val) {
@@ -2175,6 +2229,12 @@ function renderHorizon() {
 }
 
 function filterHorizon() { renderHorizon(); }
+
+function navigateToPath(path) {
+  const input = document.getElementById('horizonSearch');
+  input.value = path;
+  renderHorizon();
+}
 
 function selectTarget(target) {
   selectedTarget = target;
