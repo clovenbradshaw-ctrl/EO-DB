@@ -1,4 +1,11 @@
+import { useState, useEffect } from 'react';
 import { logout, type MatrixSession } from '../matrix/client';
+import { useEoStore } from '../store/eo-store';
+import { createIdb } from '../db/idb';
+import { createStore } from '../db/encrypted-store';
+import { deriveKey } from '../lib/crypto';
+import { ClientList } from './ClientList';
+import { RecordView } from './RecordView';
 
 interface LayoutProps {
   session: MatrixSession;
@@ -6,7 +13,34 @@ interface LayoutProps {
 }
 
 export function Layout({ session, onLogout }: LayoutProps) {
+  const init = useEoStore((s) => s.init);
+  const teardown = useEoStore((s) => s.teardown);
+  const ready = useEoStore((s) => s.ready);
+  const lastSeq = useEoStore((s) => s.lastSeq);
+  const [selected, setSelected] = useState<string | null>(null);
+
+  // Initialize encrypted store on mount
+  useEffect(() => {
+    let mounted = true;
+
+    async function setup() {
+      const idb = await createIdb();
+      const key = await deriveKey(session.userId, session.deviceId, session.accessToken);
+      const store = createStore(idb, key);
+      if (mounted) {
+        await init(store);
+      }
+    }
+
+    setup();
+
+    return () => {
+      mounted = false;
+    };
+  }, [session, init]);
+
   function handleLogout() {
+    teardown();
     logout();
     onLogout();
   }
@@ -14,18 +48,36 @@ export function Layout({ session, onLogout }: LayoutProps) {
   return (
     <div style={styles.container}>
       <header style={styles.header}>
-        <span style={styles.logo}>EO///DB</span>
+        <div style={styles.headerLeft}>
+          <span style={styles.logo}>Amino Immigration</span>
+          <div style={styles.divider} />
+          <span style={styles.section}>Case Management</span>
+        </div>
         <div style={styles.headerRight}>
+          <div style={styles.seqBadge}>seq: {lastSeq}</div>
           <span style={styles.user}>{session.userId}</span>
           <button onClick={handleLogout} style={styles.logoutBtn}>Sign out</button>
         </div>
       </header>
       <div style={styles.body}>
         <aside style={styles.sidebar}>
-          <p style={styles.sidebarText}>Records will appear here</p>
+          {ready ? (
+            <ClientList selected={selected} onSelect={setSelected} />
+          ) : (
+            <div style={styles.loading}>Initializing...</div>
+          )}
         </aside>
         <main style={styles.main}>
-          <p style={styles.placeholder}>Select a record to view its Horizon</p>
+          {selected ? (
+            <RecordView target={selected} onNavigate={setSelected} />
+          ) : (
+            <div style={styles.empty}>
+              <div style={styles.emptyText}>Select a client to view their record</div>
+              <div style={styles.emptySub}>
+                You'll see their case details, the context around them, and patterns across similar cases
+              </div>
+            </div>
+          )}
         </main>
       </div>
     </div>
@@ -37,66 +89,64 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     flexDirection: 'column',
     height: '100vh',
-    background: '#0a0a0a',
-    color: '#ddd',
-    fontFamily: 'system-ui, -apple-system, sans-serif',
+    background: '#faf9f7',
+    color: '#2c2a26',
+    fontFamily: "'Outfit', system-ui, -apple-system, sans-serif",
   },
   header: {
     display: 'flex',
     justifyContent: 'space-between',
     alignItems: 'center',
-    padding: '12px 24px',
-    borderBottom: '1px solid #222',
-    background: '#111',
+    padding: '0 24px',
+    height: 52,
+    background: '#fff',
+    borderBottom: '1px solid #e5e2dd',
   },
+  headerLeft: { display: 'flex', alignItems: 'center', gap: 12 },
   logo: {
-    fontSize: 18,
-    fontWeight: 700,
-    color: '#fff',
-    letterSpacing: '0.02em',
+    fontFamily: "'Source Serif 4', Georgia, serif",
+    fontSize: 17,
+    fontWeight: 600,
+    color: '#1a1816',
   },
-  headerRight: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 16,
+  divider: { width: 1, height: 20, background: '#d4d0ca' },
+  section: { fontSize: 13, color: '#7a756d', fontWeight: 400 },
+  headerRight: { display: 'flex', alignItems: 'center', gap: 16 },
+  seqBadge: {
+    fontFamily: "'JetBrains Mono', monospace",
+    fontSize: 10,
+    color: '#aba69e',
+    padding: '2px 8px',
+    borderRadius: 4,
+    background: '#f4f3f0',
+    border: '1px solid #e5e2dd',
   },
-  user: {
-    fontSize: 13,
-    color: '#888',
-  },
+  user: { fontSize: 12, color: '#7a756d' },
   logoutBtn: {
     padding: '6px 14px',
-    fontSize: 13,
-    border: '1px solid #333',
+    fontSize: 12,
+    border: '1px solid #e5e2dd',
     borderRadius: 6,
     background: 'transparent',
-    color: '#aaa',
+    color: '#7a756d',
     cursor: 'pointer',
   },
-  body: {
-    display: 'flex',
-    flex: 1,
-    overflow: 'hidden',
-  },
+  body: { display: 'flex', flex: 1, overflow: 'hidden' },
   sidebar: {
     width: 280,
-    borderRight: '1px solid #222',
-    padding: 16,
-    overflowY: 'auto',
+    borderRight: '1px solid #e5e2dd',
+    background: '#fff',
   },
-  sidebarText: {
-    fontSize: 13,
-    color: '#555',
+  main: { flex: 1, overflowY: 'auto', background: '#faf9f7' },
+  loading: { padding: 18, fontSize: 13, color: '#aba69e' },
+  empty: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    height: '100%',
+    gap: 8,
   },
-  main: {
-    flex: 1,
-    padding: 32,
-    overflowY: 'auto',
-  },
-  placeholder: {
-    fontSize: 15,
-    color: '#555',
-    textAlign: 'center',
-    marginTop: 120,
-  },
+  emptyText: { fontSize: 14, color: '#7a756d', fontWeight: 300 },
+  emptySub: { fontSize: 12, color: '#aba69e' },
 };
