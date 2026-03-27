@@ -954,22 +954,58 @@ On-demand population analytics. Only runs when `?signals=true`. Computes basic s
 ```
 GET /horizon/:target
   ?prefix=true       → array of HorizonResponse for all targets under prefix
-  ?signals=true      → include Layer 6 signal detection (expensive)
-  ?grounds=false     → exclude Layer 2
-  ?nearby=false      → exclude Layer 3
-  ?governance=false  → exclude Layer 4
-  ?trajectory=false  → exclude Layer 5
+  ?signals=true      → include signal detection (expensive, on-demand only)
+  ?ancestry=false    → exclude ancestry chain
+  ?grounds=false     → exclude grounds
+  ?nearby=false      → exclude nearby
+  ?governance=false  → exclude governance
+  ?trajectory=false  → exclude trajectory
 ```
 
-### 7.5 API Query Parameters
+Default: ancestry, grounds, nearby, governance, and trajectory are all ON. Signals are OFF. The cheap layers are always present. The expensive layer is opt-in.
+
+### 7.9 Explorer Presentation Model
+
+The admin explorer shows Horizon layers as **one record with depth of field**, not as six sections. Six layers presented as six sections is a UX failure. Six layers presented as one record with smart annotations is what the database actually sees — one observation at varying depths of focus.
+
+**Visual hierarchy does the work:**
+
+- **Figure** — full contrast, full brightness. The record's fields in a grid.
+- **Trajectory** — one line under the target path. Operator badges with timestamps. The record's heartbeat.
+- **Grounds** — one context line: `regulatoryHold: active · Nashville · biweekly`. Inherited ambient conditions.
+- **Nearby** — one sentence: `Similar: Carlos Mendez (H1B, Nashville, @sara), Aisha Patel (H1B)`.
+- **Governance** — tiny inline badges on governed fields: `⊨ latest` on email, `ƒ filed+180` on deadline.
+- **Signals** — one quiet footnote: `daysOpen 45 — above average (28, n=4)`. Expands on click.
+
+Everything fits one screen. No tabs. No toggles. Expand any layer for detail, but the default is: everything visible, nothing demands attention unless notable.
+
+**The target sidebar is an ontology tree**, not a flat list of dot-paths:
 
 ```
-GET /horizon/:target
-  ?prefix=true     → return array of HorizonResponse for all targets under prefix
-  ?signals=true    → include Layer 3 signal detection (expensive)
-  ?grounds=false   → exclude Layer 2 ground inheritance (for performance)
+▼ app.tblClients                    4 records
+  ├ regulatoryHold: active          ← ground, visible in sidebar
+  ├ defaultRegion: Nashville
+  ├ rec001  Maria Garcia            ← figure, click to view
+  ├ rec002  Carlos Mendez
+  ├ rec003  Aisha Patel
+  └ rec004  Wei Zhang
+
+▼ app.tblCases                      4 records
+  ├ reviewCycle: biweekly           ← ground
+  ├ rec101  H1B · approved
+  ├ rec102  L1A · pending
+  └ rec103  H1B · under review
+
+▶ app                               ← application-level
+  ├ timezone: America/Chicago       ← ground
+  └ firm: Amino Immigration
 ```
-```
+
+Grounds are already visible in navigation. When you click `rec001`, the grounds section confirms what the tree already showed. The user has context before they click.
+
+**CON edges show inline** as clickable field values, not in a separate graph section. The `fldCases` field shows `rec101 → H1B approved`. Click to navigate.
+
+**Click any log event** to open its target's Horizon. The log is the timeline. The Horizon is what you see when you focus on a point in it.
 
 ---
 

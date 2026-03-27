@@ -59,16 +59,28 @@ Build and test in this exact order. Do not skip ahead. Each phase must pass its 
 - The formula executor is a placeholder — return the formula definition and gathered inputs. Do not build a full formula parser yet.
 - Write tests for alias resolution and Horizon-computed evaluation
 
-### Phase 3b: Three-Layer Horizon
-- Implement `getGrounds` — prefix-walk collecting ancestor-level state. Respect override rule (child value wins over ancestor).
-- Implement `detectSignals` — placeholder population analytics. Return basic statistics over numeric fields in the target's collection. Only runs when `opts.signals === true`.
-- Modify `horizonGet` to return `HorizonResponse` with figure, grounds, and optional signals.
+### Phase 3b: File-Cabinet Horizon (Six Layers + Ancestry)
+- **Layer 1 — Figure:** Already implemented in Phase 3. Projected state with alias resolution and Horizon-computed EVA.
+- **Layer 2 — Grounds:** Implement `getGrounds` — prefix-walk collecting ancestor-level state. Respect override rule (child value wins over ancestor).
+- **Layer 3 — Nearby:** Implement `getNearby` — one prefix scan of sibling records + in-memory field-value comparison against the current target. Also check CON linkage (records linked to the same targets are nearby). Cap at 10 results.
+- **Layer 4 — Governance:** Implement `getGovernance` — scan `eva:` keyspace for registrations on this target (direct), same collection (collection scope), or ancestor prefixes (ancestor scope). These are already indexed.
+- **Layer 5 — Trajectory:** Implement `getTrajectory` — filter log for this target, extract operator sequence, collapse consecutive same-ops. `INS → DEF → DEF → CON` becomes `INS, DEF, CON`.
+- **Layer 6 — Signals:** Implement `detectSignals` — population analytics over numeric fields. Only runs when `opts.signals === true`. Expensive, on-demand.
+- **Ancestry:** Implement `getAncestry` — climb the dot-path from this target to root. Each ancestor is a mini-Horizon: its own figure, its own grounds from above, children count, sibling count. `fldStatus → rec101 → tblCases → app`.
+- Modify `horizonGet` to return `HorizonResponse` with all layers. Layers 1-5 + ancestry default ON. Signals default OFF.
 - Write tests:
   - DEF at collection level is returned as ground for record-level reads
   - DEF at app level is returned as ground for deeper reads
   - Figure value overrides ancestor ground with same key
+  - Nearby finds records sharing field values in same collection
+  - Nearby finds records sharing CON linkage
+  - Governance returns EVA policies on this target and collection
+  - Trajectory returns compact collapsed operator sequence
+  - Ancestry climbs from field to record to collection to app
+  - Each ancestor carries its own grounds
+  - Ancestry reports children_count and nearby_count
   - Signals only computed when requested
-  - Empty signals array when population too small
+  - Each layer can be individually disabled via opts
 
 ### Phase 4: Changefeed
 - Implement the Feed class with subscribe, unsubscribe, notify (§8)
@@ -104,16 +116,30 @@ Build and test in this exact order. Do not skip ahead. Each phase must pass its 
 - On disconnect: clean up Feed subscription
 - Write tests: sync.test.ts
 
-### Phase 8: Admin interface
-- Copy the attached `eo-db-admin.html` to `src/admin/index.html`
-- Serve it at GET /admin (no auth — the interface handles its own Matrix login)
-- Modify the HTML to connect to the live API instead of using mock data:
-  - On load: prompt for Matrix access token (or read from localStorage)
-  - Fetch /horizon?prefix=true with auth header to populate the state table
-  - Fetch /log?since=0 to populate the log view
-  - Open WebSocket to /sync for real-time updates
-  - The replay slider should fetch /log and re-fold client-side to show historical state
-  - Graph view should fetch /edges for connected targets
+### Phase 8: Admin explorer interface
+- **Two admin interfaces exist:**
+  - `eo-db-admin-dev.html` — the dark-themed DBA tool (state tables, raw log, graph viz, replay slider). Keep as-is for developer use.
+  - `src/admin/index.html` — the Horizon-aware explorer. This is the primary admin interface.
+- Serve the explorer at GET /admin (no auth — the interface handles its own Matrix login).
+- **The explorer presents Horizon layers as one record with depth of field, not six sections:**
+  - Figure fields in a grid at full contrast.
+  - Trajectory as a one-line heartbeat strip under the target path: `INS → DEF → CON → DEF → EVA → SEG` with timestamps.
+  - Grounds as a single context line: `regulatoryHold: active · Nashville · biweekly`.
+  - Nearby as a sentence: `Similar: Carlos Mendez (H1B, Nashville, @sara)`.
+  - Governance as inline badges on governed fields: `⊨ latest` on email, `ƒ filed+180` on deadline.
+  - Signals as a quiet footnote: `daysOpen 45 — above average (28, n=4)`. Expands on click.
+  - Ancestry navigable via breadcrumb: `app > tblClients > rec001 > fldEmail`. Click any level to see that ancestor's Horizon.
+- **The sidebar is an ontology tree**, not a flat list:
+  - Collections collapse/expand. Record count shown.
+  - Ground properties visible directly in the tree under each collection.
+  - Click a record to open its Horizon in the center panel.
+  - Application-level grounds shown at the tree root.
+- **Click any log event** to open its target's Horizon. The log is the timeline, the Horizon is the depth.
+- **CON edges show inline** as clickable field values, not in a separate graph section.
+- On load: prompt for Matrix access token (or read from localStorage).
+- Fetch /horizon with ancestry + all layers to populate the explorer.
+- Open WebSocket to /sync for real-time updates.
+- The DBA view (`eo-db-admin-dev.html`) remains available at GET /admin/dev for raw database inspection.
 
 ### Phase 9: Server entry point
 - Wire everything together in src/server.ts
