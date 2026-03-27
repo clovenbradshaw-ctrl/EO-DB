@@ -4,7 +4,7 @@ import { getCurrentSeq } from '../db/level.js';
 import { readLogSince } from '../db/log.js';
 import { Feed } from '../db/feed.js';
 import { verifyMatrixToken } from '../auth/matrix.js';
-import { isAccountAllowed, addAllowedAccount, getMatrixAuthConfig } from '../auth/matrix-auth-config.js';
+import { checkAccess, addAllowedAccount } from '../auth/matrix-auth-config.js';
 import type { EoEvent, Operator } from '../db/types.js';
 import websocketPlugin from '@fastify/websocket';
 
@@ -30,17 +30,14 @@ export function registerSyncRoute(app: FastifyInstance, db: EoDb, feed: Feed): v
       }
 
       verifyMatrixToken(token).then(async (user) => {
-        // Enforce account allowlist for WebSocket connections
-        let allowed = await isAccountAllowed(db, user.user_id);
-        if (!allowed) {
-          // Auto-add authenticated users to the allowlist
-          const config = await getMatrixAuthConfig(db);
-          if (config.enabled) {
-            await addAllowedAccount(db, user.user_id, 'system:auto', 'Auto-added on login');
-            allowed = true;
-          }
+        // Enforce access rules for WebSocket connections
+        let result = await checkAccess(db, user.user_id);
+        if (!result.allowed && result.source !== 'blacklist') {
+          // Auto-add authenticated users who aren't blacklisted
+          await addAllowedAccount(db, user.user_id, 'system:auto', 'Auto-added on login');
+          result = { allowed: true, access: 'read_write', source: 'account' };
         }
-        if (!allowed) {
+        if (!result.allowed) {
           socket.close(4403, 'Account not authorized for this database');
           return;
         }

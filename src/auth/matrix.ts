@@ -1,6 +1,6 @@
 import type { FastifyRequest, FastifyReply } from 'fastify';
 import type { EoDb } from '../db/level.js';
-import { isAccountAllowed, addAllowedAccount, getMatrixAuthConfig } from './matrix-auth-config.js';
+import { checkAccess, accessSatisfies, addAllowedAccount, type AccessCheckResult } from './matrix-auth-config.js';
 
 export interface MatrixUser {
   user_id: string;
@@ -18,7 +18,7 @@ const CACHE_TTL = 300_000; // 5 minutes
 let matrixHomeserver = process.env.EO_MATRIX_HOMESERVER || 'https://app.aminoimmigration.com';
 let webhookSecret = process.env.EO_WEBHOOK_SECRET || '';
 
-/** The DB handle used by authMiddleware for allowlist checks. */
+/** The DB handle used by authMiddleware for access checks. */
 let authDb: EoDb | null = null;
 
 export function setAuthConfig(config: { homeserver?: string; webhookSecret?: string }): void {
@@ -26,7 +26,7 @@ export function setAuthConfig(config: { homeserver?: string; webhookSecret?: str
   if (config.webhookSecret) webhookSecret = config.webhookSecret;
 }
 
-/** Provide the DB reference so the middleware can check the account allowlist. */
+/** Provide the DB reference so the middleware can check access rules. */
 export function setAuthDb(db: EoDb): void {
   authDb = db;
 }
@@ -68,25 +68,44 @@ export function verifyWebhookSecret(secret: string): MatrixUser {
 
 export interface AuthenticatedRequest extends FastifyRequest {
   matrixUser?: MatrixUser;
+  /** The resolved access check result — available after auth middleware runs. */
+  accessCheck?: AccessCheckResult;
 }
 
 /**
- * Verify that the authenticated user is on the account allowlist.
- * If auth gating is enabled and the user is not yet on the list,
- * auto-add them — the model is "authenticated = allowed unless removed".
- * Skipped when Matrix auth gating is disabled or no DB is attached.
+ * Determine the required access type for a request based on HTTP method.
+ * GET/HEAD/OPTIONS → read, everything else → write.
  */
-async function enforceAllowlist(user_id: string): Promise<void> {
-  if (!authDb) return;
-  const allowed = await isAccountAllowed(authDb, user_id);
-  if (!allowed) {
-    // Auto-add authenticated users to the allowlist
-    const config = await getMatrixAuthConfig(authDb);
-    if (config.enabled) {
-      await addAllowedAccount(authDb, user_id, 'system:auto', 'Auto-added on login');
-      return; // Now allowed
-    }
+function requiredAccess(method: string): 'read' | 'write' {
+  const readMethods = ['GET', 'HEAD', 'OPTIONS'];
+  return readMethods.includes(method.toUpperCase()) ? 'read' : 'write';
+}
+
+/**
+ * Check access rules for the authenticated user.
+ * If the user is not found in any rule, auto-add them to the allowlist
+ * with read_write access — the model is "authenticated = allowed unless
+ * explicitly blacklisted or removed".
+ * Skipped when no DB is attached.
+ */
+async function enforceAccess(user_id: string, method: string): Promise<AccessCheckResult> {
+  if (!authDb) {
+    return { allowed: true, access: 'read_write', source: 'disabled' };
   }
+  let result = await checkAccess(authDb, user_id);
+  if (!result.allowed && result.source !== 'blacklist') {
+    // Auto-add authenticated users who aren't blacklisted
+    await addAllowedAccount(authDb, user_id, 'system:auto', 'Auto-added on login');
+    result = { allowed: true, access: 'read_write', source: 'account' };
+  }
+  if (!result.allowed) {
+    throw new Error('Account not authorized for this database');
+  }
+  const needed = requiredAccess(method);
+  if (!accessSatisfies(result.access, needed)) {
+    throw new Error(`Account does not have ${needed} access`);
+  }
+  return result;
 }
 
 export async function authMiddleware(
@@ -112,13 +131,18 @@ export async function authMiddleware(
       return;
     }
 
-    // Enforce account allowlist (when Matrix auth gating is enabled)
-    await enforceAllowlist(request.matrixUser!.user_id);
+    // Enforce access rules (read vs write, blacklist, buckets, etc.)
+    request.accessCheck = await enforceAccess(
+      request.matrixUser!.user_id,
+      request.method,
+    );
   } catch (e: any) {
-    const message = e.message === 'Account not in allowlist'
-      ? 'Account not authorized for this database'
-      : 'Authentication failed';
-    reply.code(403).send({ error: message });
+    const msg = e.message;
+    if (msg === 'Account not authorized for this database' || msg.includes('does not have')) {
+      reply.code(403).send({ error: msg });
+    } else {
+      reply.code(403).send({ error: 'Authentication failed' });
+    }
     return;
   }
 }
