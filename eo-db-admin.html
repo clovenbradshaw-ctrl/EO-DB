@@ -244,10 +244,11 @@ body {
   color: var(--text);
   cursor: pointer;
 }
-.target-path:hover { color: var(--accent); text-decoration: underline; }
 
-.target-seg { color: var(--text-faint); }
-.target-leaf { color: var(--white); font-weight: 500; }
+.target-seg { color: var(--text-faint); cursor: pointer; }
+.target-seg:hover { color: var(--accent); text-decoration: underline; }
+.target-leaf { color: var(--white); font-weight: 500; cursor: pointer; }
+.target-leaf:hover { color: var(--accent); text-decoration: underline; }
 
 .val-str { color: var(--def); }
 .val-obj { color: var(--text-dim); font-size: 10px; }
@@ -1928,8 +1929,12 @@ function switchTab(tab) {
 
 function formatTarget(target) {
   const parts = target.split('.');
-  const segs = parts.slice(0, -1).map(p => `<span class="target-seg">${p}.</span>`).join('');
-  return segs + `<span class="target-leaf">${parts[parts.length-1]}</span>`;
+  const segs = parts.slice(0, -1).map((p, i) => {
+    const path = parts.slice(0, i + 1).join('.');
+    return `<span class="target-seg" onclick="event.stopPropagation(); navigateToPath('${path}')">${p}.</span>`;
+  }).join('');
+  const leafPath = target;
+  return segs + `<span class="target-leaf" onclick="event.stopPropagation(); navigateToPath('${leafPath}')">${parts[parts.length-1]}</span>`;
 }
 
 function formatValue(val) {
@@ -1972,6 +1977,12 @@ function renderHorizon() {
 }
 
 function filterHorizon() { renderHorizon(); }
+
+function navigateToPath(path) {
+  const input = document.getElementById('horizonSearch');
+  input.value = path;
+  renderHorizon();
+}
 
 function selectTarget(target) {
   selectedTarget = target;
