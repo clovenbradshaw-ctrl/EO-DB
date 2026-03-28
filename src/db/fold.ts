@@ -25,25 +25,29 @@ export async function processEvent(
     }
   }
 
-  // 2. Assign sequence number
+  // 2. No-op check: skip if update would not change state
+  const noOpSeq = await checkNoOp(db, event);
+  if (noOpSeq !== null) return noOpSeq;
+
+  // 3. Assign sequence number
   const seq = await nextSeq(db);
   const fullEvent: EoEvent = { ...event, seq };
 
-  // 3. Append to log
+  // 4. Append to log
   await appendToLog(db, fullEvent);
 
-  // 4. Store idempotency key
+  // 5. Store idempotency key
   if (event.client_event_id) {
     await db.put(`idem:${event.client_event_id}`, encode(seq));
   }
 
-  // 5. Execute operator-specific logic (helix dispatch)
+  // 6. Execute operator-specific logic (helix dispatch)
   await executeOperator(db, fullEvent);
 
-  // 6. Recompute fold-computed EVA-active dependents
+  // 7. Recompute fold-computed EVA-active dependents
   await recomputeDependents(db, fullEvent.target);
 
-  // 7. Notify changefeed
+  // 8. Notify changefeed
   if (feed) {
     feed.notify(fullEvent);
   }
@@ -383,4 +387,40 @@ function formulaReferencesExternal(formula: any): boolean {
   return externalPatterns.some(p => str.includes(p));
 }
 
-export { mergeOperand, isFormulaOperand };
+/**
+ * Deep equality check for no-op detection.
+ */
+function deepEqual(a: any, b: any): boolean {
+  if (a === b) return true;
+  if (a == null || b == null) return false;
+  if (typeof a !== typeof b) return false;
+  if (typeof a !== 'object') return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+
+  if (Array.isArray(a)) {
+    if (a.length !== b.length) return false;
+    return a.every((val: any, i: number) => deepEqual(val, b[i]));
+  }
+
+  const keysA = Object.keys(a);
+  const keysB = Object.keys(b);
+  if (keysA.length !== keysB.length) return false;
+  return keysA.every(key => deepEqual(a[key], b[key]));
+}
+
+/**
+ * Check if an event would be a no-op (state already matches).
+ * Returns the existing last_seq if no change, null otherwise.
+ */
+async function checkNoOp(db: EoDb, event: EoEventInput): Promise<number | null> {
+  if (event.op === 'DEF') {
+    const target = await resolveAlias(db, event.target);
+    const existing = await getState(db, target);
+    if (!existing) return null; // Will auto-instantiate — not a no-op
+    const merged = mergeOperand(existing.value, event.operand);
+    if (deepEqual(existing.value, merged)) return existing.last_seq;
+  }
+  return null;
+}
+
+export { mergeOperand, isFormulaOperand, deepEqual };

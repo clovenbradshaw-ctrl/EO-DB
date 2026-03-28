@@ -416,6 +416,134 @@ describe('REC', () => {
   });
 });
 
+// --- Duplicate Update Prevention Tests ---
+
+describe('Duplicate Update Prevention', () => {
+  it('DEF with identical object operand is a no-op', async () => {
+    await processEvent(db, ev({ target: 'app.rec1', operand: { name: 'Alice', age: 30 } }));
+    const logBefore = await readLogSince(db, 0);
+
+    // Submit DEF with same values already in state
+    const seq = await processEvent(db, ev({
+      op: 'DEF',
+      target: 'app.rec1',
+      operand: { name: 'Alice', age: 30 },
+    }));
+
+    const logAfter = await readLogSince(db, 0);
+    // No new log entry — the update was skipped
+    expect(logAfter.length).toBe(logBefore.length);
+    // Returns the existing last_seq
+    expect(seq).toBe(1);
+  });
+
+  it('DEF with different operand still processes', async () => {
+    await processEvent(db, ev({ target: 'app.rec1', operand: { name: 'Alice' } }));
+    const logBefore = await readLogSince(db, 0);
+
+    await processEvent(db, ev({
+      op: 'DEF',
+      target: 'app.rec1',
+      operand: { name: 'Bob' },
+    }));
+
+    const logAfter = await readLogSince(db, 0);
+    expect(logAfter.length).toBe(logBefore.length + 1);
+    const state = await getState(db, 'app.rec1');
+    expect(state?.value?.name).toBe('Bob');
+  });
+
+  it('DEF with subset of existing fields is a no-op', async () => {
+    await processEvent(db, ev({ target: 'app.rec1', operand: { name: 'Alice', age: 30 } }));
+    const logBefore = await readLogSince(db, 0);
+
+    // Submitting { name: 'Alice' } merges into { name: 'Alice', age: 30 } — same result
+    const seq = await processEvent(db, ev({
+      op: 'DEF',
+      target: 'app.rec1',
+      operand: { name: 'Alice' },
+    }));
+
+    const logAfter = await readLogSince(db, 0);
+    expect(logAfter.length).toBe(logBefore.length);
+  });
+
+  it('DEF with identical scalar operand is a no-op', async () => {
+    await processEvent(db, ev({ target: 'app.field', operand: { x: 1 } }));
+    await processEvent(db, ev({ op: 'DEF', target: 'app.field', operand: 'hello' }));
+    const logBefore = await readLogSince(db, 0);
+
+    const seq = await processEvent(db, ev({
+      op: 'DEF',
+      target: 'app.field',
+      operand: 'hello',
+    }));
+
+    const logAfter = await readLogSince(db, 0);
+    expect(logAfter.length).toBe(logBefore.length);
+  });
+
+  it('DEF on non-existent target still auto-instantiates', async () => {
+    await processEvent(db, ev({ op: 'DEF', target: 'app.new', operand: { x: 1 } }));
+    const state = await getState(db, 'app.new');
+    expect(state).not.toBeNull();
+    expect(state?.value).toEqual({ x: 1 });
+  });
+
+  it('DEF with new field added to existing object is not a no-op', async () => {
+    await processEvent(db, ev({ target: 'app.rec1', operand: { name: 'Alice' } }));
+    const logBefore = await readLogSince(db, 0);
+
+    await processEvent(db, ev({
+      op: 'DEF',
+      target: 'app.rec1',
+      operand: { email: 'alice@test.com' },
+    }));
+
+    const logAfter = await readLogSince(db, 0);
+    expect(logAfter.length).toBe(logBefore.length + 1);
+  });
+
+  it('repeated identical DEFs do not spam the log', async () => {
+    await processEvent(db, ev({ target: 'app.rec1', operand: { status: 'active' } }));
+
+    // Spam 5 identical DEFs
+    for (let i = 0; i < 5; i++) {
+      await processEvent(db, ev({
+        op: 'DEF',
+        target: 'app.rec1',
+        operand: { status: 'active' },
+      }));
+    }
+
+    const log = await readLogSince(db, 0);
+    // Only the original INS — all DEFs were no-ops
+    expect(log.length).toBe(1);
+  });
+
+  it('no-op DEF resolves aliases before comparing', async () => {
+    await processEvent(db, ev({ target: 'target.A', operand: { x: 1 } }));
+    await processEvent(db, ev({ target: 'target.B', operand: { y: 2 } }));
+    await processEvent(db, ev({
+      op: 'SYN',
+      target: 'target.C',
+      operand: { merge: ['target.A', 'target.B'], into: 'target.C' },
+    }));
+    const logBefore = await readLogSince(db, 0);
+
+    // DEF on alias target.A with value already in target.C
+    const stateC = await getState(db, 'target.C');
+    await processEvent(db, ev({
+      op: 'DEF',
+      target: 'target.A',
+      operand: stateC!.value,
+    }));
+
+    const logAfter = await readLogSince(db, 0);
+    expect(logAfter.length).toBe(logBefore.length);
+  });
+});
+
 // --- Idempotency Tests ---
 
 describe('Idempotency', () => {
