@@ -645,6 +645,117 @@ body {
 .compose-textarea:focus { border-color: var(--accent); }
 .compose-textarea::placeholder { color: var(--text-faint); }
 
+/* Structured operand fields */
+.structured-operand {
+  display: none;
+  flex-direction: column;
+  gap: 10px;
+}
+.structured-operand.active {
+  display: flex;
+}
+.structured-field-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-faint);
+  margin-top: 2px;
+}
+.structured-kv-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 4px;
+}
+.structured-kv-key {
+  flex: 1;
+}
+.structured-kv-value {
+  flex: 2;
+}
+.structured-remove-btn {
+  background: none;
+  border: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+.structured-remove-btn:hover {
+  color: var(--seg);
+  background: rgba(244,114,182,0.12);
+}
+.structured-add-btn {
+  background: none;
+  border: 1px dashed var(--border2);
+  border-radius: 4px;
+  padding: 6px 12px;
+  color: var(--text-faint);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.15s;
+  width: 100%;
+}
+.structured-add-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.structured-select {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 10px 12px;
+  color: var(--text);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  outline: none;
+  transition: border-color 0.15s;
+  width: 100%;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%236b7280' d='M3 5l3 3 3-3'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+}
+.structured-select:focus { border-color: var(--accent); }
+.structured-select option {
+  background: var(--bg1);
+  color: var(--text);
+}
+.structured-target-entry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.structured-target-entry .autocomplete-wrap {
+  flex: 1;
+}
+.rec-subop-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 4px;
+  padding: 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.rec-subop-row .structured-select {
+  width: 80px;
+  flex-shrink: 0;
+}
+.rec-subop-row .compose-input {
+  flex: 1;
+}
+
 /* Autocomplete */
 .autocomplete-wrap {
   position: relative;
@@ -1232,10 +1343,10 @@ body {
   <div class="topbar-logo">EO<span>///</span>DB</div>
   <div class="topbar-status">
     <div class="status-dot"></div>
-    <span class="status-item">seq <b id="currentSeq">4215</b></span>
-    <span class="status-item">events <b>15</b></span>
-    <span class="status-item">targets <b>12</b></span>
-    <span class="status-item">edges <b>2</b></span>
+    <span class="status-item">seq <b id="currentSeq">—</b></span>
+    <span class="status-item">events <b>—</b></span>
+    <span class="status-item">targets <b>—</b></span>
+    <span class="status-item">edges <b>—</b></span>
   </div>
   <div class="topbar-user" id="topbarUser">
     <button class="topbar-user-btn" onclick="showLogin()">Sign In</button>
@@ -1391,11 +1502,118 @@ body {
           <div class="operand-hint">Each target will be connected to all other targets</div>
         </div>
 
-        <!-- Operand -->
+        <!-- Operand: structured fields per operator -->
         <div class="compose-row" id="operandRow">
           <div class="compose-label">Operand</div>
-          <textarea class="compose-textarea" id="composeOperand" placeholder='value or JSON object, e.g. "approved" or {"name": "Maria"}'></textarea>
-          <div class="operand-hint" id="operandHint">DEF: string value or JSON object to set/merge</div>
+
+          <!-- INS: key-value fields -->
+          <div class="structured-operand" id="operandINS">
+            <div class="structured-field-label">Fields</div>
+            <div id="insFieldsList">
+              <div class="structured-kv-row">
+                <input class="compose-input structured-kv-key" placeholder="key" autocomplete="off">
+                <input class="compose-input structured-kv-value" placeholder="value" autocomplete="off">
+                <button class="structured-remove-btn" onclick="removeStructuredRow(this, 'insFieldsList')" title="Remove">&times;</button>
+              </div>
+            </div>
+            <button class="structured-add-btn" onclick="addKvRow('insFieldsList')">+ Add field</button>
+          </div>
+
+          <!-- DEF: key-value fields -->
+          <div class="structured-operand" id="operandDEF">
+            <div class="structured-field-label">Fields</div>
+            <div id="defFieldsList">
+              <div class="structured-kv-row">
+                <input class="compose-input structured-kv-key" placeholder="key (blank for raw value)" autocomplete="off">
+                <input class="compose-input structured-kv-value" placeholder="value" autocomplete="off">
+                <button class="structured-remove-btn" onclick="removeStructuredRow(this, 'defFieldsList')" title="Remove">&times;</button>
+              </div>
+            </div>
+            <button class="structured-add-btn" onclick="addKvRow('defFieldsList')">+ Add field</button>
+            <div class="operand-hint">Leave key blank for a raw string value</div>
+          </div>
+
+          <!-- CON one-way: added + removed target lists -->
+          <div class="structured-operand" id="operandCON">
+            <div class="structured-field-label">Added</div>
+            <div id="conAddedList">
+              <div class="structured-target-entry">
+                <input class="compose-input structured-target-input" placeholder="app.tblName.recXXX" autocomplete="off">
+                <button class="structured-remove-btn" onclick="removeStructuredTarget(this, 'conAddedList')" title="Remove">&times;</button>
+              </div>
+            </div>
+            <button class="structured-add-btn" onclick="addStructuredTarget('conAddedList')">+ Add</button>
+            <div class="structured-field-label">Removed</div>
+            <div id="conRemovedList"></div>
+            <button class="structured-add-btn" onclick="addStructuredTarget('conRemovedList')">+ Add</button>
+          </div>
+
+          <!-- SEG: boundary + reason -->
+          <div class="structured-operand" id="operandSEG">
+            <div class="structured-field-label">Boundary</div>
+            <select class="structured-select" id="segBoundary">
+              <option value="exclude">exclude</option>
+              <option value="include">include</option>
+            </select>
+            <div class="structured-field-label">Reason</div>
+            <input class="compose-input" id="segReason" placeholder="e.g. archived, duplicate" autocomplete="off">
+          </div>
+
+          <!-- SYN: merge targets + into target -->
+          <div class="structured-operand" id="operandSYN">
+            <div class="structured-field-label">Merge</div>
+            <div id="synMergeList">
+              <div class="structured-target-entry">
+                <input class="compose-input structured-target-input" placeholder="app.tblClients.rec001" autocomplete="off">
+                <button class="structured-remove-btn" onclick="removeStructuredTarget(this, 'synMergeList', 2)" title="Remove">&times;</button>
+              </div>
+              <div class="structured-target-entry">
+                <input class="compose-input structured-target-input" placeholder="app.tblClients.rec002" autocomplete="off">
+                <button class="structured-remove-btn" onclick="removeStructuredTarget(this, 'synMergeList', 2)" title="Remove">&times;</button>
+              </div>
+            </div>
+            <button class="structured-add-btn" onclick="addStructuredTarget('synMergeList', 2)">+ Add target</button>
+            <div class="structured-field-label">Into</div>
+            <input class="compose-input" id="synInto" placeholder="app.tblClients.merged001" autocomplete="off">
+          </div>
+
+          <!-- EVA: strategy + formula -->
+          <div class="structured-operand" id="operandEVA">
+            <div class="structured-field-label">Strategy</div>
+            <select class="structured-select" id="evaStrategy" onchange="onEvaStrategyChange()">
+              <option value="latest">latest</option>
+              <option value="formula">formula</option>
+            </select>
+            <div id="evaFormulaRow" style="display:none;">
+              <div class="structured-field-label">Formula</div>
+              <input class="compose-input" id="evaFormula" placeholder="e.g. SUM(field1, field2)" autocomplete="off">
+            </div>
+          </div>
+
+          <!-- REC: sub-operations + reason -->
+          <div class="structured-operand" id="operandREC">
+            <div class="structured-field-label">Sub-operations</div>
+            <div id="recSubOpsList">
+              <div class="rec-subop-row">
+                <select class="structured-select" style="width:80px;">
+                  <option value="DEF">DEF</option>
+                  <option value="INS">INS</option>
+                  <option value="CON">CON</option>
+                  <option value="SEG">SEG</option>
+                  <option value="SYN">SYN</option>
+                  <option value="EVA">EVA</option>
+                </select>
+                <input class="compose-input" placeholder="target" autocomplete="off">
+                <input class="compose-input" placeholder="operand (JSON)" autocomplete="off">
+                <button class="structured-remove-btn" onclick="removeRecSubOp(this)" title="Remove">&times;</button>
+              </div>
+            </div>
+            <button class="structured-add-btn" onclick="addRecSubOp()">+ Add sub-operation</button>
+            <div class="structured-field-label">Reason</div>
+            <input class="compose-input" id="recReason" placeholder="reason for this atomic change" autocomplete="off">
+          </div>
+
+          <div class="operand-hint" id="operandHint"></div>
         </div>
 
         <!-- Logging toggle -->
@@ -1520,9 +1738,9 @@ body {
 <!-- Replay Bar -->
 <div class="replay-bar">
   <span class="replay-label">Replay</span>
-  <input type="range" class="replay-slider" id="replaySlider" min="0" max="14" value="14" oninput="updateReplay()">
-  <span class="replay-seq" id="replaySeq">seq 4215</span>
-  <span class="replay-ts" id="replayTs">2025-03-27 16:30:00</span>
+  <input type="range" class="replay-slider" id="replaySlider" min="0" max="0" value="0" oninput="updateReplay()">
+  <span class="replay-seq" id="replaySeq">seq 0</span>
+  <span class="replay-ts" id="replayTs">—</span>
 </div>
 
 <script>
@@ -1815,35 +2033,55 @@ function pickAutocomplete(target) {
   autoFillOperandKeys(target);
 }
 
-// Auto-fill operand with keys from the target's current state
+// Auto-fill structured key-value fields from target's current state
 function autoFillOperandKeys(target) {
-  const operandEl = document.getElementById('composeOperand');
-  // Only auto-fill if operand is empty or matches a previous auto-fill / template
-  if (operandEl.value.trim() && !operandEl.dataset.autoFilled) return;
-
-  // Only applies to operators that use key-value operands
   if (selectedOp !== 'DEF' && selectedOp !== 'INS') return;
 
   const state = foldState(replayIndex);
   const existing = state[target];
+  if (!existing || existing.value === null || existing.value === undefined) return;
 
-  if (!existing || !existing.value || typeof existing.value !== 'object' || Array.isArray(existing.value)) return;
+  const listId = selectedOp === 'INS' ? 'insFieldsList' : 'defFieldsList';
+  const list = document.getElementById(listId);
 
-  const keys = Object.keys(existing.value);
-  if (keys.length === 0) return;
+  // Only auto-fill if user hasn't manually entered content
+  const existingRows = list.querySelectorAll('.structured-kv-row');
+  const hasUserContent = Array.from(existingRows).some(row => {
+    const k = row.querySelector('.structured-kv-key').value.trim();
+    const v = row.querySelector('.structured-kv-value').value.trim();
+    return k || v;
+  });
+  if (hasUserContent && !list.dataset.autoFilled) return;
 
-  const template = {};
-  keys.forEach(k => { template[k] = ''; });
-  operandEl.value = JSON.stringify(template, null, 2);
-  operandEl.dataset.autoFilled = '1';
+  list.innerHTML = '';
+  list.dataset.autoFilled = '1';
+
+  if (typeof existing.value === 'object' && !Array.isArray(existing.value)) {
+    // Object target: show each key with its current value
+    const keys = Object.keys(existing.value);
+    if (keys.length === 0) {
+      addKvRow(listId, '', '');
+    } else {
+      keys.forEach(k => {
+        const val = existing.value[k];
+        const displayVal = (typeof val === 'object' && val !== null) ? JSON.stringify(val) : String(val ?? '');
+        addKvRow(listId, k, displayVal);
+      });
+    }
+  } else {
+    // Scalar target (e.g. field-level): show single row with current value, no key
+    const displayVal = String(existing.value);
+    addKvRow(listId, '', displayVal);
+  }
+
+  // Clear auto-filled flag when user edits any field
+  list.addEventListener('input', function handler() {
+    delete list.dataset.autoFilled;
+    list.removeEventListener('input', handler);
+  });
 }
 
-// Clear auto-fill flag when user manually edits operand
-document.getElementById('composeOperand').addEventListener('input', function() {
-  delete this.dataset.autoFilled;
-});
-
-// Auto-fill when target input loses focus (for manually typed targets)
+// Auto-fill when target input loses focus
 document.getElementById('composeTarget').addEventListener('blur', function() {
   const target = this.value.trim();
   if (target) autoFillOperandKeys(target);
@@ -1861,25 +2099,26 @@ let selectedOp = 'DEF';
 let conDirection = 'two-way';
 
 const OP_HINTS = {
-  INS: 'INS: JSON object with initial field values, e.g. {"name": "Maria", "status": "active"}',
-  DEF: 'DEF: string value or JSON object to set/merge',
-  CON_ONE_WAY: 'CON (one-way): target is the source, operand lists destinations',
+  INS: 'INS: define initial field values for the new target',
+  DEF: 'DEF: set or merge field values on an existing target',
+  CON_ONE_WAY: 'CON (one-way): source connects to listed destinations',
   CON_TWO_WAY: 'CON (two-way): all listed targets will be mutually connected',
-  SEG: 'SEG: {"boundary": "exclude", "reason": "archived"}',
-  SYN: 'SYN: {"merge": ["app.tblClients.rec001", "app.tblClients.rec002"], "into": "app.tblClients.merged001"}',
-  EVA: 'EVA: {"strategy": "latest"} or {"strategy": "formula", "formula": "..."}',
-  REC: 'REC: {"contains": [{"op": "DEF", "target": "...", "operand": "..."}], "reason": "..."}'
+  SEG: 'SEG: create a partition boundary on the target',
+  SYN: 'SYN: merge source targets into a single destination',
+  EVA: 'EVA: register an evaluation policy on the target',
+  REC: 'REC: atomic frame containing multiple sub-operations'
 };
 
-const OP_TEMPLATES = {
-  INS: '{\n  "name": "",\n  "status": "active"\n}',
-  DEF: '',
-  CON: '{\n  "added": [],\n  "removed": []\n}',
-  SEG: '{\n  "boundary": "exclude",\n  "reason": ""\n}',
-  SYN: '{\n  "merge": [],\n  "into": ""\n}',
-  EVA: '{\n  "strategy": "latest"\n}',
-  REC: '{\n  "contains": [\n    {"op": "DEF", "target": "", "operand": ""}\n  ],\n  "reason": ""\n}'
-};
+const ALL_STRUCTURED_IDS = ['operandINS', 'operandDEF', 'operandCON', 'operandSEG', 'operandSYN', 'operandEVA', 'operandREC'];
+
+function showStructuredOperand(op) {
+  ALL_STRUCTURED_IDS.forEach(id => {
+    document.getElementById(id).classList.remove('active');
+  });
+  const panelId = 'operand' + op;
+  const panel = document.getElementById(panelId);
+  if (panel) panel.classList.add('active');
+}
 
 function selectOp(op) {
   selectedOp = op;
@@ -1904,26 +2143,172 @@ function selectOp(op) {
     document.getElementById('conTargetsRow').style.display = 'none';
     document.getElementById('operandRow').style.display = '';
     document.getElementById('operandHint').textContent = OP_HINTS[op] || '';
+    showStructuredOperand(op);
 
-    // Auto-fill template if operand is empty
-    const operandEl = document.getElementById('composeOperand');
-    if (!operandEl.value.trim() || operandEl.dataset.autoFilled) {
-      // Try state-based auto-keys first for DEF/INS
+    // Auto-fill structured fields for DEF/INS
+    if (op === 'DEF' || op === 'INS') {
       const target = document.getElementById('composeTarget').value.trim();
-      if (target && (op === 'DEF' || op === 'INS')) {
-        operandEl.value = '';
-        operandEl.dataset.autoFilled = '1';
-        autoFillOperandKeys(target);
-        // If auto-fill didn't populate (no state), fall back to template
-        if (!operandEl.value.trim()) {
-          delete operandEl.dataset.autoFilled;
-          operandEl.value = OP_TEMPLATES[op] || '';
-        }
-      } else {
-        delete operandEl.dataset.autoFilled;
-        operandEl.value = OP_TEMPLATES[op] || '';
-      }
+      if (target) autoFillOperandKeys(target);
     }
+  }
+}
+
+// ── Structured field helpers ──
+function addKvRow(listId, key, value) {
+  const list = document.getElementById(listId);
+  const row = document.createElement('div');
+  row.className = 'structured-kv-row';
+  const placeholderKey = listId === 'defFieldsList' ? 'key (blank for raw value)' : 'key';
+  row.innerHTML = `
+    <input class="compose-input structured-kv-key" placeholder="${placeholderKey}" value="${escAttr(key || '')}" autocomplete="off">
+    <input class="compose-input structured-kv-value" placeholder="value" value="${escAttr(value || '')}" autocomplete="off">
+    <button class="structured-remove-btn" onclick="removeStructuredRow(this, '${listId}')" title="Remove">&times;</button>
+  `;
+  list.appendChild(row);
+}
+
+function escAttr(s) {
+  return s.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
+}
+
+function removeStructuredRow(btn, listId) {
+  const list = document.getElementById(listId);
+  if (list.children.length > 1) {
+    btn.closest('.structured-kv-row').remove();
+  }
+}
+
+function addStructuredTarget(listId, minCount) {
+  const list = document.getElementById(listId);
+  const entry = document.createElement('div');
+  entry.className = 'structured-target-entry';
+  const min = minCount || 0;
+  entry.innerHTML = `
+    <input class="compose-input structured-target-input" placeholder="app.tblName.recXXX" autocomplete="off">
+    <button class="structured-remove-btn" onclick="removeStructuredTarget(this, '${listId}', ${min})" title="Remove">&times;</button>
+  `;
+  list.appendChild(entry);
+}
+
+function removeStructuredTarget(btn, listId, minCount) {
+  const list = document.getElementById(listId);
+  const min = minCount || 0;
+  if (list.children.length > min) {
+    btn.closest('.structured-target-entry').remove();
+  }
+}
+
+function addRecSubOp() {
+  const list = document.getElementById('recSubOpsList');
+  const row = document.createElement('div');
+  row.className = 'rec-subop-row';
+  row.innerHTML = `
+    <select class="structured-select" style="width:80px;">
+      <option value="DEF">DEF</option>
+      <option value="INS">INS</option>
+      <option value="CON">CON</option>
+      <option value="SEG">SEG</option>
+      <option value="SYN">SYN</option>
+      <option value="EVA">EVA</option>
+    </select>
+    <input class="compose-input" placeholder="target" autocomplete="off">
+    <input class="compose-input" placeholder="operand (JSON)" autocomplete="off">
+    <button class="structured-remove-btn" onclick="removeRecSubOp(this)" title="Remove">&times;</button>
+  `;
+  list.appendChild(row);
+}
+
+function removeRecSubOp(btn) {
+  const list = document.getElementById('recSubOpsList');
+  if (list.children.length > 1) {
+    btn.closest('.rec-subop-row').remove();
+  }
+}
+
+function onEvaStrategyChange() {
+  const strategy = document.getElementById('evaStrategy').value;
+  document.getElementById('evaFormulaRow').style.display = strategy === 'formula' ? '' : 'none';
+}
+
+// Build operand object from structured fields
+function collectStructuredOperand() {
+  switch (selectedOp) {
+    case 'INS': {
+      const rows = document.querySelectorAll('#insFieldsList .structured-kv-row');
+      const obj = {};
+      rows.forEach(row => {
+        const k = row.querySelector('.structured-kv-key').value.trim();
+        const v = row.querySelector('.structured-kv-value').value;
+        if (k) obj[k] = v;
+      });
+      return obj;
+    }
+    case 'DEF': {
+      const rows = document.querySelectorAll('#defFieldsList .structured-kv-row');
+      // If only one row and key is blank, return raw string value
+      if (rows.length === 1) {
+        const k = rows[0].querySelector('.structured-kv-key').value.trim();
+        const v = rows[0].querySelector('.structured-kv-value').value;
+        if (!k) return v;
+      }
+      const obj = {};
+      rows.forEach(row => {
+        const k = row.querySelector('.structured-kv-key').value.trim();
+        const v = row.querySelector('.structured-kv-value').value;
+        if (k) obj[k] = v;
+      });
+      return obj;
+    }
+    case 'CON': {
+      const added = Array.from(document.querySelectorAll('#conAddedList .structured-target-input'))
+        .map(i => i.value.trim()).filter(Boolean);
+      const removed = Array.from(document.querySelectorAll('#conRemovedList .structured-target-input'))
+        .map(i => i.value.trim()).filter(Boolean);
+      const operand = {};
+      if (added.length) operand.added = added;
+      if (removed.length) operand.removed = removed;
+      return operand;
+    }
+    case 'SEG': {
+      return {
+        boundary: document.getElementById('segBoundary').value,
+        reason: document.getElementById('segReason').value
+      };
+    }
+    case 'SYN': {
+      const merge = Array.from(document.querySelectorAll('#synMergeList .structured-target-input'))
+        .map(i => i.value.trim()).filter(Boolean);
+      return {
+        merge: merge,
+        into: document.getElementById('synInto').value.trim()
+      };
+    }
+    case 'EVA': {
+      const operand = { strategy: document.getElementById('evaStrategy').value };
+      if (operand.strategy === 'formula') {
+        operand.formula = document.getElementById('evaFormula').value;
+      }
+      return operand;
+    }
+    case 'REC': {
+      const subOps = [];
+      document.querySelectorAll('#recSubOpsList .rec-subop-row').forEach(row => {
+        const inputs = row.querySelectorAll('.compose-input');
+        let operand = inputs[1].value.trim();
+        try { operand = JSON.parse(operand); } catch {}
+        subOps.push({
+          op: row.querySelector('.structured-select').value,
+          target: inputs[0].value.trim(),
+          operand: operand
+        });
+      });
+      return {
+        contains: subOps,
+        reason: document.getElementById('recReason').value
+      };
+    }
+    default:
+      return null;
   }
 }
 
@@ -1944,15 +2329,12 @@ function updateConLayout() {
     document.getElementById('conTargetsRow').style.display = '';
     document.getElementById('operandRow').style.display = 'none';
   } else {
-    // One-way: show single target + operand (destinations in operand)
+    // One-way: show single target + structured operand
     document.getElementById('targetRow').style.display = '';
     document.getElementById('conTargetsRow').style.display = 'none';
     document.getElementById('operandRow').style.display = '';
     document.getElementById('operandHint').textContent = OP_HINTS.CON_ONE_WAY;
-    const operandEl = document.getElementById('composeOperand');
-    if (!operandEl.value.trim()) {
-      operandEl.value = OP_TEMPLATES.CON || '';
-    }
+    showStructuredOperand('CON');
   }
 }
 
@@ -2046,6 +2428,9 @@ function updateLoggingLabel() {
 
 document.getElementById('loggingToggle').addEventListener('change', updateLoggingLabel);
 
+// Initialize structured operand to match default selected operator (DEF)
+showStructuredOperand('DEF');
+
 async function submitEvent() {
   const resultEl = document.getElementById('composeResult');
   resultEl.className = 'compose-result';
@@ -2099,23 +2484,13 @@ async function submitEvent() {
       await fetchLiveLog();
 
     } else {
-      // Standard path: single target + operand (all ops, and CON one-way)
+      // Standard path: single target + structured operand
       const target = document.getElementById('composeTarget').value.trim();
       if (!target) {
         throw new Error('Target is required');
       }
 
-      let operand;
-      const rawOperand = document.getElementById('composeOperand').value.trim();
-      if (!rawOperand && selectedOp !== 'INS') {
-        operand = null;
-      } else {
-        try {
-          operand = JSON.parse(rawOperand);
-        } catch {
-          operand = rawOperand;
-        }
-      }
+      const operand = collectStructuredOperand();
 
       const event = { op, target, operand };
       if (!logging) event.meta = { intended_op: selectedOp };
@@ -2454,6 +2829,128 @@ function renderGraph() {
   `;
 }
 
+let highlightedNode = null;
+
+function highlightNode(name) {
+  highlightedNode = (highlightedNode === name) ? null : name;
+
+  // Update sidebar selection
+  document.querySelectorAll('.graph-node-item').forEach(el => {
+    const label = el.textContent.trim();
+    const nodeName = name.split('.').pop();
+    el.style.background = (label === nodeName && highlightedNode) ? 'var(--bg3)' : '';
+  });
+
+  // Update SVG: dim non-selected nodes and edges
+  const svg = document.getElementById('graphSvg');
+  svg.querySelectorAll('circle').forEach(circle => {
+    const text = circle.nextElementSibling;
+    if (!highlightedNode) {
+      circle.setAttribute('stroke-opacity', '1');
+      circle.setAttribute('fill-opacity', '1');
+      if (text && text.tagName === 'text') text.setAttribute('fill-opacity', '1');
+    } else {
+      const label = text && text.tagName === 'text' ? text.textContent : '';
+      const isSelected = label === name.split('.').pop();
+      circle.setAttribute('stroke-opacity', isSelected ? '1' : '0.2');
+      circle.setAttribute('fill-opacity', isSelected ? '1' : '0.2');
+      if (text && text.tagName === 'text') text.setAttribute('fill-opacity', isSelected ? '1' : '0.2');
+    }
+  });
+
+  svg.querySelectorAll('path:not([d^="M 0"])').forEach(path => {
+    if (!highlightedNode) {
+      path.setAttribute('stroke-opacity', '0.5');
+    } else {
+      // Check if this edge connects to the highlighted node by position proximity
+      const d = path.getAttribute('d') || '';
+      path.setAttribute('stroke-opacity', '0.1');
+    }
+  });
+
+  // Re-highlight edges connected to the selected node
+  if (highlightedNode) {
+    const conEvents = LOG.filter((e, i) => i <= replayIndex && e.op === 'CON');
+    conEvents.forEach(e => {
+      const source = e.target.split('.').slice(0, 3).join('.');
+      if (e.operand.added) {
+        e.operand.added.forEach(dest => {
+          if (source === highlightedNode || dest === highlightedNode) {
+            // Find matching path and highlight it
+            svg.querySelectorAll('path:not([d^="M 0"])').forEach(path => {
+              path.setAttribute('stroke-opacity', '0.1');
+            });
+          }
+        });
+      }
+    });
+    // Simpler approach: re-render with highlight
+    renderGraphWithHighlight(highlightedNode);
+  }
+}
+
+function renderGraphWithHighlight(selectedNode) {
+  const svg = document.getElementById('graphSvg');
+  const conEvents = LOG.filter((e, i) => i <= replayIndex && e.op === 'CON');
+  const nodesSet = new Set();
+  const edges = [];
+
+  conEvents.forEach(e => {
+    const source = e.target.split('.').slice(0, 3).join('.');
+    if (e.operand.added) {
+      e.operand.added.forEach(dest => {
+        nodesSet.add(source);
+        nodesSet.add(dest);
+        edges.push({ source, dest });
+      });
+    }
+  });
+
+  const nodes = Array.from(nodesSet);
+  const cx = 400, cy = 250, radius = 160;
+  const nodePositions = {};
+  nodes.forEach((n, i) => {
+    const angle = (i / nodes.length) * Math.PI * 2 - Math.PI / 2;
+    nodePositions[n] = { x: cx + Math.cos(angle) * radius, y: cy + Math.sin(angle) * radius };
+  });
+
+  let svgContent = '';
+
+  edges.forEach(e => {
+    const s = nodePositions[e.source];
+    const d = nodePositions[e.dest];
+    if (s && d) {
+      const midX = (s.x + d.x) / 2;
+      const midY = (s.y + d.y) / 2 - 20;
+      const connected = (e.source === selectedNode || e.dest === selectedNode);
+      const opacity = selectedNode ? (connected ? '0.8' : '0.08') : '0.5';
+      svgContent += `<path d="M${s.x},${s.y} Q${midX},${midY} ${d.x},${d.y}" fill="none" stroke="#a78bfa" stroke-width="${connected ? '2' : '1.5'}" stroke-opacity="${opacity}" marker-end="url(#arrow)"/>`;
+    }
+  });
+
+  nodes.forEach((n, i) => {
+    const p = nodePositions[n];
+    const colors = ['#4ade80', '#38bdf8', '#a78bfa', '#34d399', '#fb923c', '#f472b6'];
+    const c = colors[i % colors.length];
+    const label = n.split('.').pop();
+    const isSelected = (n === selectedNode);
+    const opacity = selectedNode ? (isSelected ? '1' : '0.2') : '1';
+    svgContent += `
+      <circle cx="${p.x}" cy="${p.y}" r="${isSelected ? '32' : '28'}" fill="${c}15" stroke="${c}" stroke-width="${isSelected ? '2.5' : '1.5'}" stroke-opacity="${opacity}" fill-opacity="${opacity}"/>
+      <text x="${p.x}" y="${p.y + 1}" text-anchor="middle" dominant-baseline="middle" fill="${c}" font-family="JetBrains Mono, monospace" font-size="${isSelected ? '10' : '9'}" font-weight="600" fill-opacity="${opacity}">${label}</text>
+    `;
+  });
+
+  svg.innerHTML = `
+    <defs>
+      <marker id="arrow" viewBox="0 0 10 10" refX="35" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#a78bfa" fill-opacity="0.6"/>
+      </marker>
+    </defs>
+    ${svgContent}
+  `;
+}
+
 // ── Replay ──
 function updateReplay() {
   const slider = document.getElementById('replaySlider');
@@ -2635,6 +3132,8 @@ async function removeHomeserver(hs) {
 
 // ── Init ──
 updateTopbarUser();
+updateReplaySlider();
+updateStatusBar();
 renderHorizon();
 renderLog();
 
