@@ -982,7 +982,7 @@ body {
 }
 
 /* Connection bar */
-.connection-bar {
+.status-bar {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -993,42 +993,6 @@ body {
   font-size: 10px;
   flex-shrink: 0;
 }
-
-.connection-bar input {
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 3px;
-  padding: 4px 8px;
-  color: var(--text);
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 10px;
-  outline: none;
-  width: 220px;
-}
-
-.connection-bar input:focus { border-color: var(--accent); }
-
-.connection-bar button {
-  padding: 4px 12px;
-  background: var(--bg3);
-  border: 1px solid var(--border);
-  border-radius: 3px;
-  color: var(--text);
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 10px;
-  cursor: pointer;
-}
-
-.connection-bar button:hover { background: var(--bg4); }
-
-.connection-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--danger);
-}
-
-.connection-dot.connected { background: var(--ins); }
 
 /* ── Login Modal ── */
 .login-overlay {
@@ -1353,13 +1317,11 @@ body {
   </div>
 </div>
 
-<!-- Connection Bar -->
-<div class="connection-bar">
-  <div class="connection-dot" id="connDot"></div>
-  <span style="color:var(--text-faint);">Server</span>
-  <input id="serverUrl" value="http://localhost:3000" placeholder="http://localhost:3000">
-  <button onclick="connectToServer()">Connect</button>
-  <span id="connStatus" style="color:var(--text-faint);">disconnected</span>
+<!-- Status Bar -->
+<div class="status-bar" id="localStatusBar">
+  <span style="color:var(--ins);">&#9679;</span>
+  <span style="color:var(--text-faint);">Local</span>
+  <span id="localStatusText" style="color:var(--text-faint);">loading...</span>
 </div>
 
 <!-- Nav Tabs -->
@@ -1653,39 +1615,22 @@ body {
           </div>
         </div>
 
-        <!-- Auth Gating -->
+        <!-- Local Storage -->
         <div class="settings-section">
-          <div class="settings-section-title">Auth Gating</div>
-          <div class="settings-row">
-            <label class="toggle-switch">
-              <input type="checkbox" id="authGatingToggle" onchange="toggleAuthGating()">
-              <span class="toggle-slider"></span>
-            </label>
-            <div>
-              <div class="settings-row-label" id="authGatingLabel">Auth gating disabled — all authenticated users can access</div>
-              <div class="toggle-hint">When enabled, only accounts in the allowlist can access this database</div>
-            </div>
+          <div class="settings-section-title">Local Storage (IndexedDB)</div>
+          <div id="settingsStorage">
+            <div class="settings-session-field"><span class="settings-session-key">Events</span><span class="settings-session-val" id="settingsEventCount">—</span></div>
+            <div class="settings-session-field"><span class="settings-session-key">Current Seq</span><span class="settings-session-val" id="settingsCurrentSeq">—</span></div>
+            <div class="settings-session-field"><span class="settings-session-key">Architecture</span><span class="settings-session-val">Browser-native (no server)</span></div>
           </div>
         </div>
 
-        <!-- Allowed Accounts -->
+        <!-- Danger Zone -->
         <div class="settings-section">
-          <div class="settings-section-title">Allowed Accounts</div>
-          <div id="settingsAccountsList" class="settings-list"></div>
-          <div class="settings-add-row">
-            <input class="settings-add-input" id="addAccountId" placeholder="@user:homeserver.com">
-            <input class="settings-add-input" id="addAccountLabel" placeholder="Label (optional)" style="max-width:160px;">
-            <button class="settings-add-btn" onclick="addAccount()">Add</button>
-          </div>
-        </div>
-
-        <!-- Allowed Homeservers -->
-        <div class="settings-section">
-          <div class="settings-section-title">Allowed Homeservers</div>
-          <div id="settingsHomeserversList" class="settings-list"></div>
-          <div class="settings-add-row">
-            <input class="settings-add-input" id="addHomeserverUrl" placeholder="https://matrix.example.com">
-            <button class="settings-add-btn" onclick="addHomeserver()">Add</button>
+          <div class="settings-section-title" style="color:var(--danger);">Danger Zone</div>
+          <div>
+            <button class="settings-delete-btn" onclick="showDeleteModal()" style="padding:6px 16px;">Delete All Data</button>
+            <div class="toggle-hint" style="margin-top:4px;">Clears all events, state, and graph data from IndexedDB</div>
           </div>
         </div>
 
@@ -1744,16 +1689,160 @@ body {
 </div>
 
 <script>
+// ── IndexedDB Storage Layer ──
+const DB_NAME = 'eo-db';
+const DB_VERSION = 1;
+let db = null;
+
+function openDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = (e) => {
+      const d = e.target.result;
+      if (!d.objectStoreNames.contains('log')) {
+        const logStore = d.createObjectStore('log', { keyPath: 'client_event_id' });
+        logStore.createIndex('seq', 'seq', { unique: true });
+        logStore.createIndex('target', 'target', { unique: false });
+      }
+      if (!d.objectStoreNames.contains('state')) d.createObjectStore('state', { keyPath: 'target' });
+      if (!d.objectStoreNames.contains('graph_fwd')) d.createObjectStore('graph_fwd', { keyPath: 'source' });
+      if (!d.objectStoreNames.contains('graph_rev')) d.createObjectStore('graph_rev', { keyPath: 'target' });
+      if (!d.objectStoreNames.contains('eva')) d.createObjectStore('eva', { keyPath: 'target' });
+      if (!d.objectStoreNames.contains('meta')) d.createObjectStore('meta', { keyPath: 'key' });
+    };
+    req.onsuccess = (e) => { db = e.target.result; resolve(db); };
+    req.onerror = (e) => reject(e.target.error);
+  });
+}
+
+let nextSeq = 1;
+
+async function loadNextSeq() {
+  const tx = db.transaction('meta', 'readonly');
+  const store = tx.objectStore('meta');
+  return new Promise((resolve) => {
+    const req = store.get('next_seq');
+    req.onsuccess = () => { nextSeq = req.result ? req.result.value : 1; resolve(); };
+    req.onerror = () => resolve();
+  });
+}
+
+async function saveNextSeq() {
+  const tx = db.transaction('meta', 'readwrite');
+  tx.objectStore('meta').put({ key: 'next_seq', value: nextSeq });
+}
+
+function generateEventId() {
+  return 'evt_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
+}
+
+async function appendEvent(event) {
+  const ev = {
+    ...event,
+    client_event_id: event.client_event_id || generateEventId(),
+    seq: nextSeq++,
+    ts: event.ts || new Date().toISOString(),
+  };
+  const tx = db.transaction(['log', 'state', 'graph_fwd', 'graph_rev', 'eva', 'meta'], 'readwrite');
+  tx.objectStore('log').add(ev);
+  tx.objectStore('meta').put({ key: 'next_seq', value: nextSeq });
+
+  // Update projected state
+  if (['INS', 'DEF', 'SEG', 'EVA', 'REC', 'SIG'].includes(ev.op)) {
+    const stateStore = tx.objectStore('state');
+    const existing = await idbGet(stateStore, ev.target);
+    let value = ev.operand;
+    if (ev.op === 'DEF' && existing && typeof existing.value === 'object' && existing.value !== null
+        && typeof ev.operand === 'object' && ev.operand !== null && !ev.operand.formula) {
+      value = { ...existing.value, ...ev.operand };
+    }
+    stateStore.put({ target: ev.target, value, last_seq: ev.seq, last_op: ev.op, last_agent: ev.agent, last_ts: ev.ts });
+  }
+
+  if (ev.op === 'CON') {
+    const stateStore = tx.objectStore('state');
+    stateStore.put({ target: ev.target, value: ev.operand, last_seq: ev.seq, last_op: ev.op, last_agent: ev.agent, last_ts: ev.ts });
+
+    // Update graph indexes
+    const fwdStore = tx.objectStore('graph_fwd');
+    const revStore = tx.objectStore('graph_rev');
+    if (ev.operand && ev.operand.added) {
+      for (const dest of ev.operand.added) {
+        const fwd = await idbGet(fwdStore, ev.target);
+        const targets = fwd ? [...new Set([...fwd.targets, dest])] : [dest];
+        fwdStore.put({ source: ev.target, targets });
+
+        const rev = await idbGet(revStore, dest);
+        const sources = rev ? [...new Set([...rev.sources, ev.target])] : [ev.target];
+        revStore.put({ target: dest, sources });
+      }
+    }
+  }
+
+  if (ev.op === 'EVA') {
+    tx.objectStore('eva').put({ target: ev.target, strategy: ev.operand.strategy, formula: ev.operand.formula || null, seq: ev.seq });
+  }
+
+  if (ev.op === 'REC' && ev.operand && ev.operand.contains) {
+    // Process sub-operations within REC frame
+    const stateStore = tx.objectStore('state');
+    for (const subOp of ev.operand.contains) {
+      if (subOp.target && subOp.operand) {
+        stateStore.put({ target: subOp.target, value: subOp.operand, last_seq: ev.seq, last_op: subOp.op || 'DEF', last_agent: ev.agent, last_ts: ev.ts });
+      }
+    }
+  }
+
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve(ev);
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+function idbGet(store, key) {
+  return new Promise((resolve) => {
+    const req = store.get(key);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => resolve(null);
+  });
+}
+
+async function loadAllEvents() {
+  const tx = db.transaction('log', 'readonly');
+  const store = tx.objectStore('log');
+  const idx = store.index('seq');
+  return new Promise((resolve) => {
+    const req = idx.getAll();
+    req.onsuccess = () => resolve(req.result || []);
+    req.onerror = () => resolve([]);
+  });
+}
+
+async function clearAllStores() {
+  const storeNames = ['log', 'state', 'graph_fwd', 'graph_rev', 'eva', 'meta'];
+  const tx = db.transaction(storeNames, 'readwrite');
+  for (const name of storeNames) {
+    tx.objectStore(name).clear();
+  }
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => { nextSeq = 1; resolve(); };
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function getEventCount() {
+  const tx = db.transaction('log', 'readonly');
+  return new Promise((resolve) => {
+    const req = tx.objectStore('log').count();
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => resolve(0);
+  });
+}
+
 // ── Auth State ──
 let matrixToken = localStorage.getItem('eo_matrix_token');
 let matrixUserId = localStorage.getItem('eo_matrix_user_id');
 let matrixDisplayName = localStorage.getItem('eo_matrix_displayname');
-
-function authHeaders() {
-  const h = { 'Content-Type': 'application/json' };
-  if (matrixToken) h['Authorization'] = 'Bearer ' + matrixToken;
-  return h;
-}
 
 function updateTopbarUser() {
   const el = document.getElementById('topbarUser');
@@ -1802,50 +1891,30 @@ async function doLogin() {
   }
 
   try {
-    let loginData;
-
-    // Try the local EO-DB server first, fall back to direct Matrix login
-    if (isConnected) {
-      const loginRes = await fetch(`${serverUrl}/auth/login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ user, password, homeserver }),
-      });
-      loginData = await loginRes.json();
-      if (!loginRes.ok) throw new Error(loginData.error || 'Login failed');
-    } else {
-      // Direct Matrix homeserver login when EO-DB server is not available
-      const loginRes = await fetch(`${homeserver}/_matrix/client/v3/login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          type: 'm.login.password',
-          identifier: { type: 'm.id.user', user },
-          password,
-        }),
-      });
-      loginData = await loginRes.json();
-      if (!loginRes.ok) throw new Error(loginData.errcode ? `${loginData.errcode}: ${loginData.error}` : 'Login failed');
-    }
+    // Direct Matrix homeserver login
+    const loginRes = await fetch(`${homeserver}/_matrix/client/v3/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        type: 'm.login.password',
+        identifier: { type: 'm.id.user', user },
+        password,
+      }),
+    });
+    const loginData = await loginRes.json();
+    if (!loginRes.ok) throw new Error(loginData.errcode ? `${loginData.errcode}: ${loginData.error}` : 'Login failed');
 
     matrixToken = loginData.access_token;
     matrixUserId = loginData.user_id;
     localStorage.setItem('eo_matrix_token', matrixToken);
     localStorage.setItem('eo_matrix_user_id', matrixUserId);
+    localStorage.setItem('eo_matrix_homeserver', homeserver);
 
-    // Fetch profile (displayname) — try server first, then direct Matrix
+    // Fetch profile (displayname) from Matrix directly
     try {
-      let profileData;
-      if (isConnected) {
-        const profileRes = await fetch(`${serverUrl}/auth/profile`, {
-          headers: { 'Authorization': 'Bearer ' + matrixToken },
-        });
-        if (profileRes.ok) profileData = await profileRes.json();
-      } else {
-        const profileRes = await fetch(`${homeserver}/_matrix/client/v3/profile/${encodeURIComponent(matrixUserId)}/displayname`);
-        if (profileRes.ok) profileData = await profileRes.json();
-      }
-      if (profileData) {
+      const profileRes = await fetch(`${homeserver}/_matrix/client/v3/profile/${encodeURIComponent(matrixUserId)}/displayname`);
+      if (profileRes.ok) {
+        const profileData = await profileRes.json();
         matrixDisplayName = profileData.displayname || null;
         if (matrixDisplayName) {
           localStorage.setItem('eo_matrix_displayname', matrixDisplayName);
@@ -1855,7 +1924,6 @@ async function doLogin() {
 
     hideLogin();
     updateTopbarUser();
-    if (isConnected) await fetchLiveLog();
   } catch (e) {
     errEl.textContent = e.message;
     errEl.classList.add('visible');
@@ -1882,73 +1950,17 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-// ── Data (starts with mock, replaced by live data on connect) ──
-let LOG = [
-  { seq:4201, op:"INS", target:"app.tblClients.rec001", operand:{name:"Maria Garcia",status:"active"}, agent:"@intake:amino", ts:"2025-03-27T09:12:00Z" },
-  { seq:4202, op:"INS", target:"app.tblCases.rec101", operand:{type:"H1B",filed:"2025-06-01"}, agent:"@intake:amino", ts:"2025-03-27T09:12:01Z" },
-  { seq:4203, op:"CON", target:"app.tblClients.rec001.fldCases", operand:{added:["app.tblCases.rec101"]}, agent:"@intake:amino", ts:"2025-03-27T09:12:02Z" },
-  { seq:4204, op:"DEF", target:"app.tblCases.rec101.fldStatus", operand:"pending", agent:"@caseworker:amino", ts:"2025-03-27T09:15:00Z" },
-  { seq:4205, op:"DEF", target:"app.tblClients.rec001.fldEmail", operand:"maria@old.com", agent:"@intake:amino", ts:"2025-03-27T09:15:30Z" },
-  { seq:4206, op:"DEF", target:"app.tblClients.rec001.fldEmail", operand:"maria@new.com", agent:"@caseworker:amino", ts:"2025-03-27T10:30:00Z" },
-  { seq:4207, op:"DEF", target:"app.tblCases.rec101.fldStatus", operand:"approved", agent:"@caseworker:amino", ts:"2025-03-27T14:00:00Z" },
-  { seq:4208, op:"EVA", target:"app.tblClients.rec001.fldEmail", operand:{strategy:"latest"}, agent:"@admin:amino", ts:"2025-03-27T14:01:00Z" },
-  { seq:4209, op:"DEF", target:"app.tblCases.rec101.fldDeadline", operand:{formula:"DAYS_UNTIL(filed + 180)"}, agent:"@admin:amino", ts:"2025-03-27T14:05:00Z" },
-  { seq:4210, op:"INS", target:"app.tblClients.rec002", operand:{name:"Carlos Mendez",status:"active"}, agent:"@intake:amino", ts:"2025-03-27T15:00:00Z" },
-  { seq:4211, op:"INS", target:"app.tblCases.rec102", operand:{type:"L1A",filed:"2025-07-15"}, agent:"@intake:amino", ts:"2025-03-27T15:00:01Z" },
-  { seq:4212, op:"CON", target:"app.tblClients.rec002.fldCases", operand:{added:["app.tblCases.rec102"]}, agent:"@intake:amino", ts:"2025-03-27T15:00:02Z" },
-  { seq:4213, op:"SEG", target:"app.tblClients.rec001", operand:{boundary:"exclude",reason:"archived"}, agent:"@admin:amino", ts:"2025-03-27T16:00:00Z" },
-  { seq:4214, op:"DEF", target:"app.tblCases.rec102.fldNotes", operand:"Initial consultation complete", agent:"@caseworker:amino", ts:"2025-03-27T16:30:00Z" },
-  { seq:4215, op:"REC", target:"schema.tblCases", operand:{contains:[{op:"DEF",target:"schema.tblCases.fldUrgency",operand:{type:"select"}}],reason:"Added urgency field"}, agent:"@admin:amino", ts:"2025-03-27T17:00:00Z" }
-];
+// ── Data (loaded from IndexedDB) ──
+let LOG = [];
 
-// ── Server Connection ──
-let serverUrl = 'http://localhost:3000';
-let isConnected = false;
-
-async function connectToServer() {
-  serverUrl = document.getElementById('serverUrl').value.replace(/\/+$/, '');
-  const dot = document.getElementById('connDot');
-  const status = document.getElementById('connStatus');
-
-  try {
-    const res = await fetch(`${serverUrl}/health`);
-    const data = await res.json();
-    if (data.status === 'ok') {
-      isConnected = true;
-      dot.classList.add('connected');
-      status.textContent = `connected — seq ${data.seq}`;
-      status.style.color = 'var(--ins)';
-      await fetchLiveLog();
-    }
-  } catch (e) {
-    isConnected = false;
-    dot.classList.remove('connected');
-    status.textContent = `failed: ${e.message}`;
-    status.style.color = 'var(--danger)';
-  }
-}
-
-async function fetchLiveLog() {
-  try {
-    const res = await fetch(`${serverUrl}/log?limit=10000`, { headers: authHeaders() });
-    const data = await res.json();
-    if (!res.ok) {
-      // If auth required, prompt login
-      if (res.status === 401 || res.status === 403) {
-        if (!matrixToken) showLogin();
-        return;
-      }
-    }
-    if (data.events && data.events.length > 0) {
-      LOG = data.events;
-      replayIndex = LOG.length - 1;
-      updateReplaySlider();
-      refreshAll();
-      updateStatusBar();
-    }
-  } catch (e) {
-    console.error('Failed to fetch log:', e);
-  }
+async function loadFromIndexedDB() {
+  LOG = await loadAllEvents();
+  replayIndex = Math.max(0, LOG.length - 1);
+  updateReplaySlider();
+  refreshAll();
+  updateStatusBar();
+  const statusEl = document.getElementById('localStatusText');
+  if (statusEl) statusEl.textContent = `${LOG.length} events — seq ${nextSeq - 1}`;
 }
 
 function updateStatusBar() {
@@ -2468,9 +2480,7 @@ async function submitEvent() {
   submitBtn.textContent = 'Sending...';
 
   try {
-    if (!isConnected) {
-      throw new Error('Not connected to server. Click Connect first.');
-    }
+    const agent = matrixUserId || '@local:device';
 
     // CON two-way: collect targets and send pairwise events
     if (selectedOp === 'CON' && conDirection === 'two-way') {
@@ -2479,36 +2489,26 @@ async function submitEvent() {
       if (targets.length < 2) {
         throw new Error('Two-way CON requires at least 2 targets');
       }
-      // Check for duplicates
       const unique = new Set(targets);
       if (unique.size !== targets.length) {
         throw new Error('Duplicate targets are not allowed');
       }
 
-      // Send a CON event for each target, connecting it to all others
       const seqs = [];
       for (const source of targets) {
         const dests = targets.filter(t => t !== source);
-        const event = { op, target: source, operand: { added: dests } };
+        const event = { op, target: source, operand: { added: dests }, agent };
         if (!logging) event.meta = { intended_op: selectedOp };
-
-        const res = await fetch(`${serverUrl}/webhook`, {
-          method: 'POST',
-          headers: authHeaders(),
-          body: JSON.stringify(event)
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-        seqs.push(data.seq);
+        const ev = await appendEvent(event);
+        seqs.push(ev.seq);
       }
 
       resultEl.className = 'compose-result success';
       resultEl.textContent = `Two-way CON sent — ${targets.length} events (seq ${seqs.join(', ')})`;
       resultEl.style.display = 'block';
-      await fetchLiveLog();
+      await loadFromIndexedDB();
 
     } else {
-      // Standard path: single target + structured operand
       const target = document.getElementById('composeTarget').value.trim();
       if (!target) {
         throw new Error('Target is required');
@@ -2516,21 +2516,14 @@ async function submitEvent() {
 
       const operand = collectStructuredOperand();
 
-      const event = { op, target, operand };
+      const event = { op, target, operand, agent };
       if (!logging) event.meta = { intended_op: selectedOp };
-
-      const res = await fetch(`${serverUrl}/webhook`, {
-        method: 'POST',
-        headers: authHeaders(),
-        body: JSON.stringify(event)
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      const ev = await appendEvent(event);
 
       resultEl.className = 'compose-result success';
-      resultEl.textContent = `Event sent — seq ${data.seq}`;
+      resultEl.textContent = `Event saved — seq ${ev.seq}`;
       resultEl.style.display = 'block';
-      await fetchLiveLog();
+      await loadFromIndexedDB();
     }
 
   } catch (e) {
@@ -2669,28 +2662,18 @@ async function executeDeleteAll() {
     document.getElementById('deleteError').textContent = 'Type DELETE to confirm.';
     return;
   }
-  if (!isConnected) {
-    document.getElementById('deleteError').textContent = 'Not connected to server.';
-    return;
-  }
   try {
-    const res = await fetch(`${serverUrl}/admin/reset`, {
-      method: 'DELETE',
-      headers: authHeaders(),
-    });
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      document.getElementById('deleteError').textContent = data.error || `Server error ${res.status}`;
-      return;
-    }
-    const data = await res.json();
+    const oldCount = LOG.length;
+    await clearAllStores();
     LOG = [];
     replayIndex = 0;
     updateReplaySlider();
     refreshAll();
     updateStatusBar();
     hideDeleteModal();
-    alert(`Database cleared — ${data.deleted} entries removed.`);
+    const statusEl = document.getElementById('localStatusText');
+    if (statusEl) statusEl.textContent = '0 events — seq 0';
+    alert(`Database cleared — ${oldCount} events removed from IndexedDB.`);
   } catch (e) {
     document.getElementById('deleteError').textContent = e.message;
   }
@@ -2989,15 +2972,16 @@ function updateReplay() {
 }
 
 // ── Settings ──
-let settingsConfig = null;
 
 async function loadSettings() {
   // Update session info
   const sessionEl = document.getElementById('settingsSession');
   if (matrixToken && matrixUserId) {
+    const hs = localStorage.getItem('eo_matrix_homeserver') || '—';
     sessionEl.innerHTML = `
       <div class="settings-session-field"><span class="settings-session-key">User ID</span><span class="settings-session-val">${matrixUserId}</span></div>
       <div class="settings-session-field"><span class="settings-session-key">Display Name</span><span class="settings-session-val">${matrixDisplayName || '—'}</span></div>
+      <div class="settings-session-field"><span class="settings-session-key">Homeserver</span><span class="settings-session-val">${hs}</span></div>
       <div style="margin-top:12px;">
         <button class="topbar-logout" onclick="doLogout()" style="padding:6px 12px;">Sign Out</button>
       </div>
@@ -3011,158 +2995,27 @@ async function loadSettings() {
     `;
   }
 
-  if (!isConnected || !matrixToken) return;
-
-  try {
-    const res = await fetch(`${serverUrl}/admin/matrix-auth`, { headers: authHeaders() });
-    if (!res.ok) return;
-    settingsConfig = await res.json();
-    renderSettingsConfig();
-  } catch (e) {
-    console.error('Failed to load settings:', e);
-  }
-}
-
-function renderSettingsConfig() {
-  if (!settingsConfig) return;
-
-  // Auth gating toggle
-  document.getElementById('authGatingToggle').checked = settingsConfig.enabled;
-  document.getElementById('authGatingLabel').textContent = settingsConfig.enabled
-    ? 'Auth gating enabled — only allowlisted accounts can access'
-    : 'Auth gating disabled — all authenticated users can access';
-
-  // Allowed accounts
-  const accountsEl = document.getElementById('settingsAccountsList');
-  if (settingsConfig.allowed_accounts.length === 0) {
-    accountsEl.innerHTML = '<div class="settings-empty">No accounts in allowlist</div>';
-  } else {
-    accountsEl.innerHTML = settingsConfig.allowed_accounts.map(a => `
-      <div class="settings-list-item">
-        <div class="settings-list-item-info">
-          <span class="settings-list-item-id">${a.user_id}</span>
-          <span class="settings-list-item-meta">${a.label ? a.label + ' — ' : ''}added ${a.added_at.slice(0,10)} by ${a.added_by}</span>
-        </div>
-        <button class="settings-delete-btn" onclick="removeAccount('${a.user_id}')">Remove</button>
-      </div>
-    `).join('');
-  }
-
-  // Allowed homeservers
-  const hsEl = document.getElementById('settingsHomeserversList');
-  if (settingsConfig.allowed_homeservers.length === 0) {
-    hsEl.innerHTML = '<div class="settings-empty">No homeserver restrictions (all accepted)</div>';
-  } else {
-    hsEl.innerHTML = settingsConfig.allowed_homeservers.map(h => `
-      <div class="settings-list-item">
-        <span class="settings-list-item-id">${h}</span>
-        <button class="settings-delete-btn" onclick="removeHomeserver('${h}')">Remove</button>
-      </div>
-    `).join('');
-  }
-}
-
-async function toggleAuthGating() {
-  const enabled = document.getElementById('authGatingToggle').checked;
-  try {
-    const res = await fetch(`${serverUrl}/admin/matrix-auth/enabled`, {
-      method: 'PUT',
-      headers: authHeaders(),
-      body: JSON.stringify({ enabled }),
-    });
-    if (res.ok) {
-      settingsConfig = await res.json();
-      renderSettingsConfig();
-    }
-  } catch (e) {
-    console.error('Failed to toggle auth gating:', e);
-  }
-}
-
-async function addAccount() {
-  const userId = document.getElementById('addAccountId').value.trim();
-  const label = document.getElementById('addAccountLabel').value.trim();
-  if (!userId) return;
-
-  try {
-    const res = await fetch(`${serverUrl}/admin/matrix-auth/accounts`, {
-      method: 'POST',
-      headers: authHeaders(),
-      body: JSON.stringify({ user_id: userId, label: label || undefined }),
-    });
-    if (res.ok) {
-      settingsConfig = await res.json();
-      renderSettingsConfig();
-      document.getElementById('addAccountId').value = '';
-      document.getElementById('addAccountLabel').value = '';
-    } else {
-      const data = await res.json();
-      alert(data.error || 'Failed to add account');
-    }
-  } catch (e) {
-    console.error('Failed to add account:', e);
-  }
-}
-
-async function removeAccount(userId) {
-  try {
-    const res = await fetch(`${serverUrl}/admin/matrix-auth/accounts/${encodeURIComponent(userId)}`, {
-      method: 'DELETE',
-      headers: authHeaders(),
-    });
-    if (res.ok) {
-      settingsConfig = await res.json();
-      renderSettingsConfig();
-    }
-  } catch (e) {
-    console.error('Failed to remove account:', e);
-  }
-}
-
-async function addHomeserver() {
-  const hs = document.getElementById('addHomeserverUrl').value.trim();
-  if (!hs) return;
-
-  try {
-    const res = await fetch(`${serverUrl}/admin/matrix-auth/homeservers`, {
-      method: 'POST',
-      headers: authHeaders(),
-      body: JSON.stringify({ homeserver: hs }),
-    });
-    if (res.ok) {
-      settingsConfig = await res.json();
-      renderSettingsConfig();
-      document.getElementById('addHomeserverUrl').value = '';
-    }
-  } catch (e) {
-    console.error('Failed to add homeserver:', e);
-  }
-}
-
-async function removeHomeserver(hs) {
-  try {
-    const res = await fetch(`${serverUrl}/admin/matrix-auth/homeservers/${encodeURIComponent(hs)}`, {
-      method: 'DELETE',
-      headers: authHeaders(),
-    });
-    if (res.ok) {
-      settingsConfig = await res.json();
-      renderSettingsConfig();
-    }
-  } catch (e) {
-    console.error('Failed to remove homeserver:', e);
-  }
+  // Update storage info
+  const countEl = document.getElementById('settingsEventCount');
+  const seqEl = document.getElementById('settingsCurrentSeq');
+  if (countEl) countEl.textContent = LOG.length;
+  if (seqEl) seqEl.textContent = nextSeq - 1;
 }
 
 // ── Init ──
-updateTopbarUser();
-updateReplaySlider();
-updateStatusBar();
-renderHorizon();
-renderLog();
-
-// Auto-connect on load
-connectToServer();
+(async function init() {
+  try {
+    await openDB();
+    await loadNextSeq();
+    await loadFromIndexedDB();
+  } catch (e) {
+    console.error('IndexedDB init failed:', e);
+  }
+  updateTopbarUser();
+  updateStatusBar();
+  renderHorizon();
+  renderLog();
+})();
 </script>
 </body>
 </html>
