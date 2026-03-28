@@ -1809,7 +1809,7 @@ async function doLogin() {
       const loginRes = await fetch(`${serverUrl}/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ user, password }),
+        body: JSON.stringify({ user, password, homeserver }),
       });
       loginData = await loginRes.json();
       if (!loginRes.ok) throw new Error(loginData.error || 'Login failed');

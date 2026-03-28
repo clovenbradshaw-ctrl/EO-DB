@@ -9,11 +9,16 @@ export function registerAuthRoutes(app: FastifyInstance, homeserver: string): vo
 
   // POST /auth/login — proxy to Matrix login endpoint
   app.post('/auth/login', async (request: FastifyRequest, reply: FastifyReply) => {
-    const { user, password } = request.body as { user?: string; password?: string };
+    const { user, password, homeserver: clientHomeserver } = request.body as {
+      user?: string; password?: string; homeserver?: string;
+    };
 
     if (!user || !password) {
       return reply.code(400).send({ error: 'Fields "user" and "password" are required' });
     }
+
+    // Use client-provided homeserver if given, otherwise fall back to default
+    const targetHomeserver = (clientHomeserver || homeserver).replace(/\/+$/, '');
 
     const loginBody = {
       type: 'm.login.password',
@@ -22,7 +27,7 @@ export function registerAuthRoutes(app: FastifyInstance, homeserver: string): vo
     };
 
     try {
-      const res = await fetch(`${homeserver}/_matrix/client/v3/login`, {
+      const res = await fetch(`${targetHomeserver}/_matrix/client/v3/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(loginBody),
@@ -39,7 +44,7 @@ export function registerAuthRoutes(app: FastifyInstance, homeserver: string): vo
         access_token: data.access_token,
         user_id: data.user_id,
         device_id: data.device_id,
-        homeserver,
+        homeserver: targetHomeserver,
       });
     } catch (e: any) {
       return reply.code(502).send({ error: `Cannot reach homeserver: ${e.message}` });
