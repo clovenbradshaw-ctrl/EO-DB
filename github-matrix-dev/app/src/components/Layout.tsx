@@ -9,6 +9,7 @@ import { RecordView } from './RecordView';
 import { ConnectionStatus, useConnectionState } from './ConnectionStatus';
 import { ErrorBoundary } from './ErrorBoundary';
 import { SyncProgress } from './SyncProgress';
+import { AirtableSettings } from './AirtableSettings';
 
 interface LayoutProps {
   session: MatrixSession;
@@ -21,6 +22,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
   const ready = useEoStore((s) => s.ready);
   const lastSeq = useEoStore((s) => s.lastSeq);
   const [selected, setSelected] = useState<string | null>(null);
+  const [showSettings, setShowSettings] = useState(false);
   const connectionState = useConnectionState();
 
   // Initialize encrypted store on mount
@@ -60,6 +62,16 @@ export function Layout({ session, onLogout }: LayoutProps) {
         <div style={styles.headerRight}>
           <ConnectionStatus state={connectionState} />
           <div style={styles.seqBadge}>seq: {lastSeq}</div>
+          <button
+            onClick={() => setShowSettings(true)}
+            style={styles.settingsBtn}
+            title="Airtable Settings"
+          >
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="8" cy="8" r="2.5" />
+              <path d="M8 1.5v1.2M8 13.3v1.2M3.4 3.4l.85.85M11.75 11.75l.85.85M1.5 8h1.2M13.3 8h1.2M3.4 12.6l.85-.85M11.75 4.25l.85-.85" />
+            </svg>
+          </button>
           <span style={styles.user}>{session.userId}</span>
           <button onClick={handleLogout} style={styles.logoutBtn}>Sign out</button>
         </div>
@@ -87,6 +99,9 @@ export function Layout({ session, onLogout }: LayoutProps) {
           </ErrorBoundary>
         </main>
       </div>
+      {showSettings && (
+        <AirtableSettings session={session} onClose={() => setShowSettings(false)} />
+      )}
     </div>
   );
 }
@@ -127,6 +142,18 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: 4,
     background: '#f4f3f0',
     border: '1px solid #e5e2dd',
+  },
+  settingsBtn: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: 32,
+    height: 32,
+    border: '1px solid #e5e2dd',
+    borderRadius: 6,
+    background: 'transparent',
+    color: '#7a756d',
+    cursor: 'pointer',
   },
   user: { fontSize: 12, color: '#7a756d' },
   logoutBtn: {
