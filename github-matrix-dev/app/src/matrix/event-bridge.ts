@@ -46,6 +46,7 @@ export function matrixEventToEo(matrixEvent: MatrixEvent): EoEventInput {
     operand: content.operand,
     agent: matrixEvent.getSender()!,
     ts: content.ts || new Date(matrixEvent.getTs()).toISOString(),
+    acquired_ts: new Date(matrixEvent.getTs()).toISOString(),
     client_event_id: content.client_event_id,
     meta: content.meta,
   };
