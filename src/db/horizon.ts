@@ -7,6 +7,9 @@ import type {
   EoState, EvaRegistration, HorizonResponse, GroundEntry, SignalEntry,
   NearbyEntry, GovernanceEntry, LoggableOperator, AncestryEntry,
 } from './types.js';
+import { isEncryptedOperand } from './crypto-types.js';
+import type { LocalKeyring } from './crypto-types.js';
+import { decryptOperand, getKeyById } from '../crypto/segment-keys.js';
 
 export interface HorizonOpts {
   prefix?: boolean;
@@ -447,4 +450,92 @@ async function detectSignals(db: EoDb, target: string): Promise<SignalEntry[]> {
   });
 
   return signals;
+}
+
+// ─── Decryption Wrapper ───────────────────────────────────────────
+// Transparently decrypt encrypted operands in a HorizonResponse.
+// If the key is missing, replace the value with a redacted marker.
+
+/**
+ * Decrypt any EncryptedOperand values found in a HorizonResponse.
+ * Operates on a single response or an array of responses.
+ * Values whose key is not in the keyring are replaced with a redacted marker
+ * that preserves the key_id and scope for discoverability.
+ */
+export async function decryptHorizonResponse(
+  response: HorizonResponse | HorizonResponse[] | null,
+  keyring: LocalKeyring,
+): Promise<HorizonResponse | HorizonResponse[] | null> {
+  if (response === null) return null;
+
+  if (Array.isArray(response)) {
+    return Promise.all(response.map(r => decryptSingleResponse(r, keyring)));
+  }
+
+  return decryptSingleResponse(response, keyring);
+}
+
+async function decryptSingleResponse(
+  response: HorizonResponse,
+  keyring: LocalKeyring,
+): Promise<HorizonResponse> {
+  const result = { ...response };
+
+  // Decrypt figure value
+  if (result.figure) {
+    result.figure = { ...result.figure };
+    result.figure.value = await decryptValueOrRedact(result.figure.value, keyring);
+  }
+
+  // Decrypt ancestry figures
+  if (result.ancestry) {
+    result.ancestry = await Promise.all(
+      result.ancestry.map(async (entry) => ({
+        ...entry,
+        figure: entry.figure
+          ? { ...entry.figure, value: await decryptValueOrRedact(entry.figure.value, keyring) }
+          : null,
+      })),
+    );
+  }
+
+  // Decrypt ground values
+  if (result.grounds) {
+    result.grounds = await Promise.all(
+      result.grounds.map(async (g) => ({
+        ...g,
+        value: await decryptValueOrRedact(g.value, keyring),
+      })),
+    );
+  }
+
+  return result;
+}
+
+async function decryptValueOrRedact(value: any, keyring: LocalKeyring): Promise<any> {
+  if (!isEncryptedOperand(value)) return value;
+
+  const entry = getKeyById(keyring, value.key_id);
+  if (!entry) {
+    // Key not available — return redacted marker with metadata
+    return {
+      _encrypted: true,
+      _redacted: true,
+      key_id: value.key_id,
+      key_version: value.key_version,
+    };
+  }
+
+  try {
+    return await decryptOperand(entry.key, value);
+  } catch {
+    // Decryption failed (wrong key version, corrupted data, etc.)
+    return {
+      _encrypted: true,
+      _redacted: true,
+      _error: 'decryption_failed',
+      key_id: value.key_id,
+      key_version: value.key_version,
+    };
+  }
 }

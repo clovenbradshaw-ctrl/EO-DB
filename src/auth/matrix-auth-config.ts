@@ -84,6 +84,8 @@ export interface UserRulesBucket {
   updated_at: string;
   /** Who last modified this bucket */
   updated_by: string;
+  /** Segment key IDs that members of this bucket should receive */
+  segment_key_ids?: string[];
 }
 
 /** Persistent configuration for Matrix auth on this database instance. */
@@ -111,16 +113,21 @@ export interface MatrixAuthConfig {
   allowed_homeservers: string[];
 
   /**
-   * Future: encryption settings for data-at-rest using Matrix auth.
-   * Structured now so the schema is stable when encryption lands.
+   * Encryption settings for segment-key based field encryption.
+   * When enabled, SEG boundaries with `boundary: 'encrypt'` activate
+   * waterfall encryption for everything under that target prefix.
    */
   encryption: {
-    /** Whether data encryption via Matrix keys is active */
+    /** Whether segment-key encryption is active */
     enabled: boolean;
-    /** Algorithm identifier for future use (e.g. "m.megolm.v1.aes-sha2") */
+    /** Algorithm identifier (default: "aes-256-gcm") */
     algorithm?: string;
     /** Key version / rotation counter */
     key_version?: number;
+    /** Registered segment key metadata (no raw key material — keys live in the key room) */
+    segment_keys?: import('../db/crypto-types.js').SegmentKey[];
+    /** Target prefixes that currently have active encryption boundaries */
+    encrypted_prefixes?: string[];
   };
   /** Last time this config was modified */
   updated_at: string;
