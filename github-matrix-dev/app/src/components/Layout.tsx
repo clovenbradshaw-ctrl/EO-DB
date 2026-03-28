@@ -1,9 +1,11 @@
 import { useState, useEffect } from 'react';
-import { logout, type MatrixSession } from '../matrix/client';
+import { logout, createMatrixClient, type MatrixSession } from '../matrix/client';
 import { useEoStore } from '../store/eo-store';
 import { createIdb } from '../db/idb';
 import { createStore } from '../db/encrypted-store';
 import { deriveKey } from '../lib/crypto';
+import { SyncManager } from '../matrix/sync-manager';
+import { resolveDataRoom } from '../matrix/event-bridge';
 import { ClientList } from './ClientList';
 import { RecordView } from './RecordView';
 import { ConnectionStatus, useConnectionState } from './ConnectionStatus';
@@ -27,23 +29,55 @@ export function Layout({ session, onLogout }: LayoutProps) {
   const [activeView, setActiveView] = useState<'records' | 'sync'>('records');
   const connectionState = useConnectionState();
 
-  // Initialize encrypted store on mount
+  // Initialize encrypted store and sync from Matrix on mount
   useEffect(() => {
     let mounted = true;
+    let matrixClient: ReturnType<typeof createMatrixClient> | null = null;
 
     async function setup() {
       const idb = await createIdb();
       const key = await deriveKey(session.userId, session.deviceId, session.accessToken);
       const store = createStore(idb, key);
-      if (mounted) {
-        await init(store);
-      }
+      if (!mounted) return;
+
+      await init(store);
+
+      // Start Matrix client and sync data from the room
+      matrixClient = createMatrixClient(session);
+      await matrixClient.startClient({ initialSyncLimit: 0 });
+
+      // Wait for initial sync to complete so rooms are available
+      await new Promise<void>((resolve) => {
+        if (matrixClient!.isInitialSyncComplete()) {
+          resolve();
+        } else {
+          matrixClient!.once('sync' as any, (state: string) => {
+            if (state === 'PREPARED') resolve();
+          });
+        }
+      });
+
+      if (!mounted) { matrixClient.stopClient(); return; }
+
+      const roomId = await resolveDataRoom(matrixClient);
+      const syncManager = new SyncManager(matrixClient, roomId, store, (event) => {
+        // Update the Zustand store as events are replayed
+        useEoStore.setState((s) => ({
+          recentEvents: [...s.recentEvents.slice(-99), event],
+          lastSeq: event.seq,
+        }));
+      });
+      await syncManager.initialize();
+
+      // Make sync manager available for dispatching events to Matrix
+      useEoStore.getState().setSyncManager(syncManager);
     }
 
     setup();
 
     return () => {
       mounted = false;
+      if (matrixClient) matrixClient.stopClient();
     };
   }, [session, init]);
 

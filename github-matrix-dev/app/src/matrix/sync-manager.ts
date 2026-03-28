@@ -12,6 +12,7 @@ import type { EoStore } from '../db/encrypted-store';
 import type { EoEventInput } from '../db/types';
 import { processEvent } from '../db/fold';
 import { EO_EVENT_TYPE, matrixEventToEo, sendEoEvent } from './event-bridge';
+import { findLatestSnapshot, applySnapshot } from './snapshot';
 
 export class SyncManager {
   private client: MatrixClient;
@@ -33,9 +34,26 @@ export class SyncManager {
 
   /**
    * Initialize sync — call after login and store setup.
+   *
+   * On a fresh device (seq === 0), tries snapshot hydration first for speed,
+   * then replays any events after the snapshot from room history.
    */
   async initialize(): Promise<void> {
-    // Sync room history from last known position
+    const currentSeq = await this.store.getCurrentSeq();
+
+    // On a fresh device, try snapshot hydration first
+    if (currentSeq === 0) {
+      try {
+        const snap = await findLatestSnapshot(this.client, this.roomId);
+        if (snap) {
+          await applySnapshot(this.client, this.store, snap.mxc);
+        }
+      } catch {
+        // Snapshot hydration failed — fall through to full history sync
+      }
+    }
+
+    // Sync room history (replays all events, or just post-snapshot events via dedup)
     await this.syncRoomHistory();
 
     // Listen for new room events in real-time
@@ -99,14 +117,30 @@ export class SyncManager {
 
   /**
    * Paginate room history from last known sync token.
+   * On a fresh device (empty IndexedDB), paginates backwards through the
+   * full room timeline so all events are replayed into the local store.
    */
   private async syncRoomHistory(): Promise<void> {
     const room = this.client.getRoom(this.roomId);
     if (!room) return;
 
+    // Paginate backwards until we have the full timeline
     const timeline = room.getLiveTimeline();
-    const events = timeline.getEvents();
+    let canPaginate = true;
+    while (canPaginate) {
+      try {
+        canPaginate = await this.client.paginateEventTimeline(timeline, {
+          backwards: true,
+          limit: 100,
+        });
+      } catch {
+        // pagination failed (e.g. rate limit) — process what we have
+        break;
+      }
+    }
 
+    // Now process all events in chronological order
+    const events = timeline.getEvents();
     for (const event of events) {
       if (event.getType() !== EO_EVENT_TYPE) continue;
       await this.processIncomingEvent(event);

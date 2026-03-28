@@ -5,10 +5,13 @@ import { processEvent } from '../db/fold';
 import { horizonGet, type HorizonOpts } from '../db/horizon';
 import { getState, getStateByPrefix } from '../db/state';
 import { readLogSince } from '../db/log';
+import type { SyncManager } from '../matrix/sync-manager';
 
 interface EoDbState {
   /** The encrypted store instance (set after login + key derivation) */
   store: EoStore | null;
+  /** The sync manager for sending events to Matrix */
+  syncManager: SyncManager | null;
   /** Recent events processed through the fold */
   recentEvents: EoEvent[];
   /** Current sequence number */
@@ -19,7 +22,10 @@ interface EoDbState {
   /** Initialize the store with an encrypted store instance */
   init: (store: EoStore) => Promise<void>;
 
-  /** Process an event through the fold */
+  /** Set the sync manager after it's initialized */
+  setSyncManager: (syncManager: SyncManager) => void;
+
+  /** Process an event through the fold and sync to Matrix */
   dispatch: (event: EoEventInput) => Promise<number>;
 
   /** Read the Horizon for a target */
@@ -37,6 +43,7 @@ interface EoDbState {
 
 export const useEoStore = create<EoDbState>((set, get) => ({
   store: null,
+  syncManager: null,
   recentEvents: [],
   lastSeq: 0,
   ready: false,
@@ -46,10 +53,21 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     set({ store, lastSeq, ready: true, recentEvents: [] });
   },
 
+  setSyncManager(syncManager: SyncManager) {
+    set({ syncManager });
+  },
+
   async dispatch(event: EoEventInput) {
-    const { store } = get();
+    const { store, syncManager } = get();
     if (!store) throw new Error('Store not initialized');
 
+    // If sync manager is available, route through it (fold + send to Matrix)
+    if (syncManager) {
+      const seq = await syncManager.processLocalEvent(event);
+      return seq;
+    }
+
+    // Fallback: fold locally only (no Matrix sync)
     const seq = await processEvent(store, event, (fullEvent) => {
       set((state) => ({
         recentEvents: [...state.recentEvents.slice(-99), fullEvent],
@@ -81,6 +99,6 @@ export const useEoStore = create<EoDbState>((set, get) => ({
   teardown() {
     const { store } = get();
     if (store) store.close();
-    set({ store: null, ready: false, recentEvents: [], lastSeq: 0 });
+    set({ store: null, syncManager: null, ready: false, recentEvents: [], lastSeq: 0 });
   },
 }));
