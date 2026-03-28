@@ -11,7 +11,7 @@
 import { openDB, type IDBPDatabase } from 'idb';
 
 const DB_NAME = 'eo-db';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE_NAME = 'kv';
 
 export type EoIdb = IDBPDatabase;
@@ -19,9 +19,21 @@ export type EoIdb = IDBPDatabase;
 export async function createIdb(): Promise<EoIdb> {
   return openDB(DB_NAME, DB_VERSION, {
     upgrade(db) {
+      // kv store used by the modern encrypted-store layer
       if (!db.objectStoreNames.contains(STORE_NAME)) {
         db.createObjectStore(STORE_NAME);
       }
+      // Legacy stores used by index.html compose UI
+      if (!db.objectStoreNames.contains('log')) {
+        const logStore = db.createObjectStore('log', { keyPath: 'client_event_id' });
+        logStore.createIndex('seq', 'seq', { unique: true });
+        logStore.createIndex('target', 'target', { unique: false });
+      }
+      if (!db.objectStoreNames.contains('state')) db.createObjectStore('state', { keyPath: 'target' });
+      if (!db.objectStoreNames.contains('graph_fwd')) db.createObjectStore('graph_fwd', { keyPath: 'source' });
+      if (!db.objectStoreNames.contains('graph_rev')) db.createObjectStore('graph_rev', { keyPath: 'target' });
+      if (!db.objectStoreNames.contains('eva')) db.createObjectStore('eva', { keyPath: 'target' });
+      if (!db.objectStoreNames.contains('meta')) db.createObjectStore('meta', { keyPath: 'key' });
     },
   });
 }
