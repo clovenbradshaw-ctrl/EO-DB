@@ -146,7 +146,7 @@ const CONFIG_KEY = 'meta:matrix_auth_config';
 
 function defaultConfig(): MatrixAuthConfig {
   return {
-    enabled: false,
+    enabled: true,
     server_rules: [],
     allowed_accounts: [],
     blacklisted_accounts: [],

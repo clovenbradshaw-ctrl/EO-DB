@@ -6,6 +6,7 @@ interface LoginProps {
 }
 
 export function Login({ onLogin }: LoginProps) {
+  const [homeserver, setHomeserver] = useState('app.aminoimmigration.com');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
@@ -17,7 +18,7 @@ export function Login({ onLogin }: LoginProps) {
     setLoading(true);
 
     try {
-      const session = await login(username, password);
+      const session = await login(homeserver, username, password);
       onLogin(session);
     } catch (err: any) {
       setError(err.data?.error || err.message || 'Login failed');
@@ -32,6 +33,14 @@ export function Login({ onLogin }: LoginProps) {
         <h1 style={styles.title}>EO///DB</h1>
         <p style={styles.subtitle}>Decentralized Database</p>
         <form onSubmit={handleSubmit} style={styles.form}>
+          <input
+            type="text"
+            placeholder="Homeserver (e.g. matrix.org)"
+            value={homeserver}
+            onChange={(e) => setHomeserver(e.target.value)}
+            disabled={loading}
+            style={{ ...styles.input, fontSize: 13, color: '#aaa' }}
+          />
           <input
             type="text"
             placeholder="Matrix username"
@@ -51,11 +60,11 @@ export function Login({ onLogin }: LoginProps) {
             autoComplete="current-password"
           />
           {error && <div style={styles.error}>{error}</div>}
-          <button type="submit" disabled={loading || !username || !password} style={styles.button}>
+          <button type="submit" disabled={loading || !homeserver || !username || !password} style={styles.button}>
             {loading ? 'Signing in...' : 'Sign in'}
           </button>
         </form>
-        <p style={styles.server}>app.aminoimmigration.com</p>
+        <p style={styles.server}>Direct Matrix connection</p>
       </div>
     </div>
   );

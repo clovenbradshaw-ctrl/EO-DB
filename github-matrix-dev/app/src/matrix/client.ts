@@ -1,20 +1,33 @@
 import * as sdk from 'matrix-js-sdk';
 
-const HOMESERVER = 'https://app.aminoimmigration.com';
 const SESSION_KEY = 'eo-db-session';
 
 export interface MatrixSession {
   userId: string;
   deviceId: string;
   accessToken: string;
+  homeserver: string;
 }
 
 /**
- * Authenticate against the Matrix homeserver.
+ * Normalize a homeserver input into a full base URL.
+ * Accepts "matrix.org", "https://matrix.org", "matrix.org:8448", etc.
+ */
+function normalizeHomeserver(input: string): string {
+  let url = input.trim();
+  if (!/^https?:\/\//i.test(url)) {
+    url = `https://${url}`;
+  }
+  return url.replace(/\/+$/, '');
+}
+
+/**
+ * Authenticate against the given Matrix homeserver.
  * Returns a session object stored in localStorage for persistence.
  */
-export async function login(username: string, password: string): Promise<MatrixSession> {
-  const client = sdk.createClient({ baseUrl: HOMESERVER });
+export async function login(homeserver: string, username: string, password: string): Promise<MatrixSession> {
+  const baseUrl = normalizeHomeserver(homeserver);
+  const client = sdk.createClient({ baseUrl });
 
   const response = await client.login('m.login.password', {
     user: username,
@@ -25,6 +38,7 @@ export async function login(username: string, password: string): Promise<MatrixS
     userId: response.user_id,
     deviceId: response.device_id,
     accessToken: response.access_token,
+    homeserver: baseUrl,
   };
 
   localStorage.setItem(SESSION_KEY, JSON.stringify(session));
@@ -38,7 +52,13 @@ export function restoreSession(): MatrixSession | null {
   const raw = localStorage.getItem(SESSION_KEY);
   if (!raw) return null;
   try {
-    return JSON.parse(raw) as MatrixSession;
+    const parsed = JSON.parse(raw);
+    if (!parsed.homeserver) {
+      // Old session without homeserver — force re-login
+      localStorage.removeItem(SESSION_KEY);
+      return null;
+    }
+    return parsed as MatrixSession;
   } catch {
     return null;
   }
@@ -57,7 +77,7 @@ export function logout(): void {
  */
 export function createMatrixClient(session: MatrixSession): sdk.MatrixClient {
   return sdk.createClient({
-    baseUrl: HOMESERVER,
+    baseUrl: session.homeserver,
     userId: session.userId,
     deviceId: session.deviceId,
     accessToken: session.accessToken,

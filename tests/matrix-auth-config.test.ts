@@ -50,7 +50,7 @@ afterEach(async () => {
 describe('getMatrixAuthConfig', () => {
   it('returns default config when none exists', async () => {
     const config = await getMatrixAuthConfig(db);
-    expect(config.enabled).toBe(false);
+    expect(config.enabled).toBe(true);
     expect(config.allowed_accounts).toEqual([]);
     expect(config.allowed_homeservers).toEqual([]);
     expect(config.server_rules).toEqual([]);
@@ -292,6 +292,7 @@ describe('accessSatisfies', () => {
 
 describe('checkAccess', () => {
   it('allows everything when auth is disabled', async () => {
+    await setMatrixAuthEnabled(db, false, '@admin:example.com');
     const result = await checkAccess(db, '@anyone:anywhere.com');
     expect(result.allowed).toBe(true);
     expect(result.access).toBe('read_write');
@@ -413,6 +414,7 @@ describe('checkAccess', () => {
 
 describe('isAccountAllowed (backwards compatibility)', () => {
   it('allows all accounts when gating is disabled', async () => {
+    await setMatrixAuthEnabled(db, false, '@admin:example.com');
     const allowed = await isAccountAllowed(db, '@anyone:example.com');
     expect(allowed).toBe(true);
   });
