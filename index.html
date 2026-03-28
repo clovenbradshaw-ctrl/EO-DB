@@ -1703,7 +1703,7 @@ body {
 
     <div class="login-field">
       <label>Homeserver</label>
-      <input id="loginHomeserver" placeholder="https://matrix.example.com" value="">
+      <input id="loginHomeserver" placeholder="https://matrix.example.com" value="https://app.aminoimmigration.com">
     </div>
     <div class="login-field">
       <label>Username</label>
@@ -1791,6 +1791,7 @@ async function doLogin() {
 
   const user = document.getElementById('loginUser').value.trim();
   const password = document.getElementById('loginPassword').value;
+  const homeserver = (document.getElementById('loginHomeserver').value.trim() || 'https://app.aminoimmigration.com').replace(/\/+$/, '');
 
   if (!user || !password) {
     errEl.textContent = 'Username and password are required';
@@ -1801,27 +1802,50 @@ async function doLogin() {
   }
 
   try {
-    // Step 1: Login
-    const loginRes = await fetch(`${serverUrl}/auth/login`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ user, password }),
-    });
-    const loginData = await loginRes.json();
-    if (!loginRes.ok) throw new Error(loginData.error || 'Login failed');
+    let loginData;
+
+    // Try the local EO-DB server first, fall back to direct Matrix login
+    if (isConnected) {
+      const loginRes = await fetch(`${serverUrl}/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user, password, homeserver }),
+      });
+      loginData = await loginRes.json();
+      if (!loginRes.ok) throw new Error(loginData.error || 'Login failed');
+    } else {
+      // Direct Matrix homeserver login when EO-DB server is not available
+      const loginRes = await fetch(`${homeserver}/_matrix/client/v3/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          type: 'm.login.password',
+          identifier: { type: 'm.id.user', user },
+          password,
+        }),
+      });
+      loginData = await loginRes.json();
+      if (!loginRes.ok) throw new Error(loginData.errcode ? `${loginData.errcode}: ${loginData.error}` : 'Login failed');
+    }
 
     matrixToken = loginData.access_token;
     matrixUserId = loginData.user_id;
     localStorage.setItem('eo_matrix_token', matrixToken);
     localStorage.setItem('eo_matrix_user_id', matrixUserId);
 
-    // Step 2: Fetch profile (displayname)
+    // Fetch profile (displayname) — try server first, then direct Matrix
     try {
-      const profileRes = await fetch(`${serverUrl}/auth/profile`, {
-        headers: { 'Authorization': 'Bearer ' + matrixToken },
-      });
-      if (profileRes.ok) {
-        const profileData = await profileRes.json();
+      let profileData;
+      if (isConnected) {
+        const profileRes = await fetch(`${serverUrl}/auth/profile`, {
+          headers: { 'Authorization': 'Bearer ' + matrixToken },
+        });
+        if (profileRes.ok) profileData = await profileRes.json();
+      } else {
+        const profileRes = await fetch(`${homeserver}/_matrix/client/v3/profile/${encodeURIComponent(matrixUserId)}/displayname`);
+        if (profileRes.ok) profileData = await profileRes.json();
+      }
+      if (profileData) {
         matrixDisplayName = profileData.displayname || null;
         if (matrixDisplayName) {
           localStorage.setItem('eo_matrix_displayname', matrixDisplayName);
@@ -1831,7 +1855,7 @@ async function doLogin() {
 
     hideLogin();
     updateTopbarUser();
-    await fetchLiveLog();
+    if (isConnected) await fetchLiveLog();
   } catch (e) {
     errEl.textContent = e.message;
     errEl.classList.add('visible');
