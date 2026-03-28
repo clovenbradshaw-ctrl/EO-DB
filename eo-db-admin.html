@@ -2024,26 +2024,45 @@ function autoFillOperandKeys(target) {
 
   const state = foldState(replayIndex);
   const existing = state[target];
-  if (!existing || !existing.value || typeof existing.value !== 'object' || Array.isArray(existing.value)) return;
-
-  const keys = Object.keys(existing.value);
-  if (keys.length === 0) return;
+  if (!existing || existing.value === null || existing.value === undefined) return;
 
   const listId = selectedOp === 'INS' ? 'insFieldsList' : 'defFieldsList';
   const list = document.getElementById(listId);
 
-  // Only auto-fill if fields are empty
+  // Only auto-fill if user hasn't manually entered content
   const existingRows = list.querySelectorAll('.structured-kv-row');
-  const hasContent = Array.from(existingRows).some(row => {
+  const hasUserContent = Array.from(existingRows).some(row => {
     const k = row.querySelector('.structured-kv-key').value.trim();
     const v = row.querySelector('.structured-kv-value').value.trim();
     return k || v;
   });
-  if (hasContent) return;
+  if (hasUserContent && !list.dataset.autoFilled) return;
 
   list.innerHTML = '';
-  keys.forEach(k => {
-    addKvRow(listId, k, '');
+  list.dataset.autoFilled = '1';
+
+  if (typeof existing.value === 'object' && !Array.isArray(existing.value)) {
+    // Object target: show each key with its current value
+    const keys = Object.keys(existing.value);
+    if (keys.length === 0) {
+      addKvRow(listId, '', '');
+    } else {
+      keys.forEach(k => {
+        const val = existing.value[k];
+        const displayVal = (typeof val === 'object' && val !== null) ? JSON.stringify(val) : String(val ?? '');
+        addKvRow(listId, k, displayVal);
+      });
+    }
+  } else {
+    // Scalar target (e.g. field-level): show single row with current value, no key
+    const displayVal = String(existing.value);
+    addKvRow(listId, '', displayVal);
+  }
+
+  // Clear auto-filled flag when user edits any field
+  list.addEventListener('input', function handler() {
+    delete list.dataset.autoFilled;
+    list.removeEventListener('input', handler);
   });
 }
 
