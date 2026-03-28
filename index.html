@@ -1691,7 +1691,7 @@ body {
 <script>
 // ── IndexedDB Storage Layer ──
 const DB_NAME = 'eo-db';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 let db = null;
 
 function openDB() {
@@ -1699,6 +1699,9 @@ function openDB() {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = (e) => {
       const d = e.target.result;
+      // kv store used by the modern encrypted-store layer
+      if (!d.objectStoreNames.contains('kv')) d.createObjectStore('kv');
+      // Legacy stores used by compose UI
       if (!d.objectStoreNames.contains('log')) {
         const logStore = d.createObjectStore('log', { keyPath: 'client_event_id' });
         logStore.createIndex('seq', 'seq', { unique: true });
