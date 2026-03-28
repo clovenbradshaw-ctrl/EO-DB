@@ -99,6 +99,8 @@ export async function uploadSnapshot(
 
 /**
  * Find the latest snapshot reference in the room timeline.
+ * Paginates backwards through the timeline to find snapshot pointer events,
+ * which is necessary on a fresh device where the SDK has minimal history.
  */
 export async function findLatestSnapshot(
   client: MatrixClient,
@@ -107,14 +109,39 @@ export async function findLatestSnapshot(
   const room = client.getRoom(roomId);
   if (!room) return null;
 
-  const timeline = room.getLiveTimeline().getEvents();
+  // Paginate backwards to find snapshot events (they may not be in the
+  // initial sync window since they're only posted every 1000 events)
+  const timeline = room.getLiveTimeline();
+  let canPaginate = true;
   let latest: { mxc: string; seq: number } | null = null;
 
-  for (const event of timeline) {
+  // Check current timeline first
+  for (const event of timeline.getEvents()) {
     if (event.getType() === EO_SNAPSHOT_TYPE) {
       const content = event.getContent();
       if (!latest || content.seq > latest.seq) {
         latest = { mxc: content.mxc, seq: content.seq };
+      }
+    }
+  }
+
+  // If we already found one, great. Otherwise paginate backwards to find it.
+  while (!latest && canPaginate) {
+    try {
+      canPaginate = await client.paginateEventTimeline(timeline, {
+        backwards: true,
+        limit: 100,
+      });
+    } catch {
+      break;
+    }
+
+    for (const event of timeline.getEvents()) {
+      if (event.getType() === EO_SNAPSHOT_TYPE) {
+        const content = event.getContent();
+        if (!latest || content.seq > latest.seq) {
+          latest = { mxc: content.mxc, seq: content.seq };
+        }
       }
     }
   }
