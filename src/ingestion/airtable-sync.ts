@@ -619,5 +619,4 @@ export {
   baseTarget,
   extractStorableFields,
   buildFieldMetaMap,
-  type FieldMeta,
 };
