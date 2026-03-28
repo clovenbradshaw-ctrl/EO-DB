@@ -29,6 +29,9 @@ import {
   type AirtableTable,
   type AirtableRecord,
 } from './airtable-client.js';
+import { classifyFieldType, type FieldClassification } from './field-rules.js';
+import { extractValue, valuesEqual, stableStringify } from './value-extract.js';
+import { isExcluded, EMPTY_EXCLUSIONS, type SyncExclusions } from './exclusions.js';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -158,17 +161,99 @@ function baseTarget(baseId: string): string {
   return `at.${baseId}`;
 }
 
+// ─── Field metadata helpers ────────────────────────────────────────────────
+
+/** Map of field ID → { name, type, classification } built from table schema. */
+export interface FieldMeta {
+  id: string;
+  name: string;
+  type: string;
+  classification: FieldClassification;
+}
+
+/**
+ * Build a field metadata map from the table's stored schema.
+ * Falls back to empty map if schema isn't available (all fields pass through).
+ */
+function buildFieldMetaMap(
+  fields: Array<{ id: string; name: string; type: string }> | undefined,
+): Map<string, FieldMeta> {
+  const map = new Map<string, FieldMeta>();
+  if (!fields) return map;
+  for (const f of fields) {
+    map.set(f.id, {
+      id: f.id,
+      name: f.name,
+      type: f.type,
+      classification: classifyFieldType(f.type),
+    });
+  }
+  return map;
+}
+
+/**
+ * Retrieve the field metadata map for a table from its stored EO-DB state.
+ * The schema is stored during hydration as DEF on the table target.
+ */
+async function getTableFieldMeta(
+  db: EoDb,
+  baseId: string,
+  tableId: string,
+): Promise<Map<string, FieldMeta>> {
+  const state = await getState(db, tableTarget(baseId, tableId));
+  return buildFieldMetaMap(state?.value?.fields);
+}
+
 // ─── Non-transformation detection ───────────────────────────────────────────
+
+/**
+ * Extract only the storable fields from an Airtable record, skipping
+ * computed/metadata fields, applying exclusions, and normalizing values.
+ *
+ * Returns null if field metadata isn't available (fall back to raw fields).
+ */
+function extractStorableFields(
+  rawFields: Record<string, any>,
+  fieldMeta: Map<string, FieldMeta>,
+  exclusions: SyncExclusions,
+): Record<string, any> {
+  // No schema available — pass through all fields as-is (backward compat)
+  if (fieldMeta.size === 0) return rawFields;
+
+  const result: Record<string, any> = {};
+  for (const [fieldId, rawValue] of Object.entries(rawFields)) {
+    const meta = fieldMeta.get(fieldId);
+
+    // No metadata for this field — pass through (safe default)
+    if (!meta) {
+      result[fieldId] = rawValue;
+      continue;
+    }
+
+    // Skip computed/metadata fields — they're Horizon outputs
+    if (meta.classification === 'skip') continue;
+
+    // Skip excluded fields
+    if (isExcluded(fieldId, meta.name, exclusions)) continue;
+
+    // Normalize the value (strip Horizon data like stale URLs, display names)
+    result[fieldId] = extractValue(rawValue, meta.type);
+  }
+  return result;
+}
 
 /**
  * Compare an incoming Airtable record's fields against the current EO-DB state.
  * Returns true if the record actually changed — false if it's a non-transformation
- * (Airtable says "modified" but the field values are identical to what we have).
+ * (Airtable says "modified" but the storable field values are identical).
+ *
+ * Field-type-aware: skips computed/metadata fields, normalizes values before
+ * comparison, and respects exclusion policies.
  */
 async function hasActualChanges(
   db: EoDb,
   target: string,
-  incomingFields: Record<string, any>,
+  storableFields: Record<string, any>,
 ): Promise<boolean> {
   const existing = await getState(db, target);
   if (!existing) return true; // New record — always a change
@@ -176,20 +261,21 @@ async function hasActualChanges(
   const existingFields = existing.value?.fields;
   if (!existingFields) return true;
 
-  // Deep-compare each incoming field against stored value
-  for (const [key, val] of Object.entries(incomingFields)) {
+  // Compare each storable field against stored value
+  for (const [key, val] of Object.entries(storableFields)) {
     const existingVal = existingFields[key];
-    if (!deepEqual(val, existingVal)) return true;
+    if (!valuesEqual(val, existingVal)) return true;
   }
 
-  // Check if any existing fields were removed
+  // Check if any stored fields were removed (cleared in Airtable)
   for (const key of Object.keys(existingFields)) {
-    if (!(key in incomingFields)) return true;
+    if (!(key in storableFields)) return true;
   }
 
   return false;
 }
 
+/** @deprecated Use valuesEqual from value-extract.ts instead. Kept for test backward compat. */
 function deepEqual(a: any, b: any): boolean {
   if (a === b) return true;
   if (a == null || b == null) return a === b;
@@ -227,26 +313,30 @@ async function ingestRecord(
   tableId: string,
   record: AirtableRecord,
   agent: string,
+  fieldMeta: Map<string, FieldMeta>,
+  exclusions: SyncExclusions = EMPTY_EXCLUSIONS,
 ): Promise<'ingested' | 'skipped_no_change' | 'skipped_duplicate'> {
   const target = recordTarget(baseId, tableId, record.id);
-  const modifiedTime = record.createdTime; // Airtable doesn't expose lastModifiedTime in list response directly
 
-  // 1. Check for non-transformation
-  if (!await hasActualChanges(db, target, record.fields)) {
+  // 1. Extract only storable fields (skip computed/metadata, normalize values)
+  const storableFields = extractStorableFields(record.fields, fieldMeta, exclusions);
+
+  // 2. Check for non-transformation against normalized fields
+  if (!await hasActualChanges(db, target, storableFields)) {
     return 'skipped_no_change';
   }
 
-  // 2. Build idempotent event ID using record content hash for dedup
-  const contentKey = JSON.stringify(record.fields);
+  // 3. Build idempotent event ID using normalized content hash for dedup
+  const contentKey = stableStringify(storableFields);
   const clientEventId = recordEventId(baseId, tableId, record.id, contentKey);
 
-  // 3. Ingest via DEF (auto-instantiates if needed, merges if exists)
+  // 4. Ingest via DEF with only storable fields (no computed/Horizon noise)
   try {
     await processEvent(db, {
       op: 'DEF',
       target,
       operand: {
-        fields: record.fields,
+        fields: storableFields,
         _airtable: {
           record_id: record.id,
           base_id: baseId,
@@ -465,6 +555,7 @@ async function syncTable(
   tableName: string,
   agent: string,
   cursorSince: string | null,
+  exclusions: SyncExclusions = EMPTY_EXCLUSIONS,
 ): Promise<SyncResult> {
   let fetched = 0;
   let ingested = 0;
@@ -472,15 +563,27 @@ async function syncTable(
   let skippedDuplicate = 0;
   const now = new Date().toISOString();
 
+  // Retrieve field metadata from the table's stored schema (set during hydration).
+  // This tells us which fields are computed/metadata (skip), which are links (con),
+  // and how to normalize values before comparison.
+  const fieldMeta = await getTableFieldMeta(db, baseId, tableId);
+
   // Build filter: if we have a cursor, only fetch records modified since then
   const filterByFormula = cursorSince
     ? `LAST_MODIFIED_TIME()>='${cursorSince}'`
     : undefined;
 
-  for await (const page of client.paginateRecords(baseId, tableId, { filterByFormula })) {
+  // Request records keyed by field ID (not name) so they align with schema metadata.
+  // This ensures extractStorableFields can match incoming fields to their types.
+  const useFieldIds = fieldMeta.size > 0;
+
+  for await (const page of client.paginateRecords(baseId, tableId, {
+    filterByFormula,
+    returnFieldsByFieldId: useFieldIds,
+  })) {
     for (const record of page) {
       fetched++;
-      const result = await ingestRecord(db, feed, baseId, tableId, record, agent);
+      const result = await ingestRecord(db, feed, baseId, tableId, record, agent, fieldMeta, exclusions);
       switch (result) {
         case 'ingested': ingested++; break;
         case 'skipped_no_change': skippedNoChange++; break;
@@ -507,4 +610,14 @@ async function syncTable(
 
 // ─── Exports for testing ────────────────────────────────────────────────────
 
-export { hasActualChanges, deepEqual, recordEventId, recordTarget, tableTarget, baseTarget };
+export {
+  hasActualChanges,
+  deepEqual,
+  recordEventId,
+  recordTarget,
+  tableTarget,
+  baseTarget,
+  extractStorableFields,
+  buildFieldMetaMap,
+  type FieldMeta,
+};

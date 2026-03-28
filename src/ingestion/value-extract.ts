@@ -2,12 +2,18 @@
  * Value extraction / normalization for Airtable fields.
  *
  * Airtable returns "Horizon" data alongside stored values — display names
- * on linked records, thumbnail URLs on attachments, labels on select choices.
+ * on linked records, rotating thumbnail URLs on attachments, etc.
  * These change without user action (e.g. a linked record's name changes)
  * and cause false diffs if stored as-is.
  *
  * This module strips Horizon data and normalizes values so comparisons
  * only detect actual user-driven changes.
+ *
+ * Select choices (singleSelect, multipleSelects) keep id + name + color
+ * because those are user-authored configuration, not Horizon.
+ *
+ * Attachments store identity only (id, filename, size, type). URLs are
+ * NOT stored — they rotate and must be generated via API on use.
  */
 
 /**
@@ -19,22 +25,9 @@ export function extractValue(rawValue: unknown, fieldType: string): unknown {
 
   switch (fieldType) {
     case 'singleSelect':
-      // Store choice ID only, not label
-      return typeof rawValue === 'object' &&
-        rawValue !== null &&
-        'id' in rawValue
-        ? (rawValue as { id: string }).id
-        : rawValue;
-
     case 'multipleSelects':
-      // Store choice ID array
-      return Array.isArray(rawValue)
-        ? rawValue.map((c) =>
-            typeof c === 'object' && c !== null && 'id' in c
-              ? (c as { id: string }).id
-              : c,
-          )
-        : rawValue;
+      // Keep as-is — id, name, color are all user-authored config
+      return rawValue;
 
     case 'multipleRecordLinks':
       // Store linked record IDs only (name is Horizon)
