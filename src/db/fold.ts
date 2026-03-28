@@ -4,6 +4,7 @@ import { getState, setState } from './state.js';
 import { addEdge, removeEdge, getEdgesFrom, getEdgesTo } from './graph.js';
 import { resolveAlias, checkExists } from './helpers.js';
 import type { EoEvent, EoEventInput, EoState, EvaRegistration } from './types.js';
+import { isEncryptedOperand } from './crypto-types.js';
 import type { Feed } from './feed.js';
 
 /**
@@ -345,6 +346,10 @@ function executeFormulaFunction(formula: any, inputs: Record<string, any>): any 
 // --- Helpers ---
 
 function mergeOperand(existing: any, incoming: any): any {
+  // Encrypted operands are atomic blobs — no shallow merge into/from them
+  if (isEncryptedOperand(incoming)) return incoming;
+  if (isEncryptedOperand(existing)) return incoming;
+
   if (
     existing && typeof existing === 'object' && !Array.isArray(existing) &&
     incoming && typeof incoming === 'object' && !Array.isArray(incoming)
