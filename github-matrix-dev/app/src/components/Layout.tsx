@@ -10,6 +10,7 @@ import { ConnectionStatus, useConnectionState } from './ConnectionStatus';
 import { ErrorBoundary } from './ErrorBoundary';
 import { SyncProgress } from './SyncProgress';
 import { AirtableSettings } from './AirtableSettings';
+import { DataSyncDashboard } from './DataSyncDashboard';
 
 interface LayoutProps {
   session: MatrixSession;
@@ -23,6 +24,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
   const lastSeq = useEoStore((s) => s.lastSeq);
   const [selected, setSelected] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [activeView, setActiveView] = useState<'records' | 'sync'>('records');
   const connectionState = useConnectionState();
 
   // Initialize encrypted store on mount
@@ -62,6 +64,26 @@ export function Layout({ session, onLogout }: LayoutProps) {
         <div style={styles.headerRight}>
           <ConnectionStatus state={connectionState} />
           <div style={styles.seqBadge}>seq: {lastSeq}</div>
+          <div style={styles.viewTabs}>
+            <button
+              onClick={() => setActiveView('records')}
+              style={{
+                ...styles.viewTab,
+                ...(activeView === 'records' ? styles.viewTabActive : {}),
+              }}
+            >
+              Records
+            </button>
+            <button
+              onClick={() => setActiveView('sync')}
+              style={{
+                ...styles.viewTab,
+                ...(activeView === 'sync' ? styles.viewTabActive : {}),
+              }}
+            >
+              Sync
+            </button>
+          </div>
           <button
             onClick={() => setShowSettings(true)}
             style={styles.settingsBtn}
@@ -76,29 +98,39 @@ export function Layout({ session, onLogout }: LayoutProps) {
           <button onClick={handleLogout} style={styles.logoutBtn}>Sign out</button>
         </div>
       </header>
-      <div style={styles.body}>
-        <aside style={styles.sidebar}>
-          {ready ? (
-            <ClientList selected={selected} onSelect={setSelected} />
-          ) : (
-            <SyncProgress message="Initializing store..." detail="Deriving encryption key" />
-          )}
-        </aside>
-        <main style={styles.main}>
-          <ErrorBoundary>
-            {selected ? (
-              <RecordView target={selected} onNavigate={setSelected} />
+      {activeView === 'sync' ? (
+        <div style={styles.body}>
+          <main style={{ ...styles.main, flex: 1 }}>
+            <ErrorBoundary>
+              <DataSyncDashboard session={session} />
+            </ErrorBoundary>
+          </main>
+        </div>
+      ) : (
+        <div style={styles.body}>
+          <aside style={styles.sidebar}>
+            {ready ? (
+              <ClientList selected={selected} onSelect={setSelected} />
             ) : (
-              <div style={styles.empty}>
-                <div style={styles.emptyText}>Select a client to view their record</div>
-                <div style={styles.emptySub}>
-                  You'll see their case details, the context around them, and patterns across similar cases
-                </div>
-              </div>
+              <SyncProgress message="Initializing store..." detail="Deriving encryption key" />
             )}
-          </ErrorBoundary>
-        </main>
-      </div>
+          </aside>
+          <main style={styles.main}>
+            <ErrorBoundary>
+              {selected ? (
+                <RecordView target={selected} onNavigate={setSelected} />
+              ) : (
+                <div style={styles.empty}>
+                  <div style={styles.emptyText}>Select a client to view their record</div>
+                  <div style={styles.emptySub}>
+                    You'll see their case details, the context around them, and patterns across similar cases
+                  </div>
+                </div>
+              )}
+            </ErrorBoundary>
+          </main>
+        </div>
+      )}
       {showSettings && (
         <AirtableSettings session={session} onClose={() => setShowSettings(false)} />
       )}
@@ -143,6 +175,27 @@ const styles: Record<string, React.CSSProperties> = {
     background: '#f4f3f0',
     border: '1px solid #e5e2dd',
   },
+  viewTabs: {
+    display: 'flex',
+    border: '1px solid #e5e2dd',
+    borderRadius: 6,
+    overflow: 'hidden',
+  },
+  viewTab: {
+    padding: '5px 12px',
+    fontSize: 11,
+    fontWeight: 500,
+    border: 'none',
+    background: 'transparent',
+    color: '#7a756d',
+    cursor: 'pointer',
+    fontFamily: "'JetBrains Mono', monospace",
+    borderRight: '1px solid #e5e2dd',
+  } as React.CSSProperties,
+  viewTabActive: {
+    background: '#1a6dd4',
+    color: '#fff',
+  } as React.CSSProperties,
   settingsBtn: {
     display: 'flex',
     alignItems: 'center',
