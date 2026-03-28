@@ -1,4 +1,8 @@
-# EO///DB — Technical Specification
+# EO///DB — Technical Specification (Server Edition — Historical Reference)
+
+> **ARCHITECTURAL NOTE (March 2026):** This spec describes the server-based implementation (Fastify + LevelDB on a Linux VM). That implementation is complete. EO///DB is transitioning to a **serverless, browser-native architecture**: IndexedDB replaces LevelDB, Matrix room sync replaces WebSocket server, direct browser-to-homeserver auth replaces server proxy, and there is no backend. See `DEVELOPMENT-STAGES.md` for the staged transition plan.
+>
+> **Authoritative sections:** Types (§3), fold logic and operator handlers (§6), Horizon (§7), graph operations (§5.5) — these port directly to IndexedDB with unchanged semantics. **Superseded sections:** Deployment (§12), nginx (§12.1), n8n webhooks (§13), HTTP API (§9), WebSocket server (§10), Fastify auth middleware (§4).
 
 **Build target:** A Node.js server that implements an EO-native embedded database with Matrix authentication, webhook ingestion, WebSocket sync, and a visual admin interface.
 

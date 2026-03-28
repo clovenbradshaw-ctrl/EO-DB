@@ -4,6 +4,8 @@
 
 see also: https://github.com/clovenbradshaw-ctrl/amino-eo
 
+> **Architecture Update (March 2026):** This report's analysis of why the EO-native database must exist is validated by the current implementation. The three redundant implementations described in §3 (Zustand store, IndexedDB layer, PL/pgSQL trigger) have been unified. The next evolution removes the server entirely: the fold runs in every browser, data persists in encrypted IndexedDB, and devices sync through Matrix. The transformation calculus, operator helix, and Horizon are unchanged — only the storage substrate and sync topology change. See `DEVELOPMENT-STAGES.md`.
+
 ---
 
 ## 1. The Inversion
