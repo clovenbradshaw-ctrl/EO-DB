@@ -1343,10 +1343,10 @@ body {
   <div class="topbar-logo">EO<span>///</span>DB</div>
   <div class="topbar-status">
     <div class="status-dot"></div>
-    <span class="status-item">seq <b id="currentSeq">4215</b></span>
-    <span class="status-item">events <b>15</b></span>
-    <span class="status-item">targets <b>12</b></span>
-    <span class="status-item">edges <b>2</b></span>
+    <span class="status-item">seq <b id="currentSeq">—</b></span>
+    <span class="status-item">events <b>—</b></span>
+    <span class="status-item">targets <b>—</b></span>
+    <span class="status-item">edges <b>—</b></span>
   </div>
   <div class="topbar-user" id="topbarUser">
     <button class="topbar-user-btn" onclick="showLogin()">Sign In</button>
@@ -1720,12 +1720,27 @@ body {
   </div>
 </div>
 
+<!-- Delete Confirmation Modal -->
+<div class="login-overlay hidden" id="deleteOverlay">
+  <div class="login-card" style="max-width:400px;">
+    <div class="login-title" style="color:var(--danger);">Delete All Data</div>
+    <div class="login-subtitle">This will permanently erase every event, state, and edge in the database. This cannot be undone.</div>
+    <div class="login-field">
+      <label>Type <b>DELETE</b> to confirm</label>
+      <input id="deleteConfirmInput" placeholder="DELETE" autocomplete="off">
+    </div>
+    <button class="login-btn" style="background:var(--danger);" id="deleteConfirmBtn" onclick="executeDeleteAll()">Erase Database</button>
+    <div class="login-error" id="deleteError"></div>
+    <div class="login-skip" onclick="hideDeleteModal()">Cancel</div>
+  </div>
+</div>
+
 <!-- Replay Bar -->
 <div class="replay-bar">
   <span class="replay-label">Replay</span>
-  <input type="range" class="replay-slider" id="replaySlider" min="0" max="14" value="14" oninput="updateReplay()">
-  <span class="replay-seq" id="replaySeq">seq 4215</span>
-  <span class="replay-ts" id="replayTs">2025-03-27 16:30:00</span>
+  <input type="range" class="replay-slider" id="replaySlider" min="0" max="0" value="0" oninput="updateReplay()">
+  <span class="replay-seq" id="replaySeq">seq 0</span>
+  <span class="replay-ts" id="replayTs">—</span>
 </div>
 
 <script>
@@ -2603,7 +2618,59 @@ function renderHorizon() {
   `).join('');
 }
 
-function filterHorizon() { renderHorizon(); }
+function filterHorizon() {
+  const val = document.getElementById('horizonSearch').value.trim();
+  if (val.toLowerCase() === 'delete') {
+    document.getElementById('horizonSearch').value = '';
+    showDeleteModal();
+    return;
+  }
+  renderHorizon();
+}
+
+function showDeleteModal() {
+  document.getElementById('deleteOverlay').classList.remove('hidden');
+  document.getElementById('deleteConfirmInput').value = '';
+  document.getElementById('deleteError').textContent = '';
+  document.getElementById('deleteConfirmInput').focus();
+}
+
+function hideDeleteModal() {
+  document.getElementById('deleteOverlay').classList.add('hidden');
+}
+
+async function executeDeleteAll() {
+  const input = document.getElementById('deleteConfirmInput').value.trim();
+  if (input !== 'DELETE') {
+    document.getElementById('deleteError').textContent = 'Type DELETE to confirm.';
+    return;
+  }
+  if (!isConnected) {
+    document.getElementById('deleteError').textContent = 'Not connected to server.';
+    return;
+  }
+  try {
+    const res = await fetch(`${serverUrl}/admin/reset`, {
+      method: 'DELETE',
+      headers: authHeaders(),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      document.getElementById('deleteError').textContent = data.error || `Server error ${res.status}`;
+      return;
+    }
+    const data = await res.json();
+    LOG = [];
+    replayIndex = 0;
+    updateReplaySlider();
+    refreshAll();
+    updateStatusBar();
+    hideDeleteModal();
+    alert(`Database cleared — ${data.deleted} entries removed.`);
+  } catch (e) {
+    document.getElementById('deleteError').textContent = e.message;
+  }
+}
 
 function navigateToPath(path) {
   const input = document.getElementById('horizonSearch');
@@ -2749,6 +2816,128 @@ function renderGraph() {
     svgContent += `
       <circle cx="${p.x}" cy="${p.y}" r="28" fill="${c}15" stroke="${c}" stroke-width="1.5"/>
       <text x="${p.x}" y="${p.y + 1}" text-anchor="middle" dominant-baseline="middle" fill="${c}" font-family="JetBrains Mono, monospace" font-size="9" font-weight="600">${label}</text>
+    `;
+  });
+
+  svg.innerHTML = `
+    <defs>
+      <marker id="arrow" viewBox="0 0 10 10" refX="35" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#a78bfa" fill-opacity="0.6"/>
+      </marker>
+    </defs>
+    ${svgContent}
+  `;
+}
+
+let highlightedNode = null;
+
+function highlightNode(name) {
+  highlightedNode = (highlightedNode === name) ? null : name;
+
+  // Update sidebar selection
+  document.querySelectorAll('.graph-node-item').forEach(el => {
+    const label = el.textContent.trim();
+    const nodeName = name.split('.').pop();
+    el.style.background = (label === nodeName && highlightedNode) ? 'var(--bg3)' : '';
+  });
+
+  // Update SVG: dim non-selected nodes and edges
+  const svg = document.getElementById('graphSvg');
+  svg.querySelectorAll('circle').forEach(circle => {
+    const text = circle.nextElementSibling;
+    if (!highlightedNode) {
+      circle.setAttribute('stroke-opacity', '1');
+      circle.setAttribute('fill-opacity', '1');
+      if (text && text.tagName === 'text') text.setAttribute('fill-opacity', '1');
+    } else {
+      const label = text && text.tagName === 'text' ? text.textContent : '';
+      const isSelected = label === name.split('.').pop();
+      circle.setAttribute('stroke-opacity', isSelected ? '1' : '0.2');
+      circle.setAttribute('fill-opacity', isSelected ? '1' : '0.2');
+      if (text && text.tagName === 'text') text.setAttribute('fill-opacity', isSelected ? '1' : '0.2');
+    }
+  });
+
+  svg.querySelectorAll('path:not([d^="M 0"])').forEach(path => {
+    if (!highlightedNode) {
+      path.setAttribute('stroke-opacity', '0.5');
+    } else {
+      // Check if this edge connects to the highlighted node by position proximity
+      const d = path.getAttribute('d') || '';
+      path.setAttribute('stroke-opacity', '0.1');
+    }
+  });
+
+  // Re-highlight edges connected to the selected node
+  if (highlightedNode) {
+    const conEvents = LOG.filter((e, i) => i <= replayIndex && e.op === 'CON');
+    conEvents.forEach(e => {
+      const source = e.target.split('.').slice(0, 3).join('.');
+      if (e.operand.added) {
+        e.operand.added.forEach(dest => {
+          if (source === highlightedNode || dest === highlightedNode) {
+            // Find matching path and highlight it
+            svg.querySelectorAll('path:not([d^="M 0"])').forEach(path => {
+              path.setAttribute('stroke-opacity', '0.1');
+            });
+          }
+        });
+      }
+    });
+    // Simpler approach: re-render with highlight
+    renderGraphWithHighlight(highlightedNode);
+  }
+}
+
+function renderGraphWithHighlight(selectedNode) {
+  const svg = document.getElementById('graphSvg');
+  const conEvents = LOG.filter((e, i) => i <= replayIndex && e.op === 'CON');
+  const nodesSet = new Set();
+  const edges = [];
+
+  conEvents.forEach(e => {
+    const source = e.target.split('.').slice(0, 3).join('.');
+    if (e.operand.added) {
+      e.operand.added.forEach(dest => {
+        nodesSet.add(source);
+        nodesSet.add(dest);
+        edges.push({ source, dest });
+      });
+    }
+  });
+
+  const nodes = Array.from(nodesSet);
+  const cx = 400, cy = 250, radius = 160;
+  const nodePositions = {};
+  nodes.forEach((n, i) => {
+    const angle = (i / nodes.length) * Math.PI * 2 - Math.PI / 2;
+    nodePositions[n] = { x: cx + Math.cos(angle) * radius, y: cy + Math.sin(angle) * radius };
+  });
+
+  let svgContent = '';
+
+  edges.forEach(e => {
+    const s = nodePositions[e.source];
+    const d = nodePositions[e.dest];
+    if (s && d) {
+      const midX = (s.x + d.x) / 2;
+      const midY = (s.y + d.y) / 2 - 20;
+      const connected = (e.source === selectedNode || e.dest === selectedNode);
+      const opacity = selectedNode ? (connected ? '0.8' : '0.08') : '0.5';
+      svgContent += `<path d="M${s.x},${s.y} Q${midX},${midY} ${d.x},${d.y}" fill="none" stroke="#a78bfa" stroke-width="${connected ? '2' : '1.5'}" stroke-opacity="${opacity}" marker-end="url(#arrow)"/>`;
+    }
+  });
+
+  nodes.forEach((n, i) => {
+    const p = nodePositions[n];
+    const colors = ['#4ade80', '#38bdf8', '#a78bfa', '#34d399', '#fb923c', '#f472b6'];
+    const c = colors[i % colors.length];
+    const label = n.split('.').pop();
+    const isSelected = (n === selectedNode);
+    const opacity = selectedNode ? (isSelected ? '1' : '0.2') : '1';
+    svgContent += `
+      <circle cx="${p.x}" cy="${p.y}" r="${isSelected ? '32' : '28'}" fill="${c}15" stroke="${c}" stroke-width="${isSelected ? '2.5' : '1.5'}" stroke-opacity="${opacity}" fill-opacity="${opacity}"/>
+      <text x="${p.x}" y="${p.y + 1}" text-anchor="middle" dominant-baseline="middle" fill="${c}" font-family="JetBrains Mono, monospace" font-size="${isSelected ? '10' : '9'}" font-weight="600" fill-opacity="${opacity}">${label}</text>
     `;
   });
 
@@ -2943,6 +3132,8 @@ async function removeHomeserver(hs) {
 
 // ── Init ──
 updateTopbarUser();
+updateReplaySlider();
+updateStatusBar();
 renderHorizon();
 renderLog();
 
