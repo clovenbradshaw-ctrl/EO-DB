@@ -1721,6 +1721,7 @@ function openDB() {
 let nextSeq = 1;
 
 async function loadNextSeq() {
+  if (!db) return;
   const tx = db.transaction('meta', 'readonly');
   const store = tx.objectStore('meta');
   return new Promise((resolve) => {
@@ -1731,6 +1732,7 @@ async function loadNextSeq() {
 }
 
 async function saveNextSeq() {
+  if (!db) return;
   const tx = db.transaction('meta', 'readwrite');
   tx.objectStore('meta').put({ key: 'next_seq', value: nextSeq });
 }
@@ -1740,6 +1742,10 @@ function generateEventId() {
 }
 
 async function appendEvent(event) {
+  if (!db) {
+    await openDB();
+    if (!db) throw new Error('Database not available – please reload the page');
+  }
   const ev = {
     ...event,
     client_event_id: event.client_event_id || generateEventId(),
@@ -1811,6 +1817,7 @@ function idbGet(store, key) {
 }
 
 async function loadAllEvents() {
+  if (!db) return [];
   const tx = db.transaction('log', 'readonly');
   const store = tx.objectStore('log');
   const idx = store.index('seq');
@@ -1822,6 +1829,7 @@ async function loadAllEvents() {
 }
 
 async function clearAllStores() {
+  if (!db) throw new Error('Database not available');
   const storeNames = ['log', 'state', 'graph_fwd', 'graph_rev', 'eva', 'meta'];
   const tx = db.transaction(storeNames, 'readwrite');
   for (const name of storeNames) {
@@ -1834,6 +1842,7 @@ async function clearAllStores() {
 }
 
 async function getEventCount() {
+  if (!db) return 0;
   const tx = db.transaction('log', 'readonly');
   return new Promise((resolve) => {
     const req = tx.objectStore('log').count();
