@@ -11,6 +11,7 @@ import { ConnectionStatus, useConnectionState } from './ConnectionStatus';
 import { ErrorBoundary } from './ErrorBoundary';
 import { SyncProgress } from './SyncProgress';
 import { AirtableSettings } from './AirtableSettings';
+import { DataSyncDashboard } from './DataSyncDashboard';
 
 interface LayoutProps {
   session: MatrixSession;
@@ -25,6 +26,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
   const [selectedScope, setSelectedScope] = useState<string | null>(null);
   const [selectedRecord, setSelectedRecord] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [activeView, setActiveView] = useState<'records' | 'sync'>('records');
   const connectionState = useConnectionState();
 
   // Initialize encrypted store on mount
@@ -64,6 +66,26 @@ export function Layout({ session, onLogout }: LayoutProps) {
         <div style={styles.headerRight}>
           <ConnectionStatus state={connectionState} />
           <div style={styles.seqBadge}>seq: {lastSeq}</div>
+          <div style={styles.viewTabs}>
+            <button
+              onClick={() => setActiveView('records')}
+              style={{
+                ...styles.viewTab,
+                ...(activeView === 'records' ? styles.viewTabActive : {}),
+              }}
+            >
+              Records
+            </button>
+            <button
+              onClick={() => setActiveView('sync')}
+              style={{
+                ...styles.viewTab,
+                ...(activeView === 'sync' ? styles.viewTabActive : {}),
+              }}
+            >
+              Sync
+            </button>
+          </div>
           <button
             onClick={() => setShowSettings(true)}
             style={styles.settingsBtn}
@@ -78,45 +100,55 @@ export function Layout({ session, onLogout }: LayoutProps) {
           <button onClick={handleLogout} style={styles.logoutBtn}>Sign out</button>
         </div>
       </header>
-      <div style={styles.body}>
-        <aside style={styles.sidebar}>
-          {ready ? (
-            <HolonNav
-              selectedScope={selectedScope}
-              onSelectScope={(scope) => { setSelectedScope(scope); setSelectedRecord(null); }}
-              onSelectSegment={(_scope, _seg) => { setSelectedScope(_scope); }}
-            />
-          ) : (
-            <SyncProgress message="Initializing store..." detail="Deriving encryption key" />
-          )}
-        </aside>
-        <main style={styles.main}>
-          <ErrorBoundary>
-            {selectedScope ? (
-              <TableView
-                scope={selectedScope}
-                onSelectRecord={setSelectedRecord}
-                activeRecord={selectedRecord}
-                session={{ userId: session.userId }}
+      {activeView === 'sync' ? (
+        <div style={styles.body}>
+          <main style={{ ...styles.main, flex: 1 }}>
+            <ErrorBoundary>
+              <DataSyncDashboard session={session} />
+            </ErrorBoundary>
+          </main>
+        </div>
+      ) : (
+        <div style={styles.body}>
+          <aside style={styles.sidebar}>
+            {ready ? (
+              <HolonNav
+                selectedScope={selectedScope}
+                onSelectScope={(scope) => { setSelectedScope(scope); setSelectedRecord(null); }}
+                onSelectSegment={(_scope, _seg) => { setSelectedScope(_scope); }}
               />
             ) : (
-              <div style={styles.empty}>
-                <div style={styles.emptyText}>Select an object type to view its records</div>
-                <div style={styles.emptySub}>
-                  Choose from the hierarchy on the left to see records as a table
-                </div>
-              </div>
+              <SyncProgress message="Initializing store..." detail="Deriving encryption key" />
             )}
-          </ErrorBoundary>
-        </main>
-        {selectedRecord && (
-          <RecordDetailDrawer
-            target={selectedRecord}
-            onClose={() => setSelectedRecord(null)}
-            onNavigate={(t) => setSelectedRecord(t)}
-          />
-        )}
-      </div>
+          </aside>
+          <main style={styles.main}>
+            <ErrorBoundary>
+              {selectedScope ? (
+                <TableView
+                  scope={selectedScope}
+                  onSelectRecord={setSelectedRecord}
+                  activeRecord={selectedRecord}
+                  session={{ userId: session.userId }}
+                />
+              ) : (
+                <div style={styles.empty}>
+                  <div style={styles.emptyText}>Select an object type to view its records</div>
+                  <div style={styles.emptySub}>
+                    Choose from the hierarchy on the left to see records as a table
+                  </div>
+                </div>
+              )}
+            </ErrorBoundary>
+          </main>
+          {selectedRecord && (
+            <RecordDetailDrawer
+              target={selectedRecord}
+              onClose={() => setSelectedRecord(null)}
+              onNavigate={(t) => setSelectedRecord(t)}
+            />
+          )}
+        </div>
+      )}
       {showSettings && (
         <AirtableSettings session={session} onClose={() => setShowSettings(false)} />
       )}
@@ -161,6 +193,27 @@ const styles: Record<string, React.CSSProperties> = {
     background: '#f4f3f0',
     border: '1px solid #e5e2dd',
   },
+  viewTabs: {
+    display: 'flex',
+    border: '1px solid #e5e2dd',
+    borderRadius: 6,
+    overflow: 'hidden',
+  },
+  viewTab: {
+    padding: '5px 12px',
+    fontSize: 11,
+    fontWeight: 500,
+    border: 'none',
+    background: 'transparent',
+    color: '#7a756d',
+    cursor: 'pointer',
+    fontFamily: "'JetBrains Mono', monospace",
+    borderRight: '1px solid #e5e2dd',
+  } as React.CSSProperties,
+  viewTabActive: {
+    background: '#1a6dd4',
+    color: '#fff',
+  } as React.CSSProperties,
   settingsBtn: {
     display: 'flex',
     alignItems: 'center',
