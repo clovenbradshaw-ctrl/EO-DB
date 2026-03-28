@@ -1,10 +1,9 @@
 /**
- * Sync manager — orchestrates room sync, offline queue, and deduplication.
+ * Sync manager — orchestrates snapshot persistence, offline queue, and deduplication.
  *
- * Three sync paths in priority order:
- * 1. Snapshot hydration (new device or stale cache)
- * 2. Room history (primary sync — paginate timeline)
- * 3. Peer sync (gap filling via to-device messaging)
+ * Data is persisted as encrypted binary snapshots in Matrix media.
+ * On a fresh device, the latest snapshot is downloaded and applied.
+ * Snapshots are auto-saved every 1000 events and on explicit saveSnapshot() calls.
  */
 
 import type { MatrixClient, MatrixEvent } from 'matrix-js-sdk';
@@ -12,7 +11,7 @@ import type { EoStore } from '../db/encrypted-store';
 import type { EoEventInput } from '../db/types';
 import { processEvent } from '../db/fold';
 import { EO_EVENT_TYPE, matrixEventToEo, sendEoEvent } from './event-bridge';
-import { findLatestSnapshot, applySnapshot } from './snapshot';
+import { findLatestSnapshot, applySnapshot, maybeCreateSnapshot, createSnapshot, uploadSnapshot } from './snapshot';
 
 export class SyncManager {
   private client: MatrixClient;
@@ -35,26 +34,16 @@ export class SyncManager {
   /**
    * Initialize sync — call after login and store setup.
    *
-   * On a fresh device (seq === 0), tries snapshot hydration first for speed,
-   * then replays any events after the snapshot from room history.
+   * On a fresh device (seq === 0), hydrates from the latest snapshot stored
+   * in Matrix media. This is the primary data recovery path.
    */
   async initialize(): Promise<void> {
     const currentSeq = await this.store.getCurrentSeq();
 
-    // On a fresh device, try snapshot hydration first
+    // On a fresh device, restore from the latest Matrix media snapshot
     if (currentSeq === 0) {
-      try {
-        const snap = await findLatestSnapshot(this.client, this.roomId);
-        if (snap) {
-          await applySnapshot(this.client, this.store, snap.mxc);
-        }
-      } catch {
-        // Snapshot hydration failed — fall through to full history sync
-      }
+      await this.hydrateFromSnapshot();
     }
-
-    // Sync room history (replays all events, or just post-snapshot events via dedup)
-    await this.syncRoomHistory();
 
     // Listen for new room events in real-time
     this.client.on('Room.timeline' as any, (event: MatrixEvent) => {
@@ -65,6 +54,28 @@ export class SyncManager {
 
     // Flush any unsynced local events
     await this.flushUnsyncedEvents();
+  }
+
+  /**
+   * Hydrate the local store from the latest snapshot in Matrix media.
+   */
+  private async hydrateFromSnapshot(): Promise<void> {
+    const snap = await findLatestSnapshot(this.client, this.roomId);
+    if (!snap) return;
+    const restoredSeq = await applySnapshot(this.client, this.store, snap.mxc);
+    await this.store.put('meta:snapshot_seq', restoredSeq);
+  }
+
+  /**
+   * Force-save a snapshot to Matrix media right now.
+   * Called on beforeunload / logout so data is always persisted.
+   */
+  async saveSnapshot(): Promise<void> {
+    const seq = await this.store.getCurrentSeq();
+    if (seq === 0) return; // nothing to snapshot
+    const snapshot = await createSnapshot(this.store, this.client.getUserId()!);
+    await uploadSnapshot(this.client, this.roomId, snapshot);
+    await this.store.put('meta:snapshot_seq', seq);
   }
 
   /**
@@ -97,6 +108,9 @@ export class SyncManager {
       await this.store.put('meta:offline_queue', queue);
     }
 
+    // Auto-snapshot to Matrix media every 1000 events
+    await maybeCreateSnapshot(this.client, this.roomId, this.store, this.client.getUserId()!);
+
     return seq;
   }
 
@@ -113,38 +127,6 @@ export class SyncManager {
     }
 
     await processEvent(this.store, eoEvent, this.onEvent);
-  }
-
-  /**
-   * Paginate room history from last known sync token.
-   * On a fresh device (empty IndexedDB), paginates backwards through the
-   * full room timeline so all events are replayed into the local store.
-   */
-  private async syncRoomHistory(): Promise<void> {
-    const room = this.client.getRoom(this.roomId);
-    if (!room) return;
-
-    // Paginate backwards until we have the full timeline
-    const timeline = room.getLiveTimeline();
-    let canPaginate = true;
-    while (canPaginate) {
-      try {
-        canPaginate = await this.client.paginateEventTimeline(timeline, {
-          backwards: true,
-          limit: 100,
-        });
-      } catch {
-        // pagination failed (e.g. rate limit) — process what we have
-        break;
-      }
-    }
-
-    // Now process all events in chronological order
-    const events = timeline.getEvents();
-    for (const event of events) {
-      if (event.getType() !== EO_EVENT_TYPE) continue;
-      await this.processIncomingEvent(event);
-    }
   }
 
   /**

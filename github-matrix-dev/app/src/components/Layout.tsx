@@ -71,17 +71,31 @@ export function Layout({ session, onLogout }: LayoutProps) {
 
       // Make sync manager available for dispatching events to Matrix
       useEoStore.getState().setSyncManager(syncManager);
+
+      // Save a snapshot to Matrix media before the page unloads
+      const handleBeforeUnload = () => {
+        syncManager.saveSnapshot().catch(() => {});
+      };
+      window.addEventListener('beforeunload', handleBeforeUnload);
+      cleanupBeforeUnload = () => window.removeEventListener('beforeunload', handleBeforeUnload);
     }
 
+    let cleanupBeforeUnload: (() => void) | undefined;
     setup();
 
     return () => {
       mounted = false;
+      cleanupBeforeUnload?.();
       if (matrixClient) matrixClient.stopClient();
     };
   }, [session, init]);
 
-  function handleLogout() {
+  async function handleLogout() {
+    // Save snapshot to Matrix media before clearing local state
+    const { syncManager } = useEoStore.getState();
+    if (syncManager) {
+      try { await syncManager.saveSnapshot(); } catch { /* best effort */ }
+    }
     teardown();
     logout();
     onLogout();
