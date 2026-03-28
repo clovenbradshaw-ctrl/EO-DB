@@ -42,6 +42,19 @@ function validateMatrixUserId(user_id: any): boolean {
  * All routes are auth-protected (registered inside the protected scope).
  */
 export function registerAdminRoutes(app: FastifyInstance, db: EoDb): void {
+  // ─── Reset (clear entire DB) ────────────────────────────────────────────
+  app.delete('/admin/reset', async (request: AuthenticatedRequest, reply) => {
+    const keys: string[] = [];
+    for await (const key of db.keys()) {
+      keys.push(key);
+    }
+    const batch = db.batch();
+    for (const key of keys) {
+      batch.del(key);
+    }
+    await batch.write();
+    return reply.send({ deleted: keys.length });
+  });
   // ─── Config ──────────────────────────────────────────────────────────────
 
   // GET /admin/matrix-auth — read current config
