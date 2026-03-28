@@ -1752,6 +1752,28 @@ async function appendEvent(event) {
     seq: nextSeq++,
     ts: event.ts || new Date().toISOString(),
   };
+
+  // Pre-read any data we need BEFORE opening the write transaction.
+  // Using await inside an IDB transaction causes the transaction to auto-close,
+  // which silently aborts all subsequent operations and hangs the promise.
+  let existingState = null;
+  let fwdEntries = {};
+  let revEntries = {};
+
+  const readTx = db.transaction(['state', 'graph_fwd', 'graph_rev'], 'readonly');
+  if (['DEF'].includes(ev.op)) {
+    existingState = await idbGet(readTx.objectStore('state'), ev.target);
+  }
+  if (ev.op === 'CON' && ev.operand && ev.operand.added) {
+    const fwdStore = readTx.objectStore('graph_fwd');
+    const revStore = readTx.objectStore('graph_rev');
+    fwdEntries[ev.target] = await idbGet(fwdStore, ev.target);
+    for (const dest of ev.operand.added) {
+      revEntries[dest] = await idbGet(revStore, dest);
+    }
+  }
+
+  // Now perform all writes synchronously within a single transaction
   const tx = db.transaction(['log', 'state', 'graph_fwd', 'graph_rev', 'eva', 'meta'], 'readwrite');
   tx.objectStore('log').add(ev);
   tx.objectStore('meta').put({ key: 'next_seq', value: nextSeq });
@@ -1759,11 +1781,10 @@ async function appendEvent(event) {
   // Update projected state
   if (['INS', 'DEF', 'SEG', 'EVA', 'REC', 'SIG'].includes(ev.op)) {
     const stateStore = tx.objectStore('state');
-    const existing = await idbGet(stateStore, ev.target);
     let value = ev.operand;
-    if (ev.op === 'DEF' && existing && typeof existing.value === 'object' && existing.value !== null
+    if (ev.op === 'DEF' && existingState && typeof existingState.value === 'object' && existingState.value !== null
         && typeof ev.operand === 'object' && ev.operand !== null && !ev.operand.formula) {
-      value = { ...existing.value, ...ev.operand };
+      value = { ...existingState.value, ...ev.operand };
     }
     stateStore.put({ target: ev.target, value, last_seq: ev.seq, last_op: ev.op, last_agent: ev.agent, last_ts: ev.ts });
   }
@@ -1777,11 +1798,11 @@ async function appendEvent(event) {
     const revStore = tx.objectStore('graph_rev');
     if (ev.operand && ev.operand.added) {
       for (const dest of ev.operand.added) {
-        const fwd = await idbGet(fwdStore, ev.target);
+        const fwd = fwdEntries[ev.target];
         const targets = fwd ? [...new Set([...fwd.targets, dest])] : [dest];
         fwdStore.put({ source: ev.target, targets });
 
-        const rev = await idbGet(revStore, dest);
+        const rev = revEntries[dest];
         const sources = rev ? [...new Set([...rev.sources, ev.target])] : [ev.target];
         revStore.put({ target: dest, sources });
       }
@@ -1805,6 +1826,7 @@ async function appendEvent(event) {
   return new Promise((resolve, reject) => {
     tx.oncomplete = () => resolve(ev);
     tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error('Transaction aborted'));
   });
 }
 
@@ -1971,8 +1993,21 @@ async function loadFromIndexedDB() {
   updateReplaySlider();
   refreshAll();
   updateStatusBar();
+  updateOpButtons();
   const statusEl = document.getElementById('localStatusText');
   if (statusEl) statusEl.textContent = `${LOG.length} events — seq ${nextSeq - 1}`;
+}
+
+function updateOpButtons() {
+  const empty = LOG.length === 0;
+  const requireExisting = ['DEF', 'CON', 'SEG', 'SYN', 'EVA', 'REC'];
+  requireExisting.forEach(op => {
+    const btn = document.querySelector(`.compose-op-btn.op-${op}`);
+    if (btn) {
+      btn.style.opacity = empty ? '0.35' : '';
+      btn.title = empty ? 'Requires existing targets — use INS first' : '';
+    }
+  });
 }
 
 function updateStatusBar() {
@@ -2493,6 +2528,12 @@ async function submitEvent() {
 
   try {
     const agent = matrixUserId || '@local:device';
+
+    // Validate: operators that act on existing targets require a non-empty DB
+    const OPS_REQUIRING_EXISTING = ['DEF', 'CON', 'SEG', 'SYN', 'EVA', 'REC'];
+    if (OPS_REQUIRING_EXISTING.includes(selectedOp) && LOG.length === 0) {
+      throw new Error(`${selectedOp} requires existing targets — use INS first to create one`);
+    }
 
     // CON two-way: collect targets and send pairwise events
     if (selectedOp === 'CON' && conDirection === 'two-way') {
