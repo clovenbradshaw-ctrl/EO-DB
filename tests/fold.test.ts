@@ -23,6 +23,7 @@ function ev(overrides: Partial<EoEventInput>): EoEventInput {
     operand: {},
     agent: AGENT,
     ts: TS,
+    acquired_ts: TS,
     ...overrides,
   };
 }

@@ -151,6 +151,7 @@ describe('hasActualChanges', () => {
       last_op: 'DEF',
       last_agent: 'test',
       last_ts: new Date().toISOString(),
+      last_acquired_ts: new Date().toISOString(),
     });
 
     const changed = await hasActualChanges(db, 'at.appXYZ.tblABC.rec001', {
@@ -168,6 +169,7 @@ describe('hasActualChanges', () => {
       last_op: 'DEF',
       last_agent: 'test',
       last_ts: new Date().toISOString(),
+      last_acquired_ts: new Date().toISOString(),
     });
 
     const changed = await hasActualChanges(db, 'at.appXYZ.tblABC.rec002', {
@@ -185,6 +187,7 @@ describe('hasActualChanges', () => {
       last_op: 'DEF',
       last_agent: 'test',
       last_ts: new Date().toISOString(),
+      last_acquired_ts: new Date().toISOString(),
     });
 
     const changed = await hasActualChanges(db, 'at.appXYZ.tblABC.rec003', {
@@ -202,6 +205,7 @@ describe('hasActualChanges', () => {
       last_op: 'DEF',
       last_agent: 'test',
       last_ts: new Date().toISOString(),
+      last_acquired_ts: new Date().toISOString(),
     });
 
     const changed = await hasActualChanges(db, 'at.appXYZ.tblABC.rec004', {

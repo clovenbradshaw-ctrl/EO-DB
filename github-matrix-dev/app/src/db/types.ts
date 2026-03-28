@@ -11,7 +11,8 @@ export interface EoEvent {
   target: string;
   operand: any;
   agent: string;
-  ts: string;
+  ts: string;                     // submission timestamp — when the agent/user submitted this event (ISO 8601)
+  acquired_ts: string;            // acquisition timestamp — when the system received this event (ISO 8601)
   client_event_id?: string;
   meta?: Record<string, any>;
 }
@@ -23,7 +24,8 @@ export interface EoState {
   last_seq: number;
   last_op: Operator;
   last_agent: string;
-  last_ts: string;
+  last_ts: string;                // submission timestamp of last event
+  last_acquired_ts: string;       // acquisition timestamp of last event
 }
 
 // CON graph edge
@@ -50,7 +52,7 @@ export interface Subscription {
   callback: (event: EoEvent) => void;
 }
 
-// Input event (before seq assignment)
+// Input event (before seq assignment — acquired_ts is system-assigned, not caller-provided)
 export type EoEventInput = Omit<EoEvent, 'seq'>;
 
 // --- Horizon: The File Cabinet ---

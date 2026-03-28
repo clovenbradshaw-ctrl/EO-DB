@@ -86,7 +86,8 @@ interface EoEvent {
   target: string;                 // dot-path target (e.g. "app.tblClients.rec123.fldEmail")
   operand: any;                   // typed by operator — value, edges, policy, boundary, etc.
   agent: string;                  // Matrix user ID (e.g. "@caseworker:app.aminoimmigration.com")
-  ts: string;                     // ISO 8601 timestamp
+  ts: string;                     // submission timestamp — when the agent/user submitted this event (ISO 8601)
+  acquired_ts: string;            // acquisition timestamp — when the system received this event (ISO 8601)
   client_event_id?: string;       // idempotency key from producer
   meta?: Record<string, any>;     // optional metadata (source system, provenance)
 }
@@ -98,7 +99,8 @@ interface EoState {
   last_seq: number;               // sequence of last event that touched this target
   last_op: Operator;              // operator type of last event
   last_agent: string;             // agent of last event
-  last_ts: string;                // timestamp of last event
+  last_ts: string;                // submission timestamp of last event
+  last_acquired_ts: string;       // acquisition timestamp of last event
 }
 
 // CON graph edge

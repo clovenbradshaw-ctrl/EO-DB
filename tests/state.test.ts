@@ -17,6 +17,7 @@ function makeState(overrides: Partial<EoState> = {}): EoState {
     last_op: 'INS',
     last_agent: '@intake:app.aminoimmigration.com',
     last_ts: '2025-06-01T00:00:00.000Z',
+    last_acquired_ts: '2025-06-01T00:00:00.000Z',
     ...overrides,
   };
 }
