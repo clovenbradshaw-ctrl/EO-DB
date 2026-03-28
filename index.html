@@ -1502,6 +1502,21 @@ body {
   </div>
 </div>
 
+<!-- Delete Confirmation Modal -->
+<div class="login-overlay hidden" id="deleteOverlay">
+  <div class="login-card" style="max-width:400px;">
+    <div class="login-title" style="color:var(--danger);">Delete All Data</div>
+    <div class="login-subtitle">This will permanently erase every event, state, and edge in the database. This cannot be undone.</div>
+    <div class="login-field">
+      <label>Type <b>DELETE</b> to confirm</label>
+      <input id="deleteConfirmInput" placeholder="DELETE" autocomplete="off">
+    </div>
+    <button class="login-btn" style="background:var(--danger);" id="deleteConfirmBtn" onclick="executeDeleteAll()">Erase Database</button>
+    <div class="login-error" id="deleteError"></div>
+    <div class="login-skip" onclick="hideDeleteModal()">Cancel</div>
+  </div>
+</div>
+
 <!-- Replay Bar -->
 <div class="replay-bar">
   <span class="replay-label">Replay</span>
@@ -2228,7 +2243,59 @@ function renderHorizon() {
   `).join('');
 }
 
-function filterHorizon() { renderHorizon(); }
+function filterHorizon() {
+  const val = document.getElementById('horizonSearch').value.trim();
+  if (val.toLowerCase() === 'delete') {
+    document.getElementById('horizonSearch').value = '';
+    showDeleteModal();
+    return;
+  }
+  renderHorizon();
+}
+
+function showDeleteModal() {
+  document.getElementById('deleteOverlay').classList.remove('hidden');
+  document.getElementById('deleteConfirmInput').value = '';
+  document.getElementById('deleteError').textContent = '';
+  document.getElementById('deleteConfirmInput').focus();
+}
+
+function hideDeleteModal() {
+  document.getElementById('deleteOverlay').classList.add('hidden');
+}
+
+async function executeDeleteAll() {
+  const input = document.getElementById('deleteConfirmInput').value.trim();
+  if (input !== 'DELETE') {
+    document.getElementById('deleteError').textContent = 'Type DELETE to confirm.';
+    return;
+  }
+  if (!isConnected) {
+    document.getElementById('deleteError').textContent = 'Not connected to server.';
+    return;
+  }
+  try {
+    const res = await fetch(`${serverUrl}/admin/reset`, {
+      method: 'DELETE',
+      headers: authHeaders(),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      document.getElementById('deleteError').textContent = data.error || `Server error ${res.status}`;
+      return;
+    }
+    const data = await res.json();
+    LOG = [];
+    replayIndex = 0;
+    updateReplaySlider();
+    refreshAll();
+    updateStatusBar();
+    hideDeleteModal();
+    alert(`Database cleared — ${data.deleted} entries removed.`);
+  } catch (e) {
+    document.getElementById('deleteError').textContent = e.message;
+  }
+}
 
 function navigateToPath(path) {
   const input = document.getElementById('horizonSearch');
