@@ -11,7 +11,12 @@ import {
   recordTarget,
   tableTarget,
   baseTarget,
+  extractStorableFields,
+  buildFieldMetaMap,
 } from '../src/ingestion/airtable-sync.js';
+import { classifyFieldType, COMPUTED_TYPES, METADATA_TYPES } from '../src/ingestion/field-rules.js';
+import { extractValue, valuesEqual, stableStringify } from '../src/ingestion/value-extract.js';
+import { isExcluded, mergeExclusions, EMPTY_EXCLUSIONS } from '../src/ingestion/exclusions.js';
 import { getState, setState } from '../src/db/state.js';
 import { rmSync, mkdtempSync } from 'fs';
 import { tmpdir } from 'os';
@@ -231,6 +236,199 @@ describe('target naming', () => {
   });
 });
 
+// ─── Field rules tests ─────────────────────────────────────────────────────
+
+describe('classifyFieldType', () => {
+  it('skips computed fields', () => {
+    for (const type of ['formula', 'rollup', 'lookup', 'count']) {
+      expect(classifyFieldType(type)).toBe('skip');
+    }
+  });
+
+  it('skips metadata fields', () => {
+    for (const type of ['createdTime', 'lastModifiedTime', 'createdBy', 'lastModifiedBy', 'autoNumber']) {
+      expect(classifyFieldType(type)).toBe('skip');
+    }
+  });
+
+  it('classifies link fields as con', () => {
+    expect(classifyFieldType('multipleRecordLinks')).toBe('con');
+  });
+
+  it('classifies stored value fields as def', () => {
+    for (const type of ['singleLineText', 'email', 'number', 'checkbox', 'singleSelect', 'multipleSelects', 'attachment']) {
+      expect(classifyFieldType(type)).toBe('def');
+    }
+  });
+});
+
+// ─── Value extraction tests ────────────────────────────────────────────────
+
+describe('extractValue', () => {
+  it('passes through simple values unchanged', () => {
+    expect(extractValue('hello', 'singleLineText')).toBe('hello');
+    expect(extractValue(42, 'number')).toBe(42);
+    expect(extractValue(true, 'checkbox')).toBe(true);
+  });
+
+  it('keeps select choices as-is (id + name + color)', () => {
+    const choice = { id: 'selABC', name: 'Active', color: 'green' };
+    expect(extractValue(choice, 'singleSelect')).toEqual(choice);
+  });
+
+  it('keeps multipleSelects as-is', () => {
+    const choices = [
+      { id: 'sel1', name: 'A', color: 'red' },
+      { id: 'sel2', name: 'B', color: 'blue' },
+    ];
+    expect(extractValue(choices, 'multipleSelects')).toEqual(choices);
+  });
+
+  it('strips display names from linked records', () => {
+    const links = [
+      { id: 'recXYZ', name: 'Alice' },
+      { id: 'recABC', name: 'Bob' },
+    ];
+    expect(extractValue(links, 'multipleRecordLinks')).toEqual(['recXYZ', 'recABC']);
+  });
+
+  it('strips URLs from attachments, keeps identity', () => {
+    const attachments = [
+      { id: 'att1', filename: 'doc.pdf', size: 1024, type: 'application/pdf', url: 'https://stale-url.com/doc.pdf', thumbnails: {} },
+    ];
+    expect(extractValue(attachments, 'attachment')).toEqual([
+      { id: 'att1', filename: 'doc.pdf', size: 1024, type: 'application/pdf' },
+    ]);
+  });
+
+  it('returns null for null/undefined', () => {
+    expect(extractValue(null, 'singleLineText')).toBeNull();
+    expect(extractValue(undefined, 'number')).toBeNull();
+  });
+});
+
+describe('valuesEqual', () => {
+  it('treats null and undefined as equal', () => {
+    expect(valuesEqual(null, undefined)).toBe(true);
+    expect(valuesEqual(undefined, null)).toBe(true);
+  });
+
+  it('compares objects with sorted keys', () => {
+    expect(valuesEqual({ b: 2, a: 1 }, { a: 1, b: 2 })).toBe(true);
+  });
+
+  it('detects differences', () => {
+    expect(valuesEqual({ a: 1 }, { a: 2 })).toBe(false);
+  });
+});
+
+// ─── Exclusion tests ──────────────────────────────────────────────────────
+
+describe('exclusions', () => {
+  it('excludes by exact field ID', () => {
+    const excl = { fields: ['fldSecret'], patterns: [] };
+    expect(isExcluded('fldSecret', 'Secret Field', excl)).toBe(true);
+    expect(isExcluded('fldOther', 'Other', excl)).toBe(false);
+  });
+
+  it('excludes by regex pattern on name', () => {
+    const excl = { fields: [], patterns: ['^internal_'] };
+    expect(isExcluded('fld1', 'internal_notes', excl)).toBe(true);
+    expect(isExcluded('fld2', 'Name', excl)).toBe(false);
+  });
+
+  it('merges exclusion policies', () => {
+    const merged = mergeExclusions(
+      { fields: ['fldA'], patterns: ['^tmp_'] },
+      { fields: ['fldB'], patterns: ['^debug_'] },
+    );
+    expect(merged.fields).toContain('fldA');
+    expect(merged.fields).toContain('fldB');
+    expect(merged.patterns).toContain('^tmp_');
+    expect(merged.patterns).toContain('^debug_');
+  });
+});
+
+// ─── extractStorableFields tests ───────────────────────────────────────────
+
+describe('extractStorableFields', () => {
+  const fieldMeta = buildFieldMetaMap([
+    { id: 'fldName', name: 'Name', type: 'singleLineText' },
+    { id: 'fldEmail', name: 'Email', type: 'email' },
+    { id: 'fldFormula', name: 'Computed', type: 'formula' },
+    { id: 'fldRollup', name: 'Total', type: 'rollup' },
+    { id: 'fldModified', name: 'Modified', type: 'lastModifiedTime' },
+    { id: 'fldLinks', name: 'Related', type: 'multipleRecordLinks' },
+    { id: 'fldStatus', name: 'Status', type: 'singleSelect' },
+    { id: 'fldFiles', name: 'Files', type: 'attachment' },
+  ]);
+
+  it('passes through stored-value fields', () => {
+    const result = extractStorableFields(
+      { fldName: 'Alice', fldEmail: 'a@b.com' },
+      fieldMeta,
+      EMPTY_EXCLUSIONS,
+    );
+    expect(result).toEqual({ fldName: 'Alice', fldEmail: 'a@b.com' });
+  });
+
+  it('skips computed and metadata fields', () => {
+    const result = extractStorableFields(
+      { fldName: 'Alice', fldFormula: '=1+1', fldRollup: 42, fldModified: '2025-01-01' },
+      fieldMeta,
+      EMPTY_EXCLUSIONS,
+    );
+    expect(result).toEqual({ fldName: 'Alice' });
+    expect(result).not.toHaveProperty('fldFormula');
+    expect(result).not.toHaveProperty('fldRollup');
+    expect(result).not.toHaveProperty('fldModified');
+  });
+
+  it('normalizes linked record values (strips display names)', () => {
+    const result = extractStorableFields(
+      { fldLinks: [{ id: 'rec1', name: 'Alice' }, { id: 'rec2', name: 'Bob' }] },
+      fieldMeta,
+      EMPTY_EXCLUSIONS,
+    );
+    expect(result.fldLinks).toEqual(['rec1', 'rec2']);
+  });
+
+  it('keeps select choice objects as-is', () => {
+    const choice = { id: 'selActive', name: 'Active', color: 'green' };
+    const result = extractStorableFields(
+      { fldStatus: choice },
+      fieldMeta,
+      EMPTY_EXCLUSIONS,
+    );
+    expect(result.fldStatus).toEqual(choice);
+  });
+
+  it('strips attachment URLs, keeps identity', () => {
+    const result = extractStorableFields(
+      { fldFiles: [{ id: 'att1', filename: 'f.pdf', size: 100, type: 'application/pdf', url: 'https://stale.com/f.pdf' }] },
+      fieldMeta,
+      EMPTY_EXCLUSIONS,
+    );
+    expect(result.fldFiles).toEqual([{ id: 'att1', filename: 'f.pdf', size: 100, type: 'application/pdf' }]);
+  });
+
+  it('respects exclusions', () => {
+    const result = extractStorableFields(
+      { fldName: 'Alice', fldEmail: 'a@b.com' },
+      fieldMeta,
+      { fields: ['fldEmail'], patterns: [] },
+    );
+    expect(result).toEqual({ fldName: 'Alice' });
+  });
+
+  it('passes through all fields when no schema available (backward compat)', () => {
+    const emptyMeta = buildFieldMetaMap(undefined);
+    const raw = { fldName: 'Alice', fldFormula: '=1+1' };
+    const result = extractStorableFields(raw, emptyMeta, EMPTY_EXCLUSIONS);
+    expect(result).toEqual(raw);
+  });
+});
+
 // ─── API route tests ────────────────────────────────────────────────────────
 
 describe('Ingestion API routes', () => {
@@ -268,6 +466,7 @@ describe('Ingestion API routes', () => {
                 fields: [
                   { id: 'fldName', name: 'Name', type: 'singleLineText' },
                   { id: 'fldEmail', name: 'Email', type: 'email' },
+                  { id: 'fldFormula', name: 'FullName', type: 'formula' },
                 ],
               },
             ],
@@ -276,14 +475,20 @@ describe('Ingestion API routes', () => {
       }
       // Mock Airtable API — list records
       if (urlStr.includes('/appTEST1/')) {
+        // When returnFieldsByFieldId=true, use field IDs as keys
+        const byFieldId = urlStr.includes('returnFieldsByFieldId=true');
+        const records = byFieldId
+          ? [
+              { id: 'recA', createdTime: '2025-01-01T00:00:00Z', fields: { fldName: 'Alice', fldEmail: 'alice@test.com', fldFormula: 'Alice Smith' } },
+              { id: 'recB', createdTime: '2025-01-01T00:00:00Z', fields: { fldName: 'Bob', fldEmail: 'bob@test.com', fldFormula: 'Bob Jones' } },
+            ]
+          : [
+              { id: 'recA', createdTime: '2025-01-01T00:00:00Z', fields: { Name: 'Alice', Email: 'alice@test.com', FullName: 'Alice Smith' } },
+              { id: 'recB', createdTime: '2025-01-01T00:00:00Z', fields: { Name: 'Bob', Email: 'bob@test.com', FullName: 'Bob Jones' } },
+            ];
         return {
           ok: true,
-          json: async () => ({
-            records: [
-              { id: 'recA', createdTime: '2025-01-01T00:00:00Z', fields: { Name: 'Alice', Email: 'alice@test.com' } },
-              { id: 'recB', createdTime: '2025-01-01T00:00:00Z', fields: { Name: 'Bob', Email: 'bob@test.com' } },
-            ],
-          }),
+          json: async () => ({ records }),
         } as any;
       }
       return { ok: false, status: 404, text: async () => 'Not found' } as any;
@@ -418,7 +623,7 @@ describe('Ingestion API routes', () => {
     expect(manifest.bases[0].id).toBe('appTEST1');
     expect(manifest.bases[0].tables).toHaveLength(1);
     expect(manifest.bases[0].tables[0].name).toBe('Clients');
-    expect(manifest.bases[0].tables[0].fields).toHaveLength(2);
+    expect(manifest.bases[0].tables[0].fields).toHaveLength(3);
   });
 
   it('GET /ingestion/airtable/discover/:label — 404 for missing key', async () => {
@@ -449,10 +654,13 @@ describe('Ingestion API routes', () => {
     expect(body.sync_results[0].table_name).toBe('Clients');
     expect(body.sync_results[0].records_fetched).toBe(2);
 
-    // Verify records landed in EO-DB state
+    // Verify records landed in EO-DB state (keyed by field ID now)
     const aliceState = await getState(db, 'at.appTEST1.tblTEST1.recA');
     expect(aliceState).not.toBeNull();
-    expect(aliceState!.value.fields.Name).toBe('Alice');
+    expect(aliceState!.value.fields.fldName).toBe('Alice');
+    expect(aliceState!.value.fields.fldEmail).toBe('alice@test.com');
+    // Formula field should NOT be stored — it's a computed Horizon output
+    expect(aliceState!.value.fields.fldFormula).toBeUndefined();
   });
 
   it('POST /ingestion/airtable/hydrate/:label — re-hydration skips unchanged', async () => {
