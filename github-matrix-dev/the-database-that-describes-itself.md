@@ -2,6 +2,8 @@
 
 ## An Audio Essay on EO///DB
 
+> **Architecture Update (March 2026):** This essay describes the unification of three redundant implementations into a single embedded database. That unification is now going further: the server itself is being removed. The fold runs in every browser. IndexedDB is the storage. Matrix rooms are the sync. The Zustand store and IndexedDB layer this essay mentions are no longer secondary fallbacks — they are the primary architecture. The "database that describes itself" now describes itself from within every device that holds the keys.
+
 ---
 
 There's a thing that happens when you build software long enough. You start to notice that the application code is doing work the infrastructure should be doing. Not because the developers are bad. Because the infrastructure doesn't understand what it's storing. The database holds bytes at addresses. The application supplies all the meaning. And between the database and the application, there's a translation layer — usually hundreds or thousands of lines of code — that exists only because the storage engine is semantically blind.

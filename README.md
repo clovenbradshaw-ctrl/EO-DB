@@ -1,54 +1,79 @@
 # EO///DB
 
-Embedded database server implementing the EO transformation calculus.
+Browser-native database implementing the EO transformation calculus. No server. The fold runs in every browser. Every device with the events and keys has the complete database.
 
-## Prerequisites
+## Architecture
 
-- [Node.js](https://nodejs.org) (LTS version recommended)
+```
+Browser (each device)
+  ├── IndexedDB (encrypted at rest, AES-GCM)
+  │     ├── log     — append-only event log
+  │     ├── state   — projected state (from fold)
+  │     ├── graph   — CON adjacency index
+  │     └── eva     — EVA-active registrations
+  ├── Nine-case fold (runs locally)
+  ├── Six-layer Horizon read
+  └── Matrix SDK (sync, E2EE, device messaging)
 
-## Setup
+Matrix homeserver (app.aminoimmigration.com)
+  ├── #amino-data room (E2EE) — event sync between devices
+  ├── Media store — encrypted binary snapshots
+  └── Key management — Megolm sessions, cross-signing
+```
+
+## Data Persistence Tiers
+
+| Tier | Storage | Role |
+|------|---------|------|
+| 1 | Local IndexedDB (per device) | Primary working store, encrypted at rest |
+| 2 | Matrix media repository | Binary snapshot backups for fast device bootstrap |
+| 3 | 3rd-party backups (future) | Disaster recovery, archival (S3, IPFS, etc.) |
+
+## How It Works
+
+- **Local-first:** Events fold immediately in the browser. UI updates instantly. Sync is async.
+- **Matrix sync:** Events propagate to other devices through an encrypted Matrix room.
+- **Offline capable:** All operations work offline. Events queue and sync on reconnect.
+- **Snapshot hydration:** New devices bootstrap from a binary snapshot, then sync the tail.
+- **No server:** No `localhost:3000`. No Fastify. No LevelDB. No nginx. The browser is the database.
+
+## Development
+
+See [DEVELOPMENT-STAGES.md](./DEVELOPMENT-STAGES.md) for the staged build plan.
+
+### Legacy Server (historical)
+
+The `src/` directory contains the original server-based implementation (Fastify + LevelDB). It serves as reference for the fold logic, operator handlers, Horizon layers, and ingestion pipeline being ported to the browser.
 
 ```bash
-# Clone the repo
-git clone https://github.com/clovenbradshaw-ctrl/eo-db.git
-cd eo-db
-
-# Install dependencies
+# Legacy server (reference only)
 npm install
-
-# Start the server
-npm run dev
+npm run dev       # Starts Fastify at localhost:3000
+npm test          # Runs vitest suite
 ```
 
-The server runs at `http://localhost:3000` by default.
+### Browser App
 
-## Verify it's working
+```bash
+# Open directly (Stages 1-2, no build step)
+open index.html
 
-Open `http://localhost:3000/health` in your browser. You should see:
-
-```json
-{"status":"ok","seq":0,"uptime":...}
+# With Vite (Stage 3+, required for Matrix SDK)
+npm run dev       # Vite dev server
+npm run build     # Static assets to dist/
 ```
 
-## Admin UI
+## Matrix Homeserver
 
-Open `eo-db-admin.html` in your browser (double-click the file in your file explorer). It connects to the running server automatically.
+Authentication and sync target: `https://app.aminoimmigration.com`
 
-## Scripts
+## Documentation
 
-| Command | Description |
-|---|---|
-| `npm run dev` | Start the server in dev mode |
-| `npm run build` | Compile TypeScript to `dist/` |
-| `npm test` | Run tests |
-| `npm run test:watch` | Run tests in watch mode |
-
-## Environment Variables
-
-| Variable | Default | Description |
-|---|---|---|
-| `EO_PORT` | `3000` | Server port |
-| `EO_DATA_DIR` | `./data` | LevelDB data directory |
-| `EO_MATRIX_HOMESERVER` | `https://app.aminoimmigration.com` | Matrix auth homeserver |
-| `EO_WEBHOOK_SECRET` | _(empty)_ | Webhook authentication secret |
-| `EO_LOG_LEVEL` | `info` | Log verbosity (`debug`, `info`, `warn`, `error`) |
+| Document | Purpose |
+|----------|---------|
+| `DEVELOPMENT-STAGES.md` | Staged build plan for browser-native transition |
+| `eo-db-technical-spec.md` | Technical spec (server-era, fold/operator logic still authoritative) |
+| `build-eo-db-prompt.md` | Original server build phases (completed) |
+| `github-matrix-dev/eo-db-decentralized-spec.md` | Decentralized architecture spec |
+| `github-matrix-dev/build-eo-db-decentralized-prompt.md` | Browser-native build guide |
+| `about.md` | Design report — transformation calculus theory |

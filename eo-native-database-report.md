@@ -2,6 +2,8 @@
 
 **Michael T. Lacy — March 2026**
 
+> **Architecture Update (March 2026):** The server-based implementation described in this report (LevelDB, Fastify, VM deployment) is complete and has been superseded by a serverless, browser-native architecture. The fold now runs in every browser. IndexedDB replaces LevelDB. Matrix room sync replaces WebSocket server. The theoretical foundations — the transformation calculus, operator helix, Horizon layers, and the argument for an EO-native storage engine — are unchanged and validated by the transition. See `DEVELOPMENT-STAGES.md`.
+
 ---
 
 ## 1. The Inversion

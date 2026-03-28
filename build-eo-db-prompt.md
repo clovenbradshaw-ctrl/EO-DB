@@ -1,4 +1,8 @@
-# Build EO///DB
+# Build EO///DB (Server Edition — Historical Reference)
+
+> **ARCHITECTURAL NOTE (March 2026):** This document describes the original server-based build (Fastify + LevelDB). That implementation is complete and serves as reference code. EO///DB is transitioning to a **serverless, browser-native architecture** where the fold runs in every browser, data persists in IndexedDB (encrypted at rest), and devices sync through an E2EE Matrix room. See `DEVELOPMENT-STAGES.md` for the current build plan and `github-matrix-dev/eo-db-decentralized-spec.md` for the browser-native architecture spec.
+>
+> **What remains authoritative from this document:** fold logic (§2), operator helix (§2), Horizon layers (§3, §3b), type definitions, test fixtures. **What is superseded:** deployment (§9), server entry point (§9), HTTP API (§6), WebSocket sync (§7), auth middleware (§5), nginx/systemd configuration.
 
 You are building EO///DB — an embedded database server that stores, projects, and serves data using a nine-operator transformation calculus. It is not a wrapper around a relational database. It is its own storage engine over LevelDB with a nine-case fold, a native graph index, operator-aware subscriptions, and Matrix authentication.
 

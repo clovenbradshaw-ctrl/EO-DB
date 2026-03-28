@@ -1,4 +1,6 @@
-# EO///DB — Technical Specification
+# EO///DB — Technical Specification (Server Edition — Historical Reference)
+
+> **ARCHITECTURAL NOTE (March 2026):** This spec describes the completed server-based implementation. EO///DB is transitioning to a serverless, browser-native architecture. See `DEVELOPMENT-STAGES.md` and `eo-db-decentralized-spec.md` (in this directory) for the current architecture. Fold logic, types, operator handlers, and Horizon remain authoritative. Deployment, API, WebSocket, and auth middleware sections are superseded.
 
 **Build target:** A Node.js server that implements an EO-native embedded database with Matrix authentication, webhook ingestion, WebSocket sync, and a visual admin interface.
 
