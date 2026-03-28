@@ -4,8 +4,9 @@ import { useEoStore } from '../store/eo-store';
 import { createIdb } from '../db/idb';
 import { createStore } from '../db/encrypted-store';
 import { deriveKey } from '../lib/crypto';
-import { ClientList } from './ClientList';
-import { RecordView } from './RecordView';
+import { HolonNav } from './HolonNav';
+import { TableView } from './TableView';
+import { RecordDetailDrawer } from './RecordDetailDrawer';
 import { ConnectionStatus, useConnectionState } from './ConnectionStatus';
 import { ErrorBoundary } from './ErrorBoundary';
 import { SyncProgress } from './SyncProgress';
@@ -21,7 +22,8 @@ export function Layout({ session, onLogout }: LayoutProps) {
   const teardown = useEoStore((s) => s.teardown);
   const ready = useEoStore((s) => s.ready);
   const lastSeq = useEoStore((s) => s.lastSeq);
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selectedScope, setSelectedScope] = useState<string | null>(null);
+  const [selectedRecord, setSelectedRecord] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const connectionState = useConnectionState();
 
@@ -79,25 +81,41 @@ export function Layout({ session, onLogout }: LayoutProps) {
       <div style={styles.body}>
         <aside style={styles.sidebar}>
           {ready ? (
-            <ClientList selected={selected} onSelect={setSelected} />
+            <HolonNav
+              selectedScope={selectedScope}
+              onSelectScope={(scope) => { setSelectedScope(scope); setSelectedRecord(null); }}
+              onSelectSegment={(_scope, _seg) => { setSelectedScope(_scope); }}
+            />
           ) : (
             <SyncProgress message="Initializing store..." detail="Deriving encryption key" />
           )}
         </aside>
         <main style={styles.main}>
           <ErrorBoundary>
-            {selected ? (
-              <RecordView target={selected} onNavigate={setSelected} />
+            {selectedScope ? (
+              <TableView
+                scope={selectedScope}
+                onSelectRecord={setSelectedRecord}
+                activeRecord={selectedRecord}
+                session={{ userId: session.userId }}
+              />
             ) : (
               <div style={styles.empty}>
-                <div style={styles.emptyText}>Select a client to view their record</div>
+                <div style={styles.emptyText}>Select an object type to view its records</div>
                 <div style={styles.emptySub}>
-                  You'll see their case details, the context around them, and patterns across similar cases
+                  Choose from the hierarchy on the left to see records as a table
                 </div>
               </div>
             )}
           </ErrorBoundary>
         </main>
+        {selectedRecord && (
+          <RecordDetailDrawer
+            target={selectedRecord}
+            onClose={() => setSelectedRecord(null)}
+            onNavigate={(t) => setSelectedRecord(t)}
+          />
+        )}
       </div>
       {showSettings && (
         <AirtableSettings session={session} onClose={() => setShowSettings(false)} />

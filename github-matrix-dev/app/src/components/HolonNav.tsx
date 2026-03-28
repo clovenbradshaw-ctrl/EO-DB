@@ -1,0 +1,262 @@
+import { useEffect, useState, useMemo } from 'react';
+import type { EoState } from '../db/types';
+import { useEoStore } from '../store/eo-store';
+import type { FilterDefinition } from './filter-types';
+
+interface HolonNavProps {
+  selectedScope: string | null;
+  onSelectScope: (scope: string) => void;
+  onSelectSegment?: (scope: string, segment: FilterDefinition) => void;
+}
+
+interface TreeNode {
+  segment: string;       // just this level's name (e.g. "tblClients")
+  fullPath: string;      // full dot-path (e.g. "app.tblClients")
+  children: TreeNode[];
+  childCount: number;    // number of direct children with state
+  segments?: Record<string, FilterDefinition>;
+}
+
+function formatName(segment: string): string {
+  // Strip tbl/rec/fld prefixes, add spaces before capitals
+  let name = segment.replace(/^(tbl|rec|fld)/, '');
+  name = name.replace(/([a-z])([A-Z])/g, '$1 $2');
+  return name || segment;
+}
+
+function buildTree(states: EoState[]): TreeNode[] {
+  const pathSet = new Map<string, { childPaths: Set<string>; state?: EoState }>();
+
+  for (const s of states) {
+    if (s.value?._alias) continue;
+    const parts = s.target.split('.');
+
+    // Register every prefix level
+    for (let i = 1; i <= parts.length; i++) {
+      const path = parts.slice(0, i).join('.');
+      if (!pathSet.has(path)) {
+        pathSet.set(path, { childPaths: new Set() });
+      }
+    }
+
+    // Register this target's state at its path
+    const entry = pathSet.get(s.target)!;
+    entry.state = s;
+
+    // Register as child of parent
+    if (parts.length > 1) {
+      const parentPath = parts.slice(0, -1).join('.');
+      pathSet.get(parentPath)!.childPaths.add(s.target);
+    }
+  }
+
+  function buildNode(fullPath: string): TreeNode {
+    const entry = pathSet.get(fullPath)!;
+    const segment = fullPath.split('.').pop()!;
+    const childPaths = [...entry.childPaths].sort();
+    const children = childPaths
+      .filter(cp => pathSet.has(cp))
+      .map(cp => buildNode(cp));
+
+    const segments = entry.state?.value?._segments as Record<string, FilterDefinition> | undefined;
+
+    return {
+      segment,
+      fullPath,
+      children,
+      childCount: entry.childPaths.size,
+      segments,
+    };
+  }
+
+  // Find root nodes (depth 1)
+  const roots: TreeNode[] = [];
+  for (const [path] of pathSet) {
+    if (!path.includes('.')) {
+      roots.push(buildNode(path));
+    }
+  }
+  return roots;
+}
+
+export function HolonNav({ selectedScope, onSelectScope, onSelectSegment }: HolonNavProps) {
+  const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
+  const ready = useEoStore((s) => s.ready);
+  const lastSeq = useEoStore((s) => s.lastSeq);
+  const [allStates, setAllStates] = useState<EoState[]>([]);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    if (!ready) return;
+    getStateByPrefix('app.').then(setAllStates);
+  }, [ready, lastSeq, getStateByPrefix]);
+
+  const tree = useMemo(() => buildTree(allStates), [allStates]);
+
+  // Auto-expand root on first load
+  useEffect(() => {
+    if (tree.length > 0 && expanded.size === 0) {
+      setExpanded(new Set(tree.map(n => n.fullPath)));
+    }
+  }, [tree, expanded.size]);
+
+  function toggleExpand(path: string) {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  }
+
+  function renderNode(node: TreeNode, depth: number) {
+    const isActive = selectedScope === node.fullPath;
+    const isExpanded = expanded.has(node.fullPath);
+    const hasChildren = node.children.length > 0;
+
+    return (
+      <div key={node.fullPath}>
+        <div
+          style={{
+            ...styles.item,
+            paddingLeft: 12 + depth * 16,
+            ...(isActive ? styles.itemActive : {}),
+          }}
+          onClick={() => onSelectScope(node.fullPath)}
+        >
+          {/* Expand/collapse chevron */}
+          <span
+            style={styles.chevron}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (hasChildren) toggleExpand(node.fullPath);
+            }}
+          >
+            {hasChildren ? (isExpanded ? '\u25BE' : '\u25B8') : '\u00A0\u00A0'}
+          </span>
+
+          <span style={styles.name}>{formatName(node.segment)}</span>
+
+          {node.childCount > 0 && (
+            <span style={styles.count}>{node.childCount}</span>
+          )}
+        </div>
+
+        {/* Saved segments */}
+        {isExpanded && node.segments && Object.entries(node.segments).map(([name, seg]) => (
+          <div
+            key={`seg:${name}`}
+            style={{
+              ...styles.segItem,
+              paddingLeft: 28 + depth * 16,
+            }}
+            onClick={() => onSelectSegment?.(node.fullPath, seg)}
+          >
+            <span style={styles.segIcon}>
+              <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                <path d="M1 3h14M3 8h10M5 13h6" />
+              </svg>
+            </span>
+            <span style={styles.segName}>{name}</span>
+          </div>
+        ))}
+
+        {/* Children */}
+        {isExpanded && node.children.map(child => renderNode(child, depth + 1))}
+      </div>
+    );
+  }
+
+  return (
+    <div style={styles.container}>
+      <div style={styles.header}>
+        <span style={styles.title}>Objects</span>
+      </div>
+      <div style={styles.scroll}>
+        {allStates.length === 0 && (
+          <div style={styles.empty}>No objects yet</div>
+        )}
+        {tree.map(node => renderNode(node, 0))}
+      </div>
+    </div>
+  );
+}
+
+const styles: Record<string, React.CSSProperties> = {
+  container: {
+    display: 'flex',
+    flexDirection: 'column',
+    height: '100%',
+  },
+  header: {
+    padding: '16px 18px',
+    borderBottom: '1px solid #e5e2dd',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  title: { fontWeight: 600, fontSize: 13, color: '#1a1816' },
+  scroll: { flex: 1, overflowY: 'auto' },
+  empty: { padding: 18, fontSize: 13, color: '#aba69e' },
+  item: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+    padding: '10px 12px',
+    cursor: 'pointer',
+    borderBottom: '1px solid #f0eeeb',
+    transition: 'background .1s',
+    fontSize: 13,
+  } as React.CSSProperties,
+  itemActive: {
+    background: '#eef5fd',
+    borderLeft: '3px solid #1a6dd4',
+  } as React.CSSProperties,
+  chevron: {
+    fontSize: 10,
+    color: '#aba69e',
+    width: 14,
+    flexShrink: 0,
+    cursor: 'pointer',
+    userSelect: 'none' as const,
+  },
+  name: {
+    fontWeight: 500,
+    color: '#1a1816',
+    flex: 1,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap' as const,
+  },
+  count: {
+    fontSize: 10,
+    color: '#aba69e',
+    fontFamily: "'JetBrains Mono', monospace",
+    background: '#f4f3f0',
+    padding: '1px 6px',
+    borderRadius: 8,
+    flexShrink: 0,
+  },
+  segItem: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+    padding: '6px 12px',
+    cursor: 'pointer',
+    fontSize: 11,
+    color: '#7c5cbf',
+    borderBottom: '1px solid #f0eeeb',
+  } as React.CSSProperties,
+  segIcon: {
+    display: 'flex',
+    alignItems: 'center',
+    color: '#d9487a',
+    flexShrink: 0,
+  },
+  segName: {
+    fontWeight: 500,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap' as const,
+  },
+};
