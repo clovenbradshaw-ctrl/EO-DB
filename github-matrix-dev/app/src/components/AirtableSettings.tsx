@@ -8,13 +8,16 @@
  *   - Org-shared:  system.ingestion.airtable.keys.{label}
  *   - Private:     user.{userId}.ingestion.airtable.keys.{label}
  *
- * Sync is triggered via the backend ingestion API using the Matrix
- * access token for auth.
+ * Sync runs entirely in the browser — Airtable API calls go directly
+ * from the browser, records fold into IndexedDB via processEvent.
+ * No backend server involved.
  */
 
 import { useState, useEffect, useCallback } from 'react';
 import { useEoStore } from '../store/eo-store';
 import type { MatrixSession } from '../matrix/client';
+import { AirtableClient } from '../ingestion/airtable-client';
+import { discoverSchema, hydrationSync, updateSync } from '../ingestion/airtable-sync';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -65,7 +68,11 @@ function labelFromTarget(target: string, userId: string): { label: string; share
 
 // ─── Component ──────────────────────────────────────────────────────────────
 
-export function AirtableSettings({ session, onClose }: AirtableSettingsProps) {
+/**
+ * Standalone Airtable settings section (no overlay wrapper).
+ * Used inside the Settings page.
+ */
+export function AirtableSettingsSection({ session }: { session: MatrixSession }) {
   const dispatch = useEoStore((s) => s.dispatch);
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
 
@@ -163,28 +170,6 @@ export function AirtableSettings({ session, onClose }: AirtableSettingsProps) {
         client_event_id: crypto.randomUUID(),
       });
 
-      // Also store on the backend server for sync operations
-      try {
-        const res = await fetch(`${session.homeserver}/_eo/ingestion/keys`, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${session.accessToken}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            label: label.trim(),
-            api_key: apiKey.trim(),
-          }),
-        });
-        if (!res.ok) {
-          const body = await res.json().catch(() => ({ error: res.statusText }));
-          console.warn('Backend key store warning:', body.error);
-        }
-      } catch (e) {
-        // Backend store is best-effort — key is already in room data
-        console.warn('Could not store key on backend:', e);
-      }
-
       setLabel('');
       setApiKey('');
       await loadKeys();
@@ -212,52 +197,63 @@ export function AirtableSettings({ session, onClose }: AirtableSettingsProps) {
       client_event_id: crypto.randomUUID(),
     });
 
-    // Also remove from backend
-    try {
-      await fetch(`${session.homeserver}/_eo/ingestion/keys/${encodeURIComponent(key.label)}`, {
-        method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${session.accessToken}` },
-      });
-    } catch { /* best-effort */ }
-
     await loadKeys();
   }
 
-  // ── Trigger sync ──
+  // ── Retrieve the actual API key from IndexedDB for a stored key entry ──
+  async function getApiKey(key: StoredKey): Promise<string | null> {
+    const target = key.shared
+      ? `${ORG_PREFIX}${key.label}`
+      : `${userPrefix(session.userId)}${key.label}`;
+    const state = await useEoStore.getState().getState(target);
+    return state?.value?.api_key ?? null;
+  }
+
+  // ── Trigger sync (runs entirely in the browser) ──
   async function handleSync(key: StoredKey, mode: 'hydrate' | 'sync') {
     const statusKey = `${key.label}-${mode}`;
     setSyncStatus((s) => ({
       ...s,
-      [statusKey]: { state: mode === 'hydrate' ? 'syncing' : 'syncing', message: `Starting ${mode}...` },
+      [statusKey]: { state: 'syncing', message: `Starting ${mode}...` },
     }));
 
     try {
-      const endpoint = mode === 'hydrate'
-        ? `${session.homeserver}/_eo/ingestion/airtable/hydrate/${encodeURIComponent(key.label)}`
-        : `${session.homeserver}/_eo/ingestion/airtable/sync/${encodeURIComponent(key.label)}`;
-
-      const res = await fetch(endpoint, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${session.accessToken}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({}),
-      });
-
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({ error: res.statusText }));
+      const rawKey = await getApiKey(key);
+      if (!rawKey) {
         setSyncStatus((s) => ({
           ...s,
-          [statusKey]: { state: 'error', message: body.error || 'Sync failed' },
+          [statusKey]: { state: 'error', message: 'API key not found in store' },
         }));
         return;
       }
 
-      const result = await res.json();
-      const ingested = result.total_records_ingested ?? 0;
-      const skipped = result.total_records_skipped ?? 0;
-      const duration = result.duration_ms ? `${(result.duration_ms / 1000).toFixed(1)}s` : '';
+      const store = useEoStore.getState().store;
+      if (!store) {
+        setSyncStatus((s) => ({
+          ...s,
+          [statusKey]: { state: 'error', message: 'Store not initialized' },
+        }));
+        return;
+      }
+
+      const client = new AirtableClient(rawKey);
+      const onProgress = (p: { phase: string; table?: string; records_so_far?: number }) => {
+        const msg = p.table
+          ? `Syncing ${p.table}${p.records_so_far ? ` (${p.records_so_far} records)` : ''}...`
+          : 'Discovering schema...';
+        setSyncStatus((s) => ({
+          ...s,
+          [statusKey]: { state: 'syncing', message: msg },
+        }));
+      };
+
+      const result = mode === 'hydrate'
+        ? await hydrationSync(store, client, session.userId, { onProgress })
+        : await updateSync(store, client, session.userId, { onProgress });
+
+      const ingested = result.total_records_ingested;
+      const skipped = result.total_records_skipped;
+      const duration = `${(result.duration_ms / 1000).toFixed(1)}s`;
 
       // Update last sync time in room data
       const target = key.shared
@@ -300,7 +296,7 @@ export function AirtableSettings({ session, onClose }: AirtableSettingsProps) {
     }
   }
 
-  // ── Discover schema ──
+  // ── Discover schema (browser-side) ──
   async function handleDiscover(key: StoredKey) {
     const statusKey = `${key.label}-discover`;
     setSyncStatus((s) => ({
@@ -309,25 +305,20 @@ export function AirtableSettings({ session, onClose }: AirtableSettingsProps) {
     }));
 
     try {
-      const res = await fetch(
-        `${session.homeserver}/_eo/ingestion/airtable/discover/${encodeURIComponent(key.label)}`,
-        {
-          headers: { 'Authorization': `Bearer ${session.accessToken}` },
-        },
-      );
-
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({ error: res.statusText }));
+      const rawKey = await getApiKey(key);
+      if (!rawKey) {
         setSyncStatus((s) => ({
           ...s,
-          [statusKey]: { state: 'error', message: body.error || 'Discovery failed' },
+          [statusKey]: { state: 'error', message: 'API key not found in store' },
         }));
         return;
       }
 
-      const { manifest } = await res.json();
-      const baseCount = manifest?.bases?.length ?? 0;
-      const tableCount = manifest?.bases?.reduce((t: number, b: any) => t + (b.tables?.length ?? 0), 0) ?? 0;
+      const client = new AirtableClient(rawKey);
+      const manifest = await discoverSchema(client);
+
+      const baseCount = manifest.bases.length;
+      const tableCount = manifest.bases.reduce((t, b) => t + b.tables.length, 0);
 
       setSyncStatus((s) => ({
         ...s,
@@ -345,17 +336,7 @@ export function AirtableSettings({ session, onClose }: AirtableSettingsProps) {
   }
 
   return (
-    <div style={styles.overlay} onClick={onClose}>
-      <div style={styles.panel} onClick={(e) => e.stopPropagation()}>
-        {/* Header */}
-        <div style={styles.panelHeader}>
-          <div>
-            <div style={styles.panelTitle}>Airtable Integration</div>
-            <div style={styles.panelSubtitle}>Connect and sync data from Airtable bases</div>
-          </div>
-          <button onClick={onClose} style={styles.closeBtn}>&times;</button>
-        </div>
-
+    <div>
         {/* Add new key */}
         <div style={styles.section}>
           <div style={styles.sectionTitle}>Add API Key</div>
@@ -496,6 +477,26 @@ export function AirtableSettings({ session, onClose }: AirtableSettingsProps) {
             </div>
           ))}
         </div>
+    </div>
+  );
+}
+
+/**
+ * Overlay wrapper for backward compatibility.
+ * Opens AirtableSettingsSection in a slide-out panel.
+ */
+export function AirtableSettings({ session, onClose }: AirtableSettingsProps) {
+  return (
+    <div style={styles.overlay} onClick={onClose}>
+      <div style={styles.panel} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.panelHeader}>
+          <div>
+            <div style={styles.panelTitle}>Airtable Integration</div>
+            <div style={styles.panelSubtitle}>Connect and sync data from Airtable bases</div>
+          </div>
+          <button onClick={onClose} style={styles.closeBtn}>&times;</button>
+        </div>
+        <AirtableSettingsSection session={session} />
       </div>
     </div>
   );

@@ -14,6 +14,7 @@ import { ErrorBoundary } from './ErrorBoundary';
 import { SyncProgress } from './SyncProgress';
 import { AirtableSettings } from './AirtableSettings';
 import { DataSyncDashboard } from './DataSyncDashboard';
+import { SettingsPage } from './SettingsPage';
 
 interface LayoutProps {
   session: MatrixSession;
@@ -28,7 +29,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
   const [selectedScope, setSelectedScope] = useState<string | null>(null);
   const [selectedRecord, setSelectedRecord] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
-  const [activeView, setActiveView] = useState<'records' | 'sync'>('records');
+  const [activeView, setActiveView] = useState<'records' | 'sync' | 'settings'>('records');
   const connectionState = useConnectionState();
 
   // Initialize encrypted store and sync from Matrix on mount
@@ -133,11 +134,24 @@ export function Layout({ session, onLogout }: LayoutProps) {
             >
               Sync
             </button>
+            <button
+              onClick={() => setActiveView('settings')}
+              style={{
+                ...styles.viewTab,
+                ...(activeView === 'settings' ? styles.viewTabActive : {}),
+                borderRight: 'none',
+              }}
+            >
+              Settings
+            </button>
           </div>
           <button
-            onClick={() => setShowSettings(true)}
-            style={styles.settingsBtn}
-            title="Airtable Settings"
+            onClick={() => setActiveView('settings')}
+            style={{
+              ...styles.settingsBtn,
+              ...(activeView === 'settings' ? { borderColor: '#1a6dd4', color: '#1a6dd4' } : {}),
+            }}
+            title="Settings"
           >
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
               <circle cx="8" cy="8" r="2.5" />
@@ -148,7 +162,13 @@ export function Layout({ session, onLogout }: LayoutProps) {
           <button onClick={handleLogout} style={styles.logoutBtn}>Sign out</button>
         </div>
       </header>
-      {activeView === 'sync' ? (
+      {activeView === 'settings' ? (
+        <div style={styles.body}>
+          <ErrorBoundary>
+            <SettingsPage session={session} />
+          </ErrorBoundary>
+        </div>
+      ) : activeView === 'sync' ? (
         <div style={styles.body}>
           <main style={{ ...styles.main, flex: 1 }}>
             <ErrorBoundary>
