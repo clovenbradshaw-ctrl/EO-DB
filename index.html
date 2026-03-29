@@ -2623,6 +2623,10 @@ INS,app.tbl.rec1,"{""name"":""Alice""}"</pre>
             <div class="settings-session-field"><span class="settings-session-key">Last Snapshot Seq</span><span class="settings-session-val" id="settingsMediaSnapshotSeq">—</span></div>
             <div class="settings-session-field"><span class="settings-session-key">Storage Tier</span><span class="settings-session-val" id="settingsMediaTier">—</span></div>
           </div>
+          <div style="margin-top:12px;display:flex;align-items:center;gap:12px;">
+            <button class="settings-add-btn" id="matrixSyncBtn" onclick="syncToMatrix()" style="background:var(--accent);color:#fff;border-color:var(--accent);">Sync to Matrix</button>
+            <span id="matrixSyncStatus" style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-dim);"></span>
+          </div>
         </div>
 
         <!-- Airtable Integration -->
@@ -3379,6 +3383,80 @@ function disconnectSync() {
   updateOnlineDot(false);
   renderOnlineUsers();
   document.getElementById('onlineIndicator').style.display = 'none';
+}
+
+async function syncToMatrix() {
+  const btn = document.getElementById('matrixSyncBtn');
+  const statusEl = document.getElementById('matrixSyncStatus');
+
+  if (!matrixToken || !matrixUserId) {
+    if (statusEl) statusEl.textContent = 'Not signed in';
+    statusEl.style.color = 'var(--danger)';
+    return;
+  }
+
+  if (LOG.length === 0) {
+    if (statusEl) statusEl.textContent = 'Nothing to sync';
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = 'Syncing...';
+  if (statusEl) { statusEl.textContent = ''; statusEl.style.color = 'var(--text-dim)'; }
+
+  try {
+    // Serialize the event log as a JSON blob
+    const snapshotData = JSON.stringify({
+      version: 1,
+      user_id: matrixUserId,
+      seq: nextSeq - 1,
+      event_count: LOG.length,
+      created_at: new Date().toISOString(),
+      events: LOG,
+    });
+    const blob = new Blob([snapshotData], { type: 'application/json' });
+
+    // Upload to Matrix media store
+    const uploadUrl = `${matrixHomeserver}/_matrix/media/v3/upload?filename=eo-snapshot-${nextSeq - 1}.json`;
+    const uploadRes = await fetch(uploadUrl, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${matrixToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: blob,
+    });
+
+    if (!uploadRes.ok) {
+      const errBody = await uploadRes.text();
+      throw new Error(`Upload failed (${uploadRes.status}): ${errBody}`);
+    }
+
+    const { content_uri } = await uploadRes.json();
+
+    // Update local snapshot tracking
+    const currentSeq = nextSeq - 1;
+    localStorage.setItem('eo_media_snapshot_seq', String(currentSeq));
+    localStorage.setItem('eo_media_snapshot_mxc', content_uri);
+
+    // Update the UI
+    const mediaSeqEl = document.getElementById('settingsMediaSnapshotSeq');
+    if (mediaSeqEl) mediaSeqEl.textContent = String(currentSeq);
+
+    if (statusEl) {
+      statusEl.textContent = `Synced @ seq ${currentSeq}`;
+      statusEl.style.color = 'var(--accent)';
+    }
+  } catch (err) {
+    console.error('Matrix sync failed:', err);
+    if (statusEl) {
+      statusEl.textContent = err.message || 'Sync failed';
+      statusEl.style.color = 'var(--danger)';
+    }
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Sync to Matrix';
+  }
 }
 
 function scheduleReconnect() {
