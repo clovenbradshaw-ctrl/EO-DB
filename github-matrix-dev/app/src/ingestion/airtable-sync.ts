@@ -99,6 +99,13 @@ export interface SyncCustomization {
    * Default: true (safe mode — EO-DB is source of truth once populated).
    */
   preserveExisting?: boolean;
+
+  /**
+   * Maximum number of records to import per table.
+   * When set, sync stops after importing this many records from each table.
+   * Useful for testing or partial imports. 0 or undefined means no limit.
+   */
+  recordLimit?: number;
 }
 
 // ─── Cursor management (IndexedDB meta store) ─────────────────────────────
@@ -316,12 +323,14 @@ async function syncTable(
   preserveExisting: boolean = true,
   onEvent?: (event: any) => void,
   onProgress?: (progress: SyncProgress) => void,
+  recordLimit?: number,
 ): Promise<SyncResult> {
   let fetched = 0;
   let ingested = 0;
   let skippedNoChange = 0;
   let skippedDuplicate = 0;
   const now = new Date().toISOString();
+  const limit = recordLimit && recordLimit > 0 ? recordLimit : Infinity;
 
   const fieldMeta = await getTableFieldMeta(store, baseId, tableId);
 
@@ -331,11 +340,13 @@ async function syncTable(
 
   const useFieldIds = fieldMeta.size > 0;
 
+  let limitReached = false;
   for await (const page of client.paginateRecords(baseId, tableId, {
     filterByFormula,
     returnFieldsByFieldId: useFieldIds,
   })) {
     for (const record of page) {
+      if (fetched >= limit) { limitReached = true; break; }
       fetched++;
       const result = await ingestRecord(store, baseId, tableId, record, agent, fieldMeta, exclusions, preserveExisting, onEvent);
       switch (result) {
@@ -344,6 +355,7 @@ async function syncTable(
         case 'skipped_duplicate': skippedDuplicate++; break;
       }
     }
+    if (limitReached) break;
     onProgress?.({ phase: 'syncing', table: tableName, records_so_far: fetched });
   }
 
@@ -379,6 +391,7 @@ export async function hydrationSync(
   const preserveExisting = opts?.customization?.preserveExisting ?? true;
   const selectedTables = opts?.customization?.selectedTables;
   const fieldExclusions = opts?.customization?.fieldExclusions;
+  const recordLimit = opts?.customization?.recordLimit;
 
   opts?.onProgress?.({ phase: 'discovering' });
   const manifest = await discoverSchema(client);
@@ -431,7 +444,7 @@ export async function hydrationSync(
       const result = await syncTable(
         store, client, base.id, table.id, table.name, agent, null,
         exclusions, preserveExisting,
-        opts?.onEvent, opts?.onProgress,
+        opts?.onEvent, opts?.onProgress, recordLimit,
       );
       syncResults.push(result);
       opts?.onTableComplete?.(result);
@@ -469,6 +482,7 @@ export async function updateSync(
   const preserveExisting = opts?.customization?.preserveExisting ?? true;
   const selectedTables = opts?.customization?.selectedTables;
   const fieldExclusions = opts?.customization?.fieldExclusions;
+  const recordLimit = opts?.customization?.recordLimit;
   const syncResults: SyncResult[] = [];
 
   opts?.onProgress?.({ phase: 'discovering' });
@@ -495,7 +509,7 @@ export async function updateSync(
       const result = await syncTable(
         store, client, base.id, table.id, table.name, agent, cursor,
         exclusions, preserveExisting,
-        opts?.onEvent, opts?.onProgress,
+        opts?.onEvent, opts?.onProgress, recordLimit,
       );
       syncResults.push(result);
       opts?.onTableComplete?.(result);
