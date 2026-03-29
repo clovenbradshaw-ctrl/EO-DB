@@ -10,6 +10,7 @@ import { registerSyncRoute } from './api/sync.js';
 import { registerAdminRoutes } from './api/admin.js';
 import { registerAuthRoutes } from './api/auth.js';
 import { registerIngestionRoutes } from './api/ingestion.js';
+import { registerLogImportRoutes } from './api/log-import.js';
 
 const PORT = parseInt(process.env.EO_PORT || '3000', 10);
 const DATA_DIR = process.env.EO_DATA_DIR || './data';
@@ -46,6 +47,7 @@ async function start(): Promise<void> {
     registerQueryRoutes(protectedApp, db);
     registerAdminRoutes(protectedApp, db);
     registerIngestionRoutes(protectedApp, db, feed);
+    registerLogImportRoutes(protectedApp, db, feed);
   });
 
   // Graceful shutdown
