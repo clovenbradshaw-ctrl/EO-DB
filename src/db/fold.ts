@@ -100,6 +100,7 @@ export async function processEvent(
  */
 export async function executeOperator(db: EoDb, event: EoEvent): Promise<void> {
   switch (event.op) {
+    case 'NUL': return handleNUL(db, event);
     case 'INS': return handleINS(db, event);
     case 'SEG': return handleSEG(db, event);
     case 'CON': return handleCON(db, event);
@@ -120,6 +121,13 @@ function stateFromEvent(event: EoEvent, op: EoEvent['op']) {
     last_ts: event.ts,
     last_acquired_ts: event.acquired_ts,
   };
+}
+
+// --- NUL: Observation ---
+// Pure observation — state goes in, state comes out unchanged.
+// The event is logged but no state mutation occurs.
+async function handleNUL(_db: EoDb, _event: EoEvent): Promise<void> {
+  // Identity operator: no state change. The log entry is written by processEvent.
 }
 
 // --- INS: Instantiate ---
