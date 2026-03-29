@@ -20,6 +20,19 @@ export interface EoEvent {
   client_event_id?: string;
   triggered_by?: number;          // for REC/INS2+: seq of the human-initiated event that caused the cycle
   meta?: Record<string, any>;
+
+  // --- Experience Engine extensions (Given-Log record requirements) ---
+
+  /** Cell type: Mode × Object on the Existence face. Determines record shape. */
+  cell_type?: { mode: 'NUL' | 'SIG' | 'INS'; object: 'ground' | 'figure' | 'pattern' };
+  /** Mode of givenness — how the experience was encountered */
+  mode_of_givenness?: string;
+  /** Context envelope — the frame within which the appearance occurred */
+  context_envelope?: { frame?: string; source?: string; conditions?: Record<string, any>; prior_refs?: string[] };
+  /** NUL absence state — required for NUL entries: cleared, unknown, or never_set */
+  nul_state?: 'cleared' | 'unknown' | 'never_set';
+  /** Prior reference — for NUL×Figure and NUL×Pattern, points to what was present before */
+  prior_ref?: string;
 }
 
 // Projected state at a target

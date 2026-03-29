@@ -8,6 +8,8 @@ import type { EoEvent, EoEventInput, EoState, EvaRegistration, RecResult, Extern
 import { isEncryptedOperand } from './crypto-types.js';
 import type { Feed } from './feed.js';
 import { seedHash, chainHash, eventHash } from './hash.js';
+import { classifyCellType, inferNulState } from './ee-classify.js';
+import { interpretationFromEvent } from './meant-graph.js';
 
 /** Configuration for REC loop runner. */
 export interface RecConfig {
@@ -54,6 +56,17 @@ export async function processEvent(
     event = { ...event, client_event_id: eventHash(event) };
   }
 
+  // 0.6. Experience Engine: auto-classify cell_type if not provided
+  if (!event.cell_type) {
+    event = { ...event, cell_type: classifyCellType(event.op, event.operand) };
+  }
+
+  // 0.7. Experience Engine: auto-classify NUL absence state if NUL op
+  if (event.op === 'NUL' && !event.nul_state) {
+    const priorState = await getState(db, event.target);
+    event = { ...event, nul_state: inferNulState(event.operand, priorState) };
+  }
+
   // 1. Idempotency check
   if (event.client_event_id) {
     try {
@@ -82,6 +95,11 @@ export async function processEvent(
 
   // 6. Execute operator-specific logic (helix dispatch)
   await executeOperator(db, fullEvent);
+
+  // 6.5. Experience Engine: write Meant-Graph interpretation for Significance triad ops
+  if (fullEvent.op === 'DEF' || fullEvent.op === 'EVA' || fullEvent.op === 'REC') {
+    await interpretationFromEvent(db, fullEvent);
+  }
 
   // 7. Recompute fold-computed EVA-active dependents (with cycle guard)
   await recomputeDependents(db, fullEvent.target, new Set());
