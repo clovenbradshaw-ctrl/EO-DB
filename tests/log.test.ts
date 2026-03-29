@@ -15,7 +15,7 @@ function makeEvent(overrides: Partial<EoEvent> = {}): EoEvent {
     op: 'INS',
     target: 'app.tblClients.rec001',
     operand: { name: 'Maria Garcia' },
-    agent: '@intake:app.aminoimmigration.com',
+    agent: '@intake:matrix.example.com',
     ts: '2025-06-01T00:00:00.000Z',
     acquired_ts: '2025-06-01T00:00:00.000Z',
     ...overrides,

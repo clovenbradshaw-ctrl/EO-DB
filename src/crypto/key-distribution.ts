@@ -7,10 +7,10 @@
  * - New devices heal their keyring by paginating room history
  * - Peers can request missing keys via to-device messages (gap filling)
  *
- * Matrix event types:
- *   com.aminoimmigration.eo.key.announce   — room state: segment key metadata + material
- *   com.aminoimmigration.eo.key.heal.request — to-device: request missing keys
- *   com.aminoimmigration.eo.key.heal.response — to-device: batch of keys
+ * Matrix event types (namespace derived from EO_EVENT_PREFIX, default "com.eo-db"):
+ *   {prefix}.key.announce       — room state: segment key metadata + material
+ *   {prefix}.key.heal.request   — to-device: request missing keys
+ *   {prefix}.key.heal.response  — to-device: batch of keys
  *
  * Key room vs data room:
  *   The data room carries EO events (encrypted operands).
@@ -20,12 +20,14 @@
 
 import type { SegmentKey, LocalKeyring, KeyringEntry } from '../db/crypto-types.js';
 import { createKeyring, addToKeyring, importKey, exportKey } from './segment-keys.js';
+import { keyEventTypes } from '../config/matrix-domain.js';
 
 // ─── Matrix Event Types ─────────────────────────────────────────────────────
 
-export const KEY_ANNOUNCE_TYPE = 'com.aminoimmigration.eo.key.announce';
-export const KEY_HEAL_REQUEST = 'com.aminoimmigration.eo.key.heal.request';
-export const KEY_HEAL_RESPONSE = 'com.aminoimmigration.eo.key.heal.response';
+/** Event types are derived from the configurable event prefix (EO_EVENT_PREFIX). */
+export const KEY_ANNOUNCE_TYPE = keyEventTypes().announce;
+export const KEY_HEAL_REQUEST = keyEventTypes().healRequest;
+export const KEY_HEAL_RESPONSE = keyEventTypes().healResponse;
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 

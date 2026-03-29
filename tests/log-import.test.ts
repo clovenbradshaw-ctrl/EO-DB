@@ -25,7 +25,7 @@ let dbPath: string;
 let feed: Feed;
 let app: FastifyInstance;
 
-const AGENT = '@import:app.aminoimmigration.com';
+const AGENT = '@import:matrix.example.com';
 const TS = '2025-06-01T00:00:00.000Z';
 const VALID_TOKEN = 'valid-matrix-token';
 

@@ -1,16 +1,25 @@
 /**
  * Event bridge — converts between EO events and Matrix room events.
  *
- * Custom event type: com.aminoimmigration.eo.event
+ * Custom event type derived from configurable prefix (default: "com.eo-db").
  * Agent is ALWAYS derived from the Matrix sender, never from event content.
  */
 
 import type { MatrixClient, MatrixEvent } from 'matrix-js-sdk';
 import type { EoEventInput } from '../db/types';
+import { eoEventTypes, getDataRoomAlias } from '../lib/matrix-domain';
 
-export const EO_EVENT_TYPE = 'com.aminoimmigration.eo.event';
-export const EO_SNAPSHOT_TYPE = 'com.aminoimmigration.eo.snapshot';
-export const DATA_ROOM_ALIAS = '#amino-data:app.aminoimmigration.com';
+const _types = eoEventTypes();
+export const EO_EVENT_TYPE = _types.event;
+export const EO_SNAPSHOT_TYPE = _types.snapshot;
+
+/** Room alias — configured at runtime via `configureMatrixDomain()`. */
+export function getDataRoom(): string {
+  return getDataRoomAlias();
+}
+
+/** @deprecated Use getDataRoom() instead. Kept for backward compatibility. */
+export const DATA_ROOM_ALIAS = '' as string;
 
 /**
  * Send an EO event to the encrypted Matrix room.
@@ -56,6 +65,10 @@ export function matrixEventToEo(matrixEvent: MatrixEvent): EoEventInput {
  * Resolve the data room alias to a room ID.
  */
 export async function resolveDataRoom(client: MatrixClient): Promise<string> {
-  const result = await client.getRoomIdForAlias(DATA_ROOM_ALIAS);
+  const alias = getDataRoom();
+  if (!alias) {
+    throw new Error('Data room alias not configured — call configureMatrixDomain() first');
+  }
+  const result = await client.getRoomIdForAlias(alias);
   return result.room_id;
 }

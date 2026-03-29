@@ -8,7 +8,7 @@ function makeEvent(overrides: Partial<EoEvent> = {}): EoEvent {
     op: 'DEF',
     target: 'app.tblClients.rec001.fldEmail',
     operand: 'test@test.com',
-    agent: '@test:app.aminoimmigration.com',
+    agent: '@test:matrix.example.com',
     ts: '2025-06-01T00:00:00.000Z',
     acquired_ts: '2025-06-01T00:00:00.000Z',
     ...overrides,

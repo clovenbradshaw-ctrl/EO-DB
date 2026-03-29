@@ -5,6 +5,7 @@ import {
   setAuthConfig,
   clearTokenCache,
 } from '../src/auth/matrix.js';
+import { configureMatrixDomain } from '../src/config/matrix-domain.js';
 
 beforeEach(() => {
   clearTokenCache();
@@ -14,12 +15,12 @@ describe('verifyMatrixToken', () => {
   it('returns user_id for valid token', async () => {
     const mockResponse = {
       ok: true,
-      json: async () => ({ user_id: '@caseworker:app.aminoimmigration.com', device_id: 'DEV1' }),
+      json: async () => ({ user_id: '@caseworker:matrix.example.com', device_id: 'DEV1' }),
     };
     vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(mockResponse as any);
 
     const user = await verifyMatrixToken('valid-token');
-    expect(user.user_id).toBe('@caseworker:app.aminoimmigration.com');
+    expect(user.user_id).toBe('@caseworker:matrix.example.com');
     expect(user.device_id).toBe('DEV1');
 
     vi.restoreAllMocks();
@@ -36,7 +37,7 @@ describe('verifyMatrixToken', () => {
   it('caches successful verification', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
       ok: true,
-      json: async () => ({ user_id: '@test:app.aminoimmigration.com' }),
+      json: async () => ({ user_id: '@test:matrix.example.com' }),
     } as any);
 
     await verifyMatrixToken('cached-token');
@@ -51,7 +52,7 @@ describe('verifyMatrixToken', () => {
   it('cache expires after 5 minutes', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
       ok: true,
-      json: async () => ({ user_id: '@test:app.aminoimmigration.com' }),
+      json: async () => ({ user_id: '@test:matrix.example.com' }),
     } as any);
 
     await verifyMatrixToken('expiring-token');
@@ -71,20 +72,25 @@ describe('verifyMatrixToken', () => {
 
 describe('verifyWebhookSecret', () => {
   beforeEach(() => {
-    setAuthConfig({ webhookSecret: 'test-secret-123' });
+    setAuthConfig({ webhookSecret: 'test-secret-123', webhookUser: '@n8n:matrix.example.com' });
   });
 
   it('succeeds with correct secret', () => {
     const user = verifyWebhookSecret('test-secret-123');
-    expect(user.user_id).toBe('@n8n:app.aminoimmigration.com');
+    expect(user.user_id).toBe('@n8n:matrix.example.com');
   });
 
   it('fails with wrong secret', () => {
     expect(() => verifyWebhookSecret('wrong-secret')).toThrow('Invalid webhook secret');
   });
 
-  it('sets agent to n8n system user', () => {
+  it('sets agent to configured webhook user', () => {
     const user = verifyWebhookSecret('test-secret-123');
-    expect(user.user_id).toBe('@n8n:app.aminoimmigration.com');
+    expect(user.user_id).toBe('@n8n:matrix.example.com');
+  });
+
+  it('throws when webhook user is not configured', () => {
+    configureMatrixDomain({ webhookUser: '' });
+    expect(() => verifyWebhookSecret('test-secret-123')).toThrow('Webhook user not configured');
   });
 });

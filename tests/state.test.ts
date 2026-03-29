@@ -15,7 +15,7 @@ function makeState(overrides: Partial<EoState> = {}): EoState {
     value: { name: 'Maria Garcia', status: 'active' },
     last_seq: 1,
     last_op: 'INS',
-    last_agent: '@intake:app.aminoimmigration.com',
+    last_agent: '@intake:matrix.example.com',
     last_ts: '2025-06-01T00:00:00.000Z',
     last_acquired_ts: '2025-06-01T00:00:00.000Z',
     ...overrides,

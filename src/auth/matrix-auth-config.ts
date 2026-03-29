@@ -16,7 +16,7 @@ export type ServerAccessMode = 'accept_all' | 'whitelist' | 'blacklist';
 
 /** Per-homeserver access policy. */
 export interface ServerRule {
-  /** Homeserver domain, e.g. "app.aminoimmigration.com" */
+  /** Homeserver domain, e.g. "matrix.example.com" */
   homeserver: string;
   /** How users from this server are filtered */
   mode: ServerAccessMode;
@@ -30,7 +30,7 @@ export interface ServerRule {
 
 /** A single allowed Matrix account with access level. */
 export interface AllowedMatrixAccount {
-  /** Full Matrix user ID, e.g. "@user:app.aminoimmigration.com" */
+  /** Full Matrix user ID, e.g. "@user:matrix.example.com" */
   user_id: string;
   /** Human-readable label for this account (optional) */
   label?: string;

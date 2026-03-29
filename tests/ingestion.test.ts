@@ -439,7 +439,7 @@ describe('Ingestion API routes', () => {
       if (urlStr.includes('/_matrix/')) {
         return {
           ok: true,
-          json: async () => ({ user_id: '@testuser:app.aminoimmigration.com' }),
+          json: async () => ({ user_id: '@testuser:matrix.example.com' }),
         } as any;
       }
       // Mock Airtable API — bases list
@@ -562,8 +562,8 @@ describe('Ingestion API routes', () => {
   });
 
   it('GET /ingestion/keys — lists stored keys', async () => {
-    await storeApiKey(db, 'k1', 'pat111', '@testuser:app.aminoimmigration.com');
-    await storeApiKey(db, 'k2', 'pat222', '@testuser:app.aminoimmigration.com');
+    await storeApiKey(db, 'k1', 'pat111', '@testuser:matrix.example.com');
+    await storeApiKey(db, 'k2', 'pat222', '@testuser:matrix.example.com');
 
     const res = await app.inject({
       method: 'GET',
@@ -575,7 +575,7 @@ describe('Ingestion API routes', () => {
   });
 
   it('GET /ingestion/keys/:label — returns redacted key', async () => {
-    await storeApiKey(db, 'my-key', 'patSECRET', '@testuser:app.aminoimmigration.com');
+    await storeApiKey(db, 'my-key', 'patSECRET', '@testuser:matrix.example.com');
 
     const res = await app.inject({
       method: 'GET',
@@ -596,7 +596,7 @@ describe('Ingestion API routes', () => {
   });
 
   it('DELETE /ingestion/keys/:label — deletes a key', async () => {
-    await storeApiKey(db, 'del-me', 'patXYZ', '@testuser:app.aminoimmigration.com');
+    await storeApiKey(db, 'del-me', 'patXYZ', '@testuser:matrix.example.com');
 
     const res = await app.inject({
       method: 'DELETE',
@@ -610,7 +610,7 @@ describe('Ingestion API routes', () => {
   // ── Discovery ─────────────────────────────────────────────────────────
 
   it('GET /ingestion/airtable/discover/:label — returns schema manifest', async () => {
-    await storeApiKey(db, 'discover-key', 'patMOCK', '@testuser:app.aminoimmigration.com');
+    await storeApiKey(db, 'discover-key', 'patMOCK', '@testuser:matrix.example.com');
 
     const res = await app.inject({
       method: 'GET',
@@ -638,7 +638,7 @@ describe('Ingestion API routes', () => {
   // ── Hydration sync ────────────────────────────────────────────────────
 
   it('POST /ingestion/airtable/hydrate/:label — ingests records', async () => {
-    await storeApiKey(db, 'hydrate-key', 'patMOCK', '@testuser:app.aminoimmigration.com');
+    await storeApiKey(db, 'hydrate-key', 'patMOCK', '@testuser:matrix.example.com');
 
     const res = await app.inject({
       method: 'POST',
@@ -664,7 +664,7 @@ describe('Ingestion API routes', () => {
   });
 
   it('POST /ingestion/airtable/hydrate/:label — re-hydration skips unchanged', async () => {
-    await storeApiKey(db, 'rehydrate-key', 'patMOCK', '@testuser:app.aminoimmigration.com');
+    await storeApiKey(db, 'rehydrate-key', 'patMOCK', '@testuser:matrix.example.com');
 
     // First hydration
     await app.inject({
@@ -690,7 +690,7 @@ describe('Ingestion API routes', () => {
   // ── Update sync ───────────────────────────────────────────────────────
 
   it('POST /ingestion/airtable/sync/:label — incremental sync after hydration', async () => {
-    await storeApiKey(db, 'sync-key', 'patMOCK', '@testuser:app.aminoimmigration.com');
+    await storeApiKey(db, 'sync-key', 'patMOCK', '@testuser:matrix.example.com');
 
     // Hydrate first
     await app.inject({

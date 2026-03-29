@@ -1,6 +1,7 @@
 import type { FastifyRequest, FastifyReply } from 'fastify';
 import type { EoDb } from '../db/level.js';
 import { checkAccess, accessSatisfies, type AccessCheckResult } from './matrix-auth-config.js';
+import { getHomeserver, getWebhookUser, configureMatrixDomain } from '../config/matrix-domain.js';
 
 export interface MatrixUser {
   user_id: string;
@@ -15,14 +16,14 @@ interface CacheEntry {
 const tokenCache = new Map<string, CacheEntry>();
 const CACHE_TTL = 300_000; // 5 minutes
 
-let matrixHomeserver = process.env.EO_MATRIX_HOMESERVER || 'https://app.aminoimmigration.com';
 let webhookSecret = process.env.EO_WEBHOOK_SECRET || '';
 
 /** The DB handle used by authMiddleware for access checks. */
 let authDb: EoDb | null = null;
 
-export function setAuthConfig(config: { homeserver?: string; webhookSecret?: string }): void {
-  if (config.homeserver) matrixHomeserver = config.homeserver;
+export function setAuthConfig(config: { homeserver?: string; webhookSecret?: string; webhookUser?: string }): void {
+  if (config.homeserver) configureMatrixDomain({ homeserver: config.homeserver });
+  if (config.webhookUser) configureMatrixDomain({ webhookUser: config.webhookUser });
   if (config.webhookSecret) webhookSecret = config.webhookSecret;
 }
 
@@ -41,7 +42,7 @@ export async function verifyMatrixToken(accessToken: string): Promise<MatrixUser
     return cached.user;
   }
 
-  const response = await fetch(`${matrixHomeserver}/_matrix/client/v3/account/whoami`, {
+  const response = await fetch(`${getHomeserver()}/_matrix/client/v3/account/whoami`, {
     headers: { 'Authorization': `Bearer ${accessToken}` },
   });
 
@@ -63,7 +64,11 @@ export function verifyWebhookSecret(secret: string): MatrixUser {
   if (!webhookSecret || secret !== webhookSecret) {
     throw new Error('Invalid webhook secret');
   }
-  return { user_id: '@n8n:app.aminoimmigration.com' };
+  const webhookUser = getWebhookUser();
+  if (!webhookUser) {
+    throw new Error('Webhook user not configured (set EO_WEBHOOK_USER)');
+  }
+  return { user_id: webhookUser };
 }
 
 export interface AuthenticatedRequest extends FastifyRequest {
