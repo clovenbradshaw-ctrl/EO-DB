@@ -3,6 +3,7 @@
  */
 
 import { useState, useEffect } from 'react';
+import { useTheme, type Theme } from '../theme';
 
 export type ConnectionState = 'online' | 'offline' | 'syncing';
 
@@ -11,53 +12,43 @@ interface ConnectionStatusProps {
 }
 
 export function ConnectionStatus({ state }: ConnectionStatusProps) {
+  const { theme } = useTheme();
+
+  const stateConfig: Record<ConnectionState, { color: string; bg: string; borderColor: string; label: string }> = {
+    online: { color: theme.success, bg: theme.successBg, borderColor: theme.successBorder, label: 'Connected' },
+    offline: { color: theme.danger, bg: theme.dangerBg, borderColor: theme.dangerBorder, label: 'Offline' },
+    syncing: { color: theme.warning, bg: theme.warningBg, borderColor: theme.warningBorder, label: 'Syncing...' },
+  };
+
+  const config = stateConfig[state];
+
   return (
-    <div style={{ ...styles.container, ...stateStyles[state] }}>
-      <div style={{ ...styles.dot, background: stateColors[state] }} />
-      <span style={styles.label}>{stateLabels[state]}</span>
+    <div style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 6,
+      padding: '3px 10px',
+      borderRadius: 12,
+      border: `1px solid ${config.borderColor}`,
+      background: config.bg,
+      fontSize: 10,
+      fontWeight: 500,
+    }}>
+      <div style={{
+        width: 6,
+        height: 6,
+        borderRadius: '50%',
+        background: config.color,
+      }} />
+      <span style={{
+        fontFamily: "'JetBrains Mono', monospace",
+        letterSpacing: 0.3,
+      }}>
+        {config.label}
+      </span>
     </div>
   );
 }
-
-const stateLabels: Record<ConnectionState, string> = {
-  online: 'Connected',
-  offline: 'Offline',
-  syncing: 'Syncing...',
-};
-
-const stateColors: Record<ConnectionState, string> = {
-  online: '#16a34a',
-  offline: '#d9487a',
-  syncing: '#c2700a',
-};
-
-const stateStyles: Record<ConnectionState, React.CSSProperties> = {
-  online: { borderColor: '#b8e4ca', background: '#f0faf4' },
-  offline: { borderColor: '#f0b8c8', background: '#fdf2f5' },
-  syncing: { borderColor: '#f0d9b8', background: '#fef6ed' },
-};
-
-const styles: Record<string, React.CSSProperties> = {
-  container: {
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: 6,
-    padding: '3px 10px',
-    borderRadius: 12,
-    border: '1px solid',
-    fontSize: 10,
-    fontWeight: 500,
-  },
-  dot: {
-    width: 6,
-    height: 6,
-    borderRadius: '50%',
-  },
-  label: {
-    fontFamily: "'JetBrains Mono', monospace",
-    letterSpacing: 0.3,
-  },
-};
 
 /**
  * Hook to track browser online/offline status.

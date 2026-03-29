@@ -24,6 +24,9 @@ export class ErrorBoundary extends Component<Props, State> {
     if (this.state.error) {
       if (this.props.fallback) return this.props.fallback;
 
+      // ErrorBoundary is a class component that can't use hooks.
+      // Use CSS variables set by the theme provider on <html data-theme>.
+      // Fallback to light theme colors as defaults.
       return (
         <div style={styles.container}>
           <div style={styles.icon}>!</div>
@@ -68,11 +71,12 @@ const styles: Record<string, React.CSSProperties> = {
   title: {
     fontSize: 16,
     fontWeight: 600,
-    color: '#1a1816',
+    color: 'inherit',
   },
   message: {
     fontSize: 12,
-    color: '#7a756d',
+    color: 'inherit',
+    opacity: 0.7,
     fontFamily: "'JetBrains Mono', monospace",
     maxWidth: 400,
     textAlign: 'center' as const,
@@ -83,10 +87,11 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '8px 20px',
     fontSize: 13,
     fontWeight: 500,
-    border: '1px solid #e5e2dd',
+    border: '1px solid currentColor',
     borderRadius: 6,
-    background: '#fff',
-    color: '#2c2a26',
+    background: 'transparent',
+    color: 'inherit',
     cursor: 'pointer',
+    opacity: 0.8,
   },
 };
