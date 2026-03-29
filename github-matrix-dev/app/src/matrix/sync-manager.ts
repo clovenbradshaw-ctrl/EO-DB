@@ -16,11 +16,39 @@ import type { EoEventInput } from '../db/types';
 import { processEvent } from '../db/fold';
 import { eventHash } from '../db/hash';
 import { AsyncMutex } from '../db/mutex';
-import { EO_EVENT_TYPE, matrixEventToEo, sendEoEvent } from './event-bridge';
+import { EO_EVENT_TYPE, getDataRoom, matrixEventToEo, sendEoEvent } from './event-bridge';
 import { findLatestSnapshot, applySnapshot, maybeCreateSnapshot, createSnapshot, uploadSnapshot, createDeltaSnapshot, uploadDeltaSnapshot } from './snapshot';
 
 /** Mutex protecting the offline queue from concurrent read-modify-write. */
 const queueMutex = new AsyncMutex();
+
+export interface RoomDataSnapshot {
+  roomId: string;
+  roomAlias: string;
+  name: string | null;
+  topic: string | null;
+  memberCount: number;
+  members: Array<{ userId: string; displayName: string | null; membership: string }>;
+  encryptionEnabled: boolean;
+  encryptionAlgorithm: string | null;
+  timelineLength: number;
+  timeline: Array<{
+    eventId: string;
+    type: string;
+    sender: string;
+    ts: number;
+    content: any;
+  }>;
+  stateEvents: Array<{
+    type: string;
+    stateKey: string;
+    sender: string;
+    content: any;
+  }>;
+  roomVersion: string | null;
+  joinRule: string | null;
+  historyVisibility: string | null;
+}
 
 export class SyncManager {
   private client: MatrixClient;
@@ -129,6 +157,64 @@ export class SyncManager {
     await this.store.put('meta:snapshot_mxc', mxc);
 
     return { mxc, seq: currentSeq };
+  }
+
+  /**
+   * Return a snapshot of the raw Matrix room data for debugging/inspection.
+   */
+  getRoomData(): RoomDataSnapshot | null {
+    const room = this.client.getRoom(this.roomId);
+    if (!room) return null;
+
+    const stateEvents: RoomDataSnapshot['stateEvents'] = [];
+    const currentState = room.currentState;
+    for (const evMap of Object.values(currentState.events as Map<string, Map<string, MatrixEvent>> | Record<string, Record<string, MatrixEvent>>)) {
+      const entries = evMap instanceof Map ? evMap.values() : Object.values(evMap);
+      for (const ev of entries) {
+        stateEvents.push({
+          type: ev.getType(),
+          stateKey: ev.getStateKey() ?? '',
+          sender: ev.getSender() ?? '',
+          content: ev.getContent(),
+        });
+      }
+    }
+
+    const members = room.getJoinedMembers().map((m: any) => ({
+      userId: m.userId,
+      displayName: m.name || null,
+      membership: m.membership,
+    }));
+
+    const timeline = room.getLiveTimeline().getEvents().slice(-100).map((ev: MatrixEvent) => ({
+      eventId: ev.getId() ?? '',
+      type: ev.getType(),
+      sender: ev.getSender() ?? '',
+      ts: ev.getTs(),
+      content: ev.getContent(),
+    }));
+
+    const encryptionEvent = currentState.getStateEvents('m.room.encryption', '');
+    const joinRuleEvent = currentState.getStateEvents('m.room.join_rules', '');
+    const historyEvent = currentState.getStateEvents('m.room.history_visibility', '');
+    const createEvent = currentState.getStateEvents('m.room.create', '');
+
+    return {
+      roomId: this.roomId,
+      roomAlias: getDataRoom(),
+      name: room.name || null,
+      topic: (currentState.getStateEvents('m.room.topic', '') as any)?.getContent()?.topic ?? null,
+      memberCount: members.length,
+      members,
+      encryptionEnabled: !!encryptionEvent,
+      encryptionAlgorithm: encryptionEvent?.getContent()?.algorithm ?? null,
+      timelineLength: room.getLiveTimeline().getEvents().length,
+      timeline,
+      stateEvents,
+      roomVersion: createEvent?.getContent()?.room_version ?? null,
+      joinRule: joinRuleEvent?.getContent()?.join_rule ?? null,
+      historyVisibility: historyEvent?.getContent()?.history_visibility ?? null,
+    };
   }
 
   /**

@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useEoStore } from '../store/eo-store';
 import { useTheme, type Theme } from '../theme';
 import type { MatrixSession } from '../matrix/client';
+import { RoomDataViewer } from './RoomDataViewer';
 
 interface SettingsViewProps {
   session: MatrixSession;
@@ -14,6 +15,7 @@ export function SettingsView({ session }: SettingsViewProps) {
   const store = useEoStore((s) => s.store);
   const syncManager = useEoStore((s) => s.syncManager);
   const manualSnapshot = useEoStore((s) => s.manualSnapshot);
+  const [showRoomData, setShowRoomData] = useState(false);
   const s = styles(theme);
 
   const [eventCount, setEventCount] = useState<number | null>(null);
@@ -117,6 +119,10 @@ export function SettingsView({ session }: SettingsViewProps) {
     ? session.userId.split(':')[1]
     : 'unknown';
 
+  if (showRoomData) {
+    return <RoomDataViewer onBack={() => setShowRoomData(false)} />;
+  }
+
   return (
     <div style={s.container}>
       <div style={s.form}>
@@ -150,6 +156,12 @@ export function SettingsView({ session }: SettingsViewProps) {
           <div style={{ marginTop: 8, display: 'flex', gap: 8, alignItems: 'center' }}>
             <button style={s.actionBtn} onClick={handleSnapshot} disabled={!syncManager}>
               Take Snapshot
+            </button>
+            <button
+              style={{ ...s.actionBtn, background: 'transparent', color: theme.accent, border: `1px solid ${theme.accent}` }}
+              onClick={() => setShowRoomData(true)}
+            >
+              View Room Data
             </button>
             {snapshotStatus && (
               <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: snapshotStatus.startsWith('Error') ? theme.danger : theme.success }}>
