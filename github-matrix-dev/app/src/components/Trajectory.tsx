@@ -1,15 +1,5 @@
 import type { LoggableOperator, EoEvent } from '../db/types';
-
-const OP_COLORS: Record<string, { bg: string; color: string; border: string }> = {
-  INS: { bg: '#e8f7ee', color: '#16a34a', border: '#16a34a' },
-  DEF: { bg: '#eef5fd', color: '#1a6dd4', border: '#1a6dd4' },
-  CON: { bg: '#f3f0fa', color: '#7c5cbf', border: '#7c5cbf' },
-  SEG: { bg: '#fce8f0', color: '#d9487a', border: '#d9487a' },
-  SYN: { bg: '#f3f0fa', color: '#7c5cbf', border: '#7c5cbf' },
-  EVA: { bg: '#eef8f5', color: '#0e8a6e', border: '#0e8a6e' },
-  REC: { bg: '#fef6ed', color: '#c2700a', border: '#c2700a' },
-  NUL: { bg: '#f0f0f5', color: '#5c5f7a', border: '#5c5f7a' },
-};
+import { useTheme, type Theme } from '../theme';
 
 // REC is system-generated — distinct style: dashed border, "SYS" label
 const REC_SYSTEM_STYLE: React.CSSProperties = {
@@ -22,19 +12,23 @@ interface TrajectoryProps {
 }
 
 export function Trajectory({ ops, events }: TrajectoryProps) {
+  const { theme } = useTheme();
+  const s = makeStyles(theme);
+  const opColors = makeOpColors(theme);
+
   return (
-    <div style={styles.row}>
+    <div style={s.row}>
       {ops.map((op, i) => {
-        const c = OP_COLORS[op] || OP_COLORS.DEF;
+        const c = opColors[op] || opColors.DEF;
         const isSystemREC = op === 'REC' && (!events || events[i]?.agent === 'system');
         return (
-          <div key={i} style={styles.nodeWrap}>
-            {i > 0 && <div style={styles.connector} />}
-            <div style={styles.node}>
+          <div key={i} style={s.nodeWrap}>
+            {i > 0 && <div style={s.connector} />}
+            <div style={s.node}>
               <div
                 style={{
-                  ...styles.dot,
-                  background: isSystemREC ? '#fff7ed' : c.bg,
+                  ...s.dot,
+                  background: isSystemREC ? theme.warningBg : c.bg,
                   color: c.color,
                   borderColor: c.border,
                   ...(isSystemREC ? REC_SYSTEM_STYLE : {}),
@@ -46,8 +40,8 @@ export function Trajectory({ ops, events }: TrajectoryProps) {
                 {op}
               </div>
               <div style={{
-                ...styles.label,
-                ...(isSystemREC ? { color: '#c2700a', fontWeight: 600 } : {}),
+                ...s.label,
+                ...(isSystemREC ? { color: theme.warning, fontWeight: 600 } : {}),
               }}>
                 {isSystemREC ? 'SYS' : op}
               </div>
@@ -59,28 +53,43 @@ export function Trajectory({ ops, events }: TrajectoryProps) {
   );
 }
 
-const styles: Record<string, React.CSSProperties> = {
-  row: { display: 'flex', alignItems: 'center', padding: '4px 0' },
-  nodeWrap: { display: 'flex', alignItems: 'center' },
-  connector: { width: 24, height: 2, background: '#d4d0ca', flexShrink: 0 },
-  node: { display: 'flex', flexDirection: 'column', alignItems: 'center' },
-  dot: {
-    width: 24,
-    height: 24,
-    borderRadius: '50%',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    fontFamily: "'JetBrains Mono', monospace",
-    fontSize: 7,
-    fontWeight: 600,
-    border: '2px solid',
-  },
-  label: {
-    fontFamily: "'JetBrains Mono', monospace",
-    fontSize: 8,
-    color: '#aba69e',
-    marginTop: 4,
-    whiteSpace: 'nowrap' as const,
-  },
-};
+function makeOpColors(t: Theme): Record<string, { bg: string; color: string; border: string }> {
+  return {
+    INS: { bg: t.successBg, color: t.success, border: t.success },
+    DEF: { bg: t.accentBg, color: t.accent, border: t.accent },
+    CON: { bg: t.purpleBg, color: t.purple, border: t.purple },
+    SEG: { bg: t.dangerBg, color: t.danger, border: t.danger },
+    SYN: { bg: t.purpleBg, color: t.purple, border: t.purple },
+    EVA: { bg: t.tealBg, color: t.teal, border: t.teal },
+    REC: { bg: t.warningBg, color: t.warning, border: t.warning },
+    NUL: { bg: t.bgMuted, color: t.textMuted, border: t.textMuted },
+  };
+}
+
+function makeStyles(t: Theme): Record<string, React.CSSProperties> {
+  return {
+    row: { display: 'flex', alignItems: 'center', padding: '4px 0' },
+    nodeWrap: { display: 'flex', alignItems: 'center' },
+    connector: { width: 24, height: 2, background: t.borderDivider, flexShrink: 0 },
+    node: { display: 'flex', flexDirection: 'column', alignItems: 'center' },
+    dot: {
+      width: 24,
+      height: 24,
+      borderRadius: '50%',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      fontFamily: "'JetBrains Mono', monospace",
+      fontSize: 7,
+      fontWeight: 600,
+      border: '2px solid',
+    },
+    label: {
+      fontFamily: "'JetBrains Mono', monospace",
+      fontSize: 8,
+      color: t.textMuted,
+      marginTop: 4,
+      whiteSpace: 'nowrap' as const,
+    },
+  };
+}

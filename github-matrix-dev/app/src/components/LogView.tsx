@@ -1,8 +1,9 @@
 import { useState, useMemo } from 'react';
 import { useEoStore } from '../store/eo-store';
+import { useTheme } from '../theme';
 import type { EoEvent, LoggableOperator } from '../db/types';
 
-// --- Operator colors (dark theme, rgba-based) ---
+// --- Operator colors (rgba-based, works on light and dark backgrounds) ---
 const OP_COLORS: Record<string, { bg: string; text: string; border: string }> = {
   NUL: { bg: 'rgba(148,163,184,0.12)', text: '#94a3b8', border: 'rgba(148,163,184,0.25)' },
   SIG: { bg: 'rgba(56,189,248,0.12)', text: '#38bdf8', border: 'rgba(56,189,248,0.25)' },
@@ -50,7 +51,6 @@ function getAgentType(agent: string): 'human' | 'system' | 'llm' {
 
 function getAgentName(agent: string): string {
   if (agent === 'system') return 'system';
-  // Extract display name from Matrix user ID like @user:server
   if (agent.startsWith('@')) {
     const name = agent.slice(1).split(':')[0];
     return name || agent;
@@ -78,7 +78,7 @@ function OpBadge({ op }: { op: string }) {
       display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
       background: c.bg, color: c.text, border: `1px solid ${c.border}`,
       borderRadius: 3, fontSize: 9.5, fontWeight: 700,
-      fontFamily: 'var(--mono)', padding: '2px 7px',
+      fontFamily: "'JetBrains Mono', monospace", padding: '2px 7px',
       letterSpacing: '0.04em', lineHeight: 1.3, minWidth: 32, textAlign: 'center' as const,
     }}>
       {op}
@@ -91,7 +91,7 @@ function LevelBadge({ level }: { level: number }) {
   if (level <= 1) return null;
   return (
     <span style={{
-      fontSize: 8, fontWeight: 700, fontFamily: 'var(--mono)',
+      fontSize: 8, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace",
       color: level >= 3 ? '#ef4444' : '#eab308',
       background: level >= 3 ? 'rgba(239,68,68,0.1)' : 'rgba(234,179,8,0.1)',
       border: `1px solid ${level >= 3 ? 'rgba(239,68,68,0.2)' : 'rgba(234,179,8,0.2)'}`,
@@ -103,18 +103,18 @@ function LevelBadge({ level }: { level: number }) {
 }
 
 // --- Operand formatting ---
-function formatOperand(op: string, operand: any): JSX.Element | null {
+function formatOperand(op: string, operand: any, t: { textSecondary: string; textMuted: string; text: string; border: string; success: string; purple: string; warning: string }): JSX.Element | null {
   if (!operand || (typeof operand === 'object' && Object.keys(operand).length === 0)) return null;
 
   if (op === 'DEF') {
     const from = operand.from ?? operand.old_value;
     const to = operand.to ?? operand.new_value;
     return (
-      <span style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>
-        {operand.field && <span style={{ color: '#64748b' }}>{operand.field}: </span>}
-        <span style={{ color: '#64748b', textDecoration: 'line-through', opacity: 0.7 }}>{JSON.stringify(from)}</span>
-        <span style={{ color: '#334155', margin: '0 5px' }}>{'\u2192'}</span>
-        <span style={{ color: '#22c55e' }}>{JSON.stringify(to)}</span>
+      <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11 }}>
+        {operand.field && <span style={{ color: t.textSecondary }}>{operand.field}: </span>}
+        <span style={{ color: t.textSecondary, textDecoration: 'line-through', opacity: 0.7 }}>{JSON.stringify(from)}</span>
+        <span style={{ color: t.textMuted, margin: '0 5px' }}>{'\u2192'}</span>
+        <span style={{ color: t.success }}>{JSON.stringify(to)}</span>
       </span>
     );
   }
@@ -122,24 +122,24 @@ function formatOperand(op: string, operand: any): JSX.Element | null {
     const dest = operand.link_to ?? operand.dest;
     const edgeType = operand.type ?? operand.edge_type;
     return (
-      <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: '#a855f7' }}>
+      <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: t.purple }}>
         {'\u2192'} {dest}
-        {edgeType && <span style={{ color: '#475569', marginLeft: 5 }}>({edgeType})</span>}
+        {edgeType && <span style={{ color: t.textMuted, marginLeft: 5 }}>({edgeType})</span>}
       </span>
     );
   }
   if (op === 'REC') {
     const status = operand.converged ? 'converged' : 'oscillation';
-    const statusColor = operand.converged ? '#22c55e' : '#eab308';
+    const statusColor = operand.converged ? t.success : t.warning;
     return (
-      <span style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>
+      <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11 }}>
         <span style={{ color: statusColor }}>{status}</span>
-        <span style={{ color: '#334155', margin: '0 5px' }}>|</span>
-        <span style={{ color: '#64748b' }}>{operand.iterations} iterations</span>
+        <span style={{ color: t.textMuted, margin: '0 5px' }}>|</span>
+        <span style={{ color: t.textSecondary }}>{operand.iterations} iterations</span>
         {operand.cycle_length && (
           <>
-            <span style={{ color: '#334155', margin: '0 5px' }}>|</span>
-            <span style={{ color: '#64748b' }}>cycle: {operand.cycle_length}</span>
+            <span style={{ color: t.textMuted, margin: '0 5px' }}>|</span>
+            <span style={{ color: t.textSecondary }}>cycle: {operand.cycle_length}</span>
           </>
         )}
       </span>
@@ -147,8 +147,8 @@ function formatOperand(op: string, operand: any): JSX.Element | null {
   }
   if (op === 'NUL') {
     return (
-      <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: '#94a3b8' }}>
-        nullified{operand.reason ? ` — ${operand.reason}` : ''}
+      <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: t.textMuted }}>
+        nullified{operand.reason ? ` \u2014 ${operand.reason}` : ''}
       </span>
     );
   }
@@ -157,12 +157,12 @@ function formatOperand(op: string, operand: any): JSX.Element | null {
   const entries = Object.entries(operand).filter(([k]) => !['type'].includes(k)).slice(0, 3);
   if (entries.length === 0) return null;
   return (
-    <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: '#64748b' }}>
+    <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: t.textSecondary }}>
       {entries.map(([k, v], i) => (
         <span key={k}>
-          <span style={{ color: '#475569' }}>{k}:</span>{' '}
-          <span style={{ color: '#94a3b8' }}>{typeof v === 'string' ? v : JSON.stringify(v)}</span>
-          {i < entries.length - 1 && <span style={{ color: '#1e293b', margin: '0 6px' }}>|</span>}
+          <span style={{ color: t.textMuted }}>{k}:</span>{' '}
+          <span style={{ color: t.textSecondary }}>{typeof v === 'string' ? v : JSON.stringify(v)}</span>
+          {i < entries.length - 1 && <span style={{ color: t.border, margin: '0 6px' }}>|</span>}
         </span>
       ))}
     </span>
@@ -171,6 +171,7 @@ function formatOperand(op: string, operand: any): JSX.Element | null {
 
 // --- Detail Panel ---
 function DetailPanel({ event, onClose }: { event: EoEvent; onClose: () => void }) {
+  const { theme: t } = useTheme();
   const agentType = getAgentType(event.agent);
   const agentName = getAgentName(event.agent);
   const level = event.level ?? 1;
@@ -178,19 +179,19 @@ function DetailPanel({ event, onClose }: { event: EoEvent; onClose: () => void }
   const rows: { label: string; value: JSX.Element }[] = [
     {
       label: 'TARGET',
-      value: <span style={{ color: '#94a3b8' }}>{event.target}</span>,
+      value: <span style={{ color: t.textSecondary }}>{event.target}</span>,
     },
     {
       label: 'AGENT',
       value: (
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-          <span style={{ color: agentType === 'system' ? '#eab308' : '#64748b' }}>
+          <span style={{ color: agentType === 'system' ? t.warning : t.textSecondary }}>
             {AGENT_ICONS[agentType]}
           </span>
-          <span style={{ color: '#cbd5e1' }}>{agentName}</span>
+          <span style={{ color: t.text }}>{agentName}</span>
           <span style={{
-            fontSize: 8, color: '#475569', background: '#111827',
-            borderRadius: 2, padding: '1px 4px', border: '1px solid #1e293b',
+            fontSize: 8, color: t.textMuted, background: t.bgMuted,
+            borderRadius: 2, padding: '1px 4px', border: `1px solid ${t.border}`,
           }}>{agentType}</span>
         </span>
       ),
@@ -198,7 +199,7 @@ function DetailPanel({ event, onClose }: { event: EoEvent; onClose: () => void }
     {
       label: 'HASH',
       value: (
-        <span style={{ color: '#475569', letterSpacing: '0.05em' }}>
+        <span style={{ color: t.textMuted, letterSpacing: '0.05em' }}>
           {event.meta?.hash || `t_${event.seq}`}
         </span>
       ),
@@ -206,38 +207,38 @@ function DetailPanel({ event, onClose }: { event: EoEvent; onClose: () => void }
     {
       label: 'LEVEL',
       value: (
-        <span style={{ color: level > 1 ? '#eab308' : '#64748b' }}>
+        <span style={{ color: level > 1 ? t.warning : t.textSecondary }}>
           {level}
-          {level > 1 && <span style={{ color: '#475569', marginLeft: 6, fontSize: 10 }}>derived</span>}
+          {level > 1 && <span style={{ color: t.textMuted, marginLeft: 6, fontSize: 10 }}>derived</span>}
         </span>
       ),
     },
     {
       label: 'TIME',
-      value: <span style={{ color: '#64748b' }}>{new Date(event.ts).toLocaleString()}</span>,
+      value: <span style={{ color: t.textSecondary }}>{new Date(event.ts).toLocaleString()}</span>,
     },
   ];
 
   return (
     <div style={{
-      width: 300, borderLeft: '1px solid #141a24',
-      background: '#0a0f16', overflowY: 'auto' as const,
+      width: 300, borderLeft: `1px solid ${t.border}`,
+      background: t.bgCard, overflowY: 'auto' as const,
     }}>
       {/* Header */}
       <div style={{
-        padding: '10px 14px', borderBottom: '1px solid #141a24',
+        padding: '10px 14px', borderBottom: `1px solid ${t.border}`,
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <OpBadge op={event.op} />
-          <span style={{ fontSize: 10, color: '#334155', fontFamily: 'var(--mono)' }}>
+          <span style={{ fontSize: 10, color: t.textMuted, fontFamily: "'JetBrains Mono', monospace" }}>
             #{event.seq}
           </span>
           <LevelBadge level={level} />
         </div>
         <button onClick={onClose} style={{
-          background: '#111827', border: '1px solid #1e293b',
-          borderRadius: 3, color: '#475569', cursor: 'pointer',
+          background: t.bgMuted, border: `1px solid ${t.border}`,
+          borderRadius: 3, color: t.textMuted, cursor: 'pointer',
           width: 20, height: 20, display: 'flex', alignItems: 'center',
           justifyContent: 'center', fontSize: 11,
         }}>x</button>
@@ -248,11 +249,11 @@ function DetailPanel({ event, onClose }: { event: EoEvent; onClose: () => void }
         {rows.map(({ label, value }) => (
           <div key={label} style={{ marginBottom: 12 }}>
             <div style={{
-              fontSize: 8, fontWeight: 700, color: '#334155',
-              letterSpacing: '0.1em', marginBottom: 3, fontFamily: 'var(--mono)',
+              fontSize: 8, fontWeight: 700, color: t.textMuted,
+              letterSpacing: '0.1em', marginBottom: 3, fontFamily: "'JetBrains Mono', monospace",
             }}>{label}</div>
             <div style={{
-              fontSize: 11.5, fontFamily: 'var(--mono)',
+              fontSize: 11.5, fontFamily: "'JetBrains Mono', monospace",
               wordBreak: 'break-all' as const, lineHeight: 1.5,
             }}>{value}</div>
           </div>
@@ -261,13 +262,13 @@ function DetailPanel({ event, onClose }: { event: EoEvent; onClose: () => void }
         {/* Operand */}
         <div style={{ marginBottom: 12 }}>
           <div style={{
-            fontSize: 8, fontWeight: 700, color: '#334155',
-            letterSpacing: '0.1em', marginBottom: 3, fontFamily: 'var(--mono)',
+            fontSize: 8, fontWeight: 700, color: t.textMuted,
+            letterSpacing: '0.1em', marginBottom: 3, fontFamily: "'JetBrains Mono', monospace",
           }}>OPERAND</div>
           <pre style={{
-            fontSize: 10.5, color: '#64748b', fontFamily: 'var(--mono)',
-            background: '#080c12', borderRadius: 4, padding: 8, margin: 0,
-            border: '1px solid #141a24',
+            fontSize: 10.5, color: t.textSecondary, fontFamily: "'JetBrains Mono', monospace",
+            background: t.bg, borderRadius: 4, padding: 8, margin: 0,
+            border: `1px solid ${t.border}`,
             whiteSpace: 'pre-wrap' as const, wordBreak: 'break-all' as const, lineHeight: 1.6,
           }}>
             {JSON.stringify(event.operand, null, 2)}
@@ -278,31 +279,31 @@ function DetailPanel({ event, onClose }: { event: EoEvent; onClose: () => void }
         {level > 1 && event.operand?.constituents && (
           <div style={{ marginBottom: 12 }}>
             <div style={{
-              fontSize: 8, fontWeight: 700, color: '#334155',
-              letterSpacing: '0.1em', marginBottom: 3, fontFamily: 'var(--mono)',
+              fontSize: 8, fontWeight: 700, color: t.textMuted,
+              letterSpacing: '0.1em', marginBottom: 3, fontFamily: "'JetBrains Mono', monospace",
             }}>CONSTITUENTS</div>
             {(event.operand.constituents as string[]).map((c: string, i: number) => (
               <div key={i} style={{
-                fontSize: 11, fontFamily: 'var(--mono)',
-                color: '#3b82f6', padding: '3px 0', cursor: 'pointer',
+                fontSize: 11, fontFamily: "'JetBrains Mono', monospace",
+                color: t.accent, padding: '3px 0', cursor: 'pointer',
               }}>{c}</div>
             ))}
           </div>
         )}
 
         {/* Footer links */}
-        <div style={{ borderTop: '1px solid #141a24', paddingTop: 10, marginTop: 4 }}>
+        <div style={{ borderTop: `1px solid ${t.border}`, paddingTop: 10, marginTop: 4 }}>
           <div style={{
-            fontSize: 10.5, color: '#3b82f6', cursor: 'pointer',
-            fontFamily: 'var(--mono)', padding: '4px 0',
+            fontSize: 10.5, color: t.accent, cursor: 'pointer',
+            fontFamily: "'JetBrains Mono', monospace", padding: '4px 0',
             display: 'flex', alignItems: 'center', gap: 4,
           }}>
             <span style={{ fontSize: 11 }}>{'\u2193'}</span> target history
           </div>
           {level > 1 && (
             <div style={{
-              fontSize: 10.5, color: '#a855f7', cursor: 'pointer',
-              fontFamily: 'var(--mono)', padding: '4px 0',
+              fontSize: 10.5, color: t.purple, cursor: 'pointer',
+              fontFamily: "'JetBrains Mono', monospace", padding: '4px 0',
               display: 'flex', alignItems: 'center', gap: 4,
             }}>
               <span style={{ fontSize: 11 }}>{'\u2191'}</span> dependency graph
@@ -317,6 +318,7 @@ function DetailPanel({ event, onClose }: { event: EoEvent; onClose: () => void }
 // --- Main LogView ---
 export function LogView() {
   const recentEvents = useEoStore((s) => s.recentEvents);
+  const { theme: t } = useTheme();
   const [activeFilters, setActiveFilters] = useState<Set<string>>(new Set());
   const [selectedEvent, setSelectedEvent] = useState<EoEvent | null>(null);
   const [filterText, setFilterText] = useState('');
@@ -349,12 +351,12 @@ export function LogView() {
   }
 
   return (
-    <div style={{ display: 'flex', flex: 1, minHeight: 0, background: '#080c12' }}>
+    <div style={{ display: 'flex', flex: 1, minHeight: 0, background: t.bg }}>
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column' as const, minWidth: 0 }}>
         {/* Filters */}
         <div style={{
           display: 'flex', alignItems: 'center', gap: 6,
-          padding: '8px 16px', borderBottom: '1px solid #0f1520',
+          padding: '8px 16px', borderBottom: `1px solid ${t.borderLight}`,
         }}>
           {ALL_OPS.map((op) => {
             const c = OP_COLORS[op];
@@ -364,10 +366,10 @@ export function LogView() {
               <button key={op} onClick={() => toggleFilter(op)} style={{
                 display: 'inline-flex', alignItems: 'center', gap: 3,
                 background: active ? c.bg : 'transparent',
-                border: `1px solid ${active ? c.border : '#151c28'}`,
-                color: active ? c.text : count > 0 ? '#3e4a5a' : '#1e293b',
+                border: `1px solid ${active ? c.border : t.borderLight}`,
+                color: active ? c.text : count > 0 ? t.textMuted : t.borderLight,
                 borderRadius: 3, padding: '2px 6px', cursor: 'pointer',
-                fontSize: 9, fontWeight: 600, fontFamily: 'var(--mono)',
+                fontSize: 9, fontWeight: 600, fontFamily: "'JetBrains Mono', monospace",
                 letterSpacing: '0.03em', transition: 'all 0.1s',
               }}>
                 {op}
@@ -381,9 +383,9 @@ export function LogView() {
             onChange={(e) => setFilterText(e.target.value)}
             placeholder="filter targets..."
             style={{
-              background: '#0d1117', border: '1px solid #1a2030',
-              borderRadius: 3, padding: '4px 8px', color: '#94a3b8',
-              fontSize: 10, fontFamily: 'var(--mono)', width: 160, outline: 'none',
+              background: t.bgMuted, border: `1px solid ${t.border}`,
+              borderRadius: 3, padding: '4px 8px', color: t.textSecondary,
+              fontSize: 10, fontFamily: "'JetBrains Mono', monospace", width: 160, outline: 'none',
             }}
           />
         </div>
@@ -397,7 +399,7 @@ export function LogView() {
             const parts = event.target.split('.');
             const level = event.level ?? 1;
             const agentType = getAgentType(event.agent);
-            const operandEl = formatOperand(event.op, event.operand);
+            const operandEl = formatOperand(event.op, event.operand, t);
 
             return (
               <div
@@ -406,23 +408,23 @@ export function LogView() {
                 style={{
                   display: 'flex', alignItems: 'flex-start', gap: 10,
                   padding: '9px 16px', cursor: 'pointer',
-                  background: sel ? '#0e1420' : 'transparent',
-                  borderBottom: '1px solid #0c1018',
+                  background: sel ? t.bgHover : 'transparent',
+                  borderBottom: `1px solid ${t.borderLight}`,
                   borderLeft: sel ? `2px solid ${c.text}` : '2px solid transparent',
                   transition: 'background 0.08s',
                 }}
-                onMouseEnter={(e) => { if (!sel) (e.currentTarget as HTMLElement).style.background = '#0b0f18'; }}
+                onMouseEnter={(e) => { if (!sel) (e.currentTarget as HTMLElement).style.background = t.bgHover; }}
                 onMouseLeave={(e) => { if (!sel) (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
               >
                 {/* Seq */}
                 <span style={{
-                  fontSize: 9, color: '#252d38', fontFamily: 'var(--mono)',
+                  fontSize: 9, color: t.textMuted, fontFamily: "'JetBrains Mono', monospace",
                   minWidth: 18, textAlign: 'right' as const, paddingTop: 3, fontWeight: 500,
                 }}>{event.seq}</span>
 
                 {/* Agent icon */}
                 <span style={{
-                  paddingTop: 2, color: isSystem ? '#eab308' : '#3e4a5a',
+                  paddingTop: 2, color: isSystem ? t.warning : t.textMuted,
                   display: 'flex', alignItems: 'center',
                 }}>
                   {AGENT_ICONS[agentType]}
@@ -434,16 +436,16 @@ export function LogView() {
                 {/* Content: target + operand */}
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ display: 'flex', alignItems: 'center' }}>
-                    <span style={{ fontFamily: 'var(--mono)', fontSize: 12.5, fontWeight: 500 }}>
+                    <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12.5, fontWeight: 500 }}>
                       {parts.map((seg, i) => (
                         <span key={i}>
                           {i < parts.length - 1 ? (
                             <>
-                              <span style={{ color: '#3e4a5a' }}>{seg}</span>
-                              <span style={{ color: '#252d38' }}>.</span>
+                              <span style={{ color: t.textMuted }}>{seg}</span>
+                              <span style={{ color: t.borderDivider }}>.</span>
                             </>
                           ) : (
-                            <span style={{ color: '#e2e8f0' }}>{seg}</span>
+                            <span style={{ color: t.textHeading }}>{seg}</span>
                           )}
                         </span>
                       ))}
@@ -459,7 +461,7 @@ export function LogView() {
 
                 {/* Timestamp */}
                 <span style={{
-                  fontSize: 9, color: '#252d38', fontFamily: 'var(--mono)',
+                  fontSize: 9, color: t.textMuted, fontFamily: "'JetBrains Mono', monospace",
                   whiteSpace: 'nowrap' as const, paddingTop: 3,
                 }}>{formatTime(event.ts)}</span>
               </div>
@@ -467,8 +469,8 @@ export function LogView() {
           })}
           {filtered.length === 0 && (
             <div style={{
-              padding: 48, textAlign: 'center' as const, color: '#1e293b',
-              fontSize: 11, fontFamily: 'var(--mono)',
+              padding: 48, textAlign: 'center' as const, color: t.textMuted,
+              fontSize: 11, fontFamily: "'JetBrains Mono', monospace",
             }}>
               {recentEvents.length === 0 ? 'no events yet' : 'no events match'}
             </div>

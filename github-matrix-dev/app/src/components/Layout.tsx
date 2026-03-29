@@ -15,6 +15,7 @@ import { SyncProgress } from './SyncProgress';
 import { AirtableSettings } from './AirtableSettings';
 import { DataSyncDashboard } from './DataSyncDashboard';
 import { LogView } from './LogView';
+import { useTheme, type Theme } from '../theme';
 
 type View = 'horizon' | 'log' | 'graph' | 'compose' | 'settings';
 const TABS: View[] = ['horizon', 'log', 'graph', 'compose', 'settings'];
@@ -36,6 +37,8 @@ export function Layout({ session, onLogout }: LayoutProps) {
   const [activeView, setActiveView] = useState<View>('horizon');
   const [spaceOpen, setSpaceOpen] = useState(false);
   const connectionState = useConnectionState();
+  const { theme, toggleTheme } = useTheme();
+  const s = makeStyles(theme);
 
   // Compute target count from recent events
   const targetCount = new Set(recentEvents.map((e) => e.target)).size;
@@ -75,8 +78,8 @@ export function Layout({ session, onLogout }: LayoutProps) {
       const roomId = await resolveDataRoom(matrixClient);
       const syncManager = new SyncManager(matrixClient, roomId, store, (event) => {
         // Update the Zustand store as events are replayed
-        useEoStore.setState((s) => ({
-          recentEvents: [...s.recentEvents.slice(-99), event],
+        useEoStore.setState((st) => ({
+          recentEvents: [...st.recentEvents.slice(-99), event],
           lastSeq: event.seq,
         }));
       });
@@ -120,47 +123,47 @@ export function Layout({ session, onLogout }: LayoutProps) {
     : session.userId;
 
   return (
-    <div style={styles.container}>
+    <div style={s.container}>
       {/* Top bar */}
-      <header style={styles.topBar}>
-        <div style={styles.topBarLeft}>
-          <span style={styles.logo}>
-            <span style={{ color: '#22c55e' }}>EO</span>
-            <span style={{ color: '#1e293b' }}>///</span>
-            <span style={{ color: '#cbd5e1' }}>DB</span>
+      <header style={s.topBar}>
+        <div style={s.topBarLeft}>
+          <span style={s.logo}>
+            <span style={{ color: theme.success }}>EO</span>
+            <span style={{ color: theme.borderLight }}>///</span>
+            <span style={{ color: theme.textHeading }}>DB</span>
           </span>
 
-          <div style={styles.divider} />
+          <div style={s.divider} />
 
           {/* NULSpace selector */}
           <div style={{ position: 'relative' as const }}>
             <button
               onClick={() => setSpaceOpen(!spaceOpen)}
-              style={styles.nulspaceBtn}
+              style={s.nulspaceBtn}
             >
-              <span style={styles.nulTag}>NUL</span>
-              <span style={styles.nulspaceName}>default</span>
+              <span style={s.nulTag}>NUL</span>
+              <span style={s.nulspaceName}>default</span>
               <svg width="10" height="10" viewBox="0 0 10 10" fill="none" style={{ marginLeft: 2 }}>
-                <path d="M2.5 4L5 6.5L7.5 4" stroke="#475569" strokeWidth="1.2" strokeLinecap="round" />
+                <path d="M2.5 4L5 6.5L7.5 4" stroke={theme.textMuted} strokeWidth="1.2" strokeLinecap="round" />
               </svg>
             </button>
 
             {spaceOpen && (
-              <div style={styles.nulspaceDropdown}>
+              <div style={s.nulspaceDropdown}>
                 <button
                   onClick={() => setSpaceOpen(false)}
-                  style={{ ...styles.nulspaceItem, background: '#1e293b' }}
+                  style={{ ...s.nulspaceItem, background: theme.bgHover }}
                 >
-                  <span style={{ fontFamily: 'var(--mono)', fontSize: 12 }}>default</span>
-                  <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: '#475569' }}>
+                  <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12 }}>default</span>
+                  <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: theme.textMuted }}>
                     {targetCount} targets
                   </span>
                 </button>
-                <div style={{ borderTop: '1px solid #1e293b', margin: '4px 0' }} />
+                <div style={{ borderTop: `1px solid ${theme.border}`, margin: '4px 0' }} />
                 <button style={{
-                  ...styles.nulspaceItem,
-                  color: '#22c55e',
-                  fontFamily: 'var(--mono)',
+                  ...s.nulspaceItem,
+                  color: theme.success,
+                  fontFamily: "'JetBrains Mono', monospace",
                   fontSize: 11,
                   gap: 5,
                 }}>
@@ -172,36 +175,64 @@ export function Layout({ session, onLogout }: LayoutProps) {
           </div>
         </div>
 
-        <div style={styles.topBarRight}>
-          <div style={styles.stats}>
-            <span>seq <span style={{ color: '#64748b' }}>{lastSeq}</span></span>
-            <span>events <span style={{ color: '#64748b' }}>{recentEvents.length}</span></span>
-            <span>targets <span style={{ color: '#64748b' }}>{targetCount}</span></span>
-            <span>edges <span style={{ color: '#64748b' }}>{edgeCount}</span></span>
+        <div style={s.topBarRight}>
+          <div style={s.stats}>
+            <span>seq <span style={{ color: theme.textSecondary }}>{lastSeq}</span></span>
+            <span>events <span style={{ color: theme.textSecondary }}>{recentEvents.length}</span></span>
+            <span>targets <span style={{ color: theme.textSecondary }}>{targetCount}</span></span>
+            <span>edges <span style={{ color: theme.textSecondary }}>{edgeCount}</span></span>
           </div>
-          <div style={styles.divider} />
+          <div style={s.divider} />
           <ConnectionStatus state={connectionState} />
-          <div style={styles.divider} />
-          <div style={styles.userArea}>
-            <div style={styles.userAvatar}>
+          <div style={s.divider} />
+          {/* Settings */}
+          <button
+            onClick={() => setShowSettings(true)}
+            style={s.settingsBtn}
+            title="Airtable Settings"
+          >
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="8" cy="8" r="2.5" />
+              <path d="M8 1.5v1.2M8 13.3v1.2M3.4 3.4l.85.85M11.75 11.75l.85.85M1.5 8h1.2M13.3 8h1.2M3.4 12.6l.85-.85M11.75 4.25l.85-.85" />
+            </svg>
+          </button>
+          {/* Theme toggle */}
+          <button
+            onClick={toggleTheme}
+            style={s.settingsBtn}
+            title={theme.mode === 'light' ? 'Switch to dark mode' : 'Switch to light mode'}
+          >
+            {theme.mode === 'light' ? (
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M13.5 8.5a5.5 5.5 0 0 1-7-7 5.5 5.5 0 1 0 7 7z" />
+              </svg>
+            ) : (
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="8" cy="8" r="3" />
+                <path d="M8 1v1.5M8 13.5V15M1 8h1.5M13.5 8H15M3.05 3.05l1.06 1.06M11.89 11.89l1.06 1.06M3.05 12.95l1.06-1.06M11.89 4.11l1.06-1.06" />
+              </svg>
+            )}
+          </button>
+          <div style={s.userArea}>
+            <div style={s.userAvatar}>
               {displayName.charAt(0).toUpperCase()}
             </div>
-            <span style={{ fontSize: 11, color: '#64748b' }}>{displayName}</span>
+            <span style={{ fontSize: 11, color: theme.textSecondary }}>{displayName}</span>
           </div>
-          <button onClick={handleLogout} style={styles.logoutBtn}>Sign out</button>
+          <button onClick={handleLogout} style={s.logoutBtn}>Sign out</button>
         </div>
       </header>
 
       {/* Tab bar */}
-      <div style={styles.tabBar}>
+      <div style={s.tabBar}>
         {TABS.map((tab) => (
           <button
             key={tab}
             onClick={() => setActiveView(tab)}
             style={{
-              ...styles.tab,
-              color: activeView === tab ? '#e2e8f0' : '#334155',
-              borderBottom: activeView === tab ? '1.5px solid #22c55e' : '1.5px solid transparent',
+              ...s.tab,
+              color: activeView === tab ? theme.textHeading : theme.textMuted,
+              borderBottom: activeView === tab ? `1.5px solid ${theme.success}` : '1.5px solid transparent',
             }}
           >
             {tab === 'compose' ? '+ COMPOSE' : tab.toUpperCase()}
@@ -211,14 +242,14 @@ export function Layout({ session, onLogout }: LayoutProps) {
 
       {/* Body */}
       {activeView === 'log' ? (
-        <div style={styles.body}>
+        <div style={s.body}>
           <ErrorBoundary>
             <LogView />
           </ErrorBoundary>
         </div>
       ) : activeView === 'horizon' ? (
-        <div style={styles.bodyLight}>
-          <aside style={styles.sidebar}>
+        <div style={s.body}>
+          <aside style={s.sidebar}>
             {ready ? (
               <HolonNav
                 selectedScope={selectedScope}
@@ -229,7 +260,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
               <SyncProgress message="Initializing store..." detail="Deriving encryption key" />
             )}
           </aside>
-          <main style={styles.mainLight}>
+          <main style={s.main}>
             <ErrorBoundary>
               {selectedScope ? (
                 <TableView
@@ -239,9 +270,9 @@ export function Layout({ session, onLogout }: LayoutProps) {
                   session={{ userId: session.userId }}
                 />
               ) : (
-                <div style={styles.empty}>
-                  <div style={styles.emptyText}>Select an object type to view its records</div>
-                  <div style={styles.emptySub}>
+                <div style={s.empty}>
+                  <div style={s.emptyText}>Select an object type to view its records</div>
+                  <div style={s.emptySub}>
                     Choose from the hierarchy on the left to see records as a table
                   </div>
                 </div>
@@ -257,14 +288,10 @@ export function Layout({ session, onLogout }: LayoutProps) {
           )}
         </div>
       ) : (
-        <div style={styles.body}>
-          <div style={styles.emptyDark}>
-            <div style={{ fontSize: 13, color: '#334155', fontFamily: 'var(--mono)' }}>
-              {activeView.toUpperCase()}
-            </div>
-            <div style={{ fontSize: 11, color: '#1e293b', fontFamily: 'var(--mono)' }}>
-              not yet implemented
-            </div>
+        <div style={s.body}>
+          <div style={s.empty}>
+            <div style={s.emptyText}>{activeView.toUpperCase()} view</div>
+            <div style={s.emptySub}>This view is not yet implemented</div>
           </div>
         </div>
       )}
@@ -275,196 +302,185 @@ export function Layout({ session, onLogout }: LayoutProps) {
   );
 }
 
-const styles: Record<string, React.CSSProperties> = {
-  container: {
-    '--mono': "'JetBrains Mono', 'SF Mono', 'Fira Code', monospace",
-    '--sans': "'Inter', -apple-system, system-ui, sans-serif",
-    display: 'flex',
-    flexDirection: 'column',
-    height: '100vh',
-    background: '#080c12',
-    color: '#e2e8f0',
-    fontFamily: 'var(--sans)',
-  } as React.CSSProperties,
+function makeStyles(t: Theme): Record<string, React.CSSProperties> {
+  return {
+    container: {
+      display: 'flex',
+      flexDirection: 'column',
+      height: '100vh',
+      background: t.bg,
+      color: t.text,
+      fontFamily: "'Outfit', system-ui, -apple-system, sans-serif",
+    },
 
-  // Top bar
-  topBar: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    padding: '0 16px',
-    height: 42,
-    borderBottom: '1px solid #141a24',
-    background: '#0a0f16',
-    flexShrink: 0,
-  },
-  topBarLeft: { display: 'flex', alignItems: 'center', gap: 14 },
-  topBarRight: { display: 'flex', alignItems: 'center', gap: 16 },
-  logo: {
-    fontFamily: 'var(--mono)',
-    fontWeight: 700,
-    fontSize: 13.5,
-    letterSpacing: '-0.03em',
-  },
-  divider: { width: 1, height: 18, background: '#1e293b' },
+    // Top bar
+    topBar: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      padding: '0 16px',
+      height: 42,
+      borderBottom: `1px solid ${t.border}`,
+      background: t.bgCard,
+      flexShrink: 0,
+    },
+    topBarLeft: { display: 'flex', alignItems: 'center', gap: 14 },
+    topBarRight: { display: 'flex', alignItems: 'center', gap: 12 },
+    logo: {
+      fontFamily: "'JetBrains Mono', monospace",
+      fontWeight: 700,
+      fontSize: 13.5,
+      letterSpacing: '-0.03em',
+    },
+    divider: { width: 1, height: 18, background: t.borderDivider },
 
-  // NULSpace selector
-  nulspaceBtn: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 6,
-    background: '#111827',
-    border: '1px solid #1e293b',
-    borderRadius: 4,
-    padding: '4px 10px 4px 8px',
-    cursor: 'pointer',
-    color: '#e2e8f0',
-  },
-  nulTag: {
-    fontSize: 8,
-    fontWeight: 700,
-    color: '#475569',
-    fontFamily: 'var(--mono)',
-    letterSpacing: '0.06em',
-    background: '#0a0f16',
-    borderRadius: 2,
-    padding: '1px 4px',
-    border: '1px solid #1e293b',
-  },
-  nulspaceName: {
-    fontFamily: 'var(--mono)',
-    fontSize: 12,
-    fontWeight: 500,
-  },
-  nulspaceDropdown: {
-    position: 'absolute',
-    top: 'calc(100% + 4px)',
-    left: 0,
-    background: '#111827',
-    border: '1px solid #1e293b',
-    borderRadius: 6,
-    padding: 4,
-    minWidth: 200,
-    boxShadow: '0 8px 24px rgba(0,0,0,0.4)',
-    zIndex: 100,
-  } as React.CSSProperties,
-  nulspaceItem: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    width: '100%',
-    padding: '7px 10px',
-    background: 'transparent',
-    border: 'none',
-    borderRadius: 4,
-    cursor: 'pointer',
-    color: '#e2e8f0',
-    textAlign: 'left' as const,
-  },
+    // NULSpace selector
+    nulspaceBtn: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6,
+      background: t.bgMuted,
+      border: `1px solid ${t.border}`,
+      borderRadius: 4,
+      padding: '4px 10px 4px 8px',
+      cursor: 'pointer',
+      color: t.text,
+    },
+    nulTag: {
+      fontSize: 8,
+      fontWeight: 700,
+      color: t.textMuted,
+      fontFamily: "'JetBrains Mono', monospace",
+      letterSpacing: '0.06em',
+      background: t.bg,
+      borderRadius: 2,
+      padding: '1px 4px',
+      border: `1px solid ${t.border}`,
+    },
+    nulspaceName: {
+      fontFamily: "'JetBrains Mono', monospace",
+      fontSize: 12,
+      fontWeight: 500,
+    },
+    nulspaceDropdown: {
+      position: 'absolute',
+      top: 'calc(100% + 4px)',
+      left: 0,
+      background: t.bgCard,
+      border: `1px solid ${t.border}`,
+      borderRadius: 6,
+      padding: 4,
+      minWidth: 200,
+      boxShadow: `0 8px 24px ${t.shadow}`,
+      zIndex: 100,
+    } as React.CSSProperties,
+    nulspaceItem: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      width: '100%',
+      padding: '7px 10px',
+      background: 'transparent',
+      border: 'none',
+      borderRadius: 4,
+      cursor: 'pointer',
+      color: t.text,
+      textAlign: 'left' as const,
+    },
 
-  // Stats
-  stats: {
-    display: 'flex',
-    gap: 12,
-    fontSize: 10,
-    color: '#334155',
-    fontFamily: 'var(--mono)',
-  },
+    // Stats
+    stats: {
+      display: 'flex',
+      gap: 12,
+      fontSize: 10,
+      color: t.textMuted,
+      fontFamily: "'JetBrains Mono', monospace",
+    },
 
-  // User area
-  userArea: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 6,
-  },
-  userAvatar: {
-    width: 22,
-    height: 22,
-    borderRadius: '50%',
-    background: '#1e293b',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    fontSize: 10,
-    fontWeight: 600,
-    color: '#64748b',
-  },
+    // User area
+    userArea: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6,
+    },
+    userAvatar: {
+      width: 22,
+      height: 22,
+      borderRadius: '50%',
+      background: t.bgMuted,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      fontSize: 10,
+      fontWeight: 600,
+      color: t.textSecondary,
+    },
 
-  logoutBtn: {
-    padding: '4px 10px',
-    fontSize: 10,
-    border: '1px solid #1e293b',
-    borderRadius: 4,
-    background: 'transparent',
-    color: '#475569',
-    cursor: 'pointer',
-    fontFamily: 'var(--mono)',
-  },
+    // Buttons
+    settingsBtn: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      width: 32,
+      height: 32,
+      border: `1px solid ${t.border}`,
+      borderRadius: 6,
+      background: 'transparent',
+      color: t.textSecondary,
+      cursor: 'pointer',
+    },
+    logoutBtn: {
+      padding: '4px 10px',
+      fontSize: 10,
+      border: `1px solid ${t.border}`,
+      borderRadius: 4,
+      background: 'transparent',
+      color: t.textSecondary,
+      cursor: 'pointer',
+      fontFamily: "'JetBrains Mono', monospace",
+    },
 
-  // Tab bar
-  tabBar: {
-    display: 'flex',
-    padding: '0 16px',
-    borderBottom: '1px solid #141a24',
-    background: '#0a0f16',
-    flexShrink: 0,
-  },
-  tab: {
-    padding: '9px 14px',
-    background: 'transparent',
-    border: 'none',
-    cursor: 'pointer',
-    fontSize: 10,
-    fontWeight: 600,
-    letterSpacing: '0.06em',
-    fontFamily: 'var(--mono)',
-    color: '#334155',
-    borderBottom: '1.5px solid transparent',
-  },
+    // Tab bar
+    tabBar: {
+      display: 'flex',
+      padding: '0 16px',
+      borderBottom: `1px solid ${t.border}`,
+      background: t.bgCard,
+      flexShrink: 0,
+    },
+    tab: {
+      padding: '9px 14px',
+      background: 'transparent',
+      border: 'none',
+      cursor: 'pointer',
+      fontSize: 10,
+      fontWeight: 600,
+      letterSpacing: '0.06em',
+      fontFamily: "'JetBrains Mono', monospace",
+      color: t.textMuted,
+      borderBottom: '1.5px solid transparent',
+    },
 
-  // Body
-  body: {
-    display: 'flex',
-    flex: 1,
-    overflow: 'hidden',
-    background: '#080c12',
-  },
-  bodyLight: {
-    display: 'flex',
-    flex: 1,
-    overflow: 'hidden',
-    background: '#faf9f7',
-  },
+    // Body
+    body: { display: 'flex', flex: 1, overflow: 'hidden' },
+    sidebar: {
+      width: 280,
+      borderRight: `1px solid ${t.border}`,
+      background: t.bgCard,
+    },
+    main: { flex: 1, overflowY: 'auto', background: t.bg },
 
-  // Sidebar (for HORIZON view)
-  sidebar: {
-    width: 280,
-    borderRight: '1px solid #e5e2dd',
-    background: '#fff',
-  },
-  mainLight: {
-    flex: 1,
-    overflowY: 'auto',
-    background: '#faf9f7',
-  },
-
-  // Empty states
-  empty: {
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    justifyContent: 'center',
-    height: '100%',
-    gap: 8,
-  },
-  emptyText: { fontSize: 14, color: '#7a756d', fontWeight: 300 },
-  emptySub: { fontSize: 12, color: '#aba69e' },
-  emptyDark: {
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    justifyContent: 'center',
-    flex: 1,
-    gap: 8,
-  },
-};
+    // Empty states
+    empty: {
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      justifyContent: 'center',
+      height: '100%',
+      flex: 1,
+      gap: 8,
+    },
+    emptyText: { fontSize: 14, color: t.textSecondary, fontWeight: 300 },
+    emptySub: { fontSize: 12, color: t.textMuted },
+  };
+}
