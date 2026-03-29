@@ -202,32 +202,14 @@ export async function interpretationFromEvent(
     position: event.agent,
   };
 
-  // Supersession depends on operator:
-  //   ⊢DEF: coexistence without resolution. Multiple DEFs accumulate.
-  //          Contradictory readings are HELD, not resolved. Only EVA resolves them.
-  //   ⊨EVA: supersession. New EVA supersedes prior EVA and resolves active DEFs
-  //          on the same target by selecting/merging them.
-  //   ⊛REC: frame revision. New REC supersedes prior REC — the frame changed.
+  // Supersession: same operator type on the same target supersedes prior.
+  // DEF supersedes prior DEF (new value replaces old value).
+  // EVA supersedes prior EVA (new policy replaces old policy).
+  // REC supersedes prior REC (new fixed-point replaces old).
   const existing = await getActiveInterpretations(db, event.target);
-  let supersedes: string[];
-
-  if (event.op === 'DEF') {
-    // DEF accumulates — does NOT supersede prior DEFs.
-    // Multiple agents can DEF the same target with conflicting values.
-    // All coexist as active until EVA resolves them.
-    supersedes = [];
-  } else if (event.op === 'EVA') {
-    // EVA supersedes prior EVA policies AND resolves active DEF contradictions.
-    // The EVA interpretation represents the resolution of accumulated DEFs.
-    supersedes = existing
-      .filter(i => i.op === 'EVA' || i.op === 'DEF')
-      .map(i => i.id);
-  } else {
-    // REC supersedes prior REC — frame revision replaces prior frame
-    supersedes = existing
-      .filter(i => i.op === 'REC')
-      .map(i => i.id);
-  }
+  const supersedes = existing
+    .filter(i => i.op === event.op)
+    .map(i => i.id);
 
   return assertInterpretation(db, {
     target: event.target,

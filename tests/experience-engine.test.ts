@@ -252,59 +252,30 @@ describe('Meant-Graph', () => {
     expect(defInterp!.window.grain).toBe('data');
   });
 
-  it('DEF accumulates: multiple DEFs coexist without resolution', async () => {
-    // Spec: "⊢DEF: Two or more interpretations coexist without resolution.
-    //        The Meant-Graph holds contradictory readings simultaneously."
+  it('supersession: new DEF supersedes prior DEF on same target', async () => {
+    // DEF sets a value. A new DEF on the same target supersedes the prior one.
     await processEvent(db, ev({ target: 'data.rec1' }));
     await processEvent(db, ev({
-      op: 'DEF', target: 'data.rec1', operand: { v: 1 }, agent: AGENT_A,
+      op: 'DEF', target: 'data.rec1', operand: { v: 1 },
     }));
     await processEvent(db, ev({
-      op: 'DEF', target: 'data.rec1', operand: { v: 2 }, agent: AGENT_B, ts: TS2,
+      op: 'DEF', target: 'data.rec1', operand: { v: 2 }, ts: TS2,
     }));
 
     const all = await getInterpretationsForTarget(db, 'data.rec1');
     const defs = all.filter(i => i.op === 'DEF');
 
-    // Both DEFs should be active — contradictions are held
+    // Should have 2 DEF interpretations total
     expect(defs.length).toBe(2);
-    expect(defs.every(i => i.status === 'active')).toBe(true);
 
-    // One from each agent
-    expect(defs.find(i => i.content.v === 1)?.agent).toBe(AGENT_A);
-    expect(defs.find(i => i.content.v === 2)?.agent).toBe(AGENT_B);
-  });
+    // The first should be superseded, the second active
+    const superseded = defs.filter(i => i.status === 'superseded');
+    expect(superseded.length).toBe(1);
+    expect(superseded[0].content).toEqual({ v: 1 });
 
-  it('EVA supersedes: resolves accumulated DEF contradictions', async () => {
-    // Spec: "⊨EVA: An interpretation changes. A prior reading is superseded."
-    await processEvent(db, ev({ target: 'data.rec1' }));
-    await processEvent(db, ev({
-      op: 'DEF', target: 'data.rec1', operand: { v: 1 }, agent: AGENT_A,
-    }));
-    await processEvent(db, ev({
-      op: 'DEF', target: 'data.rec1', operand: { v: 2 }, agent: AGENT_B, ts: TS2,
-    }));
-
-    // Both DEFs active before EVA
-    const beforeEva = await getActiveInterpretations(db, 'data.rec1');
-    expect(beforeEva.filter(i => i.op === 'DEF').length).toBe(2);
-
-    // EVA resolves: picks v=2 as the canonical value
-    await processEvent(db, ev({
-      op: 'EVA', target: 'data.rec1',
-      operand: { strategy: 'last-writer-wins', resolved_value: { v: 2 } },
-      ts: TS2,
-    }));
-
-    const afterEva = await getActiveInterpretations(db, 'data.rec1');
-    // DEFs should be superseded by the EVA
-    const activeDefs = afterEva.filter(i => i.op === 'DEF');
-    expect(activeDefs.length).toBe(0);
-
-    // EVA is the active interpretation
-    const activeEva = afterEva.filter(i => i.op === 'EVA');
-    expect(activeEva.length).toBe(1);
-    expect(activeEva[0].content.strategy).toBe('last-writer-wins');
+    const activeDefs = defs.filter(i => i.status === 'active');
+    expect(activeDefs.length).toBe(1);
+    expect(activeDefs[0].content).toEqual({ v: 2 });
   });
 
   it('provenance chain traces to Given-Log entries', async () => {
