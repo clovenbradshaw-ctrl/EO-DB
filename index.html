@@ -2661,8 +2661,13 @@ let onlineUsers = [];
 let syncReconnectTimer = null;
 const SYNC_RECONNECT_DELAY = 3000;
 
+function isStaticHosting() {
+  const host = window.location.host;
+  return host.endsWith('.github.io') || host.endsWith('.pages.dev') || host.endsWith('.netlify.app');
+}
+
 function getSyncServerUrl() {
-  // Derive EO-DB server URL from current page location
+  if (isStaticHosting()) return null;
   const loc = window.location;
   const protocol = loc.protocol === 'https:' ? 'wss:' : 'ws:';
   return `${protocol}//${loc.host}/sync`;
@@ -2674,7 +2679,14 @@ function connectSync() {
   }
   if (!matrixToken) return;
 
-  const url = `${getSyncServerUrl()}?access_token=${encodeURIComponent(matrixToken)}`;
+  const baseUrl = getSyncServerUrl();
+  if (!baseUrl) {
+    // Static hosting — no backend WebSocket available
+    updateOnlineDot(false);
+    return;
+  }
+
+  const url = `${baseUrl}?access_token=${encodeURIComponent(matrixToken)}`;
   try {
     syncSocket = new WebSocket(url);
   } catch (e) {
