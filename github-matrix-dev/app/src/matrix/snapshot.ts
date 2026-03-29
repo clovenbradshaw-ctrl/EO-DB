@@ -1,17 +1,30 @@
 /**
- * Snapshot — create, upload, download, and apply database snapshots.
+ * Snapshot — incremental event-based snapshots stored in Matrix media.
  *
- * Snapshots are hydration accelerators stored as encrypted binary blobs
- * in the Matrix media store. The room event history is the source of truth.
+ * Snapshots are hydration accelerators, NOT the source of truth.
+ * The room event timeline is always authoritative.
+ *
+ * Version 1 (legacy): full state dump — no longer created, still loadable.
+ * Version 2 (current): incremental — stores only the events from base_seq+1 to seq.
+ *
+ * Non-destructive pruning: old snapshot media can be deleted from the
+ * Matrix media store at any time. Hydration falls back to timeline
+ * pagination for any gaps in the snapshot chain.
  */
 
 import { pack, unpack } from 'msgpackr';
 import type { MatrixClient } from 'matrix-js-sdk';
 import type { EoStore } from '../db/encrypted-store';
-import type { EoState, GraphEdge, EvaRegistration } from '../db/types';
+import type { EoState, EoEvent, GraphEdge, EvaRegistration } from '../db/types';
+import { readLogSince } from '../db/log';
 import { EO_SNAPSHOT_TYPE } from './event-bridge';
 
-interface Snapshot {
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+/** Legacy full-state snapshot (read-only — we never create these anymore). */
+interface SnapshotV1 {
   version: 1;
   seq: number;
   ts: string;
@@ -22,65 +35,70 @@ interface Snapshot {
   eva: Record<string, EvaRegistration>;
 }
 
+/** Incremental snapshot — a batch of events since the previous snapshot. */
+export interface IncrementalSnapshot {
+  version: 2;
+  base_seq: number;           // events start AFTER this seq (0 = from the beginning)
+  seq: number;                // last event seq included
+  ts: string;                 // creation timestamp
+  created_by: string;         // Matrix user ID of creator
+  events: EoEvent[];          // the actual event batch
+}
+
+type Snapshot = SnapshotV1 | IncrementalSnapshot;
+
+/** Pointer stored as a Matrix room event (com.aminoimmigration.eo.snapshot). */
+export interface SnapshotRef {
+  mxc: string;
+  base_seq: number;
+  seq: number;
+  ts: string;
+  size_bytes: number;
+  version: number;
+}
+
+// ---------------------------------------------------------------------------
+// Create
+// ---------------------------------------------------------------------------
+
 /**
- * Create a snapshot from current store state.
+ * Create an incremental snapshot containing events from (base_seq, seq].
  */
 export async function createSnapshot(
   store: EoStore,
   myUserId: string,
-): Promise<Snapshot> {
-  const state: Record<string, EoState> = {};
-  const stateEntries = await store.iterator('state:');
-  for (const [key, value] of stateEntries) {
-    const target = key.slice(6); // remove 'state:'
-    state[target] = value as EoState;
-  }
-
-  const graph_fwd: Record<string, GraphEdge> = {};
-  const fwdEntries = await store.iterator('graph:fwd:');
-  for (const [key, value] of fwdEntries) {
-    graph_fwd[key] = value as GraphEdge;
-  }
-
-  const graph_rev: Record<string, GraphEdge> = {};
-  const revEntries = await store.iterator('graph:rev:');
-  for (const [key, value] of revEntries) {
-    graph_rev[key] = value as GraphEdge;
-  }
-
-  const eva: Record<string, EvaRegistration> = {};
-  const evaEntries = await store.iterator('eva:');
-  for (const [key, value] of evaEntries) {
-    const target = key.slice(4); // remove 'eva:'
-    eva[target] = value as EvaRegistration;
-  }
-
-  const seq = await store.getCurrentSeq();
+): Promise<IncrementalSnapshot> {
+  const lastSnapshotSeq: number = (await store.get('meta:snapshot_seq')) ?? 0;
+  const currentSeq = await store.getCurrentSeq();
+  const events = await readLogSince(store, lastSnapshotSeq);
 
   return {
-    version: 1,
-    seq,
+    version: 2,
+    base_seq: lastSnapshotSeq,
+    seq: currentSeq,
     ts: new Date().toISOString(),
     created_by: myUserId,
-    state,
-    graph_fwd,
-    graph_rev,
-    eva,
+    events,
   };
 }
 
+// ---------------------------------------------------------------------------
+// Upload
+// ---------------------------------------------------------------------------
+
 /**
- * Serialize and upload a snapshot to the Matrix media store.
+ * Serialize and upload a snapshot to the Matrix media store,
+ * then post a pointer event into the room.
  */
 export async function uploadSnapshot(
   client: MatrixClient,
   roomId: string,
-  snapshot: Snapshot,
+  snapshot: IncrementalSnapshot,
 ): Promise<string> {
   const binary = pack(snapshot);
 
   const uploadResult = await client.uploadContent(new Blob([binary]), {
-    name: `eo-snapshot-${snapshot.seq}.bin`,
+    name: `eo-snapshot-${snapshot.base_seq}-${snapshot.seq}.bin`,
     type: 'application/octet-stream',
   });
 
@@ -88,6 +106,7 @@ export async function uploadSnapshot(
 
   await client.sendEvent(roomId, EO_SNAPSHOT_TYPE as any, {
     mxc: mxcUrl,
+    base_seq: snapshot.base_seq,
     seq: snapshot.seq,
     ts: snapshot.ts,
     size_bytes: binary.byteLength,
@@ -97,36 +116,47 @@ export async function uploadSnapshot(
   return mxcUrl;
 }
 
+// ---------------------------------------------------------------------------
+// Discover
+// ---------------------------------------------------------------------------
+
 /**
- * Find the latest snapshot reference in the room timeline.
- * Paginates backwards through the timeline to find snapshot pointer events,
- * which is necessary on a fresh device where the SDK has minimal history.
+ * Find ALL snapshot references in the room timeline, ordered by base_seq.
+ * Paginates backwards through the full timeline.
  */
-export async function findLatestSnapshot(
+export async function findAllSnapshots(
   client: MatrixClient,
   roomId: string,
-): Promise<{ mxc: string; seq: number } | null> {
+): Promise<SnapshotRef[]> {
   const room = client.getRoom(roomId);
-  if (!room) return null;
+  if (!room) return [];
 
-  // Paginate backwards to find snapshot events (they may not be in the
-  // initial sync window since they're only posted every 1000 events)
   const timeline = room.getLiveTimeline();
-  let canPaginate = true;
-  let latest: { mxc: string; seq: number } | null = null;
+  const refs: SnapshotRef[] = [];
+  const seen = new Set<string>();         // deduplicate by mxc
 
-  // Check current timeline first
-  for (const event of timeline.getEvents()) {
-    if (event.getType() === EO_SNAPSHOT_TYPE) {
-      const content = event.getContent();
-      if (!latest || content.seq > latest.seq) {
-        latest = { mxc: content.mxc, seq: content.seq };
-      }
+  function collectFromTimeline() {
+    for (const event of timeline.getEvents()) {
+      if (event.getType() !== EO_SNAPSHOT_TYPE) continue;
+      const c = event.getContent();
+      if (seen.has(c.mxc)) continue;
+      seen.add(c.mxc);
+      refs.push({
+        mxc: c.mxc,
+        base_seq: c.base_seq ?? 0,        // v1 snapshots lack base_seq
+        seq: c.seq,
+        ts: c.ts,
+        size_bytes: c.size_bytes,
+        version: c.version ?? 1,
+      });
     }
   }
 
-  // If we already found one, great. Otherwise paginate backwards to find it.
-  while (!latest && canPaginate) {
+  collectFromTimeline();
+
+  // Paginate backwards to find older snapshots
+  let canPaginate = true;
+  while (canPaginate) {
     try {
       canPaginate = await client.paginateEventTimeline(timeline, {
         backwards: true,
@@ -135,58 +165,151 @@ export async function findLatestSnapshot(
     } catch {
       break;
     }
-
-    for (const event of timeline.getEvents()) {
-      if (event.getType() === EO_SNAPSHOT_TYPE) {
-        const content = event.getContent();
-        if (!latest || content.seq > latest.seq) {
-          latest = { mxc: content.mxc, seq: content.seq };
-        }
-      }
-    }
+    collectFromTimeline();
   }
 
-  return latest;
+  // Sort ascending by base_seq so the chain is in application order
+  refs.sort((a, b) => a.base_seq - b.base_seq);
+  return refs;
 }
 
 /**
- * Download and apply a snapshot to the store.
+ * Convenience: find just the latest snapshot (highest seq).
+ * Used by the auto-snapshot trigger to decide if a new one is needed.
+ */
+export async function findLatestSnapshot(
+  client: MatrixClient,
+  roomId: string,
+): Promise<SnapshotRef | null> {
+  const all = await findAllSnapshots(client, roomId);
+  if (all.length === 0) return null;
+  return all.reduce((best, ref) => (ref.seq > best.seq ? ref : best));
+}
+
+// ---------------------------------------------------------------------------
+// Download & Apply
+// ---------------------------------------------------------------------------
+
+/**
+ * Download a single snapshot blob and decode it.
+ */
+async function downloadSnapshot(
+  client: MatrixClient,
+  mxcUrl: string,
+): Promise<Snapshot> {
+  const httpUrl = client.mxcUrlToHttp(mxcUrl);
+  if (!httpUrl) throw new Error('Cannot resolve mxc URL');
+
+  const response = await fetch(httpUrl);
+  const buffer = await response.arrayBuffer();
+  return unpack(new Uint8Array(buffer)) as Snapshot;
+}
+
+/**
+ * Apply a legacy v1 full-state snapshot to the store.
+ */
+async function applyV1Snapshot(store: EoStore, snap: SnapshotV1): Promise<number> {
+  for (const [target, state] of Object.entries(snap.state)) {
+    await store.put(`state:${target}`, state);
+  }
+  for (const [key, edge] of Object.entries(snap.graph_fwd)) {
+    await store.put(key, edge);
+  }
+  for (const [key, edge] of Object.entries(snap.graph_rev)) {
+    await store.put(key, edge);
+  }
+  for (const [target, reg] of Object.entries(snap.eva)) {
+    await store.put(`eva:${target}`, reg);
+  }
+  return snap.seq;
+}
+
+/**
+ * Apply an incremental v2 snapshot by replaying its events through the fold.
+ */
+async function applyV2Snapshot(
+  store: EoStore,
+  snap: IncrementalSnapshot,
+  processEvent: (store: EoStore, event: EoEvent) => Promise<number>,
+): Promise<number> {
+  for (const event of snap.events) {
+    await processEvent(store, event);
+  }
+  return snap.seq;
+}
+
+/**
+ * Hydrate the store from the full snapshot chain.
+ *
+ * Applies snapshots in order. If there are gaps (pruned snapshots),
+ * those ranges are skipped here — the SyncManager fills them from
+ * the room timeline after snapshot hydration.
+ *
+ * Returns the highest seq reached, or 0 if no snapshots were applied.
+ */
+export async function applySnapshotChain(
+  client: MatrixClient,
+  store: EoStore,
+  refs: SnapshotRef[],
+  processEvent: (store: EoStore, event: EoEvent) => Promise<number>,
+): Promise<{ seq: number; gaps: Array<{ from: number; to: number }> }> {
+  if (refs.length === 0) return { seq: 0, gaps: [] };
+
+  let currentSeq = 0;
+  const gaps: Array<{ from: number; to: number }> = [];
+
+  for (const ref of refs) {
+    // Detect gap: if this snapshot starts after where we left off
+    if (ref.base_seq > currentSeq) {
+      gaps.push({ from: currentSeq, to: ref.base_seq });
+    }
+
+    // Skip snapshots we've already passed (overlap from v1 full snapshots)
+    if (ref.seq <= currentSeq) continue;
+
+    try {
+      const snap = await downloadSnapshot(client, ref.mxc);
+
+      if (snap.version === 1) {
+        currentSeq = await applyV1Snapshot(store, snap as SnapshotV1);
+      } else {
+        currentSeq = await applyV2Snapshot(store, snap as IncrementalSnapshot, processEvent);
+      }
+    } catch {
+      // Snapshot media was pruned or unreachable — record as gap
+      gaps.push({ from: ref.base_seq, to: ref.seq });
+    }
+  }
+
+  return { seq: currentSeq, gaps };
+}
+
+/**
+ * Legacy single-snapshot apply (kept for backward compat with SyncManager).
  */
 export async function applySnapshot(
   client: MatrixClient,
   store: EoStore,
   mxcUrl: string,
 ): Promise<number> {
-  const httpUrl = client.mxcUrlToHttp(mxcUrl);
-  if (!httpUrl) throw new Error('Cannot resolve mxc URL');
-
-  const response = await fetch(httpUrl);
-  const buffer = await response.arrayBuffer();
-  const snapshot: Snapshot = unpack(new Uint8Array(buffer));
-
-  // Load state
-  for (const [target, state] of Object.entries(snapshot.state)) {
-    await store.put(`state:${target}`, state);
+  const snap = await downloadSnapshot(client, mxcUrl);
+  if (snap.version === 1) {
+    return applyV1Snapshot(store, snap as SnapshotV1);
   }
-
-  // Load graph
-  for (const [key, edge] of Object.entries(snapshot.graph_fwd)) {
-    await store.put(key, edge);
+  // v2 without fold — just load events raw into the log
+  const v2 = snap as IncrementalSnapshot;
+  for (const event of v2.events) {
+    await store.put(`log:${String(event.seq).padStart(12, '0')}`, event);
   }
-  for (const [key, edge] of Object.entries(snapshot.graph_rev)) {
-    await store.put(key, edge);
-  }
-
-  // Load EVA registrations
-  for (const [target, reg] of Object.entries(snapshot.eva)) {
-    await store.put(`eva:${target}`, reg);
-  }
-
-  return snapshot.seq;
+  return v2.seq;
 }
 
+// ---------------------------------------------------------------------------
+// Auto-snapshot trigger
+// ---------------------------------------------------------------------------
+
 /**
- * Auto-snapshot: create every 1000 events.
+ * Auto-snapshot: create every 1000 events since the last snapshot.
  */
 export async function maybeCreateSnapshot(
   client: MatrixClient,
@@ -195,11 +318,108 @@ export async function maybeCreateSnapshot(
   myUserId: string,
 ): Promise<void> {
   const lastSeq = await store.getCurrentSeq();
-  const lastSnapshotSeq = (await store.get('meta:snapshot_seq')) || 0;
+  const lastSnapshotSeq: number = (await store.get('meta:snapshot_seq')) ?? 0;
 
   if (lastSeq - lastSnapshotSeq >= 1000) {
     const snapshot = await createSnapshot(store, myUserId);
     await uploadSnapshot(client, roomId, snapshot);
     await store.put('meta:snapshot_seq', lastSeq);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Non-destructive pruning
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse an mxc:// URL into server_name and media_id.
+ * e.g. "mxc://app.aminoimmigration.com/AbCdEfGh" → ["app.aminoimmigration.com", "AbCdEfGh"]
+ */
+function parseMxcUrl(mxc: string): { serverName: string; mediaId: string } {
+  const match = mxc.match(/^mxc:\/\/([^/]+)\/(.+)$/);
+  if (!match) throw new Error(`Invalid mxc URL: ${mxc}`);
+  return { serverName: match[1], mediaId: match[2] };
+}
+
+/**
+ * Delete a single media item from the Synapse media store.
+ * Requires a Synapse server admin access token.
+ *
+ * This is non-destructive: the room timeline still contains all events,
+ * so any deleted snapshot range can be reconstructed by replaying from
+ * the timeline (it just takes longer).
+ */
+export async function deleteMedia(
+  homeserver: string,
+  accessToken: string,
+  mxc: string,
+): Promise<void> {
+  const { serverName, mediaId } = parseMxcUrl(mxc);
+  const url = `${homeserver}/_synapse/admin/v1/media/${serverName}/${mediaId}`;
+
+  const response = await fetch(url, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`Failed to delete media ${mxc}: ${response.status} ${body}`);
+  }
+}
+
+export interface PruneResult {
+  deleted: string[];     // mxc URLs successfully deleted
+  kept: string[];        // mxc URLs retained
+  errors: string[];      // mxc URLs that failed to delete
+}
+
+/**
+ * Prune old snapshots from the Matrix media store.
+ *
+ * Strategy: keep the most recent `keepCount` snapshots, delete the rest.
+ * This is always safe because:
+ *   1. The room timeline has every event (source of truth)
+ *   2. Remaining snapshots still accelerate hydration
+ *   3. Gaps are filled by timeline pagination at hydration time
+ *
+ * The snapshot *pointer events* in the room are immutable (Matrix doesn't
+ * allow redacting others' events without admin), but the media behind
+ * the mxc:// URLs is deleted — download attempts will 404, which the
+ * hydration code treats as a gap.
+ */
+export async function pruneSnapshots(
+  client: MatrixClient,
+  roomId: string,
+  homeserver: string,
+  accessToken: string,
+  keepCount: number = 3,
+): Promise<PruneResult> {
+  const all = await findAllSnapshots(client, roomId);
+  const result: PruneResult = { deleted: [], kept: [], errors: [] };
+
+  if (all.length <= keepCount) {
+    result.kept = all.map(r => r.mxc);
+    return result;
+  }
+
+  // Keep the N most recent (by seq), prune the rest
+  const sorted = [...all].sort((a, b) => b.seq - a.seq);
+  const toKeep = new Set(sorted.slice(0, keepCount).map(r => r.mxc));
+
+  for (const ref of all) {
+    if (toKeep.has(ref.mxc)) {
+      result.kept.push(ref.mxc);
+      continue;
+    }
+
+    try {
+      await deleteMedia(homeserver, accessToken, ref.mxc);
+      result.deleted.push(ref.mxc);
+    } catch {
+      result.errors.push(ref.mxc);
+    }
+  }
+
+  return result;
 }

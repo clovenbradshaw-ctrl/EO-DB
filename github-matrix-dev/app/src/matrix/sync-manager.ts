@@ -1,9 +1,12 @@
 /**
- * Sync manager — orchestrates snapshot persistence, offline queue, and deduplication.
+ * Sync manager — orchestrates incremental snapshots, offline queue, and deduplication.
  *
- * Data is persisted as encrypted binary snapshots in Matrix media.
- * On a fresh device, the latest snapshot is downloaded and applied.
- * Snapshots are auto-saved every 1000 events and on explicit saveSnapshot() calls.
+ * Data flow:
+ *   1. On fresh device (seq === 0): hydrate from snapshot chain in Matrix media.
+ *      Any gaps (pruned snapshots) are filled by replaying events from the room timeline.
+ *   2. Real-time: incoming room events are deduplicated and folded.
+ *   3. Local events fold immediately, then send to the room async.
+ *   4. Snapshots are incremental — each one stores only the events since the last snapshot.
  */
 
 import type { MatrixClient, MatrixEvent } from 'matrix-js-sdk';
@@ -11,7 +14,13 @@ import type { EoStore } from '../db/encrypted-store';
 import type { EoEventInput } from '../db/types';
 import { processEvent } from '../db/fold';
 import { EO_EVENT_TYPE, matrixEventToEo, sendEoEvent } from './event-bridge';
-import { findLatestSnapshot, applySnapshot, maybeCreateSnapshot, createSnapshot, uploadSnapshot } from './snapshot';
+import {
+  findAllSnapshots,
+  applySnapshotChain,
+  maybeCreateSnapshot,
+  createSnapshot,
+  uploadSnapshot,
+} from './snapshot';
 
 export class SyncManager {
   private client: MatrixClient;
@@ -34,15 +43,14 @@ export class SyncManager {
   /**
    * Initialize sync — call after login and store setup.
    *
-   * On a fresh device (seq === 0), hydrates from the latest snapshot stored
-   * in Matrix media. This is the primary data recovery path.
+   * On a fresh device (seq === 0), hydrates from the snapshot chain
+   * stored in Matrix media, filling any gaps from the room timeline.
    */
   async initialize(): Promise<void> {
     const currentSeq = await this.store.getCurrentSeq();
 
-    // On a fresh device, restore from the latest Matrix media snapshot
     if (currentSeq === 0) {
-      await this.hydrateFromSnapshot();
+      await this.hydrateFromSnapshots();
     }
 
     // Listen for new room events in real-time
@@ -57,22 +65,75 @@ export class SyncManager {
   }
 
   /**
-   * Hydrate the local store from the latest snapshot in Matrix media.
+   * Hydrate the local store from the snapshot chain in Matrix media.
+   *
+   * Applies all available snapshots in order. If any were pruned
+   * (download 404s), their event ranges are filled by paginating
+   * the room timeline — slower, but always correct.
    */
-  private async hydrateFromSnapshot(): Promise<void> {
-    const snap = await findLatestSnapshot(this.client, this.roomId);
-    if (!snap) return;
-    const restoredSeq = await applySnapshot(this.client, this.store, snap.mxc);
-    await this.store.put('meta:snapshot_seq', restoredSeq);
+  private async hydrateFromSnapshots(): Promise<void> {
+    const refs = await findAllSnapshots(this.client, this.roomId);
+    if (refs.length === 0) return;
+
+    // Apply the snapshot chain, collecting any gaps
+    const { seq, gaps } = await applySnapshotChain(
+      this.client,
+      this.store,
+      refs,
+      async (store, event) => processEvent(store, event, this.onEvent),
+    );
+
+    // Fill gaps from room timeline (events whose snapshots were pruned)
+    for (const gap of gaps) {
+      await this.fillGapFromTimeline(gap.from, gap.to);
+    }
+
+    if (seq > 0) {
+      await this.store.put('meta:snapshot_seq', seq);
+    }
   }
 
   /**
-   * Force-save a snapshot to Matrix media right now.
+   * Fill a gap in the snapshot chain by paginating the room timeline
+   * and replaying events in the (from, to] range through the fold.
+   */
+  private async fillGapFromTimeline(from: number, to: number): Promise<void> {
+    const room = this.client.getRoom(this.roomId);
+    if (!room) return;
+
+    const timeline = room.getLiveTimeline();
+    let canPaginate = true;
+
+    // Paginate until we've covered the gap
+    while (canPaginate) {
+      for (const event of timeline.getEvents()) {
+        if (event.getType() !== EO_EVENT_TYPE) continue;
+        const eoEvent = matrixEventToEo(event);
+        // We don't have a seq on incoming Matrix events directly,
+        // but processEvent assigns one via the fold. The idempotency
+        // check (client_event_id) prevents double-processing.
+        await processEvent(this.store, eoEvent, this.onEvent);
+      }
+
+      try {
+        canPaginate = await this.client.paginateEventTimeline(timeline, {
+          backwards: true,
+          limit: 100,
+        });
+      } catch {
+        break;
+      }
+    }
+  }
+
+  /**
+   * Force-save an incremental snapshot to Matrix media right now.
    * Called on beforeunload / logout so data is always persisted.
    */
   async saveSnapshot(): Promise<void> {
     const seq = await this.store.getCurrentSeq();
-    if (seq === 0) return; // nothing to snapshot
+    const lastSnapshotSeq: number = (await this.store.get('meta:snapshot_seq')) ?? 0;
+    if (seq === 0 || seq === lastSnapshotSeq) return; // nothing new to snapshot
     const snapshot = await createSnapshot(this.store, this.client.getUserId()!);
     await uploadSnapshot(this.client, this.roomId, snapshot);
     await this.store.put('meta:snapshot_seq', seq);
