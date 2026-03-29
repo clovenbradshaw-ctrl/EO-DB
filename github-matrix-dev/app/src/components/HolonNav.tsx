@@ -15,6 +15,9 @@ interface TreeNode {
   fullPath: string;      // full dot-path (e.g. "app.tblClients")
   children: TreeNode[];
   childCount: number;    // number of direct children with state
+  conCount: number;      // children whose last_op is CON
+  segCount: number;      // children whose last_op is SEG
+  recCount: number;      // children whose last_op is REC
   segments?: Record<string, FilterDefinition>;
 }
 
@@ -61,11 +64,28 @@ function buildTree(states: EoState[]): TreeNode[] {
 
     const segments = entry.state?.value?._segments as Record<string, FilterDefinition> | undefined;
 
+    // Count children by operator type
+    let conCount = 0;
+    let segCount = 0;
+    let recCount = 0;
+    for (const cp of entry.childPaths) {
+      const childEntry = pathSet.get(cp);
+      if (childEntry?.state) {
+        const op = childEntry.state.last_op;
+        if (op === 'CON') conCount++;
+        else if (op === 'SEG') segCount++;
+        else if (op === 'REC') recCount++;
+      }
+    }
+
     return {
       segment,
       fullPath,
       children,
       childCount: entry.childPaths.size,
+      conCount,
+      segCount,
+      recCount,
       segments,
     };
   }
@@ -142,6 +162,15 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment }: Holo
 
           {node.childCount > 0 && (
             <span style={s.count}>{node.childCount}</span>
+          )}
+          {node.conCount > 0 && (
+            <span style={s.countCon}>{node.conCount} CON</span>
+          )}
+          {node.segCount > 0 && (
+            <span style={s.countSeg}>{node.segCount} SEG</span>
+          )}
+          {node.recCount > 0 && (
+            <span style={s.countRec}>{node.recCount} REC</span>
           )}
         </div>
 
@@ -238,6 +267,33 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       fontFamily: "'JetBrains Mono', monospace",
       background: t.bgMuted,
       padding: '1px 6px',
+      borderRadius: 8,
+      flexShrink: 0,
+    },
+    countCon: {
+      fontSize: 9,
+      color: '#a855f7',
+      fontFamily: "'JetBrains Mono', monospace",
+      background: 'rgba(168,85,247,0.12)',
+      padding: '1px 5px',
+      borderRadius: 8,
+      flexShrink: 0,
+    },
+    countSeg: {
+      fontSize: 9,
+      color: '#f97316',
+      fontFamily: "'JetBrains Mono', monospace",
+      background: 'rgba(249,115,22,0.12)',
+      padding: '1px 5px',
+      borderRadius: 8,
+      flexShrink: 0,
+    },
+    countRec: {
+      fontSize: 9,
+      color: '#ef4444',
+      fontFamily: "'JetBrains Mono', monospace",
+      background: 'rgba(239,68,68,0.12)',
+      padding: '1px 5px',
       borderRadius: 8,
       flexShrink: 0,
     },
