@@ -21,6 +21,7 @@ export interface EoEvent {
 export interface EoState {
   target: string;
   value: any;
+  hash: string;                   // transformation hash — compressed history of all operations
   last_seq: number;
   last_op: Operator;
   last_agent: string;
