@@ -65,7 +65,11 @@ function labelFromTarget(target: string, userId: string): { label: string; share
 
 // ─── Component ──────────────────────────────────────────────────────────────
 
-export function AirtableSettings({ session, onClose }: AirtableSettingsProps) {
+/**
+ * Standalone Airtable settings section (no overlay wrapper).
+ * Used inside the Settings page.
+ */
+export function AirtableSettingsSection({ session }: { session: MatrixSession }) {
   const dispatch = useEoStore((s) => s.dispatch);
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
 
@@ -345,17 +349,7 @@ export function AirtableSettings({ session, onClose }: AirtableSettingsProps) {
   }
 
   return (
-    <div style={styles.overlay} onClick={onClose}>
-      <div style={styles.panel} onClick={(e) => e.stopPropagation()}>
-        {/* Header */}
-        <div style={styles.panelHeader}>
-          <div>
-            <div style={styles.panelTitle}>Airtable Integration</div>
-            <div style={styles.panelSubtitle}>Connect and sync data from Airtable bases</div>
-          </div>
-          <button onClick={onClose} style={styles.closeBtn}>&times;</button>
-        </div>
-
+    <div>
         {/* Add new key */}
         <div style={styles.section}>
           <div style={styles.sectionTitle}>Add API Key</div>
@@ -496,6 +490,26 @@ export function AirtableSettings({ session, onClose }: AirtableSettingsProps) {
             </div>
           ))}
         </div>
+    </div>
+  );
+}
+
+/**
+ * Overlay wrapper for backward compatibility.
+ * Opens AirtableSettingsSection in a slide-out panel.
+ */
+export function AirtableSettings({ session, onClose }: AirtableSettingsProps) {
+  return (
+    <div style={styles.overlay} onClick={onClose}>
+      <div style={styles.panel} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.panelHeader}>
+          <div>
+            <div style={styles.panelTitle}>Airtable Integration</div>
+            <div style={styles.panelSubtitle}>Connect and sync data from Airtable bases</div>
+          </div>
+          <button onClick={onClose} style={styles.closeBtn}>&times;</button>
+        </div>
+        <AirtableSettingsSection session={session} />
       </div>
     </div>
   );
