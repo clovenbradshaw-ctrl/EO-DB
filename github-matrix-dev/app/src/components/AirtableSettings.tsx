@@ -108,6 +108,9 @@ export function AirtableSettingsSection({ session }: { session: MatrixSession })
   // ── Preserve existing toggle per key ──
   const [preserveFlags, setPreserveFlags] = useState<Record<string, boolean>>({});
 
+  // ── Record limit per key (0 = no limit) ──
+  const [recordLimits, setRecordLimits] = useState<Record<string, number>>({});
+
   // ── Load stored keys ──
   const loadKeys = useCallback(async () => {
     setLoadingKeys(true);
@@ -227,9 +230,11 @@ export function AirtableSettingsSection({ session }: { session: MatrixSession })
   function buildCustomization(keyLabel: string): SyncCustomization {
     const selection = tableSelections[keyLabel];
     const hasSelection = selection && Object.values(selection).some(t => t.length > 0);
+    const limit = recordLimits[keyLabel] || 0;
     return {
       selectedTables: hasSelection ? selection : undefined,
       preserveExisting: preserveFlags[keyLabel] ?? true,
+      recordLimit: limit > 0 ? limit : undefined,
     };
   }
 
@@ -569,6 +574,43 @@ export function AirtableSettingsSection({ session }: { session: MatrixSession })
                       {(preserveFlags[key.label] ?? true)
                         ? 'New records and empty fields are filled; existing values are never overwritten'
                         : 'Airtable values will overwrite EO-DB values on every sync'}
+                    </span>
+                  </div>
+
+                  {/* Record limit */}
+                  <div style={s.recordLimitRow}>
+                    <label style={s.recordLimitLabel}>
+                      Record limit per table
+                    </label>
+                    <div style={s.recordLimitInputRow}>
+                      <input
+                        type="number"
+                        min={0}
+                        step={1}
+                        placeholder="No limit"
+                        value={recordLimits[key.label] || ''}
+                        onChange={(e) => {
+                          const val = parseInt(e.target.value, 10);
+                          setRecordLimits((prev) => ({
+                            ...prev,
+                            [key.label]: isNaN(val) ? 0 : Math.max(0, val),
+                          }));
+                        }}
+                        style={s.recordLimitInput}
+                      />
+                      {(recordLimits[key.label] || 0) > 0 && (
+                        <button
+                          onClick={() => setRecordLimits((prev) => ({ ...prev, [key.label]: 0 }))}
+                          style={s.recordLimitClear}
+                        >
+                          Clear
+                        </button>
+                      )}
+                    </div>
+                    <span style={s.recordLimitHint}>
+                      {(recordLimits[key.label] || 0) > 0
+                        ? `Import up to ${recordLimits[key.label]} records from each selected table`
+                        : 'Import all records from each selected table'}
                     </span>
                   </div>
 
@@ -962,6 +1004,53 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       fontSize: 10,
       color: t.textMuted,
       paddingLeft: 22,
+    },
+
+    // ── Record limit ──
+    recordLimitRow: {
+      marginTop: 10,
+      padding: '8px 0',
+      borderTop: `1px solid ${t.borderLight}`,
+      display: 'flex',
+      flexDirection: 'column' as const,
+      gap: 6,
+    },
+    recordLimitLabel: {
+      fontSize: 11,
+      fontWeight: 600,
+      color: t.textMuted,
+      textTransform: 'uppercase' as const,
+      letterSpacing: '0.06em',
+    },
+    recordLimitInputRow: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6,
+    },
+    recordLimitInput: {
+      width: 120,
+      padding: '6px 10px',
+      fontSize: 12,
+      border: `1px solid ${t.border}`,
+      borderRadius: 5,
+      background: t.bg,
+      color: t.text,
+      outline: 'none',
+      fontFamily: "'JetBrains Mono', monospace",
+    },
+    recordLimitClear: {
+      padding: '5px 10px',
+      fontSize: 10,
+      fontWeight: 500,
+      border: `1px solid ${t.border}`,
+      borderRadius: 5,
+      background: t.bgCard,
+      color: t.textSecondary,
+      cursor: 'pointer',
+    },
+    recordLimitHint: {
+      fontSize: 10,
+      color: t.textMuted,
     },
 
     // ── Sync modes ──
