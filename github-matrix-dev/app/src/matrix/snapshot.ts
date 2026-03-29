@@ -8,11 +8,12 @@
 import { pack, unpack } from 'msgpackr';
 import type { MatrixClient } from 'matrix-js-sdk';
 import type { EoStore } from '../db/encrypted-store';
-import type { EoState, GraphEdge, EvaRegistration } from '../db/types';
+import type { EoState, GraphEdge, EvaRegistration, NulSnapshotKind } from '../db/types';
 import { EO_SNAPSHOT_TYPE } from './event-bridge';
 
 interface Snapshot {
   version: 1;
+  kind: NulSnapshotKind;
   seq: number;
   ts: string;
   created_by: string;
@@ -20,45 +21,60 @@ interface Snapshot {
   graph_fwd: Record<string, GraphEdge>;
   graph_rev: Record<string, GraphEdge>;
   eva: Record<string, EvaRegistration>;
+  seg?: string;               // present when kind is 'limited_snapshot' — the SEG boundary
 }
 
 /**
  * Create a snapshot from current store state.
+ *
+ * NUL is a snapshot. If a SEG boundary is provided, the snapshot is limited
+ * to targets within that segment — making it a 'limited_snapshot'.
+ * Without a SEG, it captures full state — a plain 'snapshot'.
  */
 export async function createSnapshot(
   store: EoStore,
   myUserId: string,
+  seg?: string,
 ): Promise<Snapshot> {
   const state: Record<string, EoState> = {};
   const stateEntries = await store.iterator('state:');
   for (const [key, value] of stateEntries) {
     const target = key.slice(6); // remove 'state:'
+    // If SEG boundary is set, only include targets within that segment
+    if (seg && !target.startsWith(seg)) continue;
     state[target] = value as EoState;
   }
 
   const graph_fwd: Record<string, GraphEdge> = {};
   const fwdEntries = await store.iterator('graph:fwd:');
   for (const [key, value] of fwdEntries) {
-    graph_fwd[key] = value as GraphEdge;
+    const edge = value as GraphEdge;
+    if (seg && !edge.source.startsWith(seg) && !edge.dest.startsWith(seg)) continue;
+    graph_fwd[key] = edge;
   }
 
   const graph_rev: Record<string, GraphEdge> = {};
   const revEntries = await store.iterator('graph:rev:');
   for (const [key, value] of revEntries) {
-    graph_rev[key] = value as GraphEdge;
+    const edge = value as GraphEdge;
+    if (seg && !edge.source.startsWith(seg) && !edge.dest.startsWith(seg)) continue;
+    graph_rev[key] = edge;
   }
 
   const eva: Record<string, EvaRegistration> = {};
   const evaEntries = await store.iterator('eva:');
   for (const [key, value] of evaEntries) {
     const target = key.slice(4); // remove 'eva:'
+    if (seg && !target.startsWith(seg)) continue;
     eva[target] = value as EvaRegistration;
   }
 
   const seq = await store.getCurrentSeq();
+  const kind = seg ? 'limited_snapshot' : 'snapshot';
 
   return {
     version: 1,
+    kind,
     seq,
     ts: new Date().toISOString(),
     created_by: myUserId,
@@ -66,6 +82,7 @@ export async function createSnapshot(
     graph_fwd,
     graph_rev,
     eva,
+    ...(seg ? { seg } : {}),
   };
 }
 
@@ -88,10 +105,12 @@ export async function uploadSnapshot(
 
   await client.sendEvent(roomId, EO_SNAPSHOT_TYPE as any, {
     mxc: mxcUrl,
+    kind: snapshot.kind,
     seq: snapshot.seq,
     ts: snapshot.ts,
     size_bytes: binary.byteLength,
     version: snapshot.version,
+    ...(snapshot.seg ? { seg: snapshot.seg } : {}),
   });
 
   return mxcUrl;

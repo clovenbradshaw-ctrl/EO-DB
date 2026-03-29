@@ -3,7 +3,7 @@ import { appendToLog } from './log';
 import { getState, setState } from './state';
 import { addEdge, removeEdge, getEdgesFrom, getEdgesTo } from './graph';
 import { resolveAlias, checkExists } from './helpers';
-import type { EoEvent, EoEventInput, EoState, EvaRegistration } from './types';
+import type { EoEvent, EoEventInput, EoState, EvaRegistration, NulSnapshot, NulSnapshotKind } from './types';
 
 /**
  * Process a single EO event through the fold.
@@ -71,6 +71,27 @@ function stateFromEvent(event: EoEvent, op: EoEvent['op']) {
     last_agent: event.agent,
     last_ts: event.ts,
     last_acquired_ts: event.acquired_ts,
+  };
+}
+
+// --- NUL: Snapshot Observation ---
+// NUL is a snapshot — a read-only observation of state.
+// If the operand contains a SEG, the snapshot is limited (scoped to that segment boundary).
+export async function handleNUL(
+  store: EoStore,
+  target: string,
+  operand?: { seg?: string },
+): Promise<NulSnapshot> {
+  const existing = await getState(store, target);
+  const hasSeg = !!(operand?.seg);
+  const kind: NulSnapshotKind = hasSeg ? 'limited_snapshot' : 'snapshot';
+
+  return {
+    kind,
+    target,
+    ts: new Date().toISOString(),
+    state: existing ?? null,
+    ...(hasSeg ? { seg: operand!.seg } : {}),
   };
 }
 
@@ -340,4 +361,4 @@ function formulaReferencesExternal(formula: any): boolean {
   return externalPatterns.some(p => str.includes(p));
 }
 
-export { mergeOperand, isFormulaOperand };
+export { mergeOperand, isFormulaOperand, handleNUL };

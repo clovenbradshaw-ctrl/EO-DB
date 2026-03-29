@@ -3,7 +3,7 @@ import { appendToLog } from './log.js';
 import { getState, setState } from './state.js';
 import { addEdge, removeEdge, getEdgesFrom, getEdgesTo } from './graph.js';
 import { resolveAlias, checkExists } from './helpers.js';
-import type { EoEvent, EoEventInput, EoState, EvaRegistration } from './types.js';
+import type { EoEvent, EoEventInput, EoState, EvaRegistration, NulSnapshot, NulSnapshotKind } from './types.js';
 import { isEncryptedOperand } from './crypto-types.js';
 import type { Feed } from './feed.js';
 
@@ -80,6 +80,27 @@ function stateFromEvent(event: EoEvent, op: EoEvent['op']) {
     last_agent: event.agent,
     last_ts: event.ts,
     last_acquired_ts: event.acquired_ts,
+  };
+}
+
+// --- NUL: Snapshot Observation ---
+// NUL is a snapshot — a read-only observation of state.
+// If the operand contains a SEG, the snapshot is limited (scoped to that segment boundary).
+export async function handleNUL(
+  db: EoDb,
+  target: string,
+  operand?: { seg?: string },
+): Promise<NulSnapshot> {
+  const existing = await getState(db, target);
+  const hasSeg = !!(operand?.seg);
+  const kind: NulSnapshotKind = hasSeg ? 'limited_snapshot' : 'snapshot';
+
+  return {
+    kind,
+    target,
+    ts: new Date().toISOString(),
+    state: existing ?? null,
+    ...(hasSeg ? { seg: operand!.seg } : {}),
   };
 }
 
@@ -428,4 +449,4 @@ async function checkNoOp(db: EoDb, event: EoEventInput): Promise<number | null> 
   return null;
 }
 
-export { mergeOperand, isFormulaOperand, deepEqual };
+export { mergeOperand, isFormulaOperand, deepEqual, handleNUL };

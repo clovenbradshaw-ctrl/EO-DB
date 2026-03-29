@@ -4,6 +4,20 @@ export type Operator = 'NUL' | 'SIG' | 'INS' | 'SEG' | 'CON' | 'SYN' | 'DEF' | '
 // Operators that produce log entries (post-INS threshold)
 export type LoggableOperator = 'INS' | 'SEG' | 'CON' | 'SYN' | 'DEF' | 'EVA' | 'REC';
 
+// NUL snapshot classification
+// NUL is a snapshot — a read-only observation of state at a point in time.
+// If the NUL contains a SEG (boundary), it is a limited snapshot (scoped to a segment).
+export type NulSnapshotKind = 'snapshot' | 'limited_snapshot';
+
+// Result of a NUL observation — a point-in-time snapshot
+export interface NulSnapshot {
+  kind: NulSnapshotKind;
+  target: string;
+  ts: string;
+  state: EoState | null;
+  seg?: string;               // present when kind is 'limited_snapshot' — the SEG boundary
+}
+
 // An event in the log
 export interface EoEvent {
   seq: number;
