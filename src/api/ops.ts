@@ -3,9 +3,10 @@ import type { EoDb } from '../db/level.js';
 import type { Feed } from '../db/feed.js';
 import { processEvent } from '../db/fold.js';
 import type { AuthenticatedRequest } from '../auth/matrix.js';
-import type { LoggableOperator } from '../db/types.js';
+import type { ExternalOperator } from '../db/types.js';
 
-const OPS: LoggableOperator[] = ['INS', 'DEF', 'CON', 'SEG', 'SYN', 'EVA', 'REC'];
+// REC is system-generated — only the eight human-initiated operators are exposed via API.
+const OPS: ExternalOperator[] = ['INS', 'DEF', 'CON', 'SEG', 'SYN', 'EVA'];
 
 export function registerOpsRoutes(app: FastifyInstance, db: EoDb, feed: Feed): void {
   for (const op of OPS) {

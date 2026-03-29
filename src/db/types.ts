@@ -4,16 +4,20 @@ export type Operator = 'NUL' | 'SIG' | 'INS' | 'SEG' | 'CON' | 'SYN' | 'DEF' | '
 // Operators that produce log entries (post-INS threshold)
 export type LoggableOperator = 'INS' | 'SEG' | 'CON' | 'SYN' | 'DEF' | 'EVA' | 'REC';
 
+// Operators that can be submitted externally (by humans or sync bridges)
+export type ExternalOperator = 'INS' | 'SEG' | 'CON' | 'SYN' | 'DEF' | 'EVA';
+
 // An event in the log
 export interface EoEvent {
   seq: number;
   op: LoggableOperator;
   target: string;
   operand: any;
-  agent: string;
+  agent: string;                  // Matrix user ID for human ops, "system" for REC
   ts: string;                     // submission timestamp — when the agent/user submitted this event (ISO 8601)
   acquired_ts: string;            // acquisition timestamp — when the system received this event (ISO 8601)
   client_event_id?: string;
+  triggered_by?: number;          // for REC: seq of the human-initiated event that caused the cycle
   meta?: Record<string, any>;
 }
 

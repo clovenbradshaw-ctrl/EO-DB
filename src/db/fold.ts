@@ -3,7 +3,7 @@ import { appendToLog } from './log.js';
 import { getState, setState } from './state.js';
 import { addEdge, removeEdge, getEdgesFrom, getEdgesTo } from './graph.js';
 import { resolveAlias, checkExists } from './helpers.js';
-import type { EoEvent, EoEventInput, EoState, EvaRegistration, RecResult } from './types.js';
+import type { EoEvent, EoEventInput, EoState, EvaRegistration, RecResult, ExternalOperator } from './types.js';
 import { isEncryptedOperand } from './crypto-types.js';
 import type { Feed } from './feed.js';
 import { seedHash, chainHash } from './hash.js';
@@ -17,6 +17,11 @@ export async function processEvent(
   event: EoEventInput,
   feed?: Feed
 ): Promise<number> {
+  // 0. REC is system-generated — reject external submissions
+  if (event.op === 'REC') {
+    throw new Error('REC is system-generated and cannot be submitted externally');
+  }
+
   // 1. Idempotency check
   if (event.client_event_id) {
     try {
@@ -46,10 +51,13 @@ export async function processEvent(
   // 6. Execute operator-specific logic (helix dispatch)
   await executeOperator(db, fullEvent);
 
-  // 7. Recompute fold-computed EVA-active dependents
-  await recomputeDependents(db, fullEvent.target);
+  // 7. Recompute fold-computed EVA-active dependents (with cycle guard)
+  await recomputeDependents(db, fullEvent.target, new Set());
 
-  // 8. Notify changefeed
+  // 8. Detect dependency cycles and emit system-generated REC if found
+  await detectAndEmitREC(db, fullEvent.target, fullEvent, feed);
+
+  // 9. Notify changefeed
   if (feed) {
     feed.notify(fullEvent);
   }
@@ -69,7 +77,8 @@ export async function executeOperator(db: EoDb, event: EoEvent): Promise<void> {
     case 'SYN': return handleSYN(db, event);
     case 'DEF': return handleDEF(db, event);
     case 'EVA': return handleEVA(db, event);
-    case 'REC': return handleREC(db, event);
+    // REC is not dispatched from outside — it is produced by the fold
+    // when it detects a circular dependency after applying a human-initiated event.
   }
 }
 
@@ -336,7 +345,7 @@ async function handleREC(db: EoDb, event: EoEvent): Promise<void> {
     for (const subOp of subOps) {
       await executeOperator(db, subEvent(subOp));
       // Recompute dependents after each sub-op so feedback propagates within the pass
-      await recomputeDependents(db, subOp.target);
+      await recomputeDependents(db, subOp.target, new Set());
     }
 
     iterations++;
@@ -396,9 +405,217 @@ async function handleREC(db: EoDb, event: EoEvent): Promise<void> {
   });
 }
 
+// --- System-Generated REC: Cycle Detection and Emission ---
+
+/**
+ * Strip ephemeral fields (e.g. evaluated_at timestamps) from a value
+ * so that convergence comparison is structural, not temporal.
+ */
+function stripEphemeral(val: any): any {
+  if (val == null || typeof val !== 'object') return val;
+  if (Array.isArray(val)) return val.map(stripEphemeral);
+  const result: Record<string, any> = {};
+  for (const [k, v] of Object.entries(val)) {
+    if (k === 'evaluated_at') continue;
+    result[k] = stripEphemeral(v);
+  }
+  return result;
+}
+
+/**
+ * Detect dependency cycles involving the changed target.
+ * If a cycle exists (all members have fold-mode EVA registrations),
+ * run the fixed-point iteration and emit a system-generated REC event.
+ */
+async function detectAndEmitREC(
+  db: EoDb,
+  changedTarget: string,
+  triggeringEvent: EoEvent,
+  feed?: Feed,
+): Promise<void> {
+  const cycleTargets = await findRecomputationCycle(db, changedTarget);
+  if (!cycleTargets || cycleTargets.length === 0) return;
+
+  // Collect EVA registrations for all cycle members
+  const registrations: EvaRegistration[] = [];
+  for (const target of cycleTargets) {
+    try {
+      const buf = await db.get(`eva:${target}`);
+      const reg = decode(buf) as EvaRegistration;
+      if (reg && reg.mode === 'fold') {
+        registrations.push(reg);
+      }
+    } catch (e: any) {
+      if (e.code !== 'LEVEL_NOT_FOUND') throw e;
+    }
+  }
+
+  if (registrations.length === 0) return;
+
+  // Build the set of targets to watch for convergence
+  const watchedTargets = new Set<string>(cycleTargets);
+  watchedTargets.add(changedTarget);
+
+  // Snapshot for convergence comparison — strips ephemeral evaluation timestamps
+  // so that structurally identical states are recognized as equal.
+  async function snapshot(): Promise<Record<string, any>> {
+    const snap: Record<string, any> = {};
+    for (const t of watchedTargets) {
+      const state = await getState(db, t);
+      snap[t] = stripEphemeral(state?.value ?? null);
+    }
+    return snap;
+  }
+
+  const initialSnap = await snapshot();
+  const history: Array<Record<string, any>> = [initialSnap];
+
+  let iterations = 0;
+  let converged = false;
+  let cycleLength = 0;
+
+  while (iterations < DEFAULT_MAX_ITERATIONS) {
+    // Run one pass: re-evaluate all formulas in the cycle
+    for (const reg of registrations) {
+      await evaluateFormula(db, reg);
+    }
+
+    iterations++;
+    const currentSnap = await snapshot();
+
+    // Check against all previous snapshots for convergence or oscillation
+    let matched = -1;
+    for (let i = 0; i < history.length; i++) {
+      if (deepEqual(currentSnap, history[i])) {
+        matched = i;
+        break;
+      }
+    }
+
+    if (matched >= 0) {
+      if (matched === history.length - 1) {
+        converged = true;
+      } else {
+        cycleLength = history.length - matched;
+      }
+      break;
+    }
+
+    history.push(currentSnap);
+  }
+
+  // Build result
+  const result: RecResult = { converged, iterations };
+  if (!converged && cycleLength > 0) {
+    result.cycle_length = cycleLength;
+    result.states = history.slice(history.length - cycleLength);
+  } else if (converged) {
+    result.stable_state = await snapshot();
+  }
+
+  // Build the contains array showing what operators ran in each pass
+  const containsOps = registrations.map(reg => ({
+    op: 'DEF' as const,
+    target: reg.target,
+    operand: reg.formula,
+  }));
+
+  // Produce the REC event with system as agent
+  const seq = await nextSeq(db);
+  const now = new Date().toISOString();
+  const recEvent: EoEvent = {
+    seq,
+    op: 'REC',
+    target: changedTarget,
+    operand: {
+      contains: containsOps,
+      pivot: changedTarget,
+    },
+    agent: 'system',
+    ts: now,
+    acquired_ts: now,
+    triggered_by: triggeringEvent.seq,
+  };
+
+  // Log the REC event
+  await appendToLog(db, recEvent);
+
+  // Store REC result in state
+  const existing = await getState(db, changedTarget);
+  await setState(db, {
+    target: changedTarget,
+    value: {
+      ...existing?.value,
+      _rec: {
+        recursion: true,
+        pivot: changedTarget,
+        sub_ops: registrations.length,
+        triggered_by: triggeringEvent.seq,
+        result,
+      },
+    },
+    hash: existing ? chainHash(existing.hash, recEvent) : seedHash(recEvent),
+    ...stateFromEvent(recEvent, 'REC'),
+  });
+
+  // Notify changefeed
+  if (feed) {
+    feed.notify(recEvent);
+  }
+}
+
+/**
+ * Find a dependency cycle involving the start target.
+ * Follows the recomputation chain: getEdgesTo finds targets that depend on current,
+ * checks if they have fold-mode EVA registrations, and continues the traversal.
+ * Returns the list of cycle member targets, or null if no cycle exists.
+ */
+async function findRecomputationCycle(db: EoDb, startTarget: string): Promise<string[] | null> {
+  const visited = new Set<string>();
+  const path: string[] = [];
+
+  async function dfs(current: string): Promise<string[] | null> {
+    const reverseEdges = await getEdgesTo(db, current);
+    for (const edge of reverseEdges) {
+      const source = edge.source;
+
+      // Check if this source has an EVA-active fold registration
+      let hasReg = false;
+      try {
+        const buf = await db.get(`eva:${source}`);
+        const reg = decode(buf) as EvaRegistration;
+        hasReg = reg != null && reg.mode === 'fold';
+      } catch (e: any) {
+        if (e.code !== 'LEVEL_NOT_FOUND') throw e;
+      }
+
+      if (!hasReg) continue;
+
+      if (source === startTarget) {
+        // Cycle found — return the targets in the cycle
+        return [...path, current];
+      }
+
+      if (!visited.has(source)) {
+        visited.add(source);
+        path.push(current);
+        const result = await dfs(source);
+        if (result) return result;
+        path.pop();
+      }
+    }
+    return null;
+  }
+
+  return dfs(startTarget);
+}
+
 // --- Dependent Recomputation ---
 
-async function recomputeDependents(db: EoDb, changedTarget: string): Promise<void> {
+async function recomputeDependents(db: EoDb, changedTarget: string, visited: Set<string> = new Set()): Promise<void> {
+  if (visited.has(changedTarget)) return; // cycle guard — prevents infinite recursion
+  visited.add(changedTarget);
+
   const reverseEdges = await getEdgesTo(db, changedTarget);
 
   for (const edge of reverseEdges) {
@@ -414,7 +631,7 @@ async function recomputeDependents(db: EoDb, changedTarget: string): Promise<voi
     if (registration && registration.mode === 'fold') {
       await evaluateFormula(db, registration);
       // Recurse: if this formula's result changed, its dependents may need recomputation
-      await recomputeDependents(db, registration.target);
+      await recomputeDependents(db, registration.target, visited);
     }
   }
 }

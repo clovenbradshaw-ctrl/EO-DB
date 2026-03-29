@@ -1,4 +1,4 @@
-import type { LoggableOperator } from '../db/types';
+import type { LoggableOperator, EoEvent } from '../db/types';
 
 const OP_COLORS: Record<string, { bg: string; color: string; border: string }> = {
   INS: { bg: '#e8f7ee', color: '#16a34a', border: '#16a34a' },
@@ -10,28 +10,46 @@ const OP_COLORS: Record<string, { bg: string; color: string; border: string }> =
   REC: { bg: '#fef6ed', color: '#c2700a', border: '#c2700a' },
 };
 
+// REC is system-generated — distinct style: dashed border, "SYS" label
+const REC_SYSTEM_STYLE: React.CSSProperties = {
+  borderStyle: 'dashed',
+};
+
 interface TrajectoryProps {
   ops: LoggableOperator[];
+  events?: EoEvent[];  // optional: full events for agent-aware rendering
 }
 
-export function Trajectory({ ops }: TrajectoryProps) {
+export function Trajectory({ ops, events }: TrajectoryProps) {
   return (
     <div style={styles.row}>
       {ops.map((op, i) => {
         const c = OP_COLORS[op] || OP_COLORS.DEF;
+        const isSystemREC = op === 'REC' && (!events || events[i]?.agent === 'system');
         return (
           <div key={i} style={styles.nodeWrap}>
             {i > 0 && <div style={styles.connector} />}
             <div style={styles.node}>
-              <div style={{
-                ...styles.dot,
-                background: c.bg,
-                color: c.color,
-                borderColor: c.border,
-              }}>
+              <div
+                style={{
+                  ...styles.dot,
+                  background: isSystemREC ? '#fff7ed' : c.bg,
+                  color: c.color,
+                  borderColor: c.border,
+                  ...(isSystemREC ? REC_SYSTEM_STYLE : {}),
+                }}
+                title={isSystemREC
+                  ? `System-discovered cycle (triggered by event #${events?.[i]?.triggered_by ?? '?'})`
+                  : op}
+              >
                 {op}
               </div>
-              <div style={styles.label}>{op}</div>
+              <div style={{
+                ...styles.label,
+                ...(isSystemREC ? { color: '#c2700a', fontWeight: 600 } : {}),
+              }}>
+                {isSystemREC ? 'SYS' : op}
+              </div>
             </div>
           </div>
         );

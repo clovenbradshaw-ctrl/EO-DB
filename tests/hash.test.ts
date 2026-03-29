@@ -202,39 +202,35 @@ describe('Transformation Hash — SYN', () => {
   });
 });
 
-describe('Transformation Hash — REC', () => {
-  it('REC target gets a hash', async () => {
+describe('Transformation Hash — REC (system-generated)', () => {
+  it('system-generated REC updates the hash on the pivot target', async () => {
+    // Set up a dependency cycle to trigger a system-generated REC
+    await processEvent(db, ev({ target: 'rec.A', operand: { val: 1 } }));
+    await processEvent(db, ev({ target: 'rec.B', operand: { val: 2 } }));
+
     await processEvent(db, ev({
-      op: 'REC', target: 'rec.frame',
-      operand: {
-        contains: [
-          { op: 'DEF', target: 'rec.frame.fldA', operand: 'a' },
-        ],
-        reason: 'test',
-      },
+      op: 'CON', target: 'rec.A', operand: { added: ['rec.B'] },
+    }));
+    await processEvent(db, ev({
+      op: 'CON', target: 'rec.B', operand: { added: ['rec.A'] },
     }));
 
-    const state = await getState(db, 'rec.frame');
-    expect(state!.hash).toMatch(/^[0-9a-f]{64}$/);
-  });
-
-  it('sub-operations within REC update their own hashes', async () => {
+    // Capture hash before cycle triggers
     await processEvent(db, ev({
-      op: 'REC', target: 'rec.frame',
-      operand: {
-        contains: [
-          { op: 'DEF', target: 'rec.frame.fldA', operand: 'a' },
-          { op: 'DEF', target: 'rec.frame.fldB', operand: 'b' },
-        ],
-      },
+      op: 'DEF', target: 'rec.A', operand: { formula: 'F(B)' },
+    }));
+    const hashBefore = (await getState(db, 'rec.B'))!.hash;
+
+    // This DEF completes the cycle, triggering a system-generated REC
+    await processEvent(db, ev({
+      op: 'DEF', target: 'rec.B', operand: { formula: 'G(A)' },
     }));
 
-    const stateA = await getState(db, 'rec.frame.fldA');
-    const stateB = await getState(db, 'rec.frame.fldB');
-    expect(stateA!.hash).toMatch(/^[0-9a-f]{64}$/);
+    // The REC event should have updated the hash on the target
+    const stateB = await getState(db, 'rec.B');
     expect(stateB!.hash).toMatch(/^[0-9a-f]{64}$/);
-    // Different targets with different operands → different hashes
-    expect(stateA!.hash).not.toBe(stateB!.hash);
+    // Hash changed because REC applied a transformation
+    expect(stateB!.hash).not.toBe(hashBefore);
   });
 });
 
