@@ -1624,6 +1624,143 @@ body {
   font-style: italic;
 }
 
+/* ── Bases Panel ── */
+.bases-panel { flex-direction: column; }
+
+.bases-body {
+  flex: 1;
+  overflow: auto;
+  padding: 24px;
+  display: flex;
+  justify-content: center;
+}
+
+.bases-form {
+  width: 100%;
+  max-width: 720px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.base-card {
+  background: var(--bg1);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 16px 20px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.base-card:hover { border-color: var(--border2); }
+.base-card.active { border-color: var(--accent); }
+
+.base-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.base-card-name {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--white);
+}
+
+.base-card-owner {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  color: var(--text-faint);
+}
+
+.base-card-desc {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 8px;
+}
+
+.base-card-prefix {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  color: var(--text-faint);
+  background: var(--bg);
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+}
+
+.base-card-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.base-detail {
+  background: var(--bg1);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 20px;
+}
+
+.base-sharing-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.base-share-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  margin-bottom: 6px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+}
+
+.base-share-user {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.base-share-user-id { color: var(--text); }
+.base-share-user-access { color: var(--text-faint); font-size: 9px; text-transform: uppercase; }
+
+.base-share-actions { display: flex; gap: 6px; align-items: center; }
+
+.access-select {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  padding: 4px 6px;
+  outline: none;
+}
+
+.access-select:focus { border-color: var(--accent); }
+
+.base-badge {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+
+.base-badge-owner { background: rgba(56,189,248,0.12); color: var(--accent); }
+.base-badge-shared { background: rgba(167,139,250,0.12); color: var(--con); }
+
 /* ── Scrollbar ── */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
@@ -1667,6 +1804,7 @@ body {
   <div class="nav-tab" onclick="switchTab('log')">Log</div>
   <div class="nav-tab" onclick="switchTab('graph')">Graph</div>
   <div class="nav-tab" onclick="switchTab('compose')" style="color:var(--ins);">+ Compose</div>
+  <div class="nav-tab" onclick="switchTab('bases')">Bases</div>
   <div class="nav-tab" onclick="switchTab('settings')">Settings</div>
 </div>
 
@@ -1969,6 +2107,80 @@ body {
     </div>
   </div>
 
+  <!-- ═══ Bases Panel ═══ -->
+  <div id="panel-bases" class="panel bases-panel">
+    <div class="bases-body">
+      <div class="bases-form">
+
+        <!-- Create Base -->
+        <div class="settings-section">
+          <div class="settings-section-title">Create New Base</div>
+          <div class="settings-add-row">
+            <input class="settings-add-input" id="newBaseName" placeholder="Base name">
+            <input class="settings-add-input" id="newBaseDesc" placeholder="Description (optional)" style="max-width:200px;">
+            <button class="settings-add-btn" onclick="createNewBase()">+ Create</button>
+          </div>
+        </div>
+
+        <!-- My Bases -->
+        <div class="settings-section">
+          <div class="settings-section-title">My Bases</div>
+          <div id="basesListOwned" class="settings-list">
+            <div class="settings-empty">No bases yet</div>
+          </div>
+        </div>
+
+        <!-- Shared With Me -->
+        <div class="settings-section">
+          <div class="settings-section-title">Shared With Me</div>
+          <div id="basesListShared" class="settings-list">
+            <div class="settings-empty">No shared bases</div>
+          </div>
+        </div>
+
+        <!-- Base Detail (shown when a base is selected) -->
+        <div id="baseDetailSection" class="base-detail" style="display:none;">
+          <div class="settings-section-title" id="baseDetailTitle">Base Detail</div>
+
+          <div style="margin-bottom:16px;">
+            <div class="settings-session-field"><span class="settings-session-key">ID</span><span class="settings-session-val" id="baseDetailId">—</span></div>
+            <div class="settings-session-field"><span class="settings-session-key">Target Prefix</span><span class="settings-session-val" id="baseDetailPrefix">—</span></div>
+            <div class="settings-session-field"><span class="settings-session-key">Owner</span><span class="settings-session-val" id="baseDetailOwner">—</span></div>
+            <div class="settings-session-field"><span class="settings-session-key">Created</span><span class="settings-session-val" id="baseDetailCreated">—</span></div>
+          </div>
+
+          <!-- Sharing -->
+          <div class="base-sharing-header">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:600;color:var(--text-faint);text-transform:uppercase;letter-spacing:0.5px;">Sharing</span>
+          </div>
+
+          <div id="baseShareList" class="settings-list" style="margin-bottom:12px;">
+            <div class="settings-empty">Not shared with anyone</div>
+          </div>
+
+          <!-- Add share (owner only) -->
+          <div id="baseShareAddRow" style="display:none;">
+            <div class="settings-add-row">
+              <input class="settings-add-input" id="shareUserId" placeholder="@user:homeserver.com">
+              <select class="access-select" id="shareAccess">
+                <option value="read">Read</option>
+                <option value="write">Write</option>
+                <option value="read_write">Read+Write</option>
+              </select>
+              <button class="settings-add-btn" onclick="addShareToBase()">+ Share</button>
+            </div>
+          </div>
+
+          <!-- Delete base (owner only) -->
+          <div id="baseDeleteRow" style="display:none;margin-top:16px;">
+            <button class="settings-delete-btn" onclick="deleteSelectedBase()" style="padding:6px 16px;">Delete Base</button>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
   <!-- ═══ Settings Panel ═══ -->
   <div id="panel-settings" class="panel settings-panel">
     <div class="settings-body">
@@ -2068,7 +2280,7 @@ body {
 <script>
 // ── IndexedDB Storage Layer ──
 const DB_NAME = 'eo-db';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 let db = null;
 
 function openDB() {
@@ -2089,6 +2301,10 @@ function openDB() {
       if (!d.objectStoreNames.contains('graph_rev')) d.createObjectStore('graph_rev', { keyPath: 'target' });
       if (!d.objectStoreNames.contains('eva')) d.createObjectStore('eva', { keyPath: 'target' });
       if (!d.objectStoreNames.contains('meta')) d.createObjectStore('meta', { keyPath: 'key' });
+      if (!d.objectStoreNames.contains('bases')) {
+        const basesStore = d.createObjectStore('bases', { keyPath: 'id' });
+        basesStore.createIndex('created_by', 'created_by', { unique: false });
+      }
     };
     req.onsuccess = (e) => { db = e.target.result; resolve(db); };
     req.onerror = (e) => reject(e.target.error);
@@ -2229,7 +2445,7 @@ async function loadAllEvents() {
 
 async function clearAllStores() {
   if (!db) throw new Error('Database not available');
-  const storeNames = ['log', 'state', 'graph_fwd', 'graph_rev', 'eva', 'meta'];
+  const storeNames = ['log', 'state', 'graph_fwd', 'graph_rev', 'eva', 'meta', 'bases'];
   const tx = db.transaction(storeNames, 'readwrite');
   for (const name of storeNames) {
     tx.objectStore(name).clear();
@@ -3016,6 +3232,7 @@ function switchTab(tab) {
   document.querySelector(`.nav-tab[onclick*="${tab}"]`).classList.add('active');
   document.getElementById(`panel-${tab}`).classList.add('active');
   if (tab === 'graph') renderGraph();
+  if (tab === 'bases') loadBases();
   if (tab === 'settings') loadSettings();
 }
 
@@ -3986,6 +4203,283 @@ async function loadSettings() {
     if (mediaSeqEl) mediaSeqEl.textContent = '—';
     if (mediaTierEl) mediaTierEl.textContent = '—';
   }
+}
+
+// ── Bases ──
+let selectedBaseId = null;
+
+function generateBaseId() {
+  return 'base_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
+}
+
+async function getAllBases() {
+  if (!db) return [];
+  const tx = db.transaction('bases', 'readonly');
+  return new Promise((resolve) => {
+    const req = tx.objectStore('bases').getAll();
+    req.onsuccess = () => resolve(req.result || []);
+    req.onerror = () => resolve([]);
+  });
+}
+
+async function getBaseById(id) {
+  if (!db) return null;
+  const tx = db.transaction('bases', 'readonly');
+  return new Promise((resolve) => {
+    const req = tx.objectStore('bases').get(id);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => resolve(null);
+  });
+}
+
+async function putBase(base) {
+  if (!db) throw new Error('Database not available');
+  const tx = db.transaction('bases', 'readwrite');
+  tx.objectStore('bases').put(base);
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function deleteBaseById(id) {
+  if (!db) throw new Error('Database not available');
+  const tx = db.transaction('bases', 'readwrite');
+  tx.objectStore('bases').delete(id);
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function createNewBase() {
+  const nameEl = document.getElementById('newBaseName');
+  const descEl = document.getElementById('newBaseDesc');
+  const name = nameEl.value.trim();
+  if (!name) { nameEl.focus(); return; }
+
+  const id = generateBaseId();
+  const now = new Date().toISOString();
+  const owner = matrixUserId || 'local';
+  const base = {
+    id,
+    name,
+    description: descEl.value.trim() || undefined,
+    target_prefix: `base.${id}`,
+    created_by: owner,
+    created_at: now,
+    updated_by: owner,
+    updated_at: now,
+    sharing: [],
+  };
+
+  await putBase(base);
+  nameEl.value = '';
+  descEl.value = '';
+  await loadBases();
+  selectBase(id);
+}
+
+async function loadBases() {
+  const bases = await getAllBases();
+  const currentUser = matrixUserId || 'local';
+
+  const owned = bases.filter(b => b.created_by === currentUser);
+  const shared = bases.filter(b => b.created_by !== currentUser && b.sharing.some(s => s.user_id === currentUser));
+
+  const ownedEl = document.getElementById('basesListOwned');
+  const sharedEl = document.getElementById('basesListShared');
+
+  if (owned.length === 0) {
+    ownedEl.innerHTML = '<div class="settings-empty">No bases yet — create one above</div>';
+  } else {
+    ownedEl.innerHTML = owned.map(b => `
+      <div class="base-card ${selectedBaseId === b.id ? 'active' : ''}" onclick="selectBase('${b.id}')">
+        <div class="base-card-header">
+          <span class="base-card-name">${escHtml(b.name)}</span>
+          <span class="base-badge base-badge-owner">Owner</span>
+        </div>
+        ${b.description ? `<div class="base-card-desc">${escHtml(b.description)}</div>` : ''}
+        <div><span class="base-card-prefix">${b.target_prefix}</span></div>
+        <div style="font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--text-faint);margin-top:6px;">
+          ${b.sharing.length} shared user${b.sharing.length !== 1 ? 's' : ''}
+        </div>
+      </div>
+    `).join('');
+  }
+
+  if (shared.length === 0) {
+    sharedEl.innerHTML = '<div class="settings-empty">No shared bases</div>';
+  } else {
+    sharedEl.innerHTML = shared.map(b => {
+      const myShare = b.sharing.find(s => s.user_id === currentUser);
+      return `
+        <div class="base-card ${selectedBaseId === b.id ? 'active' : ''}" onclick="selectBase('${b.id}')">
+          <div class="base-card-header">
+            <span class="base-card-name">${escHtml(b.name)}</span>
+            <span class="base-badge base-badge-shared">${myShare ? myShare.access : 'read'}</span>
+          </div>
+          ${b.description ? `<div class="base-card-desc">${escHtml(b.description)}</div>` : ''}
+          <div><span class="base-card-prefix">${b.target_prefix}</span></div>
+          <div style="font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--text-faint);margin-top:6px;">
+            Owned by ${escHtml(b.created_by)}
+          </div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  // Refresh detail if a base is selected
+  if (selectedBaseId) {
+    const base = await getBaseById(selectedBaseId);
+    if (base) renderBaseDetail(base);
+    else hideBaseDetail();
+  }
+}
+
+function escHtml(s) {
+  const div = document.createElement('div');
+  div.textContent = s || '';
+  return div.innerHTML;
+}
+
+async function selectBase(id) {
+  selectedBaseId = id;
+  const base = await getBaseById(id);
+  if (!base) return;
+  renderBaseDetail(base);
+  // Re-render list to show active state
+  await loadBases();
+}
+
+function renderBaseDetail(base) {
+  const section = document.getElementById('baseDetailSection');
+  section.style.display = '';
+
+  document.getElementById('baseDetailTitle').textContent = base.name;
+  document.getElementById('baseDetailId').textContent = base.id;
+  document.getElementById('baseDetailPrefix').textContent = base.target_prefix;
+  document.getElementById('baseDetailOwner').textContent = base.created_by;
+  document.getElementById('baseDetailCreated').textContent = base.created_at.replace('T', ' ').replace('Z', '').slice(0, 19);
+
+  const currentUser = matrixUserId || 'local';
+  const isOwner = base.created_by === currentUser;
+
+  // Sharing list
+  const shareListEl = document.getElementById('baseShareList');
+  if (base.sharing.length === 0) {
+    shareListEl.innerHTML = '<div class="settings-empty">Not shared with anyone</div>';
+  } else {
+    shareListEl.innerHTML = base.sharing.map(s => `
+      <div class="base-share-item">
+        <div class="base-share-user">
+          <span class="base-share-user-id">${escHtml(s.user_id)}</span>
+          <span class="base-share-user-access">${s.access} — added ${s.added_at.slice(0, 10)}</span>
+        </div>
+        <div class="base-share-actions">
+          ${isOwner ? `
+            <select class="access-select" onchange="updateShare('${base.id}','${escAttr(s.user_id)}',this.value)">
+              <option value="read" ${s.access === 'read' ? 'selected' : ''}>Read</option>
+              <option value="write" ${s.access === 'write' ? 'selected' : ''}>Write</option>
+              <option value="read_write" ${s.access === 'read_write' ? 'selected' : ''}>Read+Write</option>
+            </select>
+            <button class="settings-delete-btn" onclick="removeShare('${base.id}','${escAttr(s.user_id)}')">Remove</button>
+          ` : `<span class="base-badge base-badge-shared">${s.access}</span>`}
+        </div>
+      </div>
+    `).join('');
+  }
+
+  // Show/hide owner-only controls
+  document.getElementById('baseShareAddRow').style.display = isOwner ? '' : 'none';
+  document.getElementById('baseDeleteRow').style.display = isOwner ? '' : 'none';
+}
+
+function escAttr(s) {
+  return (s || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+}
+
+function hideBaseDetail() {
+  selectedBaseId = null;
+  document.getElementById('baseDetailSection').style.display = 'none';
+}
+
+async function addShareToBase() {
+  if (!selectedBaseId) return;
+  const userIdEl = document.getElementById('shareUserId');
+  const accessEl = document.getElementById('shareAccess');
+  const userId = userIdEl.value.trim();
+
+  if (!userId.startsWith('@') || !userId.includes(':')) {
+    userIdEl.style.borderColor = 'var(--danger)';
+    setTimeout(() => { userIdEl.style.borderColor = ''; }, 2000);
+    return;
+  }
+
+  const base = await getBaseById(selectedBaseId);
+  if (!base) return;
+
+  const currentUser = matrixUserId || 'local';
+  if (base.created_by !== currentUser) return;
+  if (userId === currentUser) return;
+
+  const now = new Date().toISOString();
+  const existing = base.sharing.find(s => s.user_id === userId);
+  if (existing) {
+    existing.access = accessEl.value;
+    existing.added_at = now;
+    existing.added_by = currentUser;
+  } else {
+    base.sharing.push({
+      user_id: userId,
+      access: accessEl.value,
+      added_at: now,
+      added_by: currentUser,
+    });
+  }
+
+  base.updated_by = currentUser;
+  base.updated_at = now;
+  await putBase(base);
+
+  userIdEl.value = '';
+  await loadBases();
+}
+
+async function updateShare(baseId, userId, newAccess) {
+  const base = await getBaseById(baseId);
+  if (!base) return;
+  const share = base.sharing.find(s => s.user_id === userId);
+  if (!share) return;
+  share.access = newAccess;
+  base.updated_by = matrixUserId || 'local';
+  base.updated_at = new Date().toISOString();
+  await putBase(base);
+  await loadBases();
+}
+
+async function removeShare(baseId, userId) {
+  const base = await getBaseById(baseId);
+  if (!base) return;
+  base.sharing = base.sharing.filter(s => s.user_id !== userId);
+  base.updated_by = matrixUserId || 'local';
+  base.updated_at = new Date().toISOString();
+  await putBase(base);
+  await loadBases();
+}
+
+async function deleteSelectedBase() {
+  if (!selectedBaseId) return;
+  const base = await getBaseById(selectedBaseId);
+  if (!base) return;
+  const currentUser = matrixUserId || 'local';
+  if (base.created_by !== currentUser) return;
+
+  if (!confirm(`Delete base "${base.name}"? This cannot be undone.`)) return;
+
+  await deleteBaseById(selectedBaseId);
+  hideBaseDetail();
+  await loadBases();
 }
 
 // ── Init ──
