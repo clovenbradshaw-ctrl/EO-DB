@@ -6,6 +6,7 @@ import { resolveAlias, checkExists } from './helpers.js';
 import type { EoEvent, EoEventInput, EoState, EvaRegistration } from './types.js';
 import { isEncryptedOperand } from './crypto-types.js';
 import type { Feed } from './feed.js';
+import { seedHash, chainHash } from './hash.js';
 
 /**
  * Process a single EO event through the fold.
@@ -95,6 +96,7 @@ async function handleINS(db: EoDb, event: EoEvent): Promise<void> {
   await setState(db, {
     target: event.target,
     value: event.operand ?? {},
+    hash: seedHash(event),
     ...stateFromEvent(event, 'INS'),
   });
 }
@@ -111,6 +113,7 @@ async function handleSEG(db: EoDb, event: EoEvent): Promise<void> {
   await setState(db, {
     target: event.target,
     value: event.operand,
+    hash: chainHash(existing.hash, event),
     ...stateFromEvent(event, 'SEG'),
   });
 }
@@ -151,9 +154,11 @@ async function handleCON(db: EoDb, event: EoEvent): Promise<void> {
 
   // Update state to reflect current link set
   const currentEdges = await getEdgesFrom(db, event.target);
+  const sourceState = await getState(db, event.target);
   await setState(db, {
     target: event.target,
     value: { linked: currentEdges.map(e => e.dest), edge_type: operand.edge_type },
+    hash: chainHash(sourceState!.hash, event),
     ...stateFromEvent(event, 'CON'),
   });
 }
@@ -179,9 +184,11 @@ async function handleSYN(db: EoDb, event: EoEvent): Promise<void> {
     const mergedValue = mergeOperand(stateA.value, stateB.value);
 
     // INS capacity: mint the merged target's identity
+    // The merged target gets a seed hash — it is a new entity born from the SYN event
     await setState(db, {
       target: mergedTarget,
       value: mergedValue,
+      hash: seedHash(event),
       ...stateFromEvent(event, 'SYN'),
     });
 
@@ -203,15 +210,18 @@ async function handleSYN(db: EoDb, event: EoEvent): Promise<void> {
     }
 
     // Store alias records so queries for A or B resolve to merged target
+    // Alias targets chain from their existing hash — they carry the SYN participation
     await setState(db, {
       target: a,
       value: { _alias: mergedTarget },
+      hash: chainHash(stateA.hash, event),
       ...stateFromEvent(event, 'SYN'),
     });
     if (b !== mergedTarget) {
       await setState(db, {
         target: b,
         value: { _alias: mergedTarget },
+        hash: chainHash(stateB.hash, event),
         ...stateFromEvent(event, 'SYN'),
       });
     }
@@ -230,6 +240,7 @@ async function handleDEF(db: EoDb, event: EoEvent): Promise<void> {
     existing = {
       target,
       value: {},
+      hash: seedHash(event),
       ...stateFromEvent(event, 'INS'),
     };
     await setState(db, existing);
@@ -241,6 +252,7 @@ async function handleDEF(db: EoDb, event: EoEvent): Promise<void> {
   await setState(db, {
     target,
     value: merged,
+    hash: chainHash(existing.hash, event),
     ...stateFromEvent(event, 'DEF'),
   });
 
@@ -256,10 +268,13 @@ async function handleEVA(db: EoDb, event: EoEvent): Promise<void> {
   // SYN capacity: resolve alias
   const target = await resolveAlias(db, event.target);
 
+  const existing = await getState(db, target);
+
   // Write evaluation policy to state
   await setState(db, {
     target,
     value: event.operand,
+    hash: existing ? chainHash(existing.hash, event) : seedHash(event),
     ...stateFromEvent(event, 'EVA'),
   });
 }
@@ -282,9 +297,11 @@ async function handleREC(db: EoDb, event: EoEvent): Promise<void> {
   }
 
   // Mark the REC event itself in state
+  const existing = await getState(db, event.target);
   await setState(db, {
     target: event.target,
     value: { frame_change: true, sub_ops: subOps.length, reason: event.operand?.reason },
+    hash: existing ? chainHash(existing.hash, event) : seedHash(event),
     ...stateFromEvent(event, 'REC'),
   });
 }
@@ -326,11 +343,13 @@ async function evaluateFormula(db: EoDb, registration: EvaRegistration): Promise
   const result = executeFormulaFunction(registration.formula, inputs);
 
   // Write result to projected state (NOT to the log)
+  // Hash is preserved — formula recomputation is not a transformation event
   const existing = await getState(db, registration.target);
   const now = new Date().toISOString();
   await setState(db, {
     target: registration.target,
     value: { ...existing?.value, _computed: result },
+    hash: existing?.hash || '',
     last_seq: existing?.last_seq || 0,
     last_op: existing?.last_op || 'DEF',
     last_agent: 'system:eva',
