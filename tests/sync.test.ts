@@ -3,8 +3,9 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { createDb, type EoDb } from '../src/db/level.js';
 import { Feed } from '../src/db/feed.js';
 import { processEvent } from '../src/db/fold.js';
-import { registerSyncRoute } from '../src/api/sync.js';
+import { registerSyncRoute, resetPresence } from '../src/api/sync.js';
 import { setAuthConfig, clearTokenCache } from '../src/auth/matrix.js';
+import { setMatrixAuthConfig } from '../src/auth/matrix-auth-config.js';
 import { rmSync, mkdtempSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -26,9 +27,21 @@ beforeEach(async () => {
   } as any));
   setAuthConfig({ webhookSecret: 'test-secret' });
   clearTokenCache();
+  resetPresence();
   dbPath = mkdtempSync(join(tmpdir(), 'eo-db-sync-test-'));
   db = createDb(dbPath);
   await db.open();
+
+  // Allow the test user through auth config
+  await setMatrixAuthConfig(db, {
+    enabled: true,
+    allowed_accounts: [{ user_id: '@testuser:app.aminoimmigration.com', access: 'read_write' }],
+    blacklisted_accounts: [],
+    allowed_homeservers: [],
+    server_rules: [],
+    user_rules_buckets: [],
+  });
+
   feed = new Feed();
 
   app = Fastify();

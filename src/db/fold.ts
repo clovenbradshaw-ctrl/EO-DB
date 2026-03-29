@@ -3,7 +3,7 @@ import { appendToLog } from './log.js';
 import { getState, setState } from './state.js';
 import { addEdge, removeEdge, getEdgesFrom, getEdgesTo } from './graph.js';
 import { resolveAlias, checkExists } from './helpers.js';
-import type { EoEvent, EoEventInput, EoState, EvaRegistration } from './types.js';
+import type { EoEvent, EoEventInput, EoState, EvaRegistration, RecResult } from './types.js';
 import { isEncryptedOperand } from './crypto-types.js';
 import type { Feed } from './feed.js';
 import { seedHash, chainHash } from './hash.js';
@@ -279,28 +279,118 @@ async function handleEVA(db: EoDb, event: EoEvent): Promise<void> {
   });
 }
 
-// --- REC: Recontextualize (Atomic Frame Change) ---
-// Inherited: Everything. Dispatches sub-operations through the handler hierarchy.
+// --- REC: Recursion (Fixed-Point Iteration) ---
+// Inherited: Everything. Applies operator sequences to their own outputs until structure stabilizes.
+// REC is the only operator whose execution is not a single pass through the combining function.
+// It runs the contains array, checks whether the output changed the inputs to its own computation,
+// and if it did, runs the sequence again. It repeats until the state stabilizes or until it detects a cycle.
+//
+// Three outcomes: convergence (state stops changing), oscillation (state cycles between configurations),
+// or max-iteration bailout (safety valve — should not occur with finite state spaces).
+
+const DEFAULT_MAX_ITERATIONS = 100;
+
 async function handleREC(db: EoDb, event: EoEvent): Promise<void> {
   const subOps = event.operand?.contains || [];
+  const pivot = event.operand?.pivot || null;
+  const maxIterations = event.operand?.max_iterations || DEFAULT_MAX_ITERATIONS;
 
-  // Execute each sub-operation using the same event metadata
-  // Sub-ops don't get their own seq numbers — they share the REC's seq
+  // Collect all targets the loop body touches, plus the pivot if specified
+  const watchedTargets = new Set<string>();
   for (const subOp of subOps) {
-    await executeOperator(db, {
+    if (subOp.target) watchedTargets.add(subOp.target);
+  }
+  if (pivot) watchedTargets.add(pivot);
+
+  // Snapshot: capture current projected state of all watched targets
+  async function snapshot(): Promise<Record<string, any>> {
+    const snap: Record<string, any> = {};
+    for (const t of watchedTargets) {
+      const state = await getState(db, t);
+      snap[t] = state?.value ?? null;
+    }
+    return snap;
+  }
+
+  // Build sub-event template (shares the REC's seq — sub-ops are not individually logged)
+  function subEvent(subOp: any): EoEvent {
+    return {
       ...subOp,
       seq: event.seq,
       agent: event.agent,
       ts: event.ts,
       acquired_ts: event.acquired_ts,
-    });
+    };
+  }
+
+  // Take initial snapshot before any pass
+  const initialSnap = await snapshot();
+  const history: Array<Record<string, any>> = [initialSnap];
+
+  let iterations = 0;
+  let converged = false;
+  let cycleLength = 0;
+
+  while (iterations < maxIterations) {
+    // Run all sub-operations (one full pass through the loop body)
+    for (const subOp of subOps) {
+      await executeOperator(db, subEvent(subOp));
+      // Recompute dependents after each sub-op so feedback propagates within the pass
+      await recomputeDependents(db, subOp.target);
+    }
+
+    iterations++;
+    const currentSnap = await snapshot();
+
+    // Check against all previous snapshots
+    let matched = -1;
+    for (let i = 0; i < history.length; i++) {
+      if (deepEqual(currentSnap, history[i])) {
+        matched = i;
+        break;
+      }
+    }
+
+    if (matched >= 0) {
+      if (matched === history.length - 1) {
+        // Current state matches the immediately preceding state — converged
+        converged = true;
+      } else {
+        // Current state matches an earlier state — oscillation detected
+        cycleLength = history.length - matched;
+      }
+      break;
+    }
+
+    history.push(currentSnap);
+  }
+
+  // Build result record
+  const result: RecResult = {
+    converged,
+    iterations,
+  };
+
+  if (!converged && cycleLength > 0) {
+    result.cycle_length = cycleLength;
+    // Capture the cycling states: from the matched point to the end of history
+    result.states = history.slice(history.length - cycleLength);
+  } else if (converged) {
+    const finalSnap = await snapshot();
+    result.stable_state = finalSnap;
   }
 
   // Mark the REC event itself in state
   const existing = await getState(db, event.target);
   await setState(db, {
     target: event.target,
-    value: { frame_change: true, sub_ops: subOps.length, reason: event.operand?.reason },
+    value: {
+      recursion: true,
+      pivot,
+      sub_ops: subOps.length,
+      reason: event.operand?.reason,
+      result,
+    },
     hash: existing ? chainHash(existing.hash, event) : seedHash(event),
     ...stateFromEvent(event, 'REC'),
   });
