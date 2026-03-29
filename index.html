@@ -2714,6 +2714,100 @@ function idbGet(store, key) {
   });
 }
 
+/**
+ * After a CON event adds edges, check if any new edge source→dest creates a
+ * cycle in the forward graph.  If so, emit a system REC event recording the
+ * cycle.  Uses BFS from each dest back through graph_fwd to see if it can
+ * reach source.
+ */
+async function checkAndEmitREC(conEvent) {
+  if (!db || conEvent.op !== 'CON' || !conEvent.operand || !conEvent.operand.added) return null;
+
+  const source = conEvent.target;
+  const added = conEvent.operand.added;
+
+  // Read all graph_fwd entries for BFS
+  const fwdMap = await new Promise((resolve) => {
+    const tx = db.transaction('graph_fwd', 'readonly');
+    const store = tx.objectStore('graph_fwd');
+    const map = {};
+    const req = store.openCursor();
+    req.onsuccess = (e) => {
+      const cursor = e.target.result;
+      if (cursor) {
+        map[cursor.value.source] = cursor.value.targets || [];
+        cursor.continue();
+      } else {
+        resolve(map);
+      }
+    };
+    req.onerror = () => resolve(map);
+  });
+
+  // For each newly added dest, BFS from dest to see if we can reach source
+  for (const dest of added) {
+    const visited = new Set();
+    const queue = [dest];
+    const parent = {};          // track path for cycle reporting
+    parent[dest] = null;
+    let found = false;
+
+    while (queue.length > 0) {
+      const node = queue.shift();
+      if (node === source) { found = true; break; }
+      if (visited.has(node)) continue;
+      visited.add(node);
+      for (const next of (fwdMap[node] || [])) {
+        if (!visited.has(next)) {
+          parent[next] = node;
+          queue.push(next);
+        }
+      }
+    }
+
+    if (found) {
+      // Reconstruct cycle path: source → ... → dest → source
+      const cyclePath = [source];
+      let cur = source;
+      while (cur !== dest && parent[cur] !== undefined && parent[cur] !== null) {
+        cur = parent[cur];
+        cyclePath.push(cur);
+      }
+      cyclePath.push(dest);
+      // Deduplicate (source may appear twice)
+      const cycleNodes = [...new Set(cyclePath)];
+
+      // Deterministic client_event_id so multiple clients detecting the same
+      // cycle don't produce duplicate REC events.  The log store's keyPath is
+      // client_event_id, so a second append with the same id simply fails.
+      const sortedCycle = [...cycleNodes].sort();
+      const cycleKey = 'rec:cycle:' + sortedCycle.join('+');
+
+      const recEvent = {
+        op: 'REC',
+        target: source,
+        operand: {
+          cycle: cycleNodes,
+          pivot: source,
+          edge_type: conEvent.operand.edge_type || null,
+        },
+        agent: 'system',
+        triggered_by: conEvent.seq,
+        client_event_id: cycleKey,
+      };
+      try {
+        const emitted = await appendEvent(recEvent);
+        console.log('[cycle] REC emitted — cycle detected:', cycleNodes.join(' → '), '→', cycleNodes[0], '(seq', emitted.seq + ')');
+      } catch (e) {
+        // Duplicate key = another client (or earlier import) already emitted this REC
+        console.log('[cycle] REC already exists for cycle:', sortedCycle.join(' + '));
+      }
+      return emitted;
+    }
+  }
+  return null;
+}
+
 /** Push a locally created event to the server via HTTP API.
  *  Only works when connected to a backend (not static hosting). */
 async function pushEventToServer(event) {
@@ -3667,6 +3761,7 @@ async function submitEvent() {
         const ev = await appendEvent(event);
         pushEventToServer(ev);
         seqs.push(ev.seq);
+        await checkAndEmitREC(ev);
       }
 
       resultEl.className = 'compose-result success';
@@ -3686,6 +3781,7 @@ async function submitEvent() {
       if (!logging) event.meta = { intended_op: selectedOp };
       const ev = await appendEvent(event);
       pushEventToServer(ev);
+      if (ev.op === 'CON') await checkAndEmitREC(ev);
 
       resultEl.className = 'compose-result success';
       resultEl.textContent = `Event saved — seq ${ev.seq}`;
@@ -3960,6 +4056,7 @@ async function runImport() {
       };
       const ev = await appendEvent(event);
       pushEventToServer(ev);
+      if (ev.op === 'CON') await checkAndEmitREC(ev);
       processed++;
     } catch (e) {
       errors.push({ index: i, op: row.op, target: row.target, error: e.message });
