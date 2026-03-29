@@ -3824,9 +3824,12 @@ function parseImportJson(text) {
     data = JSON.parse(text);
   } catch { throw new Error('Invalid JSON — could not parse file'); }
 
-  // Support both bare array and { events: [...] } wrapper
-  const arr = Array.isArray(data) ? data : (Array.isArray(data?.events) ? data.events : null);
-  if (!arr) throw new Error('JSON must be an array of events or { "events": [...] }');
+  // Support bare array, { events: [...] }, or { _flat_events_for_import: [...] }
+  const arr = Array.isArray(data) ? data
+    : Array.isArray(data?.events) ? data.events
+    : Array.isArray(data?._flat_events_for_import) ? data._flat_events_for_import
+    : null;
+  if (!arr) throw new Error('JSON must be an array of events, or an object with an "events" or "_flat_events_for_import" key');
   if (arr.length === 0) throw new Error('JSON array is empty — nothing to import');
 
   for (let i = 0; i < arr.length; i++) {
