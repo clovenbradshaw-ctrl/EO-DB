@@ -70,6 +70,7 @@ export async function executeOperator(store: EoStore, event: EoEvent): Promise<v
     case 'SYN': return handleSYN(store, event);
     case 'DEF': return handleDEF(store, event);
     case 'EVA': return handleEVA(store, event);
+    case 'NUL': return; // pure observation — logged by processEvent, no state mutation
     // REC is not dispatched from outside — it is produced by the fold
     // when it detects a circular dependency after applying a human-initiated event.
   }
