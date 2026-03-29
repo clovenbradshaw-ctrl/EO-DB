@@ -10,6 +10,8 @@ interface TableViewProps {
   onSelectRecord: (target: string) => void;
   activeRecord?: string | null;
   session: { userId: string };
+  /** When provided, overrides the default data loading with query-driven results */
+  queryResults?: EoState[] | null;
 }
 
 function formatScopeName(scope: string): string {
@@ -83,7 +85,7 @@ function renderCell(value: any, key: string, onNavigate: (t: string) => void, t:
   return <span>{String(value)}</span>;
 }
 
-export function TableView({ scope, onSelectRecord, activeRecord, session }: TableViewProps) {
+export function TableView({ scope, onSelectRecord, activeRecord, session, queryResults }: TableViewProps) {
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
   const getStateFn = useEoStore((s) => s.getState);
   const dispatch = useEoStore((s) => s.dispatch);
@@ -99,8 +101,12 @@ export function TableView({ scope, onSelectRecord, activeRecord, session }: Tabl
 
   const scopeDepth = scope.split('.').length;
 
-  // Load records
+  // Load records (skip if queryResults are provided)
   useEffect(() => {
+    if (queryResults) {
+      setRecords(queryResults);
+      return;
+    }
     if (!ready) return;
     getStateByPrefix(scope + '.').then((states) => {
       const direct = states.filter((st) => {
@@ -109,7 +115,7 @@ export function TableView({ scope, onSelectRecord, activeRecord, session }: Tabl
       });
       setRecords(direct);
     });
-  }, [ready, lastSeq, getStateByPrefix, scope, scopeDepth]);
+  }, [ready, lastSeq, getStateByPrefix, scope, scopeDepth, queryResults]);
 
   // Load saved segments from scope target
   useEffect(() => {

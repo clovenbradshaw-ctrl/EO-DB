@@ -9,6 +9,7 @@ import { resolveDataRoom } from '../matrix/event-bridge';
 import { HolonNav } from './HolonNav';
 import { TableView } from './TableView';
 import { RecordDetailDrawer } from './RecordDetailDrawer';
+import { HorizonQueryBar } from './HorizonQueryBar';
 import { ConnectionStatus, useConnectionState } from './ConnectionStatus';
 import { ErrorBoundary } from './ErrorBoundary';
 import { SyncProgress } from './SyncProgress';
@@ -16,6 +17,8 @@ import { AirtableSettings, AirtableSettingsSection } from './AirtableSettings';
 import { DataSyncDashboard } from './DataSyncDashboard';
 import { LogView } from './LogView';
 import { useTheme, type Theme } from '../theme';
+import type { EoState } from '../db/types';
+import type { QueryResult } from './query-engine';
 
 type View = 'horizon' | 'log' | 'import' | 'graph' | 'compose' | 'settings';
 const TABS: View[] = ['horizon', 'log', 'import', 'graph', 'compose', 'settings'];
@@ -36,9 +39,18 @@ export function Layout({ session, onLogout }: LayoutProps) {
   const [showSettings, setShowSettings] = useState(false);
   const [activeView, setActiveView] = useState<View>('horizon');
   const [spaceOpen, setSpaceOpen] = useState(false);
+  const [allStates, setAllStates] = useState<EoState[]>([]);
+  const [queryResults, setQueryResults] = useState<QueryResult | null>(null);
+  const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
   const connectionState = useConnectionState();
   const { theme, toggleTheme } = useTheme();
   const s = makeStyles(theme);
+
+  // Load all states for query bar autofill
+  useEffect(() => {
+    if (!ready) return;
+    getStateByPrefix('app.').then(setAllStates);
+  }, [ready, lastSeq, getStateByPrefix]);
 
   // Compute target count from recent events
   const targetCount = new Set(recentEvents.map((e) => e.target)).size;
@@ -248,6 +260,13 @@ export function Layout({ session, onLogout }: LayoutProps) {
           </ErrorBoundary>
         </div>
       ) : activeView === 'horizon' ? (
+        <>
+        <HorizonQueryBar
+          allStates={allStates}
+          onSelectScope={(scope) => { setSelectedScope(scope); setSelectedRecord(null); setQueryResults(null); }}
+          onSelectRecord={(target) => { setSelectedRecord(target); setQueryResults(null); }}
+          onQueryResults={setQueryResults}
+        />
         <div style={s.body}>
           <aside style={s.sidebar}>
             {ready ? (
@@ -268,6 +287,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
                   onSelectRecord={setSelectedRecord}
                   activeRecord={selectedRecord}
                   session={{ userId: session.userId }}
+                  queryResults={queryResults?.records}
                 />
               ) : (
                 <div style={s.empty}>
@@ -287,6 +307,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
             />
           )}
         </div>
+        </>
       ) : activeView === 'import' ? (
         <div style={s.body}>
           <div style={s.importPage}>
