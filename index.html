@@ -3049,6 +3049,20 @@ INS,app.tbl.rec1,"{""name"":""Alice""}"</pre>
   </div>
 </div>
 
+<!-- Room Data Viewer -->
+<div class="login-overlay hidden" id="roomDataOverlay" style="z-index:1100;">
+  <div class="login-card" style="max-width:700px;max-height:85vh;display:flex;flex-direction:column;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+      <div class="login-title" style="margin-bottom:0;">Room Data</div>
+      <button onclick="hideRoomDataViewer()" style="background:transparent;border:1px solid var(--border);border-radius:4px;padding:4px 12px;font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-dim);cursor:pointer;">Close</button>
+    </div>
+    <div class="login-subtitle" style="margin-bottom:12px;">Raw Matrix room state and timeline</div>
+    <div id="roomDataContent" style="overflow-y:auto;flex:1;min-height:0;">
+      <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);">Loading...</div>
+    </div>
+  </div>
+</div>
+
 <!-- Share Dialog -->
 <div class="login-overlay hidden" id="shareOverlay">
   <div class="login-card" style="max-width:480px;">
@@ -4206,6 +4220,12 @@ function renderSyncTargets() {
             ${available ? '' : 'disabled'}>
             Sync
           </button>
+          ${target.id === 'matrix-room' ? `<button class="settings-add-btn"
+            onclick="showRoomDataViewer()"
+            style="background:transparent;color:var(--accent);border-color:var(--accent);${available ? '' : 'opacity:0.4;cursor:not-allowed;'}"
+            ${available ? '' : 'disabled'}>
+            View Room Data
+          </button>` : ''}
           <span id="syncStatus-${target.id}" style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-dim);"></span>
         </div>
       </div>
@@ -4243,6 +4263,153 @@ async function doSync(targetId) {
 
 // Legacy alias
 function syncToMatrix() { doSync('matrix-room'); }
+
+// ── Room Data Viewer ───────────────────────────────────────────────────
+
+function showRoomDataViewer() {
+  document.getElementById('roomDataOverlay').classList.remove('hidden');
+  loadRoomData();
+}
+
+function hideRoomDataViewer() {
+  document.getElementById('roomDataOverlay').classList.add('hidden');
+}
+
+async function loadRoomData() {
+  const container = document.getElementById('roomDataContent');
+  if (!matrixToken || !matrixUserId) {
+    container.innerHTML = `<div style="color:var(--danger);font-family:'JetBrains Mono',monospace;font-size:11px;">Not signed in to Matrix</div>`;
+    return;
+  }
+
+  const allSpaces = typeof getAllSpaces === 'function' ? await getAllSpaces() : [];
+  const space = activeNulspaceId ? allSpaces.find(s => s.id === activeNulspaceId) : null;
+  if (!space || !space.matrix_room_id) {
+    container.innerHTML = `<div style="color:var(--danger);font-family:'JetBrains Mono',monospace;font-size:11px;">No Matrix room associated with active space</div>`;
+    return;
+  }
+
+  const roomId = space.matrix_room_id;
+  container.innerHTML = `<div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);">Fetching room data...</div>`;
+
+  try {
+    // Fetch room state and messages in parallel
+    const [stateRes, msgsRes, membersRes] = await Promise.all([
+      fetch(`${matrixHomeserver}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state`, {
+        headers: { 'Authorization': `Bearer ${matrixToken}` },
+      }),
+      fetch(`${matrixHomeserver}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/messages?dir=b&limit=50`, {
+        headers: { 'Authorization': `Bearer ${matrixToken}` },
+      }),
+      fetch(`${matrixHomeserver}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/joined_members`, {
+        headers: { 'Authorization': `Bearer ${matrixToken}` },
+      }),
+    ]);
+
+    if (!stateRes.ok) throw new Error(`State fetch failed: ${stateRes.status}`);
+    if (!msgsRes.ok) throw new Error(`Messages fetch failed: ${msgsRes.status}`);
+
+    const stateEvents = await stateRes.json();
+    const msgsData = await msgsRes.json();
+    const membersData = membersRes.ok ? await membersRes.json() : { joined: {} };
+
+    // Extract key room properties from state
+    const nameEv = stateEvents.find(e => e.type === 'm.room.name');
+    const topicEv = stateEvents.find(e => e.type === 'm.room.topic');
+    const encEv = stateEvents.find(e => e.type === 'm.room.encryption');
+    const createEv = stateEvents.find(e => e.type === 'm.room.create');
+    const joinRuleEv = stateEvents.find(e => e.type === 'm.room.join_rules');
+    const histEv = stateEvents.find(e => e.type === 'm.room.history_visibility');
+
+    const members = Object.entries(membersData.joined || {});
+    const domain = matrixUserId.split(':').slice(1).join(':');
+    const alias = `#eo-db-${space.id}:${domain}`;
+
+    const timeline = (msgsData.chunk || []).reverse();
+
+    container.innerHTML = `
+      ${renderRoomSection('Overview', `
+        ${roomField('Room ID', roomId)}
+        ${roomField('Room Alias', alias)}
+        ${roomField('Name', nameEv?.content?.name || '(none)')}
+        ${roomField('Topic', topicEv?.content?.topic || '(none)')}
+        ${roomField('Room Version', createEv?.content?.room_version || 'unknown')}
+        ${roomField('Join Rule', joinRuleEv?.content?.join_rule || 'unknown')}
+        ${roomField('History Visibility', histEv?.content?.history_visibility || 'unknown')}
+        ${roomField('Encryption', encEv ? `Enabled (${encEv.content.algorithm})` : 'Disabled')}
+        ${roomField('Members', String(members.length))}
+        ${roomField('Timeline Events', String(timeline.length) + ' (last 50)')}
+      `, true)}
+
+      ${renderRoomSection(`Members (${members.length})`, `
+        ${members.length === 0 ? '<div style="font-family:\'JetBrains Mono\',monospace;font-size:10px;color:var(--text-faint);font-style:italic;">No members</div>' :
+          members.map(([uid, info]) => `
+            <div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid var(--border);">
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text);">${escapeHtml(uid)}</span>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--text-dim);">${escapeHtml(info.display_name || '')}</span>
+            </div>
+          `).join('')}
+      `)}
+
+      ${renderRoomSection(`Timeline (${timeline.length} events)`, `
+        ${timeline.length === 0 ? '<div style="font-family:\'JetBrains Mono\',monospace;font-size:10px;color:var(--text-faint);font-style:italic;">No events</div>' :
+          timeline.map((ev, i) => `
+            <div style="padding:6px 0;border-bottom:1px solid var(--border);">
+              <div class="room-data-ev-header" onclick="this.nextElementSibling.classList.toggle('hidden')" style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--accent);flex-shrink:0;">${escapeHtml(ev.type)}</span>
+                <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(ev.sender || '')}</span>
+                <span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:var(--text-faint);margin-left:auto;flex-shrink:0;">${ev.origin_server_ts ? new Date(ev.origin_server_ts).toISOString().slice(11,19) : ''}</span>
+              </div>
+              <pre class="hidden" style="margin-top:4px;padding:8px;background:var(--bg);border-radius:4px;border:1px solid var(--border);font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--text);overflow:auto;max-height:250px;white-space:pre-wrap;word-break:break-all;">${escapeHtml(JSON.stringify(ev.content, null, 2))}</pre>
+            </div>
+          `).join('')}
+      `)}
+
+      ${renderRoomSection(`State Events (${stateEvents.length})`, `
+        ${stateEvents.map((ev, i) => `
+          <div style="padding:6px 0;border-bottom:1px solid var(--border);">
+            <div onclick="this.nextElementSibling.classList.toggle('hidden')" style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+              <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--text);flex-shrink:0;">${escapeHtml(ev.type)}</span>
+              ${ev.state_key ? `<span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:var(--text-faint);background:var(--bg);padding:1px 4px;border-radius:2px;">${escapeHtml(ev.state_key)}</span>` : ''}
+              <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--text-dim);margin-left:auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(ev.sender || '')}</span>
+            </div>
+            <pre class="hidden" style="margin-top:4px;padding:8px;background:var(--bg);border-radius:4px;border:1px solid var(--border);font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--text);overflow:auto;max-height:250px;white-space:pre-wrap;word-break:break-all;">${escapeHtml(JSON.stringify(ev.content, null, 2))}</pre>
+          </div>
+        `).join('')}
+      `)}
+
+      ${renderRoomSection('Raw JSON', `
+        <pre style="padding:10px;background:var(--bg);border-radius:4px;border:1px solid var(--border);font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--text);overflow:auto;max-height:400px;white-space:pre-wrap;word-break:break-all;">${escapeHtml(JSON.stringify({ roomId, alias, state: stateEvents, timeline, members: membersData.joined }, null, 2))}</pre>
+      `)}
+    `;
+  } catch (err) {
+    container.innerHTML = `<div style="color:var(--danger);font-family:'JetBrains Mono',monospace;font-size:11px;">Error: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+function renderRoomSection(title, content, startOpen = false) {
+  const id = 'rdv-' + title.replace(/[^a-zA-Z0-9]/g, '-').toLowerCase();
+  return `
+    <div style="border-bottom:1px solid var(--border);padding:10px 0;">
+      <div onclick="document.getElementById('${id}').classList.toggle('hidden')" style="display:flex;align-items:center;gap:6px;cursor:pointer;font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-faint);user-select:none;">
+        <span style="display:inline-block;transition:transform 0.15s;" id="${id}-arrow">&#9654;</span>
+        ${escapeHtml(title)}
+      </div>
+      <div id="${id}" class="${startOpen ? '' : 'hidden'}" style="margin-top:8px;">
+        ${content}
+      </div>
+    </div>
+  `;
+}
+
+function roomField(label, value) {
+  return `
+    <div style="display:flex;justify-content:space-between;padding:3px 0;gap:12px;">
+      <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-dim);flex-shrink:0;">${escapeHtml(label)}</span>
+      <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text);text-align:right;word-break:break-all;">${escapeHtml(value)}</span>
+    </div>
+  `;
+}
 
 // ── Backup storage providers ────────────────────────────────────────────
 //
