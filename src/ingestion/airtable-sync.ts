@@ -15,7 +15,8 @@
  *   - Sync cursors stored per table: `ingestion:airtable:cursor:{baseId}:{tableId}`
  *   - Sync locks prevent concurrent syncs on the same table: `ingestion:airtable:lock:{baseId}:{tableId}`
  *   - Records map to EO targets: `at.{baseId}.{tableId}.{recordId}`
- *   - Uses DEF (not INS) so re-syncing an existing record merges gracefully.
+ *   - Explicit INS before first DEF — every entity has a real birth event in the log.
+ *   - Persistent HydrationJob records track per-table progress for crash recovery.
  */
 
 import type { EoDb } from '../db/level.js';
@@ -23,6 +24,8 @@ import { encode, decode } from '../db/level.js';
 import { processEvent } from '../db/fold.js';
 import { getState } from '../db/state.js';
 import type { Feed } from '../db/feed.js';
+import type { HydrationJob, TableProgress } from '../db/types.js';
+import { randomUUID } from 'crypto';
 import {
   AirtableClient,
   type AirtableBase,
@@ -168,6 +171,104 @@ async function releaseLock(db: EoDb, baseId: string, tableId: string): Promise<v
   } catch {
     // Ignore if already released
   }
+}
+
+/** Renew a lock's timestamp to prevent TTL expiry during long-running syncs. */
+async function renewLock(db: EoDb, baseId: string, tableId: string, agent: string): Promise<void> {
+  const key = lockKey(baseId, tableId);
+  try {
+    await db.put(key, encode({ acquired_by: agent, acquired_at: Date.now() }));
+  } catch {
+    // Best-effort renewal
+  }
+}
+
+const LOCK_RENEW_INTERVAL_MS = 2 * 60 * 1000; // Renew lock every 2 minutes
+
+// ─── Job tracking (persistent hydration/sync progress) ────────────────────
+
+const JOB_PREFIX = 'ingestion:airtable:job:';
+const JOB_LATEST_PREFIX = 'ingestion:airtable:job:latest:';
+
+async function createJob(
+  db: EoDb,
+  type: HydrationJob['type'],
+  label: string,
+  agent: string,
+  tableEntries: Array<{ baseId: string; tableId: string; tableName: string }>,
+): Promise<HydrationJob> {
+  const job: HydrationJob = {
+    job_id: randomUUID(),
+    type,
+    api_key_label: label,
+    status: 'running',
+    agent,
+    started_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    table_progress: {},
+    totals: { tables_total: tableEntries.length, tables_completed: 0, records_ingested: 0, records_skipped: 0 },
+  };
+  for (const t of tableEntries) {
+    const key = `${t.baseId}:${t.tableId}`;
+    job.table_progress[key] = {
+      base_id: t.baseId,
+      table_id: t.tableId,
+      table_name: t.tableName,
+      status: 'pending',
+      records_fetched: 0,
+      records_ingested: 0,
+    };
+  }
+  await persistJob(db, job);
+  await db.put(`${JOB_LATEST_PREFIX}${label}`, encode(job.job_id));
+  return job;
+}
+
+async function persistJob(db: EoDb, job: HydrationJob): Promise<void> {
+  job.updated_at = new Date().toISOString();
+  await db.put(`${JOB_PREFIX}${job.job_id}`, encode(job));
+}
+
+export async function getJob(db: EoDb, jobId: string): Promise<HydrationJob | null> {
+  try {
+    const buf = await db.get(`${JOB_PREFIX}${jobId}`);
+    return decode(buf) as HydrationJob;
+  } catch (e: any) {
+    if (e.code === 'LEVEL_NOT_FOUND') return null;
+    throw e;
+  }
+}
+
+export async function getLatestJob(db: EoDb, label: string): Promise<HydrationJob | null> {
+  try {
+    const buf = await db.get(`${JOB_LATEST_PREFIX}${label}`);
+    const jobId = decode(buf) as string;
+    return getJob(db, jobId);
+  } catch (e: any) {
+    if (e.code === 'LEVEL_NOT_FOUND') return null;
+    throw e;
+  }
+}
+
+/** Find jobs left in 'running' state (crashed). Mark them as 'interrupted'. */
+export async function recoverInterruptedJobs(db: EoDb): Promise<HydrationJob[]> {
+  const interrupted: HydrationJob[] = [];
+  for await (const [key, value] of db.iterator({
+    gte: JOB_PREFIX,
+    lte: `${JOB_PREFIX}\xff`,
+  })) {
+    // Skip 'latest:' pointers
+    const keyStr = typeof key === 'string' ? key : key.toString();
+    if (keyStr.startsWith(JOB_LATEST_PREFIX)) continue;
+    const job = decode(value) as HydrationJob;
+    if (job.status === 'running') {
+      job.status = 'interrupted';
+      job.updated_at = new Date().toISOString();
+      await persistJob(db, job);
+      interrupted.push(job);
+    }
+  }
+  return interrupted;
 }
 
 // ─── Target naming ──────────────────────────────────────────────────────────
@@ -376,7 +477,35 @@ async function ingestRecord(
   const contentKey = stableStringify(storableFields);
   const clientEventId = recordEventId(baseId, tableId, record.id, contentKey);
 
-  // 4. Ingest via DEF with only storable fields (no computed/Horizon noise)
+  // 4. Explicit INS for new records — the log should truthfully show entity birth
+  //    INS idempotency key uses record ID only (stable across re-syncs).
+  //    Idempotency check in processEvent prevents duplicate INS on re-sync.
+  const existing = await getState(db, target);
+  if (!existing) {
+    try {
+      await processEvent(db, {
+        op: 'INS',
+        target,
+        operand: {
+          _airtable: {
+            record_id: record.id,
+            base_id: baseId,
+            table_id: tableId,
+            created_time: record.createdTime,
+          },
+        },
+        agent,
+        ts: new Date().toISOString(),
+        acquired_ts: new Date().toISOString(),
+        client_event_id: `at-ins:${baseId}:${tableId}:${record.id}`,
+      }, feed);
+    } catch (e: any) {
+      // Idempotency or concurrent INS — safe to continue to DEF
+      if (!e.message?.includes('already') && !e.message?.includes('already instantiated')) throw e;
+    }
+  }
+
+  // 5. Ingest via DEF with only storable fields (no computed/Horizon noise)
   try {
     await processEvent(db, {
       op: 'DEF',
@@ -456,6 +585,10 @@ export async function hydrationSync(
     onTableComplete?: (result: SyncResult) => void;
     /** Customization options for table/field selection and preserve mode. */
     customization?: SyncCustomization;
+    /** API key label for job tracking. */
+    apiKeyLabel?: string;
+    /** Resume an interrupted job instead of starting fresh. */
+    resumeJobId?: string;
   },
 ): Promise<HydrationResult> {
   const start = Date.now();
@@ -465,57 +598,154 @@ export async function hydrationSync(
   const manifest = await discoverSchema(client);
   const syncResults: SyncResult[] = [];
 
-  // Register base-level targets
+  // Collect all tables that will be synced (for job tracking)
+  const tableEntries: Array<{ baseId: string; tableId: string; tableName: string }> = [];
   for (const base of manifest.bases) {
     if (opts?.baseIds?.length && !opts.baseIds.includes(base.id)) continue;
-
-    // If table selection exists but this base has no selected tables, skip
     const baseTables = selectedTables?.[base.id];
     if (selectedTables && !baseTables?.length) continue;
-
-    // INS the base as a container (idempotent via DEF)
-    try {
-      await processEvent(db, {
-        op: 'DEF',
-        target: baseTarget(base.id),
-        operand: { name: base.name, _airtable: { type: 'base', base_id: base.id } },
-        agent,
-        ts: new Date().toISOString(),
-        acquired_ts: new Date().toISOString(),
-        client_event_id: `at-base:${base.id}`,
-      }, feed);
-    } catch { /* ignore if exists */ }
-
     for (const table of base.tables) {
       if (opts?.tableIds?.length && !opts.tableIds.includes(table.id)) continue;
-      // Skip tables not in the selection
       if (baseTables && !baseTables.includes(table.id)) continue;
+      tableEntries.push({ baseId: base.id, tableId: table.id, tableName: table.name });
+    }
+  }
 
-      // Register table as container
+  // Create or resume a persistent job record
+  let job: HydrationJob | null = null;
+  if (opts?.resumeJobId) {
+    job = await getJob(db, opts.resumeJobId);
+  }
+  if (!job) {
+    job = await createJob(db, 'hydration', opts?.apiKeyLabel ?? 'unknown', agent, tableEntries);
+  }
+
+  try {
+    // Register base-level targets
+    for (const base of manifest.bases) {
+      if (opts?.baseIds?.length && !opts.baseIds.includes(base.id)) continue;
+      const baseTables = selectedTables?.[base.id];
+      if (selectedTables && !baseTables?.length) continue;
+
+      // INS the base as a container, then DEF its metadata
+      const baseT = baseTarget(base.id);
+      const baseExists = await getState(db, baseT);
+      if (!baseExists) {
+        try {
+          await processEvent(db, {
+            op: 'INS',
+            target: baseT,
+            operand: { _airtable: { type: 'base', base_id: base.id } },
+            agent,
+            ts: new Date().toISOString(),
+            acquired_ts: new Date().toISOString(),
+            client_event_id: `at-ins-base:${base.id}`,
+          }, feed);
+        } catch { /* idempotency or concurrent INS */ }
+      }
       try {
         await processEvent(db, {
           op: 'DEF',
-          target: tableTarget(base.id, table.id),
-          operand: {
-            name: table.name,
-            field_count: table.fieldCount,
-            fields: table.fields,
-            _airtable: { type: 'table', base_id: base.id, table_id: table.id },
-          },
+          target: baseT,
+          operand: { name: base.name, _airtable: { type: 'base', base_id: base.id } },
           agent,
           ts: new Date().toISOString(),
           acquired_ts: new Date().toISOString(),
-          client_event_id: `at-table:${base.id}:${table.id}`,
+          client_event_id: `at-base:${base.id}`,
         }, feed);
-      } catch { /* ignore */ }
+      } catch { /* idempotency */ }
 
-      const exclusions = fieldExclusions?.[table.id] ?? EMPTY_EXCLUSIONS;
+      for (const table of base.tables) {
+        if (opts?.tableIds?.length && !opts.tableIds.includes(table.id)) continue;
+        if (baseTables && !baseTables.includes(table.id)) continue;
 
-      // Sync all records in this table
-      const result = await syncTable(db, feed, client, base.id, table.id, table.name, agent, null, exclusions, preserveExisting);
-      syncResults.push(result);
-      opts?.onTableComplete?.(result);
+        const progressKey = `${base.id}:${table.id}`;
+        const tableProgress = job.table_progress[progressKey];
+
+        // Skip tables already completed in a previous run (resume support)
+        if (tableProgress?.status === 'completed') continue;
+
+        // INS the table as a container, then DEF its metadata
+        const tblT = tableTarget(base.id, table.id);
+        const tblExists = await getState(db, tblT);
+        if (!tblExists) {
+          try {
+            await processEvent(db, {
+              op: 'INS',
+              target: tblT,
+              operand: { _airtable: { type: 'table', base_id: base.id, table_id: table.id } },
+              agent,
+              ts: new Date().toISOString(),
+              acquired_ts: new Date().toISOString(),
+              client_event_id: `at-ins-table:${base.id}:${table.id}`,
+            }, feed);
+          } catch { /* idempotency or concurrent INS */ }
+        }
+        try {
+          await processEvent(db, {
+            op: 'DEF',
+            target: tblT,
+            operand: {
+              name: table.name,
+              field_count: table.fieldCount,
+              fields: table.fields,
+              _airtable: { type: 'table', base_id: base.id, table_id: table.id },
+            },
+            agent,
+            ts: new Date().toISOString(),
+            acquired_ts: new Date().toISOString(),
+            client_event_id: `at-table:${base.id}:${table.id}`,
+          }, feed);
+        } catch { /* idempotency */ }
+
+        // Mark table in-progress in job
+        if (tableProgress) {
+          tableProgress.status = 'in_progress';
+          tableProgress.started_at = new Date().toISOString();
+          await persistJob(db, job);
+        }
+
+        const exclusions = fieldExclusions?.[table.id] ?? EMPTY_EXCLUSIONS;
+
+        // Sync all records in this table
+        try {
+          const result = await syncTable(db, feed, client, base.id, table.id, table.name, agent, null, exclusions, preserveExisting);
+          syncResults.push(result);
+
+          // Update job progress
+          if (tableProgress) {
+            tableProgress.status = 'completed';
+            tableProgress.completed_at = new Date().toISOString();
+            tableProgress.records_fetched = result.records_fetched;
+            tableProgress.records_ingested = result.records_ingested;
+            job.totals.tables_completed++;
+            job.totals.records_ingested += result.records_ingested;
+            job.totals.records_skipped += result.records_skipped_no_change + result.records_skipped_duplicate;
+            await persistJob(db, job);
+          }
+
+          opts?.onTableComplete?.(result);
+        } catch (e: any) {
+          if (tableProgress) {
+            tableProgress.status = 'failed';
+            tableProgress.error = e.message;
+            await persistJob(db, job);
+          }
+          throw e;
+        }
+      }
     }
+
+    // Mark job completed
+    job.status = 'completed';
+    job.completed_at = new Date().toISOString();
+    await persistJob(db, job);
+  } catch (e: any) {
+    // Mark job failed (tables already completed are preserved for resume)
+    job.status = 'failed';
+    job.error = e.message;
+    await persistJob(db, job);
+    throw e;
   }
 
   const totalIngested = syncResults.reduce((s, r) => s + r.records_ingested, 0);
@@ -628,23 +858,36 @@ async function syncTable(
   let ingested = 0;
   let skippedNoChange = 0;
   let skippedDuplicate = 0;
-  const now = new Date().toISOString();
 
   // Retrieve field metadata from the table's stored schema (set during hydration).
   const fieldMeta = await getTableFieldMeta(db, baseId, tableId);
 
-  // Build filter: if we have a cursor, only fetch records modified since then
-  const filterByFormula = cursorSince
-    ? `LAST_MODIFIED_TIME()>='${cursorSince}'`
+  // Build filter: if we have a cursor, subtract a 60-second overlap window
+  // to catch records modified during clock skew or during the previous sync.
+  // Idempotency handles any re-fetched duplicates from the overlap.
+  const filterCursor = cursorSince
+    ? new Date(new Date(cursorSince).getTime() - 60_000).toISOString()
+    : undefined;
+  const filterByFormula = filterCursor
+    ? `LAST_MODIFIED_TIME()>='${filterCursor}'`
     : undefined;
 
   // Request records keyed by field ID (not name) so they align with schema metadata.
   const useFieldIds = fieldMeta.size > 0;
 
+  // Track last lock renewal to prevent TTL expiry during long-running syncs
+  let lastLockRenew = Date.now();
+
   for await (const page of client.paginateRecords(baseId, tableId, {
     filterByFormula,
     returnFieldsByFieldId: useFieldIds,
   })) {
+    // Renew lock heartbeat every 2 minutes to prevent TTL expiry
+    if (Date.now() - lastLockRenew > LOCK_RENEW_INTERVAL_MS) {
+      await renewLock(db, baseId, tableId, agent);
+      lastLockRenew = Date.now();
+    }
+
     for (const record of page) {
       fetched++;
       const result = await ingestRecord(db, feed, baseId, tableId, record, agent, fieldMeta, exclusions, preserveExisting);
@@ -656,8 +899,10 @@ async function syncTable(
     }
   }
 
-  // Update cursor to now
-  await setCursor(db, baseId, tableId, now);
+  // Set cursor AFTER all records are fetched and ingested — not before.
+  // This ensures records modified during the sync window are caught on next sync.
+  const cursorAfter = new Date().toISOString();
+  await setCursor(db, baseId, tableId, cursorAfter);
 
   return {
     base_id: baseId,
@@ -668,7 +913,7 @@ async function syncTable(
     records_skipped_no_change: skippedNoChange,
     records_skipped_duplicate: skippedDuplicate,
     cursor_before: cursorSince,
-    cursor_after: now,
+    cursor_after: cursorAfter,
   };
 }
 
