@@ -1780,10 +1780,10 @@ body {
   font-style: italic;
 }
 
-/* ── Bases Panel ── */
-.bases-panel { flex-direction: column; }
+/* ── NUL Spaces Panel ── */
+.spaces-panel { flex-direction: column; }
 
-.bases-body {
+.spaces-body {
   flex: 1;
   overflow: auto;
   padding: 24px;
@@ -1791,7 +1791,7 @@ body {
   justify-content: center;
 }
 
-.bases-form {
+.spaces-form {
   width: 100%;
   max-width: 720px;
   display: flex;
@@ -1799,7 +1799,7 @@ body {
   gap: 20px;
 }
 
-.base-card {
+.space-card {
   background: var(--bg1);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -1808,36 +1808,36 @@ body {
   transition: all 0.15s;
 }
 
-.base-card:hover { border-color: var(--border2); }
-.base-card.active { border-color: var(--accent); }
+.space-card:hover { border-color: var(--border2); }
+.space-card.active { border-color: var(--accent); }
 
-.base-card-header {
+.space-card-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
   margin-bottom: 8px;
 }
 
-.base-card-name {
+.space-card-name {
   font-family: 'JetBrains Mono', monospace;
   font-size: 14px;
   font-weight: 600;
   color: var(--white);
 }
 
-.base-card-owner {
+.space-card-owner {
   font-family: 'JetBrains Mono', monospace;
   font-size: 10px;
   color: var(--text-faint);
 }
 
-.base-card-desc {
+.space-card-desc {
   font-size: 12px;
   color: var(--text-dim);
   margin-bottom: 8px;
 }
 
-.base-card-prefix {
+.space-card-prefix {
   font-family: 'JetBrains Mono', monospace;
   font-size: 10px;
   color: var(--text-faint);
@@ -1848,27 +1848,27 @@ body {
   border: 1px solid var(--border);
 }
 
-.base-card-actions {
+.space-card-actions {
   display: flex;
   gap: 6px;
   margin-top: 12px;
 }
 
-.base-detail {
+.space-detail {
   background: var(--bg1);
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 20px;
 }
 
-.base-sharing-header {
+.space-sharing-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
   margin-bottom: 12px;
 }
 
-.base-share-item {
+.space-share-item {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1881,16 +1881,16 @@ body {
   font-size: 11px;
 }
 
-.base-share-user {
+.space-share-user {
   display: flex;
   flex-direction: column;
   gap: 2px;
 }
 
-.base-share-user-id { color: var(--text); }
-.base-share-user-access { color: var(--text-faint); font-size: 9px; text-transform: uppercase; }
+.space-share-user-id { color: var(--text); }
+.space-share-user-access { color: var(--text-faint); font-size: 9px; text-transform: uppercase; }
 
-.base-share-actions { display: flex; gap: 6px; align-items: center; }
+.space-share-actions { display: flex; gap: 6px; align-items: center; }
 
 .access-select {
   background: var(--bg2);
@@ -1905,7 +1905,7 @@ body {
 
 .access-select:focus { border-color: var(--accent); }
 
-.base-badge {
+.space-badge {
   font-family: 'JetBrains Mono', monospace;
   font-size: 9px;
   padding: 2px 6px;
@@ -1914,8 +1914,8 @@ body {
   font-weight: 600;
 }
 
-.base-badge-owner { background: rgba(56,189,248,0.12); color: var(--accent); }
-.base-badge-shared { background: rgba(167,139,250,0.12); color: var(--con); }
+.space-badge-owner { background: rgba(56,189,248,0.12); color: var(--accent); }
+.space-badge-shared { background: rgba(167,139,250,0.12); color: var(--con); }
 
 /* ── Scrollbar ── */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
@@ -1968,7 +1968,7 @@ body {
   <div class="nav-tab" onclick="switchTab('log')">Log</div>
   <div class="nav-tab" onclick="switchTab('graph')">Graph</div>
   <div class="nav-tab" onclick="switchTab('compose')" style="color:var(--ins);">+ Compose</div>
-  <div class="nav-tab" onclick="switchTab('bases')">Bases</div>
+  <div class="nav-tab" onclick="switchTab('spaces')">NUL Spaces</div>
   <div class="nav-tab" onclick="switchTab('settings')">Settings</div>
 </div>
 
@@ -2271,59 +2271,59 @@ body {
     </div>
   </div>
 
-  <!-- ═══ Bases Panel ═══ -->
-  <div id="panel-bases" class="panel bases-panel">
-    <div class="bases-body">
-      <div class="bases-form">
+  <!-- ═══ NUL Spaces Panel ═══ -->
+  <div id="panel-spaces" class="panel spaces-panel">
+    <div class="spaces-body">
+      <div class="spaces-form">
 
-        <!-- Create Base -->
+        <!-- Create NUL Space -->
         <div class="settings-section">
-          <div class="settings-section-title">Create New Base</div>
+          <div class="settings-section-title">Create New NUL Space</div>
           <div class="settings-add-row">
-            <input class="settings-add-input" id="newBaseName" placeholder="Base name">
-            <input class="settings-add-input" id="newBaseDesc" placeholder="Description (optional)" style="max-width:200px;">
-            <button class="settings-add-btn" onclick="createNewBase()">+ Create</button>
+            <input class="settings-add-input" id="newSpaceName" placeholder="NUL Space name">
+            <input class="settings-add-input" id="newSpaceDesc" placeholder="Description (optional)" style="max-width:200px;">
+            <button class="settings-add-btn" onclick="createNewSpace()">+ Create</button>
           </div>
         </div>
 
-        <!-- My Bases -->
+        <!-- My NUL Spaces -->
         <div class="settings-section">
-          <div class="settings-section-title">My Bases</div>
-          <div id="basesListOwned" class="settings-list">
-            <div class="settings-empty">No bases yet</div>
+          <div class="settings-section-title">My NUL Spaces</div>
+          <div id="spacesListOwned" class="settings-list">
+            <div class="settings-empty">No NUL spaces yet</div>
           </div>
         </div>
 
         <!-- Shared With Me -->
         <div class="settings-section">
           <div class="settings-section-title">Shared With Me</div>
-          <div id="basesListShared" class="settings-list">
-            <div class="settings-empty">No shared bases</div>
+          <div id="spacesListShared" class="settings-list">
+            <div class="settings-empty">No shared NUL spaces</div>
           </div>
         </div>
 
-        <!-- Base Detail (shown when a base is selected) -->
-        <div id="baseDetailSection" class="base-detail" style="display:none;">
-          <div class="settings-section-title" id="baseDetailTitle">Base Detail</div>
+        <!-- NUL Space Detail (shown when a space is selected) -->
+        <div id="spaceDetailSection" class="space-detail" style="display:none;">
+          <div class="settings-section-title" id="spaceDetailTitle">NUL Space Detail</div>
 
           <div style="margin-bottom:16px;">
-            <div class="settings-session-field"><span class="settings-session-key">ID</span><span class="settings-session-val" id="baseDetailId">—</span></div>
-            <div class="settings-session-field"><span class="settings-session-key">Target Prefix</span><span class="settings-session-val" id="baseDetailPrefix">—</span></div>
-            <div class="settings-session-field"><span class="settings-session-key">Owner</span><span class="settings-session-val" id="baseDetailOwner">—</span></div>
-            <div class="settings-session-field"><span class="settings-session-key">Created</span><span class="settings-session-val" id="baseDetailCreated">—</span></div>
+            <div class="settings-session-field"><span class="settings-session-key">ID</span><span class="settings-session-val" id="spaceDetailId">—</span></div>
+            <div class="settings-session-field"><span class="settings-session-key">Target Prefix</span><span class="settings-session-val" id="spaceDetailPrefix">—</span></div>
+            <div class="settings-session-field"><span class="settings-session-key">Owner</span><span class="settings-session-val" id="spaceDetailOwner">—</span></div>
+            <div class="settings-session-field"><span class="settings-session-key">Created</span><span class="settings-session-val" id="spaceDetailCreated">—</span></div>
           </div>
 
           <!-- Sharing -->
-          <div class="base-sharing-header">
+          <div class="space-sharing-header">
             <span style="font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:600;color:var(--text-faint);text-transform:uppercase;letter-spacing:0.5px;">Sharing</span>
           </div>
 
-          <div id="baseShareList" class="settings-list" style="margin-bottom:12px;">
+          <div id="spaceShareList" class="settings-list" style="margin-bottom:12px;">
             <div class="settings-empty">Not shared with anyone</div>
           </div>
 
           <!-- Add share (owner only) -->
-          <div id="baseShareAddRow" style="display:none;">
+          <div id="spaceShareAddRow" style="display:none;">
             <div class="settings-add-row">
               <input class="settings-add-input" id="shareUserId" placeholder="@user:homeserver.com">
               <select class="access-select" id="shareAccess">
@@ -2331,13 +2331,13 @@ body {
                 <option value="write">Write</option>
                 <option value="read_write">Read+Write</option>
               </select>
-              <button class="settings-add-btn" onclick="addShareToBase()">+ Share</button>
+              <button class="settings-add-btn" onclick="addShareToSpace()">+ Share</button>
             </div>
           </div>
 
-          <!-- Delete base (owner only) -->
-          <div id="baseDeleteRow" style="display:none;margin-top:16px;">
-            <button class="settings-delete-btn" onclick="deleteSelectedBase()" style="padding:6px 16px;">Delete Base</button>
+          <!-- Delete space (owner only) -->
+          <div id="spaceDeleteRow" style="display:none;margin-top:16px;">
+            <button class="settings-delete-btn" onclick="deleteSelectedSpace()" style="padding:6px 16px;">Delete NUL Space</button>
           </div>
         </div>
 
@@ -3574,10 +3574,10 @@ async function submitEvent() {
   try {
     const agent = matrixUserId || '@local:device';
 
-    // Validate: a base must exist before any operations can be submitted
-    const bases = await getAllBases();
-    if (bases.length === 0) {
-      throw new Error('Create a base first — go to the BASES tab to create one');
+    // Validate: a space must exist before any operations can be submitted
+    const spaces = await getAllSpaces();
+    if (spaces.length === 0) {
+      throw new Error('Create a NUL space first — go to the NUL SPACES tab to create one');
     }
 
     // Validate: operators that act on existing targets require a non-empty DB
@@ -3689,7 +3689,7 @@ function switchTab(tab) {
   document.querySelector(`.nav-tab[onclick*="${tab}"]`).classList.add('active');
   document.getElementById(`panel-${tab}`).classList.add('active');
   if (tab === 'graph') renderGraph();
-  if (tab === 'bases') loadBases();
+  if (tab === 'spaces') loadSpaces();
   if (tab === 'settings') loadSettings();
 }
 
@@ -4830,7 +4830,7 @@ async function atSync(label, mode) {
 
     for (const base of basesRes.bases) {
       // Register base as DEF
-      await appendEvent({ op: 'DEF', target: `at.${base.id}`, operand: { name: base.name, _airtable: { type: 'base', base_id: base.id } }, agent: matrixUserId || 'local', client_event_id: `at-base:${base.id}` });
+      await appendEvent({ op: 'DEF', target: `at.${base.id}`, operand: { name: base.name, _airtable: { type: 'space', space_id: space.id } }, agent: matrixUserId || 'local', client_event_id: `at-base:${base.id}` });
 
       const schema = await atRequest(`${AT_META}/bases/${base.id}/tables`, token);
 
@@ -4840,7 +4840,7 @@ async function atSync(label, mode) {
 
         // Register table with schema
         const fields = table.fields.map(f => ({ id: f.id, name: f.name, type: f.type }));
-        await appendEvent({ op: 'DEF', target: `at.${base.id}.${table.id}`, operand: { name: table.name, fields, _airtable: { type: 'table', base_id: base.id, table_id: table.id } }, agent: matrixUserId || 'local', client_event_id: `at-table:${base.id}:${table.id}` });
+        await appendEvent({ op: 'DEF', target: `at.${base.id}.${table.id}`, operand: { name: table.name, fields, _airtable: { type: 'table', space_id: space.id, table_id: table.id } }, agent: matrixUserId || 'local', client_event_id: `at-table:${base.id}:${table.id}` });
 
         atSetStatus(label, 'syncing', `Syncing ${table.name}...`);
 
@@ -4877,7 +4877,7 @@ async function atSync(label, mode) {
             await appendEvent({
               op: 'DEF',
               target,
-              operand: { fields: storable, _airtable: { record_id: rec.id, base_id: base.id, table_id: table.id, created_time: rec.createdTime } },
+              operand: { fields: storable, _airtable: { record_id: rec.id, space_id: space.id, table_id: table.id, created_time: rec.createdTime } },
               agent: matrixUserId || 'local',
               client_event_id: `at-sync:${base.id}:${table.id}:${rec.id}:${JSON.stringify(storable).length}`,
             });
@@ -4966,14 +4966,14 @@ async function loadSettings() {
   atRenderKeys();
 }
 
-// ── Bases ──
-let selectedBaseId = null;
+// ── NUL Spaces ──
+let selectedSpaceId = null;
 
-function generateBaseId() {
-  return 'base_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
+function generateSpaceId() {
+  return 'space_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
 }
 
-async function getAllBases() {
+async function getAllSpaces() {
   if (!db) return [];
   const tx = db.transaction('bases', 'readonly');
   return new Promise((resolve) => {
@@ -4983,7 +4983,7 @@ async function getAllBases() {
   });
 }
 
-async function getBaseById(id) {
+async function getSpaceById(id) {
   if (!db) return null;
   const tx = db.transaction('bases', 'readonly');
   return new Promise((resolve) => {
@@ -4993,20 +4993,20 @@ async function getBaseById(id) {
   });
 }
 
-async function putBase(base) {
+async function putSpace(space) {
   if (!db) {
     await openDB();
     if (!db) throw new Error('Database not available – please reload the page');
   }
   const tx = db.transaction('bases', 'readwrite');
-  tx.objectStore('bases').put(base);
+  tx.objectStore('bases').put(space);
   return new Promise((resolve, reject) => {
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });
 }
 
-async function deleteBaseById(id) {
+async function deleteSpaceById(id) {
   if (!db) {
     await openDB();
     if (!db) throw new Error('Database not available – please reload the page');
@@ -5019,20 +5019,20 @@ async function deleteBaseById(id) {
   });
 }
 
-async function createNewBase() {
-  const nameEl = document.getElementById('newBaseName');
-  const descEl = document.getElementById('newBaseDesc');
+async function createNewSpace() {
+  const nameEl = document.getElementById('newSpaceName');
+  const descEl = document.getElementById('newSpaceDesc');
   const name = nameEl.value.trim();
   if (!name) { nameEl.focus(); return; }
 
-  const id = generateBaseId();
+  const id = generateSpaceId();
   const now = new Date().toISOString();
   const owner = matrixUserId || 'local';
-  const base = {
+  const space = {
     id,
     name,
     description: descEl.value.trim() || undefined,
-    target_prefix: `base.${id}`,
+    target_prefix: `space.${id}`,
     created_by: owner,
     created_at: now,
     updated_by: owner,
@@ -5040,44 +5040,44 @@ async function createNewBase() {
     sharing: [],
   };
 
-  await putBase(base);
+  await putSpace(space);
 
-  // Creating a base is an INS — instantiate the base target in the event log
+  // Creating a space is an INS — instantiate the space target in the event log
   await appendEvent({
     op: 'INS',
-    target: base.target_prefix,
-    operand: { name: base.name, description: base.description || '', type: 'base', base_id: base.id },
+    target: space.target_prefix,
+    operand: { name: space.name, description: space.description || '', type: 'space', space_id: space.id },
     agent: owner,
   });
 
   nameEl.value = '';
   descEl.value = '';
   await loadFromIndexedDB();
-  await loadBases();
-  selectBase(id);
+  await loadSpaces();
+  selectSpace(id);
 }
 
-async function loadBases() {
-  const bases = await getAllBases();
+async function loadSpaces() {
+  const spaces = await getAllSpaces();
   const currentUser = matrixUserId || 'local';
 
-  const owned = bases.filter(b => b.created_by === currentUser);
-  const shared = bases.filter(b => b.created_by !== currentUser && b.sharing.some(s => s.user_id === currentUser));
+  const owned = spaces.filter(b => b.created_by === currentUser);
+  const shared = spaces.filter(b => b.created_by !== currentUser && b.sharing.some(s => s.user_id === currentUser));
 
-  const ownedEl = document.getElementById('basesListOwned');
-  const sharedEl = document.getElementById('basesListShared');
+  const ownedEl = document.getElementById('spacesListOwned');
+  const sharedEl = document.getElementById('spacesListShared');
 
   if (owned.length === 0) {
-    ownedEl.innerHTML = '<div class="settings-empty">No bases yet — create one above</div>';
+    ownedEl.innerHTML = '<div class="settings-empty">No NUL spaces yet — create one above</div>';
   } else {
     ownedEl.innerHTML = owned.map(b => `
-      <div class="base-card ${selectedBaseId === b.id ? 'active' : ''}" onclick="selectBase('${b.id}')">
-        <div class="base-card-header">
-          <span class="base-card-name">${escHtml(b.name)}</span>
-          <span class="base-badge base-badge-owner">Owner</span>
+      <div class="space-card ${selectedSpaceId === b.id ? 'active' : ''}" onclick="selectSpace('${b.id}')">
+        <div class="space-card-header">
+          <span class="space-card-name">${escHtml(b.name)}</span>
+          <span class="space-badge space-badge-owner">Owner</span>
         </div>
-        ${b.description ? `<div class="base-card-desc">${escHtml(b.description)}</div>` : ''}
-        <div><span class="base-card-prefix">${b.target_prefix}</span></div>
+        ${b.description ? `<div class="space-card-desc">${escHtml(b.description)}</div>` : ''}
+        <div><span class="space-card-prefix">${b.target_prefix}</span></div>
         <div style="font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--text-faint);margin-top:6px;">
           ${b.sharing.length} shared user${b.sharing.length !== 1 ? 's' : ''}
         </div>
@@ -5086,18 +5086,18 @@ async function loadBases() {
   }
 
   if (shared.length === 0) {
-    sharedEl.innerHTML = '<div class="settings-empty">No shared bases</div>';
+    sharedEl.innerHTML = '<div class="settings-empty">No shared NUL spaces</div>';
   } else {
     sharedEl.innerHTML = shared.map(b => {
       const myShare = b.sharing.find(s => s.user_id === currentUser);
       return `
-        <div class="base-card ${selectedBaseId === b.id ? 'active' : ''}" onclick="selectBase('${b.id}')">
-          <div class="base-card-header">
-            <span class="base-card-name">${escHtml(b.name)}</span>
-            <span class="base-badge base-badge-shared">${myShare ? myShare.access : 'read'}</span>
+        <div class="space-card ${selectedSpaceId === b.id ? 'active' : ''}" onclick="selectSpace('${b.id}')">
+          <div class="space-card-header">
+            <span class="space-card-name">${escHtml(b.name)}</span>
+            <span class="space-badge space-badge-shared">${myShare ? myShare.access : 'read'}</span>
           </div>
-          ${b.description ? `<div class="base-card-desc">${escHtml(b.description)}</div>` : ''}
-          <div><span class="base-card-prefix">${b.target_prefix}</span></div>
+          ${b.description ? `<div class="space-card-desc">${escHtml(b.description)}</div>` : ''}
+          <div><span class="space-card-prefix">${b.target_prefix}</span></div>
           <div style="font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--text-faint);margin-top:6px;">
             Owned by ${escHtml(b.created_by)}
           </div>
@@ -5106,11 +5106,11 @@ async function loadBases() {
     }).join('');
   }
 
-  // Refresh detail if a base is selected
-  if (selectedBaseId) {
-    const base = await getBaseById(selectedBaseId);
-    if (base) renderBaseDetail(base);
-    else hideBaseDetail();
+  // Refresh detail if a space is selected
+  if (selectedSpaceId) {
+    const space = await getSpaceById(selectedSpaceId);
+    if (space) renderSpaceDetail(space);
+    else hideSpaceDetail();
   }
 }
 
@@ -5120,69 +5120,69 @@ function escHtml(s) {
   return div.innerHTML;
 }
 
-async function selectBase(id) {
-  selectedBaseId = id;
-  const base = await getBaseById(id);
-  if (!base) return;
-  renderBaseDetail(base);
+async function selectSpace(id) {
+  selectedSpaceId = id;
+  const space = await getSpaceById(id);
+  if (!space) return;
+  renderSpaceDetail(space);
   // Re-render list to show active state
-  await loadBases();
+  await loadSpaces();
 }
 
-function renderBaseDetail(base) {
-  const section = document.getElementById('baseDetailSection');
+function renderSpaceDetail(space) {
+  const section = document.getElementById('spaceDetailSection');
   section.style.display = '';
 
-  document.getElementById('baseDetailTitle').textContent = base.name;
-  document.getElementById('baseDetailId').textContent = base.id;
-  document.getElementById('baseDetailPrefix').textContent = base.target_prefix;
-  document.getElementById('baseDetailOwner').textContent = base.created_by;
-  document.getElementById('baseDetailCreated').textContent = base.created_at.replace('T', ' ').replace('Z', '').slice(0, 19);
+  document.getElementById('spaceDetailTitle').textContent = space.name;
+  document.getElementById('spaceDetailId').textContent = space.id;
+  document.getElementById('spaceDetailPrefix').textContent = space.target_prefix;
+  document.getElementById('spaceDetailOwner').textContent = space.created_by;
+  document.getElementById('spaceDetailCreated').textContent = space.created_at.replace('T', ' ').replace('Z', '').slice(0, 19);
 
   const currentUser = matrixUserId || 'local';
-  const isOwner = base.created_by === currentUser;
+  const isOwner = space.created_by === currentUser;
 
   // Sharing list
-  const shareListEl = document.getElementById('baseShareList');
-  if (base.sharing.length === 0) {
+  const shareListEl = document.getElementById('spaceShareList');
+  if (space.sharing.length === 0) {
     shareListEl.innerHTML = '<div class="settings-empty">Not shared with anyone</div>';
   } else {
-    shareListEl.innerHTML = base.sharing.map(s => `
-      <div class="base-share-item">
-        <div class="base-share-user">
-          <span class="base-share-user-id">${escHtml(s.user_id)}</span>
-          <span class="base-share-user-access">${s.access} — added ${s.added_at.slice(0, 10)}</span>
+    shareListEl.innerHTML = space.sharing.map(s => `
+      <div class="space-share-item">
+        <div class="space-share-user">
+          <span class="space-share-user-id">${escHtml(s.user_id)}</span>
+          <span class="space-share-user-access">${s.access} — added ${s.added_at.slice(0, 10)}</span>
         </div>
-        <div class="base-share-actions">
+        <div class="space-share-actions">
           ${isOwner ? `
-            <select class="access-select" onchange="updateShare('${base.id}','${escAttr(s.user_id)}',this.value)">
+            <select class="access-select" onchange="updateShare('${space.id}','${escAttr(s.user_id)}',this.value)">
               <option value="read" ${s.access === 'read' ? 'selected' : ''}>Read</option>
               <option value="write" ${s.access === 'write' ? 'selected' : ''}>Write</option>
               <option value="read_write" ${s.access === 'read_write' ? 'selected' : ''}>Read+Write</option>
             </select>
-            <button class="settings-delete-btn" onclick="removeShare('${base.id}','${escAttr(s.user_id)}')">Remove</button>
-          ` : `<span class="base-badge base-badge-shared">${s.access}</span>`}
+            <button class="settings-delete-btn" onclick="removeShare('${space.id}','${escAttr(s.user_id)}')">Remove</button>
+          ` : `<span class="space-badge space-badge-shared">${s.access}</span>`}
         </div>
       </div>
     `).join('');
   }
 
   // Show/hide owner-only controls
-  document.getElementById('baseShareAddRow').style.display = isOwner ? '' : 'none';
-  document.getElementById('baseDeleteRow').style.display = isOwner ? '' : 'none';
+  document.getElementById('spaceShareAddRow').style.display = isOwner ? '' : 'none';
+  document.getElementById('spaceDeleteRow').style.display = isOwner ? '' : 'none';
 }
 
 function escAttr(s) {
   return (s || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
 }
 
-function hideBaseDetail() {
-  selectedBaseId = null;
-  document.getElementById('baseDetailSection').style.display = 'none';
+function hideSpaceDetail() {
+  selectedSpaceId = null;
+  document.getElementById('spaceDetailSection').style.display = 'none';
 }
 
-async function addShareToBase() {
-  if (!selectedBaseId) return;
+async function addShareToSpace() {
+  if (!selectedSpaceId) return;
   const userIdEl = document.getElementById('shareUserId');
   const accessEl = document.getElementById('shareAccess');
   const userId = userIdEl.value.trim();
@@ -5193,21 +5193,21 @@ async function addShareToBase() {
     return;
   }
 
-  const base = await getBaseById(selectedBaseId);
-  if (!base) return;
+  const space = await getSpaceById(selectedSpaceId);
+  if (!space) return;
 
   const currentUser = matrixUserId || 'local';
-  if (base.created_by !== currentUser) return;
+  if (space.created_by !== currentUser) return;
   if (userId === currentUser) return;
 
   const now = new Date().toISOString();
-  const existing = base.sharing.find(s => s.user_id === userId);
+  const existing = space.sharing.find(s => s.user_id === userId);
   if (existing) {
     existing.access = accessEl.value;
     existing.added_at = now;
     existing.added_by = currentUser;
   } else {
-    base.sharing.push({
+    space.sharing.push({
       user_id: userId,
       access: accessEl.value,
       added_at: now,
@@ -5215,48 +5215,48 @@ async function addShareToBase() {
     });
   }
 
-  base.updated_by = currentUser;
-  base.updated_at = now;
-  await putBase(base);
+  space.updated_by = currentUser;
+  space.updated_at = now;
+  await putSpace(space);
 
   userIdEl.value = '';
-  await loadBases();
+  await loadSpaces();
 }
 
-async function updateShare(baseId, userId, newAccess) {
-  const base = await getBaseById(baseId);
-  if (!base) return;
-  const share = base.sharing.find(s => s.user_id === userId);
+async function updateShare(spaceId, userId, newAccess) {
+  const space = await getSpaceById(spaceId);
+  if (!space) return;
+  const share = space.sharing.find(s => s.user_id === userId);
   if (!share) return;
   share.access = newAccess;
-  base.updated_by = matrixUserId || 'local';
-  base.updated_at = new Date().toISOString();
-  await putBase(base);
-  await loadBases();
+  space.updated_by = matrixUserId || 'local';
+  space.updated_at = new Date().toISOString();
+  await putSpace(space);
+  await loadSpaces();
 }
 
-async function removeShare(baseId, userId) {
-  const base = await getBaseById(baseId);
-  if (!base) return;
-  base.sharing = base.sharing.filter(s => s.user_id !== userId);
-  base.updated_by = matrixUserId || 'local';
-  base.updated_at = new Date().toISOString();
-  await putBase(base);
-  await loadBases();
+async function removeShare(spaceId, userId) {
+  const space = await getSpaceById(spaceId);
+  if (!space) return;
+  space.sharing = space.sharing.filter(s => s.user_id !== userId);
+  space.updated_by = matrixUserId || 'local';
+  space.updated_at = new Date().toISOString();
+  await putSpace(space);
+  await loadSpaces();
 }
 
-async function deleteSelectedBase() {
-  if (!selectedBaseId) return;
-  const base = await getBaseById(selectedBaseId);
-  if (!base) return;
+async function deleteSelectedSpace() {
+  if (!selectedSpaceId) return;
+  const space = await getSpaceById(selectedSpaceId);
+  if (!space) return;
   const currentUser = matrixUserId || 'local';
-  if (base.created_by !== currentUser) return;
+  if (space.created_by !== currentUser) return;
 
-  if (!confirm(`Delete base "${base.name}"? This cannot be undone.`)) return;
+  if (!confirm(`Delete NUL space "${space.name}"? This cannot be undone.`)) return;
 
-  await deleteBaseById(selectedBaseId);
-  hideBaseDetail();
-  await loadBases();
+  await deleteSpaceById(selectedSpaceId);
+  hideSpaceDetail();
+  await loadSpaces();
 }
 
 // ── Init ──
@@ -5279,11 +5279,11 @@ async function deleteSelectedBase() {
     connectSync();
   }
 
-  // If no bases exist, prompt the user to create one
-  const bases = await getAllBases();
-  if (bases.length === 0) {
-    switchTab('bases');
-    const nameEl = document.getElementById('newBaseName');
+  // If no spaces exist, prompt the user to create a NUL space
+  const spaces = await getAllSpaces();
+  if (spaces.length === 0) {
+    switchTab('spaces');
+    const nameEl = document.getElementById('newSpaceName');
     if (nameEl) nameEl.focus();
   }
 })();
