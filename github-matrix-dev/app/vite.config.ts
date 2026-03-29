@@ -11,7 +11,7 @@ export default defineConfig({
       manifest: {
         name: 'EO///DB — Decentralized Database',
         short_name: 'EO///DB',
-        description: 'Amino Immigration — Case Management',
+        description: 'EO///DB — Decentralized browser-native database',
         theme_color: '#1a1a2e',
         background_color: '#1a1a2e',
         display: 'standalone',
