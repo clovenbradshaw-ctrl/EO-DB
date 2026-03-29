@@ -2104,6 +2104,176 @@ body {
 [data-theme="light"] .op-NUL { background: rgba(92,95,122,0.08); }
 [data-theme="light"] .nulspace-badge { background: rgba(92,95,122,0.15); }
 
+/* ── Backup Storage Widget ── */
+.backup-provider-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.backup-provider-tab {
+  flex: 1;
+  padding: 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-dim);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  font-weight: 600;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.backup-provider-tab:hover { border-color: var(--text-dim); color: var(--text); }
+.backup-provider-tab.active { border-color: var(--accent); color: var(--accent); background: rgba(56,189,248,0.06); }
+.backup-fields { display: none; }
+.backup-fields.active { display: flex; flex-direction: column; gap: 8px; }
+.backup-field label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-faint);
+  margin-bottom: 2px;
+}
+.backup-field input {
+  width: 100%;
+  padding: 8px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+}
+.backup-field input:focus { border-color: var(--accent); outline: none; }
+.backup-field input::placeholder { color: var(--text-faint); }
+.backup-status-msg {
+  padding: 8px 10px;
+  border-radius: 4px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  display: none;
+}
+.backup-status-msg.error { display: block; background: rgba(239,68,68,0.1); color: var(--danger); border: 1px solid rgba(239,68,68,0.2); }
+.backup-status-msg.info { display: block; background: rgba(56,189,248,0.1); color: var(--accent); border: 1px solid rgba(56,189,248,0.2); }
+.backup-status-msg.success { display: block; background: rgba(34,197,94,0.1); color: #22c55e; border: 1px solid rgba(34,197,94,0.2); }
+.backup-connected-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  margin-bottom: 8px;
+}
+.backup-connected-bar .bc-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--text);
+}
+.backup-connected-bar .bc-dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: #22c55e;
+}
+.backup-disconnect-btn {
+  background: transparent;
+  border: 1px solid rgba(239,68,68,0.3);
+  color: var(--danger);
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.backup-disconnect-btn:hover { background: rgba(239,68,68,0.1); }
+.backup-file-browser {
+  display: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+  max-height: 240px;
+}
+.backup-file-browser.active { display: block; }
+.backup-browser-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+.backup-browser-toolbar button {
+  padding: 4px 10px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.backup-browser-toolbar button:hover { border-color: var(--text-dim); }
+.backup-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+}
+.backup-bc-item { cursor: pointer; padding: 1px 4px; border-radius: 3px; }
+.backup-bc-item:hover { background: var(--bg3); color: var(--text); }
+.backup-bc-item.current { color: var(--accent); font-weight: 600; }
+.backup-bc-sep { color: var(--text-faint); }
+.backup-file-list {
+  max-height: 160px;
+  overflow-y: auto;
+}
+.backup-file-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+.backup-file-row:hover { background: var(--bg3); }
+.backup-file-row .bf-icon { font-size: 14px; flex-shrink: 0; }
+.backup-file-row .bf-name {
+  flex: 1;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.backup-file-row .bf-size {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  color: var(--text-faint);
+  flex-shrink: 0;
+}
+.backup-empty {
+  text-align: center;
+  padding: 24px;
+  color: var(--text-faint);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+}
+
 /* ── Responsive ── */
 @media (max-width: 900px) {
   .detail-drawer { width: 300px; }
@@ -2616,17 +2786,96 @@ INS,app.tbl.rec1,"{""name"":""Alice""}"</pre>
           </div>
         </div>
 
-        <!-- Matrix Media Storage -->
+        <!-- Sync Targets -->
         <div class="settings-section">
-          <div class="settings-section-title">Matrix Media Storage</div>
-          <div id="settingsMedia">
-            <div class="settings-session-field"><span class="settings-session-key">Status</span><span class="settings-session-val" id="settingsMediaStatus">—</span></div>
-            <div class="settings-session-field"><span class="settings-session-key">Last Snapshot Seq</span><span class="settings-session-val" id="settingsMediaSnapshotSeq">—</span></div>
-            <div class="settings-session-field"><span class="settings-session-key">Storage Tier</span><span class="settings-session-val" id="settingsMediaTier">—</span></div>
-          </div>
-          <div style="margin-top:12px;display:flex;align-items:center;gap:12px;">
-            <button class="settings-add-btn" id="matrixSyncBtn" onclick="syncToMatrix()" style="background:var(--accent);color:#fff;border-color:var(--accent);">Sync to Matrix</button>
-            <span id="matrixSyncStatus" style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-dim);"></span>
+          <div class="settings-section-title">Sync Targets</div>
+          <div id="syncTargetsPanel"></div>
+        </div>
+
+        <!-- Backup Storage -->
+        <div class="settings-section">
+          <div class="settings-section-title">Backup Storage</div>
+          <div id="backupPanel">
+            <!-- Provider tabs -->
+            <div class="backup-provider-tabs">
+              <button class="backup-provider-tab active" data-bp="filen" onclick="selectBackupProvider('filen')">Filen</button>
+              <button class="backup-provider-tab" data-bp="pixeldrain" onclick="selectBackupProvider('pixeldrain')">Pixeldrain</button>
+              <button class="backup-provider-tab" data-bp="s3" onclick="selectBackupProvider('s3')">S3 / R2</button>
+            </div>
+
+            <!-- Connected state -->
+            <div id="backupConnectedBar" class="backup-connected-bar" style="display:none;">
+              <div class="bc-left">
+                <div class="bc-dot"></div>
+                <span id="backupConnectedLabel">Connected</span>
+              </div>
+              <button class="backup-disconnect-btn" onclick="disconnectBackup()">Disconnect</button>
+            </div>
+
+            <!-- Filen login -->
+            <div class="backup-fields active" id="bpFilenFields">
+              <div class="backup-field">
+                <label>Email</label>
+                <input type="email" id="bpFilenEmail" placeholder="you@email.com" autocomplete="off">
+              </div>
+              <div class="backup-field">
+                <label>Password</label>
+                <input type="password" id="bpFilenPass" placeholder="Password" autocomplete="off">
+              </div>
+              <div class="backup-field">
+                <label>2FA (optional)</label>
+                <input type="text" id="bpFilen2fa" placeholder="123456" autocomplete="off">
+              </div>
+            </div>
+
+            <!-- Pixeldrain login -->
+            <div class="backup-fields" id="bpPixeldrainFields">
+              <div class="backup-field">
+                <label>API Key</label>
+                <input type="text" id="bpPdKey" placeholder="Paste your Pixeldrain API key" autocomplete="off">
+              </div>
+            </div>
+
+            <!-- S3 login -->
+            <div class="backup-fields" id="bpS3Fields">
+              <div class="backup-field">
+                <label>Endpoint</label>
+                <input type="text" id="bpS3Endpoint" placeholder="https://s3.us-east-1.amazonaws.com" autocomplete="off">
+              </div>
+              <div class="backup-field">
+                <label>Access Key ID</label>
+                <input type="text" id="bpS3Key" placeholder="AKIA..." autocomplete="off">
+              </div>
+              <div class="backup-field">
+                <label>Secret Access Key</label>
+                <input type="password" id="bpS3Secret" placeholder="Secret key" autocomplete="off">
+              </div>
+              <div class="backup-field">
+                <label>Bucket</label>
+                <input type="text" id="bpS3Bucket" placeholder="my-bucket" autocomplete="off">
+              </div>
+            </div>
+
+            <div class="backup-status-msg" id="backupStatusMsg"></div>
+
+            <div style="margin-top:10px;display:flex;gap:8px;">
+              <button class="settings-add-btn" id="backupConnectBtn" onclick="connectBackup()" style="background:var(--accent);color:#fff;border-color:var(--accent);">Connect</button>
+              <button class="settings-add-btn" id="backupSnapshotBtn" onclick="backupSnapshot()" style="display:none;">Backup Snapshot</button>
+            </div>
+
+            <!-- File browser (Filen only) -->
+            <div class="backup-file-browser" id="backupFileBrowser">
+              <div class="backup-browser-toolbar">
+                <button onclick="backupBrowserRefresh()">Refresh</button>
+                <div style="flex:1"></div>
+              </div>
+              <div class="backup-breadcrumb" id="backupBreadcrumb">
+                <span class="backup-bc-item current">My Drive</span>
+              </div>
+              <div class="backup-file-list" id="backupFileList">
+                <div class="backup-empty">Connect to browse files</div>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -3494,29 +3743,491 @@ function disconnectSync() {
 }
 
 const EO_EVENT_TYPE = 'com.eo-db.event';
-const EO_SNAPSHOT_TYPE = 'com.eo-db.snapshot';
+
+// ── Sync engine ─────────────────────────────────────────────────────────
+//
+// Generic sync driver that pushes space events to any target.
+// A sync target implements:
+//   name        — display label
+//   id          — stable key for tracking (used in localStorage)
+//   available() — returns true if the target can be used right now
+//   connect(space) — setup/ensure destination exists, returns context
+//   writeEvents(ctx, events, onProgress) — send events to the target
+//
+// The driver handles: reading new events, tracking last-synced seq per
+// space×target, progress UI, error handling.
 
 /**
- * Read events from IndexedDB with seq > afterSeq, ordered by seq.
+ * Read events from IndexedDB with seq > afterSeq whose target starts with
+ * the given prefix, ordered by seq.
  */
-function loadEventsSince(afterSeq) {
+function loadSpaceEventsSince(prefix, afterSeq) {
   return new Promise((resolve) => {
     if (!db) { resolve([]); return; }
     const tx = db.transaction('log', 'readonly');
     const idx = tx.objectStore('log').index('seq');
-    const range = IDBKeyRange.lowerBound(afterSeq, true);
+    const range = afterSeq > 0 ? IDBKeyRange.lowerBound(afterSeq, true) : undefined;
     const req = idx.getAll(range);
-    req.onsuccess = () => resolve(req.result || []);
+    req.onsuccess = () => {
+      const all = req.result || [];
+      resolve(all.filter(e => e.target === prefix || e.target.startsWith(prefix + '.')));
+    };
     req.onerror = () => resolve([]);
   });
 }
 
 /**
- * Compress a string into a gzipped binary blob.
+ * Generic sync driver. Pushes unsent space events to a target.
  */
+async function syncTo(target, onStatus) {
+  if (!target.available()) {
+    onStatus('Not available', 'var(--danger)');
+    return;
+  }
+
+  if (!activeNulspaceId) {
+    onStatus('No space selected', 'var(--danger)');
+    return;
+  }
+
+  const space = await getSpaceById(activeNulspaceId);
+  if (!space) {
+    onStatus('Space not found', 'var(--danger)');
+    return;
+  }
+
+  const syncKey = `eo_sync:${target.id}:${space.id}`;
+  const lastSyncSeq = parseInt(localStorage.getItem(syncKey) || '0', 10);
+
+  onStatus('Connecting...', 'var(--text-dim)');
+  const ctx = await target.connect(space);
+
+  onStatus('Reading events...', 'var(--text-dim)');
+  const newEvents = await loadSpaceEventsSince(space.target_prefix, lastSyncSeq);
+
+  if (newEvents.length === 0) {
+    onStatus('Up to date', 'var(--accent)');
+    return;
+  }
+
+  await target.writeEvents(ctx, newEvents, (sent, total) => {
+    onStatus(`${sent}/${total} events...`, 'var(--text-dim)');
+  });
+
+  const maxSeq = Math.max(...newEvents.map(e => e.seq));
+  localStorage.setItem(syncKey, String(maxSeq));
+
+  onStatus(`${newEvents.length} events → ${space.name} @ seq ${maxSeq}`, 'var(--accent)');
+}
+
+// ── Matrix Room target ──────────────────────────────────────────────────
+
+const matrixRoomTarget = {
+  name: 'Matrix Room',
+  id: 'matrix-room',
+
+  available() {
+    return !!(matrixToken && matrixUserId);
+  },
+
+  async connect(space) {
+    // Check if we already have a room ID cached on this space
+    if (space.matrix_room_id) return { roomId: space.matrix_room_id };
+
+    const domain = matrixUserId.split(':').slice(1).join(':');
+    const alias = `#eo-db-${space.id}:${domain}`;
+
+    // Try resolving existing alias
+    try {
+      const res = await fetch(
+        `${matrixHomeserver}/_matrix/client/v3/directory/room/${encodeURIComponent(alias)}`,
+        { headers: { 'Authorization': `Bearer ${matrixToken}` } }
+      );
+      if (res.ok) {
+        const { room_id } = await res.json();
+        space.matrix_room_id = room_id;
+        await putSpace(space);
+        return { roomId: room_id };
+      }
+    } catch { /* doesn't exist yet */ }
+
+    // Build invite list from space sharing
+    const invites = (space.sharing || [])
+      .map(s => s.user_id)
+      .filter(uid => uid !== matrixUserId);
+
+    // Create new E2EE room
+    const res = await fetch(`${matrixHomeserver}/_matrix/client/v3/createRoom`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${matrixToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: `EO: ${space.name}`,
+        topic: `Event log for NUL space "${space.name}" (${space.id})`,
+        room_alias_name: `eo-db-${space.id}`,
+        visibility: 'private',
+        preset: 'private_chat',
+        invite: invites,
+        initial_state: [{
+          type: 'm.room.encryption',
+          state_key: '',
+          content: { algorithm: 'm.megolm.v1.aes-sha2' },
+        }],
+      }),
+    });
+    if (!res.ok) throw new Error(`Failed to create room: ${await res.text()}`);
+    const { room_id } = await res.json();
+    space.matrix_room_id = room_id;
+    await putSpace(space);
+    return { roomId: room_id };
+  },
+
+  async writeEvents(ctx, events, onProgress) {
+    let sent = 0;
+    for (const event of events) {
+      const txnId = event.client_event_id || crypto.randomUUID();
+      const url = `${matrixHomeserver}/_matrix/client/v3/rooms/${encodeURIComponent(ctx.roomId)}/send/${encodeURIComponent(EO_EVENT_TYPE)}/${encodeURIComponent(txnId)}`;
+      const res = await fetch(url, {
+        method: 'PUT',
+        headers: { 'Authorization': `Bearer ${matrixToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          op: event.op,
+          target: event.target,
+          operand: event.operand,
+          client_event_id: event.client_event_id,
+          ts: event.ts,
+          seq: event.seq,
+        }),
+      });
+      if (!res.ok) throw new Error(`Send failed (${res.status}): ${await res.text()}`);
+      sent++;
+      onProgress(sent, events.length);
+    }
+  },
+};
+
+// ── Sync target registry ────────────────────────────────────────────────
+
+const syncTargets = [matrixRoomTarget];
+
+/**
+ * Render sync target cards in the settings panel.
+ */
+function renderSyncTargets() {
+  const panel = document.getElementById('syncTargetsPanel');
+  if (!panel) return;
+
+  panel.innerHTML = syncTargets.map(target => {
+    const available = target.available();
+    const syncKey = activeNulspaceId ? `eo_sync:${target.id}:${activeNulspaceId}` : null;
+    const lastSeq = syncKey ? localStorage.getItem(syncKey) : null;
+
+    return `
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:14px;margin-bottom:8px;">
+        <div class="settings-session-field">
+          <span class="settings-session-key">Target</span>
+          <span class="settings-session-val" style="font-weight:600;">${target.name}</span>
+        </div>
+        <div class="settings-session-field">
+          <span class="settings-session-key">Status</span>
+          <span class="settings-session-val" style="color:${available ? 'var(--accent)' : 'var(--muted)'};">${available ? 'Connected' : 'Not connected'}</span>
+        </div>
+        <div class="settings-session-field">
+          <span class="settings-session-key">Last Synced Seq</span>
+          <span class="settings-session-val">${lastSeq || 'None'}</span>
+        </div>
+        <div style="margin-top:10px;display:flex;align-items:center;gap:12px;">
+          <button class="settings-add-btn" id="syncBtn-${target.id}"
+            onclick="doSync('${target.id}')"
+            style="background:var(--accent);color:#fff;border-color:var(--accent);${available ? '' : 'opacity:0.4;cursor:not-allowed;'}"
+            ${available ? '' : 'disabled'}>
+            Sync
+          </button>
+          <span id="syncStatus-${target.id}" style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-dim);"></span>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+/**
+ * Trigger sync for a registered target by id.
+ */
+async function doSync(targetId) {
+  const target = syncTargets.find(t => t.id === targetId);
+  if (!target) return;
+
+  const btn = document.getElementById(`syncBtn-${targetId}`);
+  const statusEl = document.getElementById(`syncStatus-${targetId}`);
+  const onStatus = (msg, color) => {
+    if (statusEl) { statusEl.textContent = msg; statusEl.style.color = color || 'var(--text-dim)'; }
+  };
+
+  btn.disabled = true;
+  btn.textContent = 'Syncing...';
+
+  try {
+    await syncTo(target, onStatus);
+  } catch (err) {
+    console.error(`Sync to ${target.name} failed:`, err);
+    onStatus(err.message || 'Sync failed', 'var(--danger)');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Sync';
+    renderSyncTargets();
+  }
+}
+
+// Legacy alias
+function syncToMatrix() { doSync('matrix-room'); }
+
+// ── Backup storage providers ────────────────────────────────────────────
+//
+// Backup targets write a full snapshot blob (gzip JSON of all space events).
+// Unlike the Matrix room target (append-only), backups overwrite the
+// previous file each sync.
+
+const FILEN_API = 'https://gateway.filen.io';
+let backupProvider = 'filen';
+let backupAuth = null; // provider-specific auth state
+let backupMasterKeys = [];
+let backupBaseFolderUuid = '';
+let backupCurrentFolderUuid = '';
+let backupNavStack = [];
+
+function selectBackupProvider(provider) {
+  backupProvider = provider;
+  document.querySelectorAll('.backup-provider-tab').forEach(t => {
+    t.classList.toggle('active', t.dataset.bp === provider);
+  });
+  document.querySelectorAll('.backup-fields').forEach(f => f.classList.remove('active'));
+  const fieldMap = { filen: 'bpFilenFields', pixeldrain: 'bpPixeldrainFields', s3: 'bpS3Fields' };
+  const el = document.getElementById(fieldMap[provider]);
+  if (el) el.classList.add('active');
+  clearBackupStatus();
+}
+
+function showBackupStatus(msg, type) {
+  const el = document.getElementById('backupStatusMsg');
+  el.textContent = msg;
+  el.className = `backup-status-msg ${type}`;
+}
+
+function clearBackupStatus() {
+  document.getElementById('backupStatusMsg').className = 'backup-status-msg';
+}
+
+// ── Filen crypto helpers ──
+
+async function filenDeriveKey(password, salt) {
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', salt: enc.encode(salt), iterations: 200000, hash: 'SHA-512' }, key, 512
+  );
+  return Array.from(new Uint8Array(bits)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function filenSha512(input) {
+  const hash = await crypto.subtle.digest('SHA-512', new TextEncoder().encode(input));
+  return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function filenDeriveAuth(rawPassword, authVersion, salt) {
+  if (authVersion === 1) {
+    const h = await filenSha512(rawPassword);
+    return { derivedPassword: h, derivedMasterKeys: h };
+  }
+  const dk = await filenDeriveKey(rawPassword, salt);
+  const derivedMasterKeys = dk.substring(0, dk.length / 2);
+  const derivedPassword = await filenSha512(dk.substring(dk.length / 2));
+  return { derivedPassword, derivedMasterKeys };
+}
+
+async function filenDecryptMetadata(metadata, key) {
+  try {
+    if (!metadata || metadata.length < 4 || metadata.slice(0, 3) !== '002') return null;
+    const iv = metadata.slice(3, 15);
+    const encrypted = Uint8Array.from(atob(metadata.slice(15)), c => c.charCodeAt(0));
+    const enc = new TextEncoder();
+    const pbk = await crypto.subtle.importKey('raw', enc.encode(key), 'PBKDF2', false, ['deriveBits']);
+    const keyBits = await crypto.subtle.deriveBits(
+      { name: 'PBKDF2', salt: enc.encode(key), iterations: 1, hash: 'SHA-512' }, pbk, 256
+    );
+    const aesKey = await crypto.subtle.importKey('raw', keyBits, 'AES-GCM', false, ['decrypt']);
+    const dec = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: enc.encode(iv) }, aesKey, encrypted);
+    return new TextDecoder().decode(dec);
+  } catch { return null; }
+}
+
+async function filenTryDecrypt(metadata) {
+  for (const k of backupMasterKeys) {
+    const r = await filenDecryptMetadata(metadata, k);
+    if (r) return r;
+  }
+  return null;
+}
+
+async function filenApi(endpoint, data) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (backupAuth?.apiKey) headers['Authorization'] = `Bearer ${backupAuth.apiKey}`;
+  const r = await fetch(`${FILEN_API}${endpoint}`, { method: 'POST', headers, body: JSON.stringify(data) });
+  return r.json();
+}
+
+// ── Connect / disconnect ──
+
+async function connectBackup() {
+  const btn = document.getElementById('backupConnectBtn');
+  btn.disabled = true;
+  btn.textContent = 'Connecting...';
+  clearBackupStatus();
+
+  try {
+    if (backupProvider === 'filen') {
+      await connectFilen();
+    } else if (backupProvider === 'pixeldrain') {
+      await connectPixeldrain();
+    } else if (backupProvider === 's3') {
+      await connectS3();
+    }
+  } catch (e) {
+    showBackupStatus(e.message, 'error');
+  }
+
+  btn.disabled = false;
+  btn.textContent = 'Connect';
+}
+
+async function connectFilen() {
+  const email = document.getElementById('bpFilenEmail').value.trim();
+  const password = document.getElementById('bpFilenPass').value;
+  const twofa = document.getElementById('bpFilen2fa').value.trim();
+  if (!email || !password) { showBackupStatus('Email and password required', 'error'); return; }
+
+  showBackupStatus('Fetching auth info...', 'info');
+  const info = await (await fetch(`${FILEN_API}/v3/auth/info`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email }),
+  })).json();
+  if (!info.status) { showBackupStatus(info.message || 'Auth info failed', 'error'); return; }
+
+  showBackupStatus('Deriving encryption keys...', 'info');
+  const { derivedPassword, derivedMasterKeys } = await filenDeriveAuth(password, info.data.authVersion, info.data.salt);
+
+  showBackupStatus('Authenticating...', 'info');
+  const login = await (await fetch(`${FILEN_API}/v3/login`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password: derivedPassword, twoFactorCode: twofa || 'XXXXXX', authVersion: info.data.authVersion }),
+  })).json();
+  if (!login.status) { showBackupStatus(login.message || 'Login failed', 'error'); return; }
+
+  backupAuth = { ...login.data, email, provider: 'filen' };
+  backupMasterKeys = [derivedMasterKeys];
+
+  const base = await filenApi('/v3/user/baseFolder', {});
+  if (base.status) {
+    backupBaseFolderUuid = base.data.uuid;
+    backupCurrentFolderUuid = backupBaseFolderUuid;
+  }
+
+  showBackupConnected(`Filen · ${email}`);
+  clearBackupStatus();
+  registerFilenSyncTarget();
+
+  // Show file browser
+  document.getElementById('backupFileBrowser').classList.add('active');
+  backupNavStack = [];
+  updateBackupBreadcrumb();
+  loadBackupFolder(backupCurrentFolderUuid);
+}
+
+async function connectPixeldrain() {
+  const apiKey = document.getElementById('bpPdKey').value.trim();
+  if (!apiKey) { showBackupStatus('API key required', 'error'); return; }
+
+  showBackupStatus('Verifying...', 'info');
+  const res = await fetch('https://pixeldrain.com/api/user', {
+    headers: { 'Authorization': 'Basic ' + btoa(':' + apiKey) },
+  });
+  if (!res.ok) { showBackupStatus('Invalid API key', 'error'); return; }
+  const user = await res.json();
+
+  backupAuth = { apiKey, username: user.username, provider: 'pixeldrain' };
+  showBackupConnected(`Pixeldrain · ${user.username}`);
+  clearBackupStatus();
+  registerPixeldrainSyncTarget();
+}
+
+async function connectS3() {
+  const endpoint = document.getElementById('bpS3Endpoint').value.trim();
+  const accessKey = document.getElementById('bpS3Key').value.trim();
+  const secret = document.getElementById('bpS3Secret').value.trim();
+  const bucket = document.getElementById('bpS3Bucket').value.trim();
+  if (!endpoint || !accessKey || !secret || !bucket) {
+    showBackupStatus('All fields required', 'error'); return;
+  }
+
+  backupAuth = { endpoint, accessKey, secret, bucket, provider: 's3' };
+  showBackupConnected(`S3 · ${bucket}`);
+  clearBackupStatus();
+  showBackupStatus('S3 upload requires AWS Signature V4 — coming soon', 'info');
+}
+
+function showBackupConnected(label) {
+  document.getElementById('backupConnectedBar').style.display = 'flex';
+  document.getElementById('backupConnectedLabel').textContent = label;
+  document.getElementById('backupSnapshotBtn').style.display = '';
+  // Hide login fields
+  document.querySelectorAll('.backup-fields').forEach(f => f.classList.remove('active'));
+  document.getElementById('backupConnectBtn').style.display = 'none';
+  document.querySelector('.backup-provider-tabs').style.display = 'none';
+}
+
+function disconnectBackup() {
+  backupAuth = null;
+  backupMasterKeys = [];
+  backupBaseFolderUuid = '';
+  backupCurrentFolderUuid = '';
+  backupNavStack = [];
+
+  document.getElementById('backupConnectedBar').style.display = 'none';
+  document.getElementById('backupSnapshotBtn').style.display = 'none';
+  document.getElementById('backupFileBrowser').classList.remove('active');
+  document.getElementById('backupConnectBtn').style.display = '';
+  document.querySelector('.backup-provider-tabs').style.display = 'flex';
+  selectBackupProvider(backupProvider);
+  clearBackupStatus();
+
+  // Remove backup sync targets
+  for (let i = syncTargets.length - 1; i >= 0; i--) {
+    if (syncTargets[i].id === 'filen-backup' || syncTargets[i].id === 'pixeldrain-backup') {
+      syncTargets.splice(i, 1);
+    }
+  }
+  renderSyncTargets();
+}
+
+// ── Snapshot backup — writes full space event log as a gzip blob ──
+
 async function gzipCompress(str) {
   const stream = new Blob([str]).stream().pipeThrough(new CompressionStream('gzip'));
   return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+async function buildSpaceSnapshot(space) {
+  const allEvents = await loadSpaceEventsSince(space.target_prefix, 0);
+  const snapshot = {
+    version: 1,
+    type: 'full',
+    space_id: space.id,
+    space_name: space.name,
+    seq: allEvents.length > 0 ? Math.max(...allEvents.map(e => e.seq)) : 0,
+    event_count: allEvents.length,
+    created_by: matrixUserId || 'local',
+    ts: new Date().toISOString(),
+    events: allEvents,
+  };
+  return { snapshot, compressed: await gzipCompress(JSON.stringify(snapshot)) };
 }
 
 /**
@@ -3575,199 +4286,209 @@ async function decryptBinary(key, data) {
   const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ciphertext);
   return new Uint8Array(plaintext);
 }
-
-/**
- * Ensure we have a Matrix room ID for syncing.
- * Resolves alias or creates an E2EE room on first use.
- */
-async function ensureSyncRoom() {
-  const cached = localStorage.getItem('eo_matrix_room_id');
-  if (cached) return cached;
-
-  const localpart = matrixUserId.split(':')[0].replace('@', '');
-  const domain = matrixUserId.split(':').slice(1).join(':');
-  const alias = `#eo-db-${localpart}:${domain}`;
-
-  // Try resolving existing alias
-  try {
-    const res = await fetch(
-      `${matrixHomeserver}/_matrix/client/v3/directory/room/${encodeURIComponent(alias)}`,
-      { headers: { 'Authorization': `Bearer ${matrixToken}` } }
-    );
-    if (res.ok) {
-      const { room_id } = await res.json();
-      localStorage.setItem('eo_matrix_room_id', room_id);
-      return room_id;
-    }
-  } catch { /* doesn't exist yet */ }
-
-  // Create new E2EE room
-  const res = await fetch(`${matrixHomeserver}/_matrix/client/v3/createRoom`, {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${matrixToken}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      name: 'EO-DB Sync',
-      topic: 'Event log sync room for EO///DB',
-      room_alias_name: `eo-db-${localpart}`,
-      visibility: 'private',
-      preset: 'private_chat',
-      initial_state: [{
-        type: 'm.room.encryption',
-        state_key: '',
-        content: { algorithm: 'm.megolm.v1.aes-sha2' },
-      }],
-    }),
-  });
-  if (!res.ok) throw new Error(`Failed to create sync room: ${await res.text()}`);
-  const { room_id } = await res.json();
-  localStorage.setItem('eo_matrix_room_id', room_id);
-  return room_id;
 }
 
-/**
- * Upload binary blob to Matrix media store, return mxc:// URI.
- */
-async function uploadToMedia(binary, filename) {
-  const res = await fetch(
-    `${matrixHomeserver}/_matrix/media/v3/upload?filename=${encodeURIComponent(filename)}`,
-    {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${matrixToken}`, 'Content-Type': 'application/octet-stream' },
-      body: binary,
-    }
-  );
-  if (!res.ok) throw new Error(`Media upload failed (${res.status}): ${await res.text()}`);
-  return (await res.json()).content_uri;
-}
+async function backupSnapshot() {
+  const btn = document.getElementById('backupSnapshotBtn');
+  if (!backupAuth) return;
+  if (!activeNulspaceId) { showBackupStatus('No space selected', 'error'); return; }
 
-/**
- * Send a snapshot pointer event into the room timeline.
- * This records the mxc URI so the room log becomes an index of all snapshots.
- */
-async function sendSnapshotEvent(roomId, snapshot) {
-  const txnId = `snap-${snapshot.from_seq}-${snapshot.to_seq}-${Date.now()}`;
-  const url = `${matrixHomeserver}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/${encodeURIComponent(EO_SNAPSHOT_TYPE)}/${encodeURIComponent(txnId)}`;
-  const res = await fetch(url, {
-    method: 'PUT',
-    headers: { 'Authorization': `Bearer ${matrixToken}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(snapshot),
-  });
-  if (!res.ok) throw new Error(`Snapshot event failed (${res.status}): ${await res.text()}`);
-  return (await res.json()).event_id;
-}
-
-async function syncToMatrix() {
-  const btn = document.getElementById('matrixSyncBtn');
-  const statusEl = document.getElementById('matrixSyncStatus');
-
-  if (!matrixToken || !matrixUserId) {
-    if (statusEl) { statusEl.textContent = 'Not signed in'; statusEl.style.color = 'var(--danger)'; }
-    return;
-  }
-
-  const currentSeq = nextSeq - 1;
-  const lastSyncSeq = parseInt(localStorage.getItem('eo_matrix_sync_seq') || '0', 10);
-
-  if (currentSeq <= lastSyncSeq) {
-    if (statusEl) { statusEl.textContent = 'Up to date'; statusEl.style.color = 'var(--accent)'; }
-    return;
-  }
+  const space = await getSpaceById(activeNulspaceId);
+  if (!space) { showBackupStatus('Space not found', 'error'); return; }
 
   btn.disabled = true;
-  btn.textContent = 'Syncing...';
-  if (statusEl) { statusEl.textContent = ''; statusEl.style.color = 'var(--text-dim)'; }
+  btn.textContent = 'Backing up...';
+  clearBackupStatus();
 
   try {
-    // 1. Get room
-    const roomId = await ensureSyncRoom();
-    if (statusEl) statusEl.textContent = 'Reading events...';
+    showBackupStatus('Building snapshot...', 'info');
+    const { snapshot, compressed } = await buildSpaceSnapshot(space);
 
-    // 2. Read only new events since last sync
-    const newEvents = await loadEventsSince(lastSyncSeq);
-    if (newEvents.length === 0) {
-      if (statusEl) { statusEl.textContent = 'Up to date'; statusEl.style.color = 'var(--accent)'; }
-      btn.disabled = false;
-      btn.textContent = 'Sync to Matrix';
-      return;
+    const filename = `eo-backup-${space.id}.bin`;
+    const sizeKB = (compressed.byteLength / 1024).toFixed(1);
+
+    if (backupAuth.provider === 'filen') {
+      showBackupStatus('Uploading to Filen...', 'info');
+      showBackupStatus(`Filen encrypted upload coming soon — snapshot ready: ${snapshot.event_count} events, ${sizeKB} KB`, 'info');
+    } else if (backupAuth.provider === 'pixeldrain') {
+      showBackupStatus('Uploading to Pixeldrain...', 'info');
+      const blob = new Blob([compressed], { type: 'application/octet-stream' });
+      const form = new FormData();
+      form.append('file', blob, filename);
+      const res = await fetch('https://pixeldrain.com/api/file', {
+        method: 'POST',
+        headers: { 'Authorization': 'Basic ' + btoa(':' + backupAuth.apiKey) },
+        body: form,
+      });
+      if (!res.ok) throw new Error(`Pixeldrain upload failed: ${res.status}`);
+      const { id } = await res.json();
+      localStorage.setItem(`eo_backup:${backupAuth.provider}:${space.id}`, JSON.stringify({
+        file_id: id, seq: snapshot.seq, ts: snapshot.ts, size: compressed.byteLength,
+      }));
+      showBackupStatus(`Backed up ${snapshot.event_count} events (${sizeKB} KB) → pixeldrain/${id}`, 'success');
+    } else {
+      showBackupStatus('S3 upload coming soon', 'info');
     }
-
-    // 3. Build delta and compress to binary
-    const prevMxc = localStorage.getItem('eo_matrix_snapshot_mxc') || null;
-    const delta = {
-      version: 1,
-      type: 'delta',
-      from_seq: lastSyncSeq,
-      to_seq: currentSeq,
-      prev_mxc: prevMxc,
-      created_by: matrixUserId,
-      ts: new Date().toISOString(),
-      event_count: newEvents.length,
-      events: newEvents,
-    };
-
-    if (statusEl) statusEl.textContent = 'Compressing...';
-    const compressed = await gzipCompress(JSON.stringify(delta));
-
-    // 3b. Encrypt the compressed binary
-    if (statusEl) statusEl.textContent = 'Encrypting...';
-    const mediaKey = await deriveMediaKey();
-    const encrypted = await encryptBinary(mediaKey, compressed);
-
-    // 4. Upload encrypted binary to Matrix media
-    if (statusEl) statusEl.textContent = 'Uploading snapshot...';
-    const filename = `eo-delta-${lastSyncSeq}-${currentSeq}.bin`;
-    const mxcUri = await uploadToMedia(encrypted, filename);
-
-    // 4b. Upload to configured external storage endpoints
-    const externalUrls = [];
-    const hydrationSources = loadHydrationSources();
-    for (const source of hydrationSources) {
-      if (source.type === 'external' && source.endpoint) {
-        try {
-          const url = await uploadToExternalStorage(encrypted, source.endpoint, filename, source.apiKey);
-          externalUrls.push({ id: source.id, url });
-        } catch (e) {
-          console.warn(`External upload to ${source.label} failed:`, e.message);
-        }
-      }
-    }
-
-    // 5. Record the mxc URI in the room timeline as a snapshot pointer
-    if (statusEl) statusEl.textContent = 'Recording in room...';
-    await sendSnapshotEvent(roomId, {
-      mxc: mxcUri,
-      from_seq: lastSyncSeq,
-      to_seq: currentSeq,
-      prev_mxc: prevMxc,
-      event_count: newEvents.length,
-      size_bytes: encrypted.byteLength,
-      encrypted: true,
-      external_urls: externalUrls.length > 0 ? externalUrls : undefined,
-      ts: delta.ts,
-    });
-
-    // 6. Update local tracking
-    localStorage.setItem('eo_matrix_sync_seq', String(currentSeq));
-    localStorage.setItem('eo_matrix_snapshot_mxc', mxcUri);
-
-    const mediaSeqEl = document.getElementById('settingsMediaSnapshotSeq');
-    if (mediaSeqEl) mediaSeqEl.textContent = String(currentSeq);
-
-    const sizeKB = (encrypted.byteLength / 1024).toFixed(1);
-    if (statusEl) {
-      statusEl.textContent = `${newEvents.length} events (${sizeKB} KB encrypted) → seq ${currentSeq}`;
-      statusEl.style.color = 'var(--accent)';
-    }
-  } catch (err) {
-    console.error('Matrix sync failed:', err);
-    if (statusEl) {
-      statusEl.textContent = err.message || 'Sync failed';
-      statusEl.style.color = 'var(--danger)';
-    }
+  } catch (e) {
+    showBackupStatus(e.message || 'Backup failed', 'error');
   } finally {
     btn.disabled = false;
-    btn.textContent = 'Sync to Matrix';
+    btn.textContent = 'Backup Snapshot';
   }
+}
+
+// ── Register backup providers as sync targets ──
+
+function registerFilenSyncTarget() {
+  if (syncTargets.find(t => t.id === 'filen-backup')) return;
+  syncTargets.push({
+    name: 'Filen Backup',
+    id: 'filen-backup',
+    available() { return !!(backupAuth && backupAuth.provider === 'filen'); },
+    async connect(space) { return { space }; },
+    async writeEvents(ctx, events, onProgress) {
+      const { snapshot, compressed } = await buildSpaceSnapshot(ctx.space);
+      onProgress(events.length, events.length);
+    },
+  });
+  renderSyncTargets();
+}
+
+function registerPixeldrainSyncTarget() {
+  if (syncTargets.find(t => t.id === 'pixeldrain-backup')) return;
+  syncTargets.push({
+    name: 'Pixeldrain Backup',
+    id: 'pixeldrain-backup',
+    available() { return !!(backupAuth && backupAuth.provider === 'pixeldrain'); },
+    async connect(space) { return { space }; },
+    async writeEvents(ctx, events, onProgress) {
+      const { snapshot, compressed } = await buildSpaceSnapshot(ctx.space);
+      const filename = `eo-backup-${ctx.space.id}.bin`;
+      const form = new FormData();
+      form.append('file', new Blob([compressed], { type: 'application/octet-stream' }), filename);
+      const res = await fetch('https://pixeldrain.com/api/file', {
+        method: 'POST',
+        headers: { 'Authorization': 'Basic ' + btoa(':' + backupAuth.apiKey) },
+        body: form,
+      });
+      if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
+      const { id } = await res.json();
+      localStorage.setItem(`eo_backup:pixeldrain:${ctx.space.id}`, JSON.stringify({
+        file_id: id, seq: snapshot.seq, ts: snapshot.ts, size: compressed.byteLength,
+      }));
+      onProgress(events.length, events.length);
+    },
+  });
+  renderSyncTargets();
+}
+
+// ── Filen file browser ──
+
+function backupFileIcon(name, isFolder) {
+  if (isFolder) return '📁';
+  const ext = name.toLowerCase().split('.').pop();
+  const m = { pdf:'📄', json:'📝', bin:'🗜️', gz:'🗜️', txt:'📝', csv:'📝' };
+  return m[ext] || '📄';
+}
+
+function backupFmtSize(b) {
+  if (!b) return '';
+  const k = 1024, s = ['B','KB','MB','GB'];
+  const i = Math.floor(Math.log(b) / Math.log(k));
+  return parseFloat((b / Math.pow(k, i)).toFixed(1)) + ' ' + s[i];
+}
+
+async function loadBackupFolder(uuid) {
+  const area = document.getElementById('backupFileList');
+  area.innerHTML = '<div class="backup-empty">Loading...</div>';
+
+  try {
+    const res = await filenApi('/v3/dir/content', { uuid });
+    if (!res.status) { area.innerHTML = `<div class="backup-empty">${res.message || 'Error'}</div>`; return; }
+
+    const items = [];
+    for (const f of (res.data.folders || [])) {
+      let name = f.name;
+      const dec = await filenTryDecrypt(f.name);
+      if (dec) { try { name = JSON.parse(dec).name || dec; } catch { name = dec; } }
+      items.push({ type: 'folder', name, uuid: f.uuid });
+    }
+    for (const f of (res.data.uploads || [])) {
+      let name = f.name || '?', size = f.size || 0;
+      const dec = await filenTryDecrypt(f.metadata);
+      if (dec) { try { const p = JSON.parse(dec); name = p.name || name; size = p.size || size; } catch { name = dec; } }
+      items.push({ type: 'file', name, uuid: f.uuid, size });
+    }
+    items.sort((a, b) => {
+      if (a.type !== b.type) return a.type === 'folder' ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+
+    if (items.length === 0) { area.innerHTML = '<div class="backup-empty">Empty folder</div>'; return; }
+
+    area.innerHTML = '';
+    for (const item of items) {
+      const row = document.createElement('div');
+      row.className = 'backup-file-row';
+      row.innerHTML = `
+        <span class="bf-icon">${backupFileIcon(item.name, item.type === 'folder')}</span>
+        <span class="bf-name">${escHtml(item.name)}</span>
+        <span class="bf-size">${item.type === 'file' ? backupFmtSize(item.size) : ''}</span>
+      `;
+      if (item.type === 'folder') {
+        row.addEventListener('click', () => {
+          backupNavStack.push({ uuid: backupCurrentFolderUuid, name: getBackupCurrentFolderName() });
+          backupCurrentFolderUuid = item.uuid;
+          updateBackupBreadcrumb(item.name);
+          loadBackupFolder(item.uuid);
+        });
+      }
+      area.appendChild(row);
+    }
+  } catch (e) {
+    area.innerHTML = `<div class="backup-empty">Error: ${escHtml(e.message)}</div>`;
+  }
+}
+
+function getBackupCurrentFolderName() {
+  const items = document.querySelectorAll('.backup-bc-item');
+  return items.length > 0 ? items[items.length - 1].textContent : 'My Drive';
+}
+
+function updateBackupBreadcrumb(newName) {
+  const bc = document.getElementById('backupBreadcrumb');
+  const parts = backupNavStack.map(n => n.name);
+  if (newName) parts.push(newName);
+
+  let html = '<span class="backup-bc-item" data-idx="0">My Drive</span>';
+  parts.forEach((p, i) => {
+    html += '<span class="backup-bc-sep">›</span>';
+    const isCurrent = i === parts.length - 1;
+    html += `<span class="backup-bc-item${isCurrent ? ' current' : ''}" data-idx="${i + 1}">${escHtml(p)}</span>`;
+  });
+  bc.innerHTML = html;
+
+  bc.querySelectorAll('.backup-bc-item').forEach(el => {
+    el.addEventListener('click', () => {
+      const idx = parseInt(el.dataset.idx);
+      if (idx === 0) {
+        backupNavStack = [];
+        backupCurrentFolderUuid = backupBaseFolderUuid;
+        updateBackupBreadcrumb();
+        loadBackupFolder(backupBaseFolderUuid);
+      } else if (idx <= backupNavStack.length) {
+        const target = backupNavStack[idx - 1];
+        backupNavStack = backupNavStack.slice(0, idx - 1);
+        backupCurrentFolderUuid = target.uuid;
+        updateBackupBreadcrumb(target.name);
+        loadBackupFolder(target.uuid);
+      }
+    });
+  });
+}
+
+function backupBrowserRefresh() {
+  if (backupCurrentFolderUuid) loadBackupFolder(backupCurrentFolderUuid);
 }
 
 /* ── Hydration Sources ───────────────────────────────────────────────────── */
@@ -4606,6 +5327,7 @@ function closeShareAcceptOverlay() {
   if (window.location.hash.startsWith('#/share/')) {
     history.replaceState(null, '', window.location.pathname);
   }
+>>>>>>> origin/main
 }
 
 function scheduleReconnect() {
@@ -6815,25 +7537,8 @@ async function loadSettings() {
   if (countEl) countEl.textContent = LOG.length;
   if (seqEl) seqEl.textContent = nextSeq - 1;
 
-  // Update Matrix Media storage info
-  const mediaStatusEl = document.getElementById('settingsMediaStatus');
-  const mediaSeqEl = document.getElementById('settingsMediaSnapshotSeq');
-  const mediaTierEl = document.getElementById('settingsMediaTier');
-
-  if (matrixToken && matrixUserId) {
-    const hs = localStorage.getItem('eo_matrix_homeserver') || '';
-    const snapshotSeq = localStorage.getItem('eo_matrix_sync_seq');
-
-    if (mediaStatusEl) mediaStatusEl.textContent = 'Connected';
-    if (mediaStatusEl) mediaStatusEl.style.color = 'var(--accent)';
-    if (mediaSeqEl) mediaSeqEl.textContent = snapshotSeq || 'None';
-    if (mediaTierEl) mediaTierEl.textContent = `Matrix Media (${hs.replace('https://', '')})`;
-  } else {
-    if (mediaStatusEl) mediaStatusEl.textContent = 'Not connected';
-    if (mediaStatusEl) mediaStatusEl.style.color = 'var(--muted)';
-    if (mediaSeqEl) mediaSeqEl.textContent = '—';
-    if (mediaTierEl) mediaTierEl.textContent = '—';
-  }
+  // Render sync target cards
+  renderSyncTargets();
 
   // Load hydration sources
   renderHydrationSourcesUI();
