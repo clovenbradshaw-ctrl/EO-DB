@@ -3811,10 +3811,17 @@ async function syncTo(target, onStatus) {
   onStatus('Connecting...', 'var(--text-dim)');
   const ctx = await target.connect(space);
 
+  // Use the higher of local sync cursor or remote max seq to avoid duplicates
+  const effectiveSeq = Math.max(lastSyncSeq, ctx.remoteMaxSeq || 0);
+
   onStatus('Reading events...', 'var(--text-dim)');
-  const newEvents = await loadSpaceEventsSince(space.target_prefix, lastSyncSeq);
+  const newEvents = await loadSpaceEventsSince(space.target_prefix, effectiveSeq);
 
   if (newEvents.length === 0) {
+    // Reconcile local cursor with remote state
+    if (ctx.remoteMaxSeq > lastSyncSeq) {
+      localStorage.setItem(syncKey, String(ctx.remoteMaxSeq));
+    }
     onStatus('Up to date', 'var(--accent)');
     return;
   }
@@ -3841,24 +3848,27 @@ const matrixRoomTarget = {
 
   async connect(space) {
     // Check if we already have a room ID cached on this space
-    if (space.matrix_room_id) return { roomId: space.matrix_room_id };
+    if (space.matrix_room_id) {
+      const maxSeq = await this._readRemoteMaxSeq(space.matrix_room_id);
+      return { roomId: space.matrix_room_id, remoteMaxSeq: maxSeq };
+    }
 
     const domain = matrixUserId.split(':').slice(1).join(':');
     const alias = `#eo-db-${space.id}:${domain}`;
 
-    // Try resolving existing alias
-    try {
-      const res = await fetch(
-        `${matrixHomeserver}/_matrix/client/v3/directory/room/${encodeURIComponent(alias)}`,
-        { headers: { 'Authorization': `Bearer ${matrixToken}` } }
-      );
-      if (res.ok) {
-        const { room_id } = await res.json();
-        space.matrix_room_id = room_id;
-        await putSpace(space);
-        return { roomId: room_id };
-      }
-    } catch { /* doesn't exist yet */ }
+    // Try resolving existing alias — 404 is expected for new spaces
+    const aliasRes = await fetch(
+      `${matrixHomeserver}/_matrix/client/v3/directory/room/${encodeURIComponent(alias)}`,
+      { headers: { 'Authorization': `Bearer ${matrixToken}` } }
+    ).catch(() => null);
+
+    if (aliasRes && aliasRes.ok) {
+      const { room_id } = await aliasRes.json();
+      space.matrix_room_id = room_id;
+      await putSpace(space);
+      const maxSeq = await this._readRemoteMaxSeq(room_id);
+      return { roomId: room_id, remoteMaxSeq: maxSeq };
+    }
 
     // Build invite list from space sharing
     const invites = (space.sharing || [])
@@ -3887,32 +3897,184 @@ const matrixRoomTarget = {
     const { room_id } = await res.json();
     space.matrix_room_id = room_id;
     await putSpace(space);
-    return { roomId: room_id };
+    return { roomId: room_id, remoteMaxSeq: 0 };
+  },
+
+  /** Read the highest seq already present in the Matrix room */
+  async _readRemoteMaxSeq(roomId) {
+    try {
+      const url = `${matrixHomeserver}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/messages?dir=b&limit=100&filter=${encodeURIComponent(JSON.stringify({ types: [EO_EVENT_TYPE] }))}`;
+      const res = await fetch(url, {
+        headers: { 'Authorization': `Bearer ${matrixToken}` },
+      });
+      if (!res.ok) return 0;
+      const data = await res.json();
+      let maxSeq = 0;
+      for (const evt of (data.chunk || [])) {
+        const content = evt.content || {};
+        // Handle both single events and batched events
+        if (content.batch) {
+          for (const e of content.batch) {
+            if (e.seq > maxSeq) maxSeq = e.seq;
+          }
+        } else if (content.seq > maxSeq) {
+          maxSeq = content.seq;
+        }
+      }
+      return maxSeq;
+    } catch {
+      return 0;
+    }
   },
 
   async writeEvents(ctx, events, onProgress) {
     let sent = 0;
-    for (const event of events) {
-      const txnId = event.client_event_id || crypto.randomUUID();
-      const url = `${matrixHomeserver}/_matrix/client/v3/rooms/${encodeURIComponent(ctx.roomId)}/send/${encodeURIComponent(EO_EVENT_TYPE)}/${encodeURIComponent(txnId)}`;
-      const res = await fetch(url, {
-        method: 'PUT',
-        headers: { 'Authorization': `Bearer ${matrixToken}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          op: event.op,
-          target: event.target,
-          operand: event.operand,
-          client_event_id: event.client_event_id,
-          ts: event.ts,
-          seq: event.seq,
-        }),
-      });
-      if (!res.ok) throw new Error(`Send failed (${res.status}): ${await res.text()}`);
-      sent++;
+    const mapped = events.map(e => ({
+      op: e.op,
+      target: e.target,
+      operand: e.operand,
+      client_event_id: e.client_event_id,
+      ts: e.ts,
+      seq: e.seq,
+    }));
+
+    // Send events in adaptive batches
+    await matrixSendBatch(ctx.roomId, mapped, (batchSent) => {
+      sent += batchSent;
       onProgress(sent, events.length);
-    }
+    });
   },
 };
+
+// ── Matrix adaptive batch sender with retry queue ──────────────────────
+
+const MATRIX_MAX_PUT_BYTES = 65536; // Matrix default max event size
+const MATRIX_TARGET_RATIO = 0.9;    // aim for 90% of max
+const MATRIX_TARGET_BYTES = Math.floor(MATRIX_MAX_PUT_BYTES * MATRIX_TARGET_RATIO);
+
+const matrixRetryQueue = [];
+let matrixRetryTimer = null;
+
+/**
+ * Send an array of events in adaptively-sized batches.
+ * Measures payload size and splits to stay under 90% of the PUT limit.
+ * On 413 (too large) or 429 (too fast), halves the batch and retries.
+ */
+async function matrixSendBatch(roomId, events, onBatchSent) {
+  let i = 0;
+  let batchSize = events.length; // start optimistic
+
+  while (i < events.length) {
+    const batch = events.slice(i, i + batchSize);
+    const body = { batch };
+    const bodyStr = JSON.stringify(body);
+
+    // Pre-flight size check — split before sending if over target
+    if (bodyStr.length > MATRIX_TARGET_BYTES && batch.length > 1) {
+      batchSize = Math.max(1, Math.floor(batch.length * MATRIX_TARGET_BYTES / bodyStr.length));
+      continue; // re-slice with smaller batch
+    }
+
+    const txnId = batch[0].client_event_id || crypto.randomUUID();
+
+    try {
+      await matrixSendWithRetry(roomId, txnId, body);
+      onBatchSent(batch.length);
+      i += batch.length;
+      // Grow batch size slowly after success (up to remaining)
+      batchSize = Math.min(events.length - i, Math.floor(batchSize * 1.5));
+      if (batchSize < 1) batchSize = 1;
+    } catch (e) {
+      if (e.statusCode === 413 && batch.length > 1) {
+        // Payload too large — halve and retry
+        batchSize = Math.max(1, Math.floor(batch.length / 2));
+        console.warn(`Matrix 413 — reducing batch to ${batchSize}`);
+        continue;
+      }
+      if (e.statusCode === 429 && batch.length > 1) {
+        // Rate limited — halve batch and wait
+        batchSize = Math.max(1, Math.floor(batch.length / 2));
+        const wait = e.retryAfterMs || 2000;
+        console.warn(`Matrix 429 — reducing batch to ${batchSize}, waiting ${wait}ms`);
+        await new Promise(r => setTimeout(r, wait));
+        continue;
+      }
+      throw e;
+    }
+  }
+}
+
+async function matrixSendWithRetry(roomId, txnId, body, attempt = 0) {
+  const MAX_RETRIES = 5;
+  const url = `${matrixHomeserver}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/${encodeURIComponent(EO_EVENT_TYPE)}/${encodeURIComponent(txnId)}`;
+
+  const res = await fetch(url, {
+    method: 'PUT',
+    headers: { 'Authorization': `Bearer ${matrixToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
+  if (res.ok) return;
+
+  const resBody = await res.text();
+  const data = (() => { try { return JSON.parse(resBody); } catch { return {}; } })();
+
+  if (res.status === 413) {
+    const err = new Error(`Payload too large (413)`);
+    err.statusCode = 413;
+    throw err;
+  }
+
+  if (res.status === 429) {
+    const retryAfter = data.retry_after_ms || Math.pow(2, attempt + 1) * 1000;
+
+    if (attempt < MAX_RETRIES) {
+      console.warn(`Matrix 429 — retrying in ${retryAfter}ms (attempt ${attempt + 1}/${MAX_RETRIES})`);
+      await new Promise(r => setTimeout(r, retryAfter));
+      return matrixSendWithRetry(roomId, txnId, body, attempt + 1);
+    }
+
+    // Max retries exceeded — enqueue for background retry
+    console.warn(`Matrix 429 — max retries exceeded, queuing for later`);
+    matrixRetryQueue.push({ roomId, txnId, body });
+    scheduleMatrixRetryFlush();
+
+    const err = new Error(`Rate limited (429)`);
+    err.statusCode = 429;
+    err.retryAfterMs = retryAfter;
+    throw err;
+  }
+
+  throw new Error(`Send failed (${res.status}): ${resBody}`);
+}
+
+function scheduleMatrixRetryFlush() {
+  if (matrixRetryTimer) return;
+  matrixRetryTimer = setTimeout(flushMatrixRetryQueue, 30000);
+}
+
+async function flushMatrixRetryQueue() {
+  matrixRetryTimer = null;
+  if (matrixRetryQueue.length === 0) return;
+
+  console.log(`Flushing ${matrixRetryQueue.length} queued Matrix events...`);
+  const pending = matrixRetryQueue.splice(0);
+  const failed = [];
+
+  for (const item of pending) {
+    try {
+      await matrixSendWithRetry(item.roomId, item.txnId, item.body, 0);
+    } catch (e) {
+      console.warn('Retry queue item failed:', e.message);
+      failed.push(item);
+    }
+  }
+
+  if (failed.length > 0) {
+    matrixRetryQueue.push(...failed);
+    scheduleMatrixRetryFlush();
+  }
+}
 
 // ── Sync target registry ────────────────────────────────────────────────
 
