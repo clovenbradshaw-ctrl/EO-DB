@@ -208,6 +208,8 @@ describe('Fold engine (browser port)', () => {
     const response = await horizonGet(store, 'app.tblClients.rec001');
     const hr = response as any;
 
-    expect(hr.trajectory).toEqual(['INS']);
+    expect(hr.trajectory).toHaveLength(1);
+    expect(hr.trajectory[0].op).toBe('INS');
+    expect(hr.trajectory[0].hash).toMatch(/^[0-9a-f]{64}$/);
   });
 });

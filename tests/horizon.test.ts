@@ -299,7 +299,14 @@ describe('Layer 5: Trajectory', () => {
     const result = await horizonGet(db, 'traj.rec001') as HorizonResponse;
     expect(result.trajectory).toBeDefined();
     // INS → DEF → DEF collapses consecutive DEFs to: INS, DEF
-    expect(result.trajectory).toEqual(['INS', 'DEF']);
+    expect(result.trajectory).toHaveLength(2);
+    expect(result.trajectory![0].op).toBe('INS');
+    expect(result.trajectory![1].op).toBe('DEF');
+    // Each entry carries a 64-char hex hash
+    expect(result.trajectory![0].hash).toMatch(/^[0-9a-f]{64}$/);
+    expect(result.trajectory![1].hash).toMatch(/^[0-9a-f]{64}$/);
+    // Hashes should differ
+    expect(result.trajectory![0].hash).not.toBe(result.trajectory![1].hash);
   });
 
   it('preserves operator variety in trajectory', async () => {
@@ -312,7 +319,12 @@ describe('Layer 5: Trajectory', () => {
 
     const result = await horizonGet(db, 'traj2.rec001') as HorizonResponse;
     // INS, DEF, CON, DEF, SEG
-    expect(result.trajectory).toEqual(['INS', 'DEF', 'CON', 'DEF', 'SEG']);
+    const ops = result.trajectory!.map(e => e.op);
+    expect(ops).toEqual(['INS', 'DEF', 'CON', 'DEF', 'SEG']);
+    // All entries have valid hashes
+    for (const entry of result.trajectory!) {
+      expect(entry.hash).toMatch(/^[0-9a-f]{64}$/);
+    }
   });
 
   it('empty trajectory for unknown target', async () => {

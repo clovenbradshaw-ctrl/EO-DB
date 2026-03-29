@@ -5,8 +5,9 @@ import { resolveAlias } from './helpers';
 import { readLogForTarget } from './log';
 import type {
   EoState, EvaRegistration, HorizonResponse, GroundEntry, SignalEntry,
-  NearbyEntry, GovernanceEntry, LoggableOperator, AncestryEntry,
+  NearbyEntry, GovernanceEntry, LoggableOperator, AncestryEntry, TrajectoryEntry,
 } from './types';
+import { seedHash, chainHash } from './hash';
 
 export interface HorizonOpts {
   prefix?: boolean;
@@ -315,17 +316,26 @@ async function getGovernance(store: EoStore, target: string): Promise<Governance
 
 // --- Layer 5: Trajectory ---
 
-async function getTrajectory(store: EoStore, target: string): Promise<LoggableOperator[]> {
+async function getTrajectory(store: EoStore, target: string): Promise<TrajectoryEntry[]> {
   const events = await readLogForTarget(store, target);
   if (events.length === 0) return [];
 
-  const trajectory: LoggableOperator[] = [];
+  const trajectory: TrajectoryEntry[] = [];
   let lastOp: LoggableOperator | null = null;
+  let runningHash = '';
 
   for (const event of events) {
+    // Compute running hash — seed on first event, chain thereafter
+    runningHash = runningHash === ''
+      ? await seedHash(event)
+      : await chainHash(runningHash, event);
+
     if (event.op !== lastOp) {
-      trajectory.push(event.op);
+      trajectory.push({ op: event.op, hash: runningHash });
       lastOp = event.op;
+    } else {
+      // Update the hash on the compressed entry to reflect the latest event
+      trajectory[trajectory.length - 1].hash = runningHash;
     }
   }
 

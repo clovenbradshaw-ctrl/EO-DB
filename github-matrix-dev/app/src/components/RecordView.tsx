@@ -78,7 +78,7 @@ export function RecordView({ target, onNavigate }: RecordViewProps) {
       {/* Layer 5: Trajectory */}
       {data.trajectory && data.trajectory.length > 0 && (
         <Section title="Trajectory" subtitle="where this record has been" color="#7a756d">
-          <Trajectory ops={data.trajectory} />
+          <Trajectory entries={data.trajectory} />
         </Section>
       )}
 
