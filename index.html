@@ -1625,6 +1625,16 @@ body {
           </div>
         </div>
 
+        <!-- Matrix Media Storage -->
+        <div class="settings-section">
+          <div class="settings-section-title">Matrix Media Storage</div>
+          <div id="settingsMedia">
+            <div class="settings-session-field"><span class="settings-session-key">Status</span><span class="settings-session-val" id="settingsMediaStatus">—</span></div>
+            <div class="settings-session-field"><span class="settings-session-key">Last Snapshot Seq</span><span class="settings-session-val" id="settingsMediaSnapshotSeq">—</span></div>
+            <div class="settings-session-field"><span class="settings-session-key">Storage Tier</span><span class="settings-session-val" id="settingsMediaTier">—</span></div>
+          </div>
+        </div>
+
         <!-- Danger Zone -->
         <div class="settings-section">
           <div class="settings-section-title" style="color:var(--danger);">Danger Zone</div>
@@ -3053,6 +3063,26 @@ async function loadSettings() {
   const seqEl = document.getElementById('settingsCurrentSeq');
   if (countEl) countEl.textContent = LOG.length;
   if (seqEl) seqEl.textContent = nextSeq - 1;
+
+  // Update Matrix Media storage info
+  const mediaStatusEl = document.getElementById('settingsMediaStatus');
+  const mediaSeqEl = document.getElementById('settingsMediaSnapshotSeq');
+  const mediaTierEl = document.getElementById('settingsMediaTier');
+
+  if (matrixToken && matrixUserId) {
+    const hs = localStorage.getItem('eo_matrix_homeserver') || '';
+    const snapshotSeq = localStorage.getItem('eo_media_snapshot_seq');
+
+    if (mediaStatusEl) mediaStatusEl.textContent = 'Connected';
+    if (mediaStatusEl) mediaStatusEl.style.color = 'var(--accent)';
+    if (mediaSeqEl) mediaSeqEl.textContent = snapshotSeq || 'None';
+    if (mediaTierEl) mediaTierEl.textContent = `Matrix Media (${hs.replace('https://', '')})`;
+  } else {
+    if (mediaStatusEl) mediaStatusEl.textContent = 'Not connected';
+    if (mediaStatusEl) mediaStatusEl.style.color = 'var(--muted)';
+    if (mediaSeqEl) mediaSeqEl.textContent = '—';
+    if (mediaTierEl) mediaTierEl.textContent = '—';
+  }
 }
 
 // ── Init ──
