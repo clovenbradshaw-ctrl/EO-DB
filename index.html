@@ -5476,7 +5476,7 @@ async function atSync(label, mode) {
 
     for (const base of basesRes.bases) {
       // Register base as DEF
-      await appendEvent({ op: 'DEF', target: `at.${base.id}`, operand: { name: base.name, _airtable: { type: 'space', space_id: space.id } }, agent: matrixUserId || 'local', client_event_id: `at-base:${base.id}` });
+      await appendEvent({ op: 'DEF', target: `at.${base.id}`, operand: { name: base.name, _airtable: { type: 'base', base_id: base.id } }, agent: matrixUserId || 'local', client_event_id: `at-base:${base.id}` });
 
       const schema = await atRequest(`${AT_META}/bases/${base.id}/tables`, token);
 
@@ -5486,7 +5486,7 @@ async function atSync(label, mode) {
 
         // Register table with schema
         const fields = table.fields.map(f => ({ id: f.id, name: f.name, type: f.type }));
-        await appendEvent({ op: 'DEF', target: `at.${base.id}.${table.id}`, operand: { name: table.name, fields, _airtable: { type: 'table', space_id: space.id, table_id: table.id } }, agent: matrixUserId || 'local', client_event_id: `at-table:${base.id}:${table.id}` });
+        await appendEvent({ op: 'DEF', target: `at.${base.id}.${table.id}`, operand: { name: table.name, fields, _airtable: { type: 'table', base_id: base.id, table_id: table.id } }, agent: matrixUserId || 'local', client_event_id: `at-table:${base.id}:${table.id}` });
 
         atSetStatus(label, 'syncing', `Syncing ${table.name}...`);
 
