@@ -1006,6 +1006,114 @@ describe('REC Configuration', () => {
   });
 });
 
+// --- Critical REC (Phase Transition) Tests ---
+
+describe('Critical REC', () => {
+  it('fires critical REC when a new formula bridges two separate components', async () => {
+    // Component 1: A↔B (separate cycle)
+    await processEvent(db, ev({ target: 'cr.A', operand: { val: 1 } }));
+    await processEvent(db, ev({ target: 'cr.B', operand: { val: 2 } }));
+    await processEvent(db, ev({
+      op: 'DEF', target: 'cr.A',
+      operand: { formula: 'F(B)', references: ['cr.B'] },
+    }));
+    await processEvent(db, ev({
+      op: 'DEF', target: 'cr.B',
+      operand: { formula: 'G(A)', references: ['cr.A'] },
+    }));
+
+    // Component 2: C↔D (separate cycle)
+    await processEvent(db, ev({ target: 'cr.C', operand: { val: 3 } }));
+    await processEvent(db, ev({ target: 'cr.D', operand: { val: 4 } }));
+    await processEvent(db, ev({
+      op: 'DEF', target: 'cr.C',
+      operand: { formula: 'H(D)', references: ['cr.D'] },
+    }));
+    await processEvent(db, ev({
+      op: 'DEF', target: 'cr.D',
+      operand: { formula: 'J(C)', references: ['cr.C'] },
+    }));
+
+    // Bridge: redefine B to also reference C — merges the two components
+    const bridgeSeq = await processEvent(db, ev({
+      op: 'DEF', target: 'cr.B',
+      operand: { formula: 'G(A, C)', references: ['cr.A', 'cr.C'] },
+    }));
+
+    // Should produce a critical REC
+    const allEvents = await readLogSince(db, 0);
+    const recEvents = allEvents.filter(e => e.op === 'REC');
+    const criticalRecs = recEvents.filter(e => e.operand?.critical === true);
+    expect(criticalRecs.length).toBeGreaterThanOrEqual(1);
+
+    const crit = criticalRecs[criticalRecs.length - 1];
+    expect(crit.agent).toBe('system');
+    expect(crit.operand.component_size).toBeGreaterThanOrEqual(4); // A, B, C, D
+
+    // The pivot should have _rec with critical: true
+    const pivotState = await getState(db, 'cr.B');
+    expect(pivotState?.value?._rec?.critical).toBe(true);
+    expect(pivotState?.value?._rec?.result?.iterations).toBe(1); // single pass — snap
+  });
+
+  it('critical REC produces derived entity with topology "critical"', async () => {
+    // Two separate single-formula targets (no pre-existing cycles to cascade)
+    await processEvent(db, ev({ target: 'ct.X', operand: { val: 10 } }));
+    await processEvent(db, ev({ target: 'ct.Y', operand: { val: 20 } }));
+    await processEvent(db, ev({ target: 'ct.Z', operand: { val: 30 } }));
+
+    // Component 1: X references Y
+    await processEvent(db, ev({
+      op: 'DEF', target: 'ct.X',
+      operand: { formula: 'F(Y)', references: ['ct.Y'] },
+    }));
+
+    // Component 2: Z references nothing yet — it's isolated
+    await processEvent(db, ev({
+      op: 'DEF', target: 'ct.Z',
+      operand: { formula: 'H()', references: [] },
+    }));
+
+    // Now Y gets a formula referencing both X and Z — bridges components
+    await processEvent(db, ev({
+      op: 'DEF', target: 'ct.Y',
+      operand: { formula: 'G(X, Z)', references: ['ct.X', 'ct.Z'] },
+    }));
+
+    // Find the derived entity with critical topology
+    const allEvents = await readLogSince(db, 0);
+    const sysIns = allEvents.filter(e => e.op === 'INS' && e.agent === 'system');
+    const criticalIns = sysIns.filter(e => e.operand?.topology === 'critical');
+    expect(criticalIns.length).toBeGreaterThanOrEqual(1);
+
+    const derived = criticalIns[criticalIns.length - 1];
+    expect(derived.operand.topology).toBe('critical');
+    expect(derived.operand.constituents.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('iterative REC still fires for simple cycles (no component merge)', async () => {
+    // Simple A↔B cycle — no merge, should be iterative
+    await processEvent(db, ev({ target: 'iter.A', operand: { val: 1 } }));
+    await processEvent(db, ev({ target: 'iter.B', operand: { val: 2 } }));
+    await processEvent(db, ev({
+      op: 'DEF', target: 'iter.A',
+      operand: { formula: 'F(B)', references: ['iter.B'] },
+    }));
+    await processEvent(db, ev({
+      op: 'DEF', target: 'iter.B',
+      operand: { formula: 'G(A)', references: ['iter.A'] },
+    }));
+
+    const allEvents = await readLogSince(db, 0);
+    const recEvents = allEvents.filter(e => e.op === 'REC');
+    expect(recEvents.length).toBeGreaterThanOrEqual(1);
+
+    // Should NOT be critical — it's a simple cycle, not a merge
+    const criticalRecs = recEvents.filter(e => e.operand?.critical === true);
+    expect(criticalRecs).toHaveLength(0);
+  });
+});
+
 describe('Full Fixture Sequence', () => {
   it('processes all 10 fixture events correctly (REC no longer externally submitted)', async () => {
     const fixtures: EoEventInput[] = [
