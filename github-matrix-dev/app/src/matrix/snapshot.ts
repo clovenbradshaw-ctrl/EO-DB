@@ -1,54 +1,79 @@
 /**
- * Snapshot — create, upload, download, and apply database snapshots.
+ * Snapshot — append-only chunked snapshot system.
  *
- * Snapshots are hydration accelerators stored as encrypted binary blobs
- * in the Matrix media store. The room event history is the source of truth.
+ * Every update is persisted to the Matrix media store as a NUL snapshot chunk.
+ * Chunks are small deltas (state changes since last chunk), not full state dumps.
+ * The media store acts as a shared append-only sync log across users.
+ *
+ * - NUL = snapshot chunk (captures delta of what changed)
+ * - NUL + SEG = limited_snapshot chunk (scoped to a segment boundary)
+ *
+ * Hydration = download all chunks in seq order from all users, apply each.
+ * Healing = discover chunks from other users on the same server, fill gaps.
  */
 
 import { pack, unpack } from 'msgpackr';
-import type { MatrixClient } from 'matrix-js-sdk';
+import type { MatrixClient, MatrixEvent } from 'matrix-js-sdk';
 import type { EoStore } from '../db/encrypted-store';
 import type { EoState, GraphEdge, EvaRegistration, NulSnapshotKind } from '../db/types';
 import { EO_SNAPSHOT_TYPE } from './event-bridge';
 
-interface Snapshot {
+/** A single snapshot chunk — a delta of changes since the last chunk. */
+export interface SnapshotChunk {
   version: 1;
   kind: NulSnapshotKind;
-  seq: number;
+  seq_start: number;          // first seq in this chunk (exclusive — changes after this)
+  seq_end: number;            // last seq in this chunk (inclusive)
   ts: string;
   created_by: string;
   state: Record<string, EoState>;
   graph_fwd: Record<string, GraphEdge>;
   graph_rev: Record<string, GraphEdge>;
   eva: Record<string, EvaRegistration>;
-  seg?: string;               // present when kind is 'limited_snapshot' — the SEG boundary
+  seg?: string;               // present when kind is 'limited_snapshot'
+}
+
+/** Pointer to a chunk stored in Matrix media. */
+export interface ChunkRef {
+  mxc: string;
+  kind: NulSnapshotKind;
+  seq_start: number;
+  seq_end: number;
+  created_by: string;
+  ts: string;
+  seg?: string;
 }
 
 /**
- * Create a snapshot from current store state.
+ * Create a snapshot chunk from changes since the last persisted chunk.
  *
- * NUL is a snapshot. If a SEG boundary is provided, the snapshot is limited
- * to targets within that segment — making it a 'limited_snapshot'.
- * Without a SEG, it captures full state — a plain 'snapshot'.
+ * Reads all state/graph/eva entries whose last_seq > sinceSeq.
+ * If seg is provided, scopes to that segment boundary (limited_snapshot).
  */
-export async function createSnapshot(
+export async function createChunk(
   store: EoStore,
   myUserId: string,
+  sinceSeq: number,
   seg?: string,
-): Promise<Snapshot> {
+): Promise<SnapshotChunk | null> {
+  const currentSeq = await store.getCurrentSeq();
+  if (currentSeq <= sinceSeq) return null; // nothing new
+
   const state: Record<string, EoState> = {};
   const stateEntries = await store.iterator('state:');
   for (const [key, value] of stateEntries) {
+    const entry = value as EoState;
+    if (entry.last_seq <= sinceSeq) continue;
     const target = key.slice(6); // remove 'state:'
-    // If SEG boundary is set, only include targets within that segment
     if (seg && !target.startsWith(seg)) continue;
-    state[target] = value as EoState;
+    state[target] = entry;
   }
 
   const graph_fwd: Record<string, GraphEdge> = {};
   const fwdEntries = await store.iterator('graph:fwd:');
   for (const [key, value] of fwdEntries) {
     const edge = value as GraphEdge;
+    if (edge.seq <= sinceSeq) continue;
     if (seg && !edge.source.startsWith(seg) && !edge.dest.startsWith(seg)) continue;
     graph_fwd[key] = edge;
   }
@@ -57,6 +82,7 @@ export async function createSnapshot(
   const revEntries = await store.iterator('graph:rev:');
   for (const [key, value] of revEntries) {
     const edge = value as GraphEdge;
+    if (edge.seq <= sinceSeq) continue;
     if (seg && !edge.source.startsWith(seg) && !edge.dest.startsWith(seg)) continue;
     graph_rev[key] = edge;
   }
@@ -66,16 +92,17 @@ export async function createSnapshot(
   for (const [key, value] of evaEntries) {
     const target = key.slice(4); // remove 'eva:'
     if (seg && !target.startsWith(seg)) continue;
+    // EVA registrations don't have seq — include all when in range
     eva[target] = value as EvaRegistration;
   }
 
-  const seq = await store.getCurrentSeq();
-  const kind = seg ? 'limited_snapshot' : 'snapshot';
+  const kind: NulSnapshotKind = seg ? 'limited_snapshot' : 'snapshot';
 
   return {
     version: 1,
     kind,
-    seq,
+    seq_start: sinceSeq,
+    seq_end: currentSeq,
     ts: new Date().toISOString(),
     created_by: myUserId,
     state,
@@ -87,17 +114,17 @@ export async function createSnapshot(
 }
 
 /**
- * Serialize and upload a snapshot to the Matrix media store.
+ * Upload a chunk to Matrix media and post a room reference event.
  */
-export async function uploadSnapshot(
+export async function uploadChunk(
   client: MatrixClient,
   roomId: string,
-  snapshot: Snapshot,
+  chunk: SnapshotChunk,
 ): Promise<string> {
-  const binary = pack(snapshot);
+  const binary = pack(chunk);
 
   const uploadResult = await client.uploadContent(new Blob([binary]), {
-    name: `eo-snapshot-${snapshot.seq}.bin`,
+    name: `eo-chunk-${chunk.seq_start}-${chunk.seq_end}.bin`,
     type: 'application/octet-stream',
   });
 
@@ -105,47 +132,58 @@ export async function uploadSnapshot(
 
   await client.sendEvent(roomId, EO_SNAPSHOT_TYPE as any, {
     mxc: mxcUrl,
-    kind: snapshot.kind,
-    seq: snapshot.seq,
-    ts: snapshot.ts,
+    kind: chunk.kind,
+    seq_start: chunk.seq_start,
+    seq_end: chunk.seq_end,
+    ts: chunk.ts,
+    created_by: chunk.created_by,
     size_bytes: binary.byteLength,
-    version: snapshot.version,
-    ...(snapshot.seg ? { seg: snapshot.seg } : {}),
+    version: chunk.version,
+    ...(chunk.seg ? { seg: chunk.seg } : {}),
   });
 
   return mxcUrl;
 }
 
 /**
- * Find the latest snapshot reference in the room timeline.
- * Paginates backwards through the timeline to find snapshot pointer events,
- * which is necessary on a fresh device where the SDK has minimal history.
+ * Collect all chunk references from the room timeline, from all users.
+ * Returns them sorted by seq_start ascending for ordered replay.
  */
-export async function findLatestSnapshot(
+export async function collectChunkRefs(
   client: MatrixClient,
   roomId: string,
-): Promise<{ mxc: string; seq: number } | null> {
+  sinceSeq?: number,
+): Promise<ChunkRef[]> {
   const room = client.getRoom(roomId);
-  if (!room) return null;
+  if (!room) return [];
 
-  // Paginate backwards to find snapshot events (they may not be in the
-  // initial sync window since they're only posted every 1000 events)
   const timeline = room.getLiveTimeline();
-  let canPaginate = true;
-  let latest: { mxc: string; seq: number } | null = null;
+  const refs: ChunkRef[] = [];
 
-  // Check current timeline first
-  for (const event of timeline.getEvents()) {
-    if (event.getType() === EO_SNAPSHOT_TYPE) {
+  const extractRefs = (events: MatrixEvent[]) => {
+    for (const event of events) {
+      if (event.getType() !== EO_SNAPSHOT_TYPE) continue;
       const content = event.getContent();
-      if (!latest || content.seq > latest.seq) {
-        latest = { mxc: content.mxc, seq: content.seq };
-      }
+      // Skip chunks we already have
+      if (sinceSeq != null && content.seq_end <= sinceSeq) continue;
+      refs.push({
+        mxc: content.mxc,
+        kind: content.kind || 'snapshot',
+        seq_start: content.seq_start ?? 0,
+        seq_end: content.seq_end ?? content.seq ?? 0,
+        created_by: content.created_by || event.getSender()!,
+        ts: content.ts,
+        seg: content.seg,
+      });
     }
-  }
+  };
 
-  // If we already found one, great. Otherwise paginate backwards to find it.
-  while (!latest && canPaginate) {
+  // Scan current timeline
+  extractRefs(timeline.getEvents());
+
+  // Paginate backwards to find all chunks
+  let canPaginate = true;
+  while (canPaginate) {
     try {
       canPaginate = await client.paginateEventTimeline(timeline, {
         backwards: true,
@@ -154,24 +192,25 @@ export async function findLatestSnapshot(
     } catch {
       break;
     }
-
-    for (const event of timeline.getEvents()) {
-      if (event.getType() === EO_SNAPSHOT_TYPE) {
-        const content = event.getContent();
-        if (!latest || content.seq > latest.seq) {
-          latest = { mxc: content.mxc, seq: content.seq };
-        }
-      }
-    }
+    extractRefs(timeline.getEvents());
   }
 
-  return latest;
+  // Deduplicate by mxc URL and sort by seq range
+  const seen = new Set<string>();
+  const unique = refs.filter(r => {
+    if (seen.has(r.mxc)) return false;
+    seen.add(r.mxc);
+    return true;
+  });
+
+  return unique.sort((a, b) => a.seq_start - b.seq_start);
 }
 
 /**
- * Download and apply a snapshot to the store.
+ * Download and apply a single chunk to the store.
+ * Merges the chunk's delta state into the local store.
  */
-export async function applySnapshot(
+export async function applyChunk(
   client: MatrixClient,
   store: EoStore,
   mxcUrl: string,
@@ -181,44 +220,112 @@ export async function applySnapshot(
 
   const response = await fetch(httpUrl);
   const buffer = await response.arrayBuffer();
-  const snapshot: Snapshot = unpack(new Uint8Array(buffer));
+  const chunk: SnapshotChunk = unpack(new Uint8Array(buffer));
 
-  // Load state
-  for (const [target, state] of Object.entries(snapshot.state)) {
-    await store.put(`state:${target}`, state);
+  // Apply state deltas — newer seq wins
+  for (const [target, state] of Object.entries(chunk.state)) {
+    const existing = await store.get(`state:${target}`) as EoState | null;
+    if (!existing || state.last_seq > existing.last_seq) {
+      await store.put(`state:${target}`, state);
+    }
   }
 
-  // Load graph
-  for (const [key, edge] of Object.entries(snapshot.graph_fwd)) {
-    await store.put(key, edge);
+  // Apply graph deltas
+  for (const [key, edge] of Object.entries(chunk.graph_fwd)) {
+    const existing = await store.get(key) as GraphEdge | null;
+    if (!existing || edge.seq > existing.seq) {
+      await store.put(key, edge);
+    }
   }
-  for (const [key, edge] of Object.entries(snapshot.graph_rev)) {
-    await store.put(key, edge);
+  for (const [key, edge] of Object.entries(chunk.graph_rev)) {
+    const existing = await store.get(key) as GraphEdge | null;
+    if (!existing || edge.seq > existing.seq) {
+      await store.put(key, edge);
+    }
   }
 
-  // Load EVA registrations
-  for (const [target, reg] of Object.entries(snapshot.eva)) {
+  // Apply EVA registrations
+  for (const [target, reg] of Object.entries(chunk.eva)) {
     await store.put(`eva:${target}`, reg);
   }
 
-  return snapshot.seq;
+  return chunk.seq_end;
 }
 
 /**
- * Auto-snapshot: create every 1000 events.
+ * Hydrate from all available chunks — used on fresh device or for healing.
+ * Downloads and applies chunks from all users in seq order.
  */
-export async function maybeCreateSnapshot(
+export async function hydrateFromChunks(
+  client: MatrixClient,
+  store: EoStore,
+  roomId: string,
+): Promise<number> {
+  const localSeq = await store.getCurrentSeq();
+  const refs = await collectChunkRefs(client, roomId, localSeq);
+
+  let highestSeq = localSeq;
+  for (const ref of refs) {
+    const chunkSeq = await applyChunk(client, store, ref.mxc);
+    if (chunkSeq > highestSeq) highestSeq = chunkSeq;
+  }
+
+  if (highestSeq > localSeq) {
+    await store.put('meta:chunk_seq', highestSeq);
+  }
+
+  return highestSeq;
+}
+
+/**
+ * Append a chunk after local writes — called after every processEvent.
+ * Creates and uploads a delta chunk of everything since the last persisted chunk.
+ */
+export async function appendChunk(
   client: MatrixClient,
   roomId: string,
   store: EoStore,
   myUserId: string,
+  seg?: string,
 ): Promise<void> {
-  const lastSeq = await store.getCurrentSeq();
-  const lastSnapshotSeq = (await store.get('meta:snapshot_seq')) || 0;
+  const lastChunkSeq = ((await store.get('meta:chunk_seq')) as number) || 0;
+  const chunk = await createChunk(store, myUserId, lastChunkSeq, seg);
+  if (!chunk) return;
 
-  if (lastSeq - lastSnapshotSeq >= 1000) {
-    const snapshot = await createSnapshot(store, myUserId);
-    await uploadSnapshot(client, roomId, snapshot);
-    await store.put('meta:snapshot_seq', lastSeq);
-  }
+  await uploadChunk(client, roomId, chunk);
+  await store.put('meta:chunk_seq', chunk.seq_end);
 }
+
+// --- Backward compatibility ---
+
+/** @deprecated Use createChunk + uploadChunk instead. */
+export const createSnapshot = async (
+  store: EoStore,
+  myUserId: string,
+  seg?: string,
+) => createChunk(store, myUserId, 0, seg);
+
+/** @deprecated Use uploadChunk instead. */
+export const uploadSnapshot = uploadChunk;
+
+/** @deprecated Use hydrateFromChunks instead. */
+export async function findLatestSnapshot(
+  client: MatrixClient,
+  roomId: string,
+): Promise<{ mxc: string; seq: number } | null> {
+  const refs = await collectChunkRefs(client, roomId);
+  if (refs.length === 0) return null;
+  const last = refs[refs.length - 1];
+  return { mxc: last.mxc, seq: last.seq_end };
+}
+
+/** @deprecated Use applyChunk instead. */
+export const applySnapshot = applyChunk;
+
+/** @deprecated Use appendChunk instead. */
+export const maybeCreateSnapshot = async (
+  client: MatrixClient,
+  roomId: string,
+  store: EoStore,
+  myUserId: string,
+) => appendChunk(client, roomId, store, myUserId);

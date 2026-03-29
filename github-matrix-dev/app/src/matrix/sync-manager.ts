@@ -1,9 +1,14 @@
 /**
- * Sync manager — orchestrates snapshot persistence, offline queue, and deduplication.
+ * Sync manager — orchestrates chunked snapshot persistence, offline queue,
+ * multi-user sync, and deduplication.
  *
- * Data is persisted as encrypted binary snapshots in Matrix media.
- * On a fresh device, the latest snapshot is downloaded and applied.
- * Snapshots are auto-saved every 1000 events and on explicit saveSnapshot() calls.
+ * Local writes go to IndexedDB (encrypted) immediately, then append a NUL
+ * snapshot chunk to the Matrix media store. Other users on the same server
+ * pull chunks to sync and heal gaps.
+ *
+ * Data flow:
+ *   local write → IndexedDB (instant) → media store chunk (append)
+ *   remote sync → pull chunks from all users → apply deltas to IndexedDB
  */
 
 import type { MatrixClient, MatrixEvent } from 'matrix-js-sdk';
@@ -11,7 +16,7 @@ import type { EoStore } from '../db/encrypted-store';
 import type { EoEventInput } from '../db/types';
 import { processEvent } from '../db/fold';
 import { EO_EVENT_TYPE, matrixEventToEo, sendEoEvent } from './event-bridge';
-import { findLatestSnapshot, applySnapshot, maybeCreateSnapshot, createSnapshot, uploadSnapshot } from './snapshot';
+import { appendChunk, hydrateFromChunks } from './snapshot';
 
 export class SyncManager {
   private client: MatrixClient;
@@ -34,16 +39,12 @@ export class SyncManager {
   /**
    * Initialize sync — call after login and store setup.
    *
-   * On a fresh device (seq === 0), hydrates from the latest snapshot stored
-   * in Matrix media. This is the primary data recovery path.
+   * On a fresh device (or any device with gaps), hydrates by pulling all
+   * chunks from all users in the room and applying them in seq order.
    */
   async initialize(): Promise<void> {
-    const currentSeq = await this.store.getCurrentSeq();
-
-    // On a fresh device, restore from the latest Matrix media snapshot
-    if (currentSeq === 0) {
-      await this.hydrateFromSnapshot();
-    }
+    // Hydrate from all available chunks (from all users)
+    await hydrateFromChunks(this.client, this.store, this.roomId);
 
     // Listen for new room events in real-time
     this.client.on('Room.timeline' as any, (event: MatrixEvent) => {
@@ -57,32 +58,29 @@ export class SyncManager {
   }
 
   /**
-   * Hydrate the local store from the latest snapshot in Matrix media.
-   */
-  private async hydrateFromSnapshot(): Promise<void> {
-    const snap = await findLatestSnapshot(this.client, this.roomId);
-    if (!snap) return;
-    const restoredSeq = await applySnapshot(this.client, this.store, snap.mxc);
-    await this.store.put('meta:snapshot_seq', restoredSeq);
-  }
-
-  /**
-   * Force-save a snapshot to Matrix media right now.
-   * Called on beforeunload / logout so data is always persisted.
+   * Force-save a snapshot chunk to Matrix media right now.
+   * Called on beforeunload / logout so unsaved changes are persisted.
    */
   async saveSnapshot(): Promise<void> {
     const seq = await this.store.getCurrentSeq();
-    if (seq === 0) return; // nothing to snapshot
-    const snapshot = await createSnapshot(this.store, this.client.getUserId()!);
-    await uploadSnapshot(this.client, this.roomId, snapshot);
-    await this.store.put('meta:snapshot_seq', seq);
+    if (seq === 0) return;
+    await appendChunk(this.client, this.roomId, this.store, this.client.getUserId()!);
+  }
+
+  /**
+   * Pull chunks from other users to heal any gaps.
+   * Call periodically or when a new user comes online.
+   */
+  async heal(): Promise<number> {
+    return hydrateFromChunks(this.client, this.store, this.roomId);
   }
 
   /**
    * Process a locally created event.
    * 1. Generate client_event_id
-   * 2. Fold immediately (instant UI update)
-   * 3. Send to Matrix room async (may fail if offline)
+   * 2. Fold immediately (instant UI update in IndexedDB)
+   * 3. Append chunk to media store (persist for sync)
+   * 4. Send to Matrix room async (real-time broadcast)
    */
   async processLocalEvent(
     event: Omit<EoEventInput, 'client_event_id' | 'agent' | 'ts'>,
@@ -95,10 +93,17 @@ export class SyncManager {
       ts: new Date().toISOString(),
     };
 
-    // Fold immediately
+    // Fold immediately into local IndexedDB
     const seq = await processEvent(this.store, localEvent, this.onEvent);
 
-    // Send to room (best-effort)
+    // Append chunk to media store for other users to sync
+    try {
+      await appendChunk(this.client, this.roomId, this.store, this.client.getUserId()!);
+    } catch {
+      // Offline — chunk will be appended on next successful write or saveSnapshot
+    }
+
+    // Send to room for real-time broadcast (best-effort)
     try {
       await sendEoEvent(this.client, this.roomId, localEvent);
     } catch {
@@ -107,9 +112,6 @@ export class SyncManager {
       queue.push(localEvent);
       await this.store.put('meta:offline_queue', queue);
     }
-
-    // Auto-snapshot to Matrix media every 1000 events
-    await maybeCreateSnapshot(this.client, this.roomId, this.store, this.client.getUserId()!);
 
     return seq;
   }
@@ -147,5 +149,14 @@ export class SyncManager {
     }
 
     await this.store.put('meta:offline_queue', remaining);
+
+    // If we flushed events, append a chunk to persist what was queued
+    if (remaining.length < queue.length) {
+      try {
+        await appendChunk(this.client, this.roomId, this.store, this.client.getUserId()!);
+      } catch {
+        // will be caught on next sync cycle
+      }
+    }
   }
 }
