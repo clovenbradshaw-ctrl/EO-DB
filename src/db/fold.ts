@@ -2,11 +2,37 @@ import { EoDb, encode, decode, nextSeq } from './level.js';
 import { appendToLog } from './log.js';
 import { getState, setState } from './state.js';
 import { addEdge, removeEdge, getEdgesFrom, getEdgesTo } from './graph.js';
+import { addDepEdge, clearDepEdgesFrom, getDepEdgesFrom, getDepEdgesTo, getConnectedComponent } from './dep-graph.js';
 import { resolveAlias, checkExists } from './helpers.js';
 import type { EoEvent, EoEventInput, EoState, EvaRegistration, RecResult, ExternalOperator, DerivedEntity } from './types.js';
 import { isEncryptedOperand } from './crypto-types.js';
 import type { Feed } from './feed.js';
 import { seedHash, chainHash } from './hash.js';
+
+/** Configuration for REC loop runner. */
+export interface RecConfig {
+  /** Maximum iterations before bailout. Safety net for genuinely non-converging cases. Default 100. */
+  maxIterations: number;
+  /** Floating-point tolerance for convergence. "Close enough" threshold. Default 1e-9. */
+  convergenceTolerance: number;
+}
+
+const DEFAULT_REC_CONFIG: RecConfig = {
+  maxIterations: 100,
+  convergenceTolerance: 1e-9,
+};
+
+let recConfig: RecConfig = { ...DEFAULT_REC_CONFIG };
+
+/** Set REC configuration. Partial updates merged with defaults. */
+export function setRecConfig(config: Partial<RecConfig>): void {
+  recConfig = { ...DEFAULT_REC_CONFIG, ...config };
+}
+
+/** Get current REC configuration. */
+export function getRecConfig(): RecConfig {
+  return { ...recConfig };
+}
 
 /**
  * Process a single EO event through the fold.
@@ -287,7 +313,11 @@ async function handleDEF(db: EoDb, event: EoEvent): Promise<void> {
 
   // Check if operand is a formula definition
   if (isFormulaOperand(event.operand)) {
-    await registerEvaActive(db, target, event.operand);
+    const result = await registerEvaActive(db, target, event.operand);
+    // Stash merge info on the event for detectAndEmitREC to pick up
+    if (result.mergedComponent) {
+      (event as any)._mergedComponent = result.mergedComponent;
+    }
   }
 }
 
@@ -318,12 +348,10 @@ async function handleEVA(db: EoDb, event: EoEvent): Promise<void> {
 // Three outcomes: convergence (state stops changing), oscillation (state cycles between configurations),
 // or max-iteration bailout (safety valve — should not occur with finite state spaces).
 
-const DEFAULT_MAX_ITERATIONS = 100;
-
 async function handleREC(db: EoDb, event: EoEvent): Promise<void> {
   const subOps = event.operand?.contains || [];
   const pivot = event.operand?.pivot || null;
-  const maxIterations = event.operand?.max_iterations || DEFAULT_MAX_ITERATIONS;
+  const maxIterations = event.operand?.max_iterations || recConfig.maxIterations;
 
   // Collect all targets the loop body touches, plus the pivot if specified
   const watchedTargets = new Set<string>();
@@ -446,9 +474,14 @@ function stripEphemeral(val: any): any {
 
 /**
  * Detect dependency cycles involving the changed target.
- * If a cycle exists (all members have fold-mode EVA registrations),
- * run the fixed-point iteration and emit a system-generated REC event.
- * On convergence, produce an INS at the next level (INS2+).
+ *
+ * Two modes:
+ * - Iterative REC: a single cycle is found, formulas are run repeatedly until convergence.
+ * - Critical REC: a new dep edge merged previously separate connected components.
+ *   The entire merged component is evaluated as one unit in a single pass. Phase transition.
+ *
+ * Critical REC fires when registerEvaActive detected a component merge.
+ * Iterative REC fires when a cycle exists but no merge happened.
  */
 async function detectAndEmitREC(
   db: EoDb,
@@ -456,6 +489,13 @@ async function detectAndEmitREC(
   triggeringEvent: EoEvent,
   feed?: Feed,
 ): Promise<void> {
+  // Check for critical REC first — component merge takes precedence
+  const mergedComponent: Set<string> | undefined = (triggeringEvent as any)._mergedComponent;
+  if (mergedComponent && mergedComponent.size > 1) {
+    await emitCriticalREC(db, changedTarget, mergedComponent, triggeringEvent, feed);
+    return;
+  }
+
   const cycleTargets = await findRecomputationCycle(db, changedTarget);
   if (!cycleTargets || cycleTargets.length === 0) return;
 
@@ -510,7 +550,7 @@ async function detectAndEmitREC(
   let converged = false;
   let cycleLength = 0;
 
-  while (iterations < DEFAULT_MAX_ITERATIONS) {
+  while (iterations < recConfig.maxIterations) {
     // Run one pass: re-evaluate all formulas in the cycle
     for (const reg of registrations) {
       await evaluateFormula(db, reg);
@@ -519,10 +559,11 @@ async function detectAndEmitREC(
     iterations++;
     const currentSnap = await snapshot();
 
-    // Check against all previous snapshots for convergence or oscillation
+    // Check against all previous snapshots for convergence or oscillation.
+    // Uses nearEqual: floating-point values within tolerance count as converged.
     let matched = -1;
     for (let i = 0; i < history.length; i++) {
-      if (deepEqual(currentSnap, history[i])) {
+      if (nearEqual(currentSnap, history[i])) {
         matched = i;
         break;
       }
@@ -683,6 +724,191 @@ async function detectAndEmitREC(
 }
 
 /**
+ * Critical REC: a phase transition.
+ * Two or more previously separate connected components just merged into one.
+ * Instead of running each sub-cycle iteratively, the entire merged component
+ * is evaluated as a single unit in one pass. The reorganization is structural —
+ * iteration count is 1. The system isn't computing a fixed point. It's recognizing
+ * that a new configuration exists.
+ */
+async function emitCriticalREC(
+  db: EoDb,
+  changedTarget: string,
+  component: Set<string>,
+  triggeringEvent: EoEvent,
+  feed?: Feed,
+): Promise<void> {
+  // Collect all fold-mode EVA registrations in the merged component
+  const registrations: EvaRegistration[] = [];
+  const componentTargets = Array.from(component);
+
+  for (const target of componentTargets) {
+    try {
+      const buf = await db.get(`eva:${target}`);
+      const reg = decode(buf) as EvaRegistration;
+      if (reg && reg.mode === 'fold') {
+        registrations.push(reg);
+      }
+    } catch (e: any) {
+      if (e.code !== 'LEVEL_NOT_FOUND') throw e;
+    }
+  }
+
+  // Need at least 2 formula targets to constitute a critical mass
+  if (registrations.length < 2) return;
+
+  // Single pass: evaluate all formulas in the merged component simultaneously
+  for (const reg of registrations) {
+    await evaluateFormula(db, reg);
+  }
+
+  // Snapshot the result — this is what the reorganization produced
+  const stableState: Record<string, any> = {};
+  for (const target of componentTargets) {
+    const state = await getState(db, target);
+    stableState[target] = stripEphemeral(state?.value ?? null);
+  }
+
+  const result: RecResult = {
+    converged: true,
+    iterations: 1,
+    stable_state: stableState,
+  };
+
+  // Determine derived level
+  let maxLevel = 1;
+  for (const target of componentTargets) {
+    const state = await getState(db, target);
+    if (state && state.level > maxLevel) maxLevel = state.level;
+  }
+  const derivedLevel = maxLevel + 1;
+
+  // Build the contains array
+  const containsOps = registrations.map(reg => ({
+    op: 'DEF' as const,
+    target: reg.target,
+    operand: reg.formula,
+  }));
+
+  // Produce the REC event
+  const recSeq = await nextSeq(db);
+  const now = new Date().toISOString();
+  const recEvent: EoEvent = {
+    seq: recSeq,
+    op: 'REC',
+    target: changedTarget,
+    operand: {
+      contains: containsOps,
+      pivot: changedTarget,
+      critical: true,
+      component_size: componentTargets.length,
+    },
+    agent: 'system',
+    ts: now,
+    acquired_ts: now,
+    triggered_by: triggeringEvent.seq,
+  };
+
+  await appendToLog(db, recEvent);
+
+  // Store REC result on the pivot target
+  const existingPivot = await getState(db, changedTarget);
+  await setState(db, {
+    target: changedTarget,
+    value: {
+      ...existingPivot?.value,
+      _rec: {
+        recursion: true,
+        critical: true,
+        pivot: changedTarget,
+        sub_ops: registrations.length,
+        component_size: componentTargets.length,
+        triggered_by: triggeringEvent.seq,
+        result,
+      },
+    },
+    hash: existingPivot ? chainHash(existingPivot.hash, recEvent) : seedHash(recEvent),
+    level: existingPivot?.level ?? 1,
+    ...stateFromEvent(recEvent, 'REC'),
+  });
+
+  if (feed) feed.notify(recEvent);
+
+  // --- INS at next level for the merged component ---
+  const sortedConstituents = componentTargets.sort();
+  const derivedTargetId = derivedEntityTarget(sortedConstituents);
+
+  const existingDerived = await getState(db, derivedTargetId);
+
+  const derivedOperand = {
+    constituents: sortedConstituents,
+    topology: 'critical',
+    result,
+  };
+
+  if (existingDerived) {
+    const updateSeq = await nextSeq(db);
+    const updateEvent: EoEvent = {
+      seq: updateSeq,
+      op: 'DEF',
+      target: derivedTargetId,
+      operand: derivedOperand,
+      agent: 'system',
+      ts: now,
+      acquired_ts: now,
+      triggered_by: triggeringEvent.seq,
+    };
+    await appendToLog(db, updateEvent);
+    await setState(db, {
+      target: derivedTargetId,
+      value: derivedOperand,
+      hash: chainHash(existingDerived.hash, updateEvent),
+      level: existingDerived.level,
+      ...stateFromEvent(updateEvent, 'DEF'),
+    });
+    if (feed) feed.notify(updateEvent);
+  } else {
+    const insSeq = await nextSeq(db);
+    const insEvent: EoEvent = {
+      seq: insSeq,
+      op: 'INS',
+      target: derivedTargetId,
+      operand: derivedOperand,
+      agent: 'system',
+      level: derivedLevel,
+      ts: now,
+      acquired_ts: now,
+      triggered_by: triggeringEvent.seq,
+    };
+    await appendToLog(db, insEvent);
+    await setState(db, {
+      target: derivedTargetId,
+      value: derivedOperand,
+      hash: seedHash(insEvent),
+      level: derivedLevel,
+      ...stateFromEvent(insEvent, 'INS'),
+    });
+
+    const derived: DerivedEntity = {
+      target: derivedTargetId,
+      level: derivedLevel,
+      constituents: sortedConstituents,
+      topology: 'critical',
+      inert: false,
+    };
+    await db.put(`derived:${derivedTargetId}`, encode(derived));
+
+    for (const constituent of sortedConstituents) {
+      await addReverseDep(db, constituent, derivedTargetId);
+    }
+
+    if (feed) feed.notify(insEvent);
+  }
+
+  await cascadeUpward(db, derivedTargetId, triggeringEvent, feed);
+}
+
+/**
  * Generate a deterministic target path for a derived entity from its constituents.
  * The identity of a derived entity is its dependency cycle, not its result.
  */
@@ -798,8 +1024,10 @@ async function cascadeUpward(
 
 /**
  * Find a dependency cycle involving the start target.
- * Follows the recomputation chain: getEdgesTo finds targets that depend on current,
- * checks if they have fold-mode EVA registrations, and continues the traversal.
+ * Standard DFS with visited set. Walks the dependency graph (dep:rev edges)
+ * forward from the changed target. If the walk returns to the starting target,
+ * there's a cycle. Terminates in time proportional to reachable edges.
+ * No depth limit needed — visited set prevents revisiting nodes.
  * Returns the list of cycle member targets, or null if no cycle exists.
  */
 async function findRecomputationCycle(db: EoDb, startTarget: string): Promise<string[] | null> {
@@ -807,7 +1035,8 @@ async function findRecomputationCycle(db: EoDb, startTarget: string): Promise<st
   const path: string[] = [];
 
   async function dfs(current: string): Promise<string[] | null> {
-    const reverseEdges = await getEdgesTo(db, current);
+    // Use dep graph (computational dependencies), not CON graph (entity relationships)
+    const reverseEdges = await getDepEdgesTo(db, current);
     for (const edge of reverseEdges) {
       const source = edge.source;
 
@@ -848,7 +1077,8 @@ async function recomputeDependents(db: EoDb, changedTarget: string, visited: Set
   if (visited.has(changedTarget)) return; // cycle guard — prevents infinite recursion
   visited.add(changedTarget);
 
-  const reverseEdges = await getEdgesTo(db, changedTarget);
+  // Use dep graph: "who has a formula that references changedTarget?"
+  const reverseEdges = await getDepEdgesTo(db, changedTarget);
 
   for (const edge of reverseEdges) {
     let registration: EvaRegistration | null = null;
@@ -922,9 +1152,27 @@ function isFormulaOperand(operand: any): boolean {
   return operand && typeof operand === 'object' && 'formula' in operand;
 }
 
-async function registerEvaActive(db: EoDb, target: string, operand: any): Promise<void> {
-  const edges = await getEdgesFrom(db, target);
-  const dependencies = edges.map(e => e.dest);
+/**
+ * Result of EVA registration — tracks whether adding this formula's
+ * dep edges caused previously separate connected components to merge.
+ */
+interface EvaRegistrationResult {
+  registration: EvaRegistration;
+  /** If the new edges bridged separate components, the merged component. Null otherwise. */
+  mergedComponent: Set<string> | null;
+}
+
+async function registerEvaActive(db: EoDb, target: string, operand: any): Promise<EvaRegistrationResult> {
+  // Extract dependencies from the formula operand.
+  // Formula operands declare references explicitly: { formula: '...', references: ['target.A', 'target.B'] }
+  // If no explicit references, fall back to CON graph edges (backward compat).
+  let dependencies: string[];
+  if (Array.isArray(operand.references) && operand.references.length > 0) {
+    dependencies = operand.references;
+  } else {
+    const edges = await getEdgesFrom(db, target);
+    dependencies = edges.map(e => e.dest);
+  }
 
   const mode = formulaReferencesExternal(operand.formula) ? 'horizon' : 'fold';
 
@@ -937,9 +1185,47 @@ async function registerEvaActive(db: EoDb, target: string, operand: any): Promis
 
   await db.put(`eva:${target}`, encode(registration));
 
+  // --- Component merge detection (the snap) ---
+  // Before adding new edges, snapshot which components exist.
+  // A component merge = phase transition.
+  let mergedComponent: Set<string> | null = null;
+
+  if (mode === 'fold' && dependencies.length > 0) {
+    // Get the component that `target` currently belongs to (before new edges)
+    const sourceComponent = await getConnectedComponent(db, target);
+
+    // Check: will any of the new dependencies bridge to a different component?
+    const destComponents: Set<string>[] = [];
+    for (const dep of dependencies) {
+      if (!sourceComponent.has(dep)) {
+        // This dep is in a different component — the edge will bridge them
+        destComponents.push(await getConnectedComponent(db, dep));
+      }
+    }
+
+    // Clear old and add new dep edges
+    await clearDepEdgesFrom(db, target);
+    for (const dep of dependencies) {
+      await addDepEdge(db, { source: target, dest: dep });
+    }
+
+    // If we bridged components, compute the merged result
+    if (destComponents.length > 0) {
+      mergedComponent = await getConnectedComponent(db, target);
+    }
+  } else {
+    // Non-fold or no dependencies — just update edges, no merge detection
+    await clearDepEdgesFrom(db, target);
+    for (const dep of dependencies) {
+      await addDepEdge(db, { source: target, dest: dep });
+    }
+  }
+
   if (mode === 'fold') {
     await evaluateFormula(db, registration);
   }
+
+  return { registration, mergedComponent };
 }
 
 function formulaReferencesExternal(formula: any): boolean {
@@ -953,6 +1239,7 @@ function formulaReferencesExternal(formula: any): boolean {
 
 /**
  * Deep equality check for no-op detection.
+ * Strict equality — no floating-point tolerance.
  */
 function deepEqual(a: any, b: any): boolean {
   if (a === b) return true;
@@ -973,6 +1260,39 @@ function deepEqual(a: any, b: any): boolean {
 }
 
 /**
+ * Near-equality check for convergence detection.
+ * Numbers within recConfig.convergenceTolerance count as equal.
+ * Two values that are close enough should count as converged, not oscillating.
+ */
+function nearEqual(a: any, b: any): boolean {
+  if (a === b) return true;
+  if (a == null || b == null) return false;
+  if (typeof a !== typeof b) return false;
+
+  // Floating-point tolerance for numbers
+  if (typeof a === 'number' && typeof b === 'number') {
+    if (Number.isNaN(a) && Number.isNaN(b)) return true;
+    const diff = Math.abs(a - b);
+    // Absolute tolerance for values near zero, relative tolerance otherwise
+    const scale = Math.max(1, Math.abs(a), Math.abs(b));
+    return diff <= recConfig.convergenceTolerance * scale;
+  }
+
+  if (typeof a !== 'object') return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+
+  if (Array.isArray(a)) {
+    if (a.length !== b.length) return false;
+    return a.every((val: any, i: number) => nearEqual(val, b[i]));
+  }
+
+  const keysA = Object.keys(a);
+  const keysB = Object.keys(b);
+  if (keysA.length !== keysB.length) return false;
+  return keysA.every(key => nearEqual(a[key], b[key]));
+}
+
+/**
  * Check if an event would be a no-op (state already matches).
  * Returns the existing last_seq if no change, null otherwise.
  */
@@ -987,4 +1307,4 @@ async function checkNoOp(db: EoDb, event: EoEventInput): Promise<number | null> 
   return null;
 }
 
-export { mergeOperand, isFormulaOperand, deepEqual };
+export { mergeOperand, isFormulaOperand, deepEqual, nearEqual };
