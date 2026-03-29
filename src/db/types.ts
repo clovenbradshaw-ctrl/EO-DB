@@ -83,6 +83,12 @@ export type EoEventInput = Omit<EoEvent, 'seq'>;
 // --- Horizon: The File Cabinet ---
 // Six layers: Figure, Ground, Nearby, Governance, Trajectory (cheap), Signals (expensive/on-demand)
 
+// A single entry in the trajectory timeline, pairing an operator with its running hash
+export interface TrajectoryEntry {
+  op: LoggableOperator;
+  hash: string;                              // running transformation hash after this event
+}
+
 export interface HorizonResponse {
   target: string;
   figure: EoState | null;                   // what this target IS
@@ -90,7 +96,7 @@ export interface HorizonResponse {
   grounds: GroundEntry[];                    // ambient conditions pervading this region
   nearby?: NearbyEntry[];                    // similar records in the same collection
   governance?: GovernanceEntry[];            // EVA policies that govern this target
-  trajectory?: LoggableOperator[];           // compact operator history shape
+  trajectory?: TrajectoryEntry[];            // compact operator history with running hashes
   signals?: SignalEntry[];                   // statistical patterns (on-demand, expensive)
 }
 

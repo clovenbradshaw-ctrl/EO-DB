@@ -26,6 +26,7 @@ export interface EoEvent {
 export interface EoState {
   target: string;
   value: any;
+  hash?: string;                  // transformation hash — fingerprint of the fold history
   level: number;                  // 1 = human-authored (INS1), 2+ = system-discovered (INS2+)
   last_seq: number;
   last_op: Operator;
@@ -81,6 +82,12 @@ export type EoEventInput = Omit<EoEvent, 'seq'>;
 
 // --- Horizon: The File Cabinet ---
 
+// A single entry in the trajectory timeline, pairing an operator with its running hash
+export interface TrajectoryEntry {
+  op: LoggableOperator;
+  hash: string;                   // running transformation hash after this event
+}
+
 export interface HorizonResponse {
   target: string;
   figure: EoState | null;
@@ -88,7 +95,7 @@ export interface HorizonResponse {
   grounds: GroundEntry[];
   nearby?: NearbyEntry[];
   governance?: GovernanceEntry[];
-  trajectory?: LoggableOperator[];
+  trajectory?: TrajectoryEntry[];
   signals?: SignalEntry[];
 }
 

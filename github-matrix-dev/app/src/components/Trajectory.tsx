@@ -1,4 +1,4 @@
-import type { LoggableOperator, EoEvent } from '../db/types';
+import type { LoggableOperator, EoEvent, TrajectoryEntry } from '../db/types';
 import { useTheme, type Theme } from '../theme';
 
 // REC is system-generated — distinct style: dashed border, "SYS" label
@@ -7,20 +7,25 @@ const REC_SYSTEM_STYLE: React.CSSProperties = {
 };
 
 interface TrajectoryProps {
-  ops: LoggableOperator[];
+  entries: TrajectoryEntry[];
   events?: EoEvent[];  // optional: full events for agent-aware rendering
 }
 
-export function Trajectory({ ops, events }: TrajectoryProps) {
+/** Truncate a hex hash to a short prefix for display. */
+function shortHash(hash: string): string {
+  return hash.slice(0, 7);
+}
+
+export function Trajectory({ entries, events }: TrajectoryProps) {
   const { theme } = useTheme();
   const s = makeStyles(theme);
   const opColors = makeOpColors(theme);
 
   return (
     <div style={s.row}>
-      {ops.map((op, i) => {
-        const c = opColors[op] || opColors.DEF;
-        const isSystemREC = op === 'REC' && (!events || events[i]?.agent === 'system');
+      {entries.map((entry, i) => {
+        const c = opColors[entry.op] || opColors.DEF;
+        const isSystemREC = entry.op === 'REC' && (!events || events[i]?.agent === 'system');
         return (
           <div key={i} style={s.nodeWrap}>
             {i > 0 && <div style={s.connector} />}
@@ -34,16 +39,22 @@ export function Trajectory({ ops, events }: TrajectoryProps) {
                   ...(isSystemREC ? REC_SYSTEM_STYLE : {}),
                 }}
                 title={isSystemREC
-                  ? `System-discovered cycle (triggered by event #${events?.[i]?.triggered_by ?? '?'})`
-                  : op}
+                  ? `System-discovered cycle (triggered by event #${events?.[i]?.triggered_by ?? '?'})\n${entry.hash}`
+                  : `${entry.op}\n${entry.hash}`}
               >
-                {op}
+                {entry.op}
+              </div>
+              <div style={{
+                ...s.hashLabel,
+                color: c.color,
+              }}>
+                {shortHash(entry.hash)}
               </div>
               <div style={{
                 ...s.label,
                 ...(isSystemREC ? { color: theme.warning, fontWeight: 600 } : {}),
               }}>
-                {isSystemREC ? 'SYS' : op}
+                {isSystemREC ? 'SYS' : entry.op}
               </div>
             </div>
           </div>
@@ -84,11 +95,18 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       fontWeight: 600,
       border: '2px solid',
     },
+    hashLabel: {
+      fontFamily: "'JetBrains Mono', monospace",
+      fontSize: 8,
+      marginTop: 3,
+      opacity: 0.7,
+      whiteSpace: 'nowrap' as const,
+    },
     label: {
       fontFamily: "'JetBrains Mono', monospace",
       fontSize: 8,
       color: t.textMuted,
-      marginTop: 4,
+      marginTop: 1,
       whiteSpace: 'nowrap' as const,
     },
   };

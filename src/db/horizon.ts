@@ -5,8 +5,9 @@ import { resolveAlias } from './helpers.js';
 import { readLogForTarget } from './log.js';
 import type {
   EoState, EvaRegistration, HorizonResponse, GroundEntry, SignalEntry,
-  NearbyEntry, GovernanceEntry, LoggableOperator, AncestryEntry,
+  NearbyEntry, GovernanceEntry, LoggableOperator, AncestryEntry, TrajectoryEntry,
 } from './types.js';
+import { seedHash, chainHash } from './hash.js';
 import { isEncryptedOperand } from './crypto-types.js';
 import type { LocalKeyring } from './crypto-types.js';
 import { decryptOperand, getKeyById } from '../crypto/segment-keys.js';
@@ -372,20 +373,30 @@ async function getGovernance(db: EoDb, target: string): Promise<GovernanceEntry[
 // Compact operator history: the shape of this record's journey.
 // Cheap: filter log for this target, extract op sequence, collapse consecutive same-ops.
 
-async function getTrajectory(db: EoDb, target: string): Promise<LoggableOperator[]> {
+async function getTrajectory(db: EoDb, target: string): Promise<TrajectoryEntry[]> {
   const events = await readLogForTarget(db, target);
   if (events.length === 0) return [];
 
-  // Extract operator sequence, collapse consecutive duplicates
-  const trajectory: LoggableOperator[] = [];
+  // Extract operator sequence with running hashes, collapse consecutive duplicates
+  const trajectory: TrajectoryEntry[] = [];
   let lastOp: LoggableOperator | null = null;
+  let runningHash = '';
 
   for (const event of events) {
     // NUL is observation-only — exclude from horizon trajectory
     if (event.op === 'NUL') continue;
+
+    // Compute running hash — seed on first event, chain thereafter
+    runningHash = runningHash === ''
+      ? seedHash(event)
+      : chainHash(runningHash, event);
+
     if (event.op !== lastOp) {
-      trajectory.push(event.op);
+      trajectory.push({ op: event.op, hash: runningHash });
       lastOp = event.op;
+    } else {
+      // Update the hash on the compressed entry to reflect the latest event
+      trajectory[trajectory.length - 1].hash = runningHash;
     }
   }
 
