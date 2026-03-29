@@ -2274,6 +2274,65 @@ body {
   font-size: 10px;
 }
 
+/* ── Backup admin controls ── */
+.backup-room-config {
+  display: none;
+  margin-top: 10px;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.backup-room-config.active { display: block; }
+.backup-room-config-title {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-faint);
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.backup-room-config-title .admin-badge {
+  background: rgba(251,191,36,0.15);
+  color: #fbbf24;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+}
+.backup-room-config-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.backup-room-config-actions button {
+  padding: 6px 12px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.backup-room-config-actions button:hover { border-color: var(--accent); color: var(--accent); }
+.backup-room-config-actions button:disabled { opacity: 0.4; cursor: not-allowed; }
+.backup-room-config-actions button.danger { border-color: rgba(239,68,68,0.3); color: var(--danger); }
+.backup-room-config-actions button.danger:hover { background: rgba(239,68,68,0.1); }
+.backup-room-config-info {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  color: var(--text-dim);
+  margin-top: 6px;
+}
+
 /* ── Responsive ── */
 @media (max-width: 900px) {
   .detail-drawer { width: 300px; }
@@ -2864,6 +2923,19 @@ INS,app.tbl.rec1,"{""name"":""Alice""}"</pre>
               <button class="settings-add-btn" id="backupSnapshotBtn" onclick="backupSnapshot()" style="display:none;">Backup Snapshot</button>
             </div>
 
+            <!-- Room config (admin only) -->
+            <div class="backup-room-config" id="backupRoomConfig">
+              <div class="backup-room-config-title">
+                Room Backup Config <span class="admin-badge">ADMIN</span>
+              </div>
+              <div class="backup-room-config-actions">
+                <button id="backupSaveToRoomBtn" onclick="saveBackupConfigToRoom()">Save to Room</button>
+                <button id="backupLoadFromRoomBtn" onclick="loadBackupConfigFromRoom()">Load from Room</button>
+                <button id="backupClearFromRoomBtn" class="danger" onclick="clearBackupConfigFromRoom()">Remove from Room</button>
+              </div>
+              <div class="backup-room-config-info" id="backupRoomConfigInfo"></div>
+            </div>
+
             <!-- File browser (Filen only) -->
             <div class="backup-file-browser" id="backupFileBrowser">
               <div class="backup-browser-toolbar">
@@ -3134,6 +3206,8 @@ async function selectNulspace(id, e) {
   localStorage.setItem('eo-active-nulspace', id);
   document.getElementById('nulspaceDropdown').classList.remove('open');
   await updateNulspaceLabel();
+  // Re-check admin status and room backup config for new space
+  if (typeof checkBackupAdminAndAutoLoad === 'function') checkBackupAdminAndAutoLoad();
 }
 
 async function updateNulspaceLabel() {
@@ -3890,11 +3964,26 @@ const matrixRoomTarget = {
         visibility: 'private',
         preset: 'private_chat',
         invite: invites,
-        initial_state: [{
-          type: 'm.room.encryption',
-          state_key: '',
-          content: { algorithm: 'm.megolm.v1.aes-sha2' },
-        }],
+        initial_state: [
+          {
+            type: 'm.room.encryption',
+            state_key: '',
+            content: { algorithm: 'm.megolm.v1.aes-sha2' },
+          },
+          {
+            type: 'm.room.power_levels',
+            state_key: '',
+            content: {
+              events_default: 0,
+              state_default: 50,
+              invite: 50,
+              events: {
+                'com.eo-db.backup_config': 50,  // only admins can write backup config
+              },
+              users: { [matrixUserId]: 100 },
+            },
+          },
+        ],
       }),
     });
     if (!res.ok) throw new Error(`Failed to create room: ${await res.text()}`);
@@ -4545,6 +4634,8 @@ function showBackupConnected(label) {
   document.querySelectorAll('.backup-fields').forEach(f => f.classList.remove('active'));
   document.getElementById('backupConnectBtn').style.display = 'none';
   document.querySelector('.backup-provider-tabs').style.display = 'none';
+  // Show admin panel if applicable
+  if (typeof checkBackupAdminAndAutoLoad === 'function') checkBackupAdminAndAutoLoad();
 }
 
 function disconnectBackup() {
@@ -4998,6 +5089,364 @@ async function tryAutoReconnectFilen() {
   } catch (e) {
     console.warn('[filen] auto-reconnect failed:', e);
     backupAuth = null; backupMasterKeys = [];
+  }
+}
+
+// ── Matrix Room Backup Config (admin-only) ────────────────────────────────
+//
+// Stores Filen backup credentials as a Matrix room state event so that all
+// admin clients can auto-connect to the same Filen account for backups.
+//
+// State event type: com.eo-db.backup_config (state_key: '')
+// Requires power level 50 (admin) to write — enforced server-side.
+// Credentials are AES-GCM encrypted with a key derived from the room ID,
+// so they aren't stored as plaintext in the Matrix homeserver DB.
+// Only users with admin power level see the config in the UI.
+
+const BACKUP_CONFIG_EVENT = 'com.eo-db.backup_config';
+const BACKUP_CONFIG_ADMIN_PL = 50;
+
+/**
+ * Check the current user's power level in a Matrix room.
+ * Returns the numeric power level (0 = default member, 50 = moderator, 100 = admin).
+ */
+async function getMyPowerLevel(roomId) {
+  if (!matrixToken || !matrixUserId || !roomId) return 0;
+  try {
+    const url = `${matrixHomeserver}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/m.room.power_levels/`;
+    const res = await fetch(url, { headers: { 'Authorization': `Bearer ${matrixToken}` } });
+    if (!res.ok) return 0;
+    const pl = await res.json();
+    // Check user-specific level first, then fall back to users_default
+    if (pl.users && pl.users[matrixUserId] !== undefined) return pl.users[matrixUserId];
+    return pl.users_default ?? 0;
+  } catch { return 0; }
+}
+
+/**
+ * Derive an AES-GCM key from the room ID for encrypting backup config.
+ * All room members with the code can derive this — the power level check
+ * is the real access gate (server-side for writes, client-side for reads).
+ */
+async function deriveBackupConfigKey(roomId) {
+  const enc = new TextEncoder();
+  const material = await crypto.subtle.importKey('raw', enc.encode(roomId), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt: enc.encode('com.eo-db.backup_config.v1'), iterations: 100000, hash: 'SHA-256' },
+    material,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt']
+  );
+}
+
+/** Encrypt a JSON-serializable object for storage in room state. */
+async function encryptBackupConfig(roomId, config) {
+  const key = await deriveBackupConfigKey(roomId);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const plaintext = new TextEncoder().encode(JSON.stringify(config));
+  const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, plaintext);
+  return {
+    v: 1,
+    iv: btoa(String.fromCharCode(...iv)),
+    data: btoa(String.fromCharCode(...new Uint8Array(ciphertext))),
+  };
+}
+
+/** Decrypt a backup config from room state. */
+async function decryptBackupConfig(roomId, encrypted) {
+  if (!encrypted || encrypted.v !== 1) return null;
+  try {
+    const key = await deriveBackupConfigKey(roomId);
+    const iv = Uint8Array.from(atob(encrypted.iv), c => c.charCodeAt(0));
+    const data = Uint8Array.from(atob(encrypted.data), c => c.charCodeAt(0));
+    const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, data);
+    return JSON.parse(new TextDecoder().decode(plaintext));
+  } catch { return null; }
+}
+
+/**
+ * Get the Matrix room ID for the active space (needed for state events).
+ */
+async function getActiveSpaceRoomId() {
+  if (!activeNulspaceId) return null;
+  const space = await getSpaceById(activeNulspaceId);
+  if (!space) return null;
+  if (space.matrix_room_id) return space.matrix_room_id;
+  // Try to resolve the room alias
+  const domain = matrixUserId?.split(':').slice(1).join(':');
+  if (!domain) return null;
+  const alias = `#eo-db-${space.id}:${domain}`;
+  try {
+    const res = await fetch(
+      `${matrixHomeserver}/_matrix/client/v3/directory/room/${encodeURIComponent(alias)}`,
+      { headers: { 'Authorization': `Bearer ${matrixToken}` } }
+    );
+    if (res.ok) {
+      const { room_id } = await res.json();
+      space.matrix_room_id = room_id;
+      await putSpace(space);
+      return room_id;
+    }
+  } catch { /* room doesn't exist yet */ }
+  return null;
+}
+
+/**
+ * Ensure the room's power_levels require PL 50 for backup_config events.
+ * Needed for rooms created before this feature existed.
+ */
+async function ensureBackupConfigPowerLevel(roomId) {
+  try {
+    const url = `${matrixHomeserver}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/m.room.power_levels/`;
+    const res = await fetch(url, { headers: { 'Authorization': `Bearer ${matrixToken}` } });
+    if (!res.ok) return;
+    const pl = await res.json();
+    if (pl.events && pl.events[BACKUP_CONFIG_EVENT] !== undefined) return; // already set
+    const updated = { ...pl, events: { ...(pl.events || {}), [BACKUP_CONFIG_EVENT]: BACKUP_CONFIG_ADMIN_PL } };
+    await fetch(url, {
+      method: 'PUT',
+      headers: { 'Authorization': `Bearer ${matrixToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(updated),
+    });
+  } catch { /* best effort — works without it since state_default is 50 */ }
+}
+
+/**
+ * Save current Filen backup credentials to the Matrix room state.
+ * Only callable by admins (PL >= 50). Server enforces the PL check.
+ */
+async function saveBackupConfigToRoom() {
+  const infoEl = document.getElementById('backupRoomConfigInfo');
+  const btn = document.getElementById('backupSaveToRoomBtn');
+  if (!backupAuth || backupAuth.provider !== 'filen') {
+    infoEl.textContent = 'Connect to Filen first';
+    infoEl.style.color = 'var(--danger)';
+    return;
+  }
+
+  const roomId = await getActiveSpaceRoomId();
+  if (!roomId) {
+    infoEl.textContent = 'No Matrix room — sync the space first';
+    infoEl.style.color = 'var(--danger)';
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = 'Saving...';
+  infoEl.textContent = '';
+
+  try {
+    // Ensure power level requirement is set for this event type
+    await ensureBackupConfigPowerLevel(roomId);
+
+    const config = {
+      provider: 'filen',
+      email: backupAuth.email,
+      apiKey: backupAuth.apiKey,
+      masterKey: backupMasterKeys[0],
+      baseFolderUuid: backupBaseFolderUuid,
+      savedBy: matrixUserId,
+      savedAt: new Date().toISOString(),
+    };
+    const encrypted = await encryptBackupConfig(roomId, config);
+    const url = `${matrixHomeserver}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/${encodeURIComponent(BACKUP_CONFIG_EVENT)}/`;
+    const res = await fetch(url, {
+      method: 'PUT',
+      headers: { 'Authorization': `Bearer ${matrixToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(encrypted),
+    });
+    if (!res.ok) {
+      const errText = await res.text();
+      if (res.status === 403) throw new Error('Insufficient power level — admin required');
+      throw new Error(errText);
+    }
+    infoEl.textContent = `Saved to room by ${matrixUserId}`;
+    infoEl.style.color = '#22c55e';
+  } catch (e) {
+    infoEl.textContent = e.message;
+    infoEl.style.color = 'var(--danger)';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Save to Room';
+  }
+}
+
+/**
+ * Load Filen backup credentials from Matrix room state and auto-connect.
+ */
+async function loadBackupConfigFromRoom() {
+  const infoEl = document.getElementById('backupRoomConfigInfo');
+  const btn = document.getElementById('backupLoadFromRoomBtn');
+
+  const roomId = await getActiveSpaceRoomId();
+  if (!roomId) {
+    infoEl.textContent = 'No Matrix room — sync the space first';
+    infoEl.style.color = 'var(--danger)';
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = 'Loading...';
+  infoEl.textContent = '';
+
+  try {
+    const config = await fetchAndDecryptBackupConfig(roomId);
+    if (!config) {
+      infoEl.textContent = 'No backup config found in room';
+      infoEl.style.color = 'var(--text-dim)';
+      return;
+    }
+
+    // Apply the credentials
+    backupAuth = { apiKey: config.apiKey, email: config.email, provider: 'filen' };
+    backupMasterKeys = [config.masterKey];
+    backupBaseFolderUuid = config.baseFolderUuid || '';
+
+    // Verify and get current base folder
+    const check = await filenApi('/v3/user/baseFolder', {});
+    if (!check.status) throw new Error('Filen credentials from room are expired');
+    backupBaseFolderUuid = check.data.uuid;
+    backupCurrentFolderUuid = backupBaseFolderUuid;
+
+    // Also save locally for offline access
+    saveFilenCredentials(config.email, config.apiKey, config.masterKey, backupBaseFolderUuid);
+
+    showBackupConnected(`Filen · ${config.email}`);
+    registerFilenSyncTarget();
+    document.getElementById('backupFileBrowser').classList.add('active');
+    backupNavStack = [];
+    updateBackupBreadcrumb();
+    loadBackupFolder(backupCurrentFolderUuid);
+
+    infoEl.textContent = `Loaded config (saved by ${config.savedBy || 'unknown'})`;
+    infoEl.style.color = '#22c55e';
+  } catch (e) {
+    infoEl.textContent = e.message;
+    infoEl.style.color = 'var(--danger)';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Load from Room';
+  }
+}
+
+/** Fetch and decrypt backup config from a room's state. */
+async function fetchAndDecryptBackupConfig(roomId) {
+  const url = `${matrixHomeserver}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/${encodeURIComponent(BACKUP_CONFIG_EVENT)}/`;
+  const res = await fetch(url, { headers: { 'Authorization': `Bearer ${matrixToken}` } });
+  if (!res.ok) return null;
+  const encrypted = await res.json();
+  return decryptBackupConfig(roomId, encrypted);
+}
+
+/**
+ * Remove backup config from the Matrix room (set empty state).
+ */
+async function clearBackupConfigFromRoom() {
+  const infoEl = document.getElementById('backupRoomConfigInfo');
+  const btn = document.getElementById('backupClearFromRoomBtn');
+
+  const roomId = await getActiveSpaceRoomId();
+  if (!roomId) {
+    infoEl.textContent = 'No Matrix room';
+    infoEl.style.color = 'var(--danger)';
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = 'Removing...';
+
+  try {
+    const url = `${matrixHomeserver}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/${encodeURIComponent(BACKUP_CONFIG_EVENT)}/`;
+    const res = await fetch(url, {
+      method: 'PUT',
+      headers: { 'Authorization': `Bearer ${matrixToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cleared: true }),
+    });
+    if (!res.ok) {
+      if (res.status === 403) throw new Error('Insufficient power level — admin required');
+      throw new Error(await res.text());
+    }
+    infoEl.textContent = 'Backup config removed from room';
+    infoEl.style.color = 'var(--text-dim)';
+  } catch (e) {
+    infoEl.textContent = e.message;
+    infoEl.style.color = 'var(--danger)';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Remove from Room';
+  }
+}
+
+/**
+ * Check if the current user is admin and show/hide the room config panel.
+ * Also auto-loads backup config from Matrix if available.
+ */
+async function checkBackupAdminAndAutoLoad() {
+  const configPanel = document.getElementById('backupRoomConfig');
+  if (!configPanel) return;
+
+  if (!matrixToken || !matrixUserId || !activeNulspaceId) {
+    configPanel.classList.remove('active');
+    return;
+  }
+
+  const roomId = await getActiveSpaceRoomId();
+  if (!roomId) {
+    configPanel.classList.remove('active');
+    return;
+  }
+
+  const pl = await getMyPowerLevel(roomId);
+  if (pl < BACKUP_CONFIG_ADMIN_PL) {
+    configPanel.classList.remove('active');
+    return;
+  }
+
+  // User is admin — show the panel
+  configPanel.classList.add('active');
+
+  // If not already connected to Filen, try loading config from room
+  if (!backupAuth) {
+    const infoEl = document.getElementById('backupRoomConfigInfo');
+    try {
+      const config = await fetchAndDecryptBackupConfig(roomId);
+      if (config && config.apiKey) {
+        infoEl.textContent = `Room has backup config (${config.email}) — loading...`;
+        infoEl.style.color = 'var(--text-dim)';
+
+        // Auto-connect using room credentials
+        backupAuth = { apiKey: config.apiKey, email: config.email, provider: 'filen' };
+        backupMasterKeys = [config.masterKey];
+        backupBaseFolderUuid = config.baseFolderUuid || '';
+
+        const check = await filenApi('/v3/user/baseFolder', {});
+        if (check.status) {
+          backupBaseFolderUuid = check.data.uuid;
+          backupCurrentFolderUuid = backupBaseFolderUuid;
+          saveFilenCredentials(config.email, config.apiKey, config.masterKey, backupBaseFolderUuid);
+          showBackupConnected(`Filen · ${config.email}`);
+          registerFilenSyncTarget();
+          document.getElementById('backupFileBrowser').classList.add('active');
+          backupNavStack = [];
+          updateBackupBreadcrumb();
+          loadBackupFolder(backupCurrentFolderUuid);
+          infoEl.textContent = `Auto-connected from room config (${config.savedBy || 'admin'})`;
+          infoEl.style.color = '#22c55e';
+          console.log('[backup] auto-connected from room config:', config.email);
+        } else {
+          backupAuth = null; backupMasterKeys = [];
+          infoEl.textContent = 'Room config credentials expired';
+          infoEl.style.color = 'var(--danger)';
+        }
+      } else {
+        infoEl.textContent = 'No backup config in room yet';
+        infoEl.style.color = 'var(--text-faint)';
+      }
+    } catch (e) {
+      infoEl.textContent = '';
+      console.warn('[backup] failed to load room config:', e);
+    }
   }
 }
 
@@ -8494,7 +8943,10 @@ async function createDemoSpace() {
   }
 
   // Auto-reconnect Filen as default backup (non-blocking)
-  tryAutoReconnectFilen();
+  // First try local credentials, then check Matrix room for shared config
+  tryAutoReconnectFilen().then(() => {
+    checkBackupAdminAndAutoLoad();
+  });
 })();
 </script>
 </body>
