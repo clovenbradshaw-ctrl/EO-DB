@@ -3,7 +3,7 @@ import { appendToLog } from './log';
 import { getState, setState } from './state';
 import { addEdge, removeEdge, getEdgesFrom, getEdgesTo } from './graph';
 import { resolveAlias, checkExists } from './helpers';
-import type { EoEvent, EoEventInput, EoState, EvaRegistration } from './types';
+import type { EoEvent, EoEventInput, EoState, EvaRegistration, RecResult } from './types';
 
 /**
  * Process a single EO event through the fold.
@@ -231,23 +231,101 @@ async function handleEVA(store: EoStore, event: EoEvent): Promise<void> {
   });
 }
 
-// --- REC: Recontextualize (Atomic Frame Change) ---
+// --- REC: Recursion (Fixed-Point Iteration) ---
+// Applies operator sequences to their own outputs until structure stabilizes.
+// Three outcomes: convergence, oscillation, or max-iteration bailout.
+
+const DEFAULT_MAX_ITERATIONS = 100;
+
 async function handleREC(store: EoStore, event: EoEvent): Promise<void> {
   const subOps = event.operand?.contains || [];
+  const pivot = event.operand?.pivot || null;
+  const maxIterations = event.operand?.max_iterations || DEFAULT_MAX_ITERATIONS;
 
+  // Collect all targets the loop body touches
+  const watchedTargets = new Set<string>();
   for (const subOp of subOps) {
-    await executeOperator(store, {
+    if (subOp.target) watchedTargets.add(subOp.target);
+  }
+  if (pivot) watchedTargets.add(pivot);
+
+  async function snapshot(): Promise<Record<string, any>> {
+    const snap: Record<string, any> = {};
+    for (const t of watchedTargets) {
+      const state = await getState(store, t);
+      snap[t] = state?.value ?? null;
+    }
+    return snap;
+  }
+
+  function subEvent(subOp: any): EoEvent {
+    return {
       ...subOp,
       seq: event.seq,
       agent: event.agent,
       ts: event.ts,
       acquired_ts: event.acquired_ts,
-    });
+    };
+  }
+
+  const initialSnap = await snapshot();
+  const history: Array<Record<string, any>> = [initialSnap];
+
+  let iterations = 0;
+  let converged = false;
+  let cycleLength = 0;
+
+  while (iterations < maxIterations) {
+    for (const subOp of subOps) {
+      await executeOperator(store, subEvent(subOp));
+      await recomputeDependents(store, subOp.target);
+    }
+
+    iterations++;
+    const currentSnap = await snapshot();
+
+    let matched = -1;
+    for (let i = 0; i < history.length; i++) {
+      if (deepEqual(currentSnap, history[i])) {
+        matched = i;
+        break;
+      }
+    }
+
+    if (matched >= 0) {
+      if (matched === history.length - 1) {
+        converged = true;
+      } else {
+        cycleLength = history.length - matched;
+      }
+      break;
+    }
+
+    history.push(currentSnap);
+  }
+
+  const result: RecResult = {
+    converged,
+    iterations,
+  };
+
+  if (!converged && cycleLength > 0) {
+    result.cycle_length = cycleLength;
+    result.states = history.slice(history.length - cycleLength);
+  } else if (converged) {
+    const finalSnap = await snapshot();
+    result.stable_state = finalSnap;
   }
 
   await setState(store, {
     target: event.target,
-    value: { frame_change: true, sub_ops: subOps.length, reason: event.operand?.reason },
+    value: {
+      recursion: true,
+      pivot,
+      sub_ops: subOps.length,
+      reason: event.operand?.reason,
+      result,
+    },
     ...stateFromEvent(event, 'REC'),
   });
 }
@@ -340,4 +418,22 @@ function formulaReferencesExternal(formula: any): boolean {
   return externalPatterns.some(p => str.includes(p));
 }
 
-export { mergeOperand, isFormulaOperand };
+function deepEqual(a: any, b: any): boolean {
+  if (a === b) return true;
+  if (a == null || b == null) return false;
+  if (typeof a !== typeof b) return false;
+  if (typeof a !== 'object') return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+
+  if (Array.isArray(a)) {
+    if (a.length !== b.length) return false;
+    return a.every((val: any, i: number) => deepEqual(val, b[i]));
+  }
+
+  const keysA = Object.keys(a);
+  const keysB = Object.keys(b);
+  if (keysA.length !== keysB.length) return false;
+  return keysA.every(key => deepEqual(a[key], b[key]));
+}
+
+export { mergeOperand, isFormulaOperand, deepEqual };

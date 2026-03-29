@@ -396,7 +396,7 @@ Each handler may invoke the handlers below it:
 | **SYN** | + CON (merge edges), SEG (dissolve boundaries), INS (mint merged identity) | Milliseconds — graph restructuring |
 | **DEF** | + SYN (alias resolution), SEG (boundary respect), CON (dependency recomputation), INS (auto-instantiation) | Tens of ms — recomputation cascades possible |
 | **EVA** | All above — reads formula (DEF), walks graph (CON), resolves aliases (SYN), respects boundaries (SEG), checks existence (INS), observes state (NUL), then computes | Tens of ms — exercises full dependency graph |
-| **REC** | All nine capacities — dispatches sub-operations through the handler hierarchy atomically | Tens of ms — compound frame changes |
+| **REC** | All nine capacities — runs contained operators in a loop until fixed point (convergence or oscillation detection) | Variable (10–500+ ms) — iteration count × cost of contained ops |
 
 **Cost gradient:** Low operators (INS) are cheap and frequent. High operators (DEF, EVA, REC) are expensive but rare. The database's average cost per event is dominated by cheap operators, with occasional expensive bursts.
 
@@ -785,39 +785,80 @@ async function executeEVA(db: Level, event: EoEvent): Promise<void> {
 }
 ```
 
-### 6.8 REC — Recontextualize (Atomic Frame Change)
+### 6.8 REC — Recursion (Fixed-Point Iteration)
 
-> **Inherited capacities:** Everything. REC inherits all eight prior capacities and adds frame restructuring. A single REC event can instantiate new schema targets (INS), partition old ones out (SEG), rewire relationships (CON), merge entities (SYN), set new values (DEF), update evaluation policies (EVA) — all atomically, all in one log entry, all replayable as one unit. Without the helix, REC would just be a transaction wrapper. With the helix, REC provides frame separation — the fold knows everything inside the REC belongs to the same frame change.
+> **Inherited capacities:** Everything. REC inherits all eight prior capacities and adds recursion to a fixed point. REC is the only operator whose execution is not a single pass through the combining function. When the fold encounters a REC, it runs the operator sequence in the contains array, checks whether the output changed the inputs to its own computation, and if it did, runs the sequence again. It repeats until the state stabilizes or until it detects a cycle.
+>
+> **Three outcomes:** Convergence (state stops changing), oscillation (state cycles between configurations), or max-iteration bailout (safety valve). The REC event in the log carries the final result, iteration count, and the full contains array for provenance.
+>
+> **Operand format:** `{ pivot?: string, contains: SubOp[], max_iterations?: number, reason?: string }`
 
 ```typescript
 async function executeREC(db: Level, event: EoEvent): Promise<void> {
-  // REC contains nested sub-operations that must all apply atomically.
-  // operand format: { contains: EoEvent[] }
-  //
-  // The sub-events do NOT get their own sequence numbers or log entries.
+  // REC runs its contains array as a loop body, iterating until fixed point.
+  // Sub-events do NOT get their own sequence numbers or log entries.
   // The REC is one log entry. The sub-operations apply to projected state
-  // as part of the REC's fold execution.
+  // as part of the REC's fold execution, potentially multiple times.
 
   const subOps = event.operand?.contains || [];
+  const pivot = event.operand?.pivot || null;
+  const maxIterations = event.operand?.max_iterations || 100;
 
-  // Use a LevelDB batch for atomicity
-  const batch = db.batch();
-
+  // Collect all targets the loop body touches
+  const watchedTargets = new Set<string>();
   for (const subOp of subOps) {
-    // Execute each sub-operation using the same event metadata
-    // but applying to projected state only (already logged as part of REC)
-    await executeOperator(db, {
-      ...subOp,
-      seq: event.seq,
-      agent: event.agent,
-      ts: event.ts
-    });
+    if (subOp.target) watchedTargets.add(subOp.target);
+  }
+  if (pivot) watchedTargets.add(pivot);
+
+  // Snapshot: capture current state of all watched targets
+  async function snapshot() {
+    const snap: Record<string, any> = {};
+    for (const t of watchedTargets) {
+      const state = await getState(db, t);
+      snap[t] = state?.value ?? null;
+    }
+    return snap;
   }
 
-  // Mark the REC event itself in state
+  // Take initial snapshot, then iterate
+  const history = [await snapshot()];
+  let iterations = 0;
+  let converged = false;
+  let cycleLength = 0;
+
+  while (iterations < maxIterations) {
+    // Run all sub-operations (one full pass)
+    for (const subOp of subOps) {
+      await executeOperator(db, { ...subOp, seq: event.seq, agent: event.agent, ts: event.ts });
+      await recomputeDependents(db, subOp.target);
+    }
+
+    iterations++;
+    const currentSnap = await snapshot();
+
+    // Check against all previous snapshots
+    for (let i = 0; i < history.length; i++) {
+      if (deepEqual(currentSnap, history[i])) {
+        if (i === history.length - 1) converged = true;  // same as last pass = stable
+        else cycleLength = history.length - i;            // oscillation
+        break;
+      }
+    }
+    if (converged || cycleLength > 0) break;
+    history.push(currentSnap);
+  }
+
+  // Build result: { converged, iterations, cycle_length?, states?, stable_state? }
+  const result = { converged, iterations, ...(
+    !converged && cycleLength > 0
+      ? { cycle_length: cycleLength, states: history.slice(history.length - cycleLength) }
+      : converged ? { stable_state: await snapshot() } : {}
+  )};
+
   await setState(db, {
     target: event.target,
-    value: { frame_change: true, sub_ops: subOps.length, ...event.operand },
+    value: { recursion: true, pivot, sub_ops: subOps.length, reason: event.operand?.reason, result },
     last_seq: event.seq,
     last_op: 'REC',
     last_agent: event.agent,

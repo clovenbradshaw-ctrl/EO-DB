@@ -34,7 +34,7 @@ Devices network through an E2EE Matrix room for real-time event sync. There is n
   - EVA classification (fold-computed vs horizon-computed)
   - SEG boundary enforcement
   - SYN alias resolution and merge
-  - REC atomic frame processing
+  - REC fixed-point recursion (iterate until convergence or oscillation detection)
 - **Local event submission** — `submitEvent()` writes to IndexedDB and runs fold locally, assigning monotonically increasing sequence numbers. No `POST /webhook`.
 - **Delete clears IndexedDB** — `executeDeleteAll()` clears all six object stores and resets in-memory state. No `DELETE /admin/reset`.
 - **Remove connection bar** — Strip the server URL input, connection status, and all `fetch` calls to `localhost:3000`.
@@ -263,7 +263,7 @@ Stages 1-2 can remain as modifications to the existing single HTML file (they us
 | SEG | Cheap (< 1 ms) | Single boundary write | Rarely a bottleneck |
 | SYN | Expensive (10–50 ms) | Alias creation + edge merge + state merge across targets | > 100 edges on merge source: 100+ ms |
 | EVA | Medium–Expensive (5–30 ms) | 8-step inherited pipeline, graph walk for dependencies | Deep dependency chains (> 10): 50+ ms |
-| REC | Variable (10–100+ ms) | Atomic frame of sub-operations, cost = sum of contained ops | > 20 sub-ops: perceptible delay |
+| REC | Variable (10–500+ ms) | Fixed-point iteration of contained ops, cost = iterations × sum of contained ops | Deep feedback chains or many sub-ops: perceptible delay |
 
 ### AES-GCM Encryption Overhead
 
