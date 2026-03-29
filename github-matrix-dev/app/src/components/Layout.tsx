@@ -16,6 +16,9 @@ import { SyncProgress } from './SyncProgress';
 import { AirtableSettings, AirtableSettingsSection } from './AirtableSettings';
 import { DataSyncDashboard } from './DataSyncDashboard';
 import { LogView } from './LogView';
+import { ComposeView } from './ComposeView';
+import { GraphView } from './GraphView';
+import { SettingsView } from './SettingsView';
 import { useTheme, type Theme } from '../theme';
 import type { EoState } from '../db/types';
 import type { QueryResult } from './query-engine';
@@ -323,14 +326,25 @@ export function Layout({ session, onLogout }: LayoutProps) {
             <AirtableSettingsSection session={session} />
           </div>
         </div>
-      ) : (
+      ) : activeView === 'compose' ? (
         <div style={s.body}>
-          <div style={s.empty}>
-            <div style={s.emptyText}>{activeView.toUpperCase()} view</div>
-            <div style={s.emptySub}>This view is not yet implemented</div>
-          </div>
+          <ErrorBoundary>
+            <ComposeView />
+          </ErrorBoundary>
         </div>
-      )}
+      ) : activeView === 'graph' ? (
+        <div style={s.body}>
+          <ErrorBoundary>
+            <GraphView />
+          </ErrorBoundary>
+        </div>
+      ) : activeView === 'settings' ? (
+        <div style={s.body}>
+          <ErrorBoundary>
+            <SettingsView session={session} />
+          </ErrorBoundary>
+        </div>
+      ) : null}
       {showSettings && (
         <AirtableSettings session={session} onClose={() => setShowSettings(false)} />
       )}
