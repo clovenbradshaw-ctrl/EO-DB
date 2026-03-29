@@ -89,7 +89,7 @@ Strip away the assumption that targets are strings and operands are JSON. The op
 | SYN | Two things are the same thing | Dedup across modalities — this photo and that scan are one entity |
 | DEF | Something is given a value | A tensor, a waveform, a pixel buffer, a weight matrix |
 | EVA | A rule governs | Conflict resolution, physics constraints, inference policies |
-| REC | A compound transformation | Update the mesh AND its texture AND its physics body atomically |
+| REC | Recursion to fixed point | Feedback loops that run until state stabilizes or cycles |
 
 The nine operators are not a data format. They are a transformation calculus. An EO-native database is the engine that runs that calculus.
 
@@ -175,7 +175,7 @@ project(state, NUL(target))         = state.remove(target) + state.removeEdges(t
 project(state, SEG(target, bounds)) = state.partition(target, bounds)
 project(state, SYN(a, b))          = state.alias(a, b) + state.mergeEdges(a, b)
 project(state, EVA(target, rule))   = state.evaluate(target, rule)
-project(state, REC(target, ops))    = state.applyFrame(target, ops)   // atomic
+project(state, REC(target, ops))    = state.fixedPoint(target, ops)   // iterate until stable or cycle detected
 ```
 
 The engine runs this fold on every append. The operator tells the engine what kind of state mutation to perform — and for fold-computed EVA-active targets, "mutation" includes recomputing formulas and writing results to projected state. For Horizon-computed targets, the fold stores the function definition but never stores a result — the Horizon evaluates it fresh at read time. Both paths run inside the database. The application calls `get(target)` and receives a value either way.
@@ -352,23 +352,25 @@ Beyond formulas, EVA's native treatment handles:
 
 The chain is always: CON tells the engine the dependency graph. DEF tells the engine what the computation is. EVA is the engine's act of running it. Three operators, three roles, one pipeline — and the pipeline runs inside the database, not in application code on top of it.
 
-### REC — The engine guarantees atomicity across frame changes
+### REC — The engine runs recursion to a fixed point
 
-REC wraps multiple sub-operations that must all land or none land. A schema migration that renames a field, updates all affected records, and revises the EVA rules is a single REC event containing nested DEF, EVA, and SEG operations.
+REC is the only operator whose execution is not a single pass through the combining function. When the fold encounters a REC, it runs the operator sequence in the contains array, checks whether the output changed the inputs to its own computation, and if it did, runs the sequence again. It repeats until the state stabilizes or until it detects a cycle.
 
 The engine's native treatment guarantees:
 
-**Atomicity.** All sub-operations apply or none do. This is not application-level transaction management — it is the fold recognizing REC as a frame boundary and treating its contents as an indivisible unit.
+**Fixed-point iteration.** REC applies its contained operators, snapshots the affected state, and compares against all previous snapshots. If the state matches the immediately preceding snapshot, the recursion has converged. If it matches an earlier snapshot, the recursion is oscillating. The result records convergence status, iteration count, and either the stable state or the cycling states.
 
-**Replay safety.** The nested structure makes the dependency relationship explicit. Replaying the REC replays all its sub-operations atomically. Partial replay of a REC's contents is safe because dependencies are contained within the structure, not implicit in the sequence.
+**Three outcomes.** Convergence: the state stops changing and the REC logs the stable result. Oscillation: the state cycles between two or more configurations and the REC logs the cycle as the result — the fixed point is "this doesn't have a fixed point," and that itself is information. Divergence is theoretically impossible because the identity sets are finite and the structure space is bounded, so a fixed point or cycle must be reached.
 
-**Frame separation.** REC creates a structural boundary between before and after. The engine can answer "what was the state under the old frame?" and "what is the state under the new frame?" as distinct queries. The log before the REC is queryable under the original frame; the log after is queryable under the corrected frame. A relational database's schema migration destroys the old frame. REC preserves both.
+**Replay safety.** The nested structure makes the dependency relationship explicit. Replaying the REC replays all its sub-operations through the same fixed-point iteration. The REC event in the log carries the final result, the number of iterations, and the full contains array — an auditor can see not just the result but the path the recursion took.
+
+**Structural necessity.** REC presupposes EVA because feedback loops only become visible when EVA exposes them. A field value is set. EVA judges a conflict or applies a formula. The judgment changes an upstream value. Another EVA fires. The chain loops. Without EVA rendering judgment at each step, the feedback loop never becomes visible. Without DEF, there are no values to feed back. Without REC, the propagation oscillates forever or gets silently truncated after one pass.
 
 ### The level above
 
 What these nine native treatments have in common is that they operate above the relational model. A relational database sees tuples going into relations and tuples coming out. It does not know that one INSERT is minting an identity anchor, another is storing a formula definition, another is establishing a graph edge, and another is drawing a partition boundary. It treats them all as "put tuple in relation."
 
-The EO database sees transformations. Each transformation has a type (the operator), a target (the coordinate), and a typed operand (the payload). The type determines the engine's behavior: skip the fold (NUL), hold in memory (SIG), mint an anchor (INS), update partition metadata (SEG), update the adjacency graph (CON), create an alias (SYN), store a value or register a computation (DEF), run a computation (EVA), apply atomically (REC).
+The EO database sees transformations. Each transformation has a type (the operator), a target (the coordinate), and a typed operand (the payload). The type determines the engine's behavior: skip the fold (NUL), hold in memory (SIG), mint an anchor (INS), update partition metadata (SEG), update the adjacency graph (CON), create an alias (SYN), store a value or register a computation (DEF), run a computation (EVA), iterate to fixed point (REC).
 
 Nine behaviors. Nine code paths. Each structurally different. This is not a feature of the query language bolted on top of a storage engine. It is the storage engine itself understanding what is happening, because the transformation calculus tells it.
 

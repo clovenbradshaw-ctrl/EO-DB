@@ -51,7 +51,7 @@ Build and test in this exact order. Do not skip ahead. Each phase must pass its 
 - SYN: use CON graph to find edges, dissolve SEG boundaries, mint merged identity (INS capacity), merge targets, create aliases, merge edges (§6.6)
 - DEF: resolve aliases (SYN capacity), respect boundaries (SEG capacity), auto-instantiate if target doesn't exist (INS capacity), merge operands, detect formula operands, register EVA-active targets, trigger recomputation via CON graph (§6.3)
 - EVA: full 8-step inherited pipeline — reads formula (DEF), walks graph (CON), resolves aliases (SYN), respects boundaries (SEG), checks existence (INS), observes state (NUL), computes, writes result (DEF). Write evaluation policy (§6.7)
-- REC: dispatches sub-operations through the same handler hierarchy atomically. Can invoke any combination of all other operators. Provides frame separation. (§6.8)
+- REC: recursion to fixed point. Runs contained operator sequence in a loop, snapshotting state after each pass and comparing against previous snapshots. Converges when state stabilizes, detects oscillation when state cycles. Logs result with iteration count and convergence status. Can invoke any combination of all other operators. (§6.8)
 - Implement idempotency via client_event_id (§6 top)
 - Implement dependent recomputation: after any state change, walk CON graph in reverse to find EVA-active targets, recompute fold-computed formulas (§6.9)
 - Implement EVA classification: when DEF stores a formula operand, inspect it for external references (time functions). If all inputs internal → fold-computed. If any input external → horizon-computed (§6.3)
@@ -173,7 +173,7 @@ Build and test in this exact order. Do not skip ahead. Each phase must pass its 
 
 **Sequence numbers are zero-padded 12-digit strings in LevelDB keys.** This ensures lexicographic order matches numeric order for the log: keyspace iteration.
 
-**REC sub-operations do not get their own sequence numbers.** The REC event is one log entry. Its contained operations apply to projected state as part of the REC's fold execution but are not individually logged.
+**REC sub-operations do not get their own sequence numbers.** The REC event is one log entry. Its contained operations apply to projected state as part of the REC's fold execution — potentially across multiple iterations — but are not individually logged. The REC result records convergence status, iteration count, and either the stable state or the cycling states.
 
 **Graph edges are stored in both directions.** Forward (graph:fwd:source:dest) for "what does this target link to?" and reverse (graph:rev:dest:source) for "what links to this target?" The reverse index is how dependent recomputation finds EVA-active targets upstream.
 

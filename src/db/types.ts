@@ -44,6 +44,15 @@ export interface EvaRegistration {
   dependencies: string[];
 }
 
+// REC recursion result
+export interface RecResult {
+  converged: boolean;
+  iterations: number;
+  cycle_length?: number;
+  states?: Array<Record<string, any>>;   // populated on oscillation: the cycling states
+  stable_state?: Record<string, any>;    // populated on convergence: the final stable state
+}
+
 // Subscription for changefeed
 export interface Subscription {
   id: string;
