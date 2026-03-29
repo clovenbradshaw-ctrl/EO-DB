@@ -2,11 +2,37 @@ import { EoDb, encode, decode, nextSeq } from './level.js';
 import { appendToLog } from './log.js';
 import { getState, setState } from './state.js';
 import { addEdge, removeEdge, getEdgesFrom, getEdgesTo } from './graph.js';
+import { addDepEdge, clearDepEdgesFrom, getDepEdgesFrom, getDepEdgesTo } from './dep-graph.js';
 import { resolveAlias, checkExists } from './helpers.js';
 import type { EoEvent, EoEventInput, EoState, EvaRegistration, RecResult, ExternalOperator, DerivedEntity } from './types.js';
 import { isEncryptedOperand } from './crypto-types.js';
 import type { Feed } from './feed.js';
 import { seedHash, chainHash } from './hash.js';
+
+/** Configuration for REC loop runner. */
+export interface RecConfig {
+  /** Maximum iterations before bailout. Safety net for genuinely non-converging cases. Default 100. */
+  maxIterations: number;
+  /** Floating-point tolerance for convergence. "Close enough" threshold. Default 1e-9. */
+  convergenceTolerance: number;
+}
+
+const DEFAULT_REC_CONFIG: RecConfig = {
+  maxIterations: 100,
+  convergenceTolerance: 1e-9,
+};
+
+let recConfig: RecConfig = { ...DEFAULT_REC_CONFIG };
+
+/** Set REC configuration. Partial updates merged with defaults. */
+export function setRecConfig(config: Partial<RecConfig>): void {
+  recConfig = { ...DEFAULT_REC_CONFIG, ...config };
+}
+
+/** Get current REC configuration. */
+export function getRecConfig(): RecConfig {
+  return { ...recConfig };
+}
 
 /**
  * Process a single EO event through the fold.
@@ -318,12 +344,10 @@ async function handleEVA(db: EoDb, event: EoEvent): Promise<void> {
 // Three outcomes: convergence (state stops changing), oscillation (state cycles between configurations),
 // or max-iteration bailout (safety valve — should not occur with finite state spaces).
 
-const DEFAULT_MAX_ITERATIONS = 100;
-
 async function handleREC(db: EoDb, event: EoEvent): Promise<void> {
   const subOps = event.operand?.contains || [];
   const pivot = event.operand?.pivot || null;
-  const maxIterations = event.operand?.max_iterations || DEFAULT_MAX_ITERATIONS;
+  const maxIterations = event.operand?.max_iterations || recConfig.maxIterations;
 
   // Collect all targets the loop body touches, plus the pivot if specified
   const watchedTargets = new Set<string>();
@@ -510,7 +534,7 @@ async function detectAndEmitREC(
   let converged = false;
   let cycleLength = 0;
 
-  while (iterations < DEFAULT_MAX_ITERATIONS) {
+  while (iterations < recConfig.maxIterations) {
     // Run one pass: re-evaluate all formulas in the cycle
     for (const reg of registrations) {
       await evaluateFormula(db, reg);
@@ -519,10 +543,11 @@ async function detectAndEmitREC(
     iterations++;
     const currentSnap = await snapshot();
 
-    // Check against all previous snapshots for convergence or oscillation
+    // Check against all previous snapshots for convergence or oscillation.
+    // Uses nearEqual: floating-point values within tolerance count as converged.
     let matched = -1;
     for (let i = 0; i < history.length; i++) {
-      if (deepEqual(currentSnap, history[i])) {
+      if (nearEqual(currentSnap, history[i])) {
         matched = i;
         break;
       }
@@ -798,8 +823,10 @@ async function cascadeUpward(
 
 /**
  * Find a dependency cycle involving the start target.
- * Follows the recomputation chain: getEdgesTo finds targets that depend on current,
- * checks if they have fold-mode EVA registrations, and continues the traversal.
+ * Standard DFS with visited set. Walks the dependency graph (dep:rev edges)
+ * forward from the changed target. If the walk returns to the starting target,
+ * there's a cycle. Terminates in time proportional to reachable edges.
+ * No depth limit needed — visited set prevents revisiting nodes.
  * Returns the list of cycle member targets, or null if no cycle exists.
  */
 async function findRecomputationCycle(db: EoDb, startTarget: string): Promise<string[] | null> {
@@ -807,7 +834,8 @@ async function findRecomputationCycle(db: EoDb, startTarget: string): Promise<st
   const path: string[] = [];
 
   async function dfs(current: string): Promise<string[] | null> {
-    const reverseEdges = await getEdgesTo(db, current);
+    // Use dep graph (computational dependencies), not CON graph (entity relationships)
+    const reverseEdges = await getDepEdgesTo(db, current);
     for (const edge of reverseEdges) {
       const source = edge.source;
 
@@ -848,7 +876,8 @@ async function recomputeDependents(db: EoDb, changedTarget: string, visited: Set
   if (visited.has(changedTarget)) return; // cycle guard — prevents infinite recursion
   visited.add(changedTarget);
 
-  const reverseEdges = await getEdgesTo(db, changedTarget);
+  // Use dep graph: "who has a formula that references changedTarget?"
+  const reverseEdges = await getDepEdgesTo(db, changedTarget);
 
   for (const edge of reverseEdges) {
     let registration: EvaRegistration | null = null;
@@ -923,8 +952,16 @@ function isFormulaOperand(operand: any): boolean {
 }
 
 async function registerEvaActive(db: EoDb, target: string, operand: any): Promise<void> {
-  const edges = await getEdgesFrom(db, target);
-  const dependencies = edges.map(e => e.dest);
+  // Extract dependencies from the formula operand.
+  // Formula operands declare references explicitly: { formula: '...', references: ['target.A', 'target.B'] }
+  // If no explicit references, fall back to CON graph edges (backward compat).
+  let dependencies: string[];
+  if (Array.isArray(operand.references) && operand.references.length > 0) {
+    dependencies = operand.references;
+  } else {
+    const edges = await getEdgesFrom(db, target);
+    dependencies = edges.map(e => e.dest);
+  }
 
   const mode = formulaReferencesExternal(operand.formula) ? 'horizon' : 'fold';
 
@@ -936,6 +973,12 @@ async function registerEvaActive(db: EoDb, target: string, operand: any): Promis
   };
 
   await db.put(`eva:${target}`, encode(registration));
+
+  // Update dependency graph: clear old dep edges and record new ones
+  await clearDepEdgesFrom(db, target);
+  for (const dep of dependencies) {
+    await addDepEdge(db, { source: target, dest: dep });
+  }
 
   if (mode === 'fold') {
     await evaluateFormula(db, registration);
@@ -953,6 +996,7 @@ function formulaReferencesExternal(formula: any): boolean {
 
 /**
  * Deep equality check for no-op detection.
+ * Strict equality — no floating-point tolerance.
  */
 function deepEqual(a: any, b: any): boolean {
   if (a === b) return true;
@@ -973,6 +1017,39 @@ function deepEqual(a: any, b: any): boolean {
 }
 
 /**
+ * Near-equality check for convergence detection.
+ * Numbers within recConfig.convergenceTolerance count as equal.
+ * Two values that are close enough should count as converged, not oscillating.
+ */
+function nearEqual(a: any, b: any): boolean {
+  if (a === b) return true;
+  if (a == null || b == null) return false;
+  if (typeof a !== typeof b) return false;
+
+  // Floating-point tolerance for numbers
+  if (typeof a === 'number' && typeof b === 'number') {
+    if (Number.isNaN(a) && Number.isNaN(b)) return true;
+    const diff = Math.abs(a - b);
+    // Absolute tolerance for values near zero, relative tolerance otherwise
+    const scale = Math.max(1, Math.abs(a), Math.abs(b));
+    return diff <= recConfig.convergenceTolerance * scale;
+  }
+
+  if (typeof a !== 'object') return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+
+  if (Array.isArray(a)) {
+    if (a.length !== b.length) return false;
+    return a.every((val: any, i: number) => nearEqual(val, b[i]));
+  }
+
+  const keysA = Object.keys(a);
+  const keysB = Object.keys(b);
+  if (keysA.length !== keysB.length) return false;
+  return keysA.every(key => nearEqual(a[key], b[key]));
+}
+
+/**
  * Check if an event would be a no-op (state already matches).
  * Returns the existing last_seq if no change, null otherwise.
  */
@@ -987,4 +1064,4 @@ async function checkNoOp(db: EoDb, event: EoEventInput): Promise<number | null> 
   return null;
 }
 
-export { mergeOperand, isFormulaOperand, deepEqual };
+export { mergeOperand, isFormulaOperand, deepEqual, nearEqual };
