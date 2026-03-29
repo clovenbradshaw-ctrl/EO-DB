@@ -7,7 +7,7 @@
  * 3. Sync Status — pairwise sync state between all peers
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { useSyncStore, type PeerInfo, type StorageLocation, type SyncPair } from '../store/sync-store';
 import { useEoStore } from '../store/eo-store';
 import type { MatrixSession } from '../matrix/client';
@@ -24,15 +24,34 @@ export function DataSyncDashboard({ session }: DataSyncDashboardProps) {
     syncPairs,
     offlineQueueSize,
     lastSnapshotSeq,
+    lastSnapshotMxc,
     initialize,
     updateLocalSeq,
     upsertPeer,
     updateSyncPair,
+    setLastSnapshotSeq,
   } = useSyncStore();
 
   const lastSeq = useEoStore((s) => s.lastSeq);
   const store = useEoStore((s) => s.store);
   const ready = useEoStore((s) => s.ready);
+  const manualSnapshot = useEoStore((s) => s.manualSnapshot);
+
+  const [snapshotInProgress, setSnapshotInProgress] = useState(false);
+  const [snapshotError, setSnapshotError] = useState<string | null>(null);
+
+  const handleSnapshot = useCallback(async () => {
+    setSnapshotInProgress(true);
+    setSnapshotError(null);
+    try {
+      const result = await manualSnapshot();
+      setLastSnapshotSeq(result.seq, result.mxc);
+    } catch (err: any) {
+      setSnapshotError(err.message || 'Snapshot failed');
+    } finally {
+      setSnapshotInProgress(false);
+    }
+  }, [manualSnapshot, setLastSnapshotSeq]);
 
   // Initialize sync store once ready
   useEffect(() => {
@@ -41,6 +60,7 @@ export function DataSyncDashboard({ session }: DataSyncDashboardProps) {
     (async () => {
       const offlineQueue: any[] = (await store.get('meta:offline_queue')) || [];
       const snapshotSeq: number = (await store.get('meta:snapshot_seq')) || 0;
+      const snapshotMxc: string | null = (await store.get('meta:snapshot_mxc')) || null;
 
       initialize({
         userId: session.userId,
@@ -49,6 +69,7 @@ export function DataSyncDashboard({ session }: DataSyncDashboardProps) {
         localSeq: lastSeq,
         offlineQueueSize: offlineQueue.length,
         lastSnapshotSeq: snapshotSeq,
+        lastSnapshotMxc: snapshotMxc,
         syncRoomId: null,
       });
     })();
@@ -178,6 +199,60 @@ export function DataSyncDashboard({ session }: DataSyncDashboardProps) {
             ))}
           </div>
         )}
+      </section>
+
+      {/* Delta Snapshots */}
+      <section style={styles.section}>
+        <h3 style={styles.sectionTitle}>
+          <SnapshotIcon />
+          Delta Snapshots
+        </h3>
+        <p style={styles.sectionDesc}>
+          Capture events since the last snapshot as a delta blob in Matrix media.
+          Each snapshot records its mxc URI in a NUL event, forming a reconstructable chain.
+        </p>
+        <div style={styles.snapshotPanel}>
+          <div style={styles.snapshotInfo}>
+            <div style={styles.snapshotRow}>
+              <span style={styles.snapshotLabel}>Last Snapshot Seq</span>
+              <span style={styles.snapshotValue}>
+                {lastSnapshotSeq > 0 ? lastSnapshotSeq : 'None'}
+              </span>
+            </div>
+            <div style={styles.snapshotRow}>
+              <span style={styles.snapshotLabel}>Events Since Snapshot</span>
+              <span style={styles.snapshotValue}>
+                {lastSeq - lastSnapshotSeq}
+              </span>
+            </div>
+            <div style={styles.snapshotRow}>
+              <span style={styles.snapshotLabel}>Latest Delta URI</span>
+              <span style={{ ...styles.snapshotValue, fontSize: 10, wordBreak: 'break-all' as const }}>
+                {lastSnapshotMxc || 'None'}
+              </span>
+            </div>
+          </div>
+          <div style={styles.snapshotActions}>
+            <button
+              onClick={handleSnapshot}
+              disabled={snapshotInProgress || lastSeq === lastSnapshotSeq}
+              style={{
+                ...styles.snapshotButton,
+                ...(snapshotInProgress || lastSeq === lastSnapshotSeq
+                  ? styles.snapshotButtonDisabled
+                  : {}),
+              }}
+            >
+              {snapshotInProgress ? 'Uploading...' : 'Take Snapshot'}
+            </button>
+            {snapshotError && (
+              <div style={styles.snapshotError}>{snapshotError}</div>
+            )}
+            {lastSeq === lastSnapshotSeq && !snapshotError && (
+              <div style={styles.snapshotUpToDate}>Up to date</div>
+            )}
+          </div>
+        </div>
       </section>
 
       {/* Architecture Diagram */}
@@ -491,6 +566,16 @@ function SyncIcon() {
       <polyline points="12.5 1 12.5 4.5 9 4.5" />
       <path d="M14 8a6 6 0 0 1-10.3 4.2" />
       <polyline points="3.5 15 3.5 11.5 7 11.5" />
+    </svg>
+  );
+}
+
+function SnapshotIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: 6 }}>
+      <rect x="2" y="2" width="12" height="12" rx="2" />
+      <circle cx="8" cy="8" r="3" />
+      <circle cx="8" cy="8" r="1" fill="currentColor" />
     </svg>
   );
 }
@@ -867,6 +952,73 @@ const styles: Record<string, React.CSSProperties> = {
     width: 8,
     height: 8,
     borderRadius: '50%',
+  },
+
+  // Snapshot panel
+  snapshotPanel: {
+    background: '#fff',
+    border: '1px solid #e5e2dd',
+    borderRadius: 8,
+    padding: 20,
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    gap: 24,
+  },
+  snapshotInfo: {
+    flex: 1,
+    display: 'flex',
+    flexDirection: 'column' as const,
+    gap: 10,
+  },
+  snapshotRow: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'baseline',
+    gap: 16,
+  },
+  snapshotLabel: {
+    fontSize: 12,
+    color: '#7a756d',
+    fontFamily: "'JetBrains Mono', monospace",
+  },
+  snapshotValue: {
+    fontSize: 12,
+    fontWeight: 600,
+    color: '#1a1816',
+    fontFamily: "'JetBrains Mono', monospace",
+  },
+  snapshotActions: {
+    display: 'flex',
+    flexDirection: 'column' as const,
+    alignItems: 'flex-end',
+    gap: 8,
+    flexShrink: 0,
+  },
+  snapshotButton: {
+    padding: '8px 20px',
+    fontSize: 12,
+    fontWeight: 600,
+    fontFamily: "'JetBrains Mono', monospace",
+    color: '#fff',
+    background: '#7c3aed',
+    border: 'none',
+    borderRadius: 6,
+    cursor: 'pointer',
+  },
+  snapshotButtonDisabled: {
+    background: '#c4b8d9',
+    cursor: 'not-allowed',
+  },
+  snapshotError: {
+    fontSize: 11,
+    color: '#d9487a',
+    fontFamily: "'JetBrains Mono', monospace",
+  },
+  snapshotUpToDate: {
+    fontSize: 11,
+    color: '#16a34a',
+    fontFamily: "'JetBrains Mono', monospace",
   },
 
   // Empty states
