@@ -3,55 +3,99 @@ import { appendToLog } from './log';
 import { getState, setState } from './state';
 import { addEdge, removeEdge, getEdgesFrom, getEdgesTo } from './graph';
 import { resolveAlias, checkExists } from './helpers';
+import { AsyncMutex } from './mutex';
+import { eventHash } from './hash';
+import { validateEvent, formatValidationErrors } from './validate';
 import type { EoEvent, EoEventInput, EoState, EvaRegistration, RecResult, ExternalOperator, DerivedEntity } from './types';
+
+/** Fold mutex — ensures only one processEvent executes at a time. */
+const foldMutex = new AsyncMutex();
 
 /**
  * Process a single EO event through the fold.
  * This is the heart of the database — every event flows through here.
+ *
+ * Protected by foldMutex: concurrent calls queue and execute serially.
+ * Uses content-addressable hashing for idempotency when client_event_id
+ * is not provided.
  */
 export async function processEvent(
   store: EoStore,
   event: EoEventInput,
   onEvent?: (event: EoEvent) => void,
 ): Promise<number> {
-  // 0. REC is system-generated — reject external submissions
+  return foldMutex.run(() => processEventInner(store, event, onEvent));
+}
+
+async function processEventInner(
+  store: EoStore,
+  event: EoEventInput,
+  onEvent?: (event: EoEvent) => void,
+): Promise<number> {
+  // 0. Validate event structure before any state mutation.
+  //    This catches malformed events from Matrix/peer sync before we
+  //    assign a seq or touch the log.
   if (event.op === 'REC') {
     throw new Error('REC is system-generated and cannot be submitted externally');
   }
-
-  // 1. Idempotency check
-  if (event.client_event_id) {
-    const existing = await store.get(`idem:${event.client_event_id}`);
-    if (existing != null) {
-      return existing as number;
-    }
+  const validationErrors = validateEvent(event);
+  if (validationErrors) {
+    throw new Error(`Invalid event: ${formatValidationErrors(validationErrors)}`);
   }
 
-  // 2. Assign sequence number
+  // 1. Ensure event has a content-addressable ID for dedup.
+  //    If the caller provided client_event_id, use it.
+  //    Otherwise, derive one from the event content (hash chain).
+  if (!event.client_event_id) {
+    event = { ...event, client_event_id: await eventHash(event) };
+  }
+
+  // 2. Idempotency check — works for both caller-provided and derived IDs
+  const existing = await store.get(`idem:${event.client_event_id}`);
+  if (existing != null) {
+    return existing as number;
+  }
+
+  // 3. Assign sequence number
   const seq = await store.nextSeq();
   const fullEvent: EoEvent = { ...event, seq };
 
-  // 3. Append to log
+  // 4. Append to log
   await appendToLog(store, fullEvent);
 
-  // 4. Store idempotency key
-  if (event.client_event_id) {
-    await store.put(`idem:${event.client_event_id}`, seq);
+  // 5. Store idempotency key
+  await store.put(`idem:${event.client_event_id!}`, seq);
+
+  // 6. Execute operator-specific logic (helix dispatch)
+  //    If the operator throws, the event is already logged — we record
+  //    the error on the event's state so it can be diagnosed and replayed.
+  try {
+    await executeOperator(store, fullEvent);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    await store.put(`error:${seq}`, {
+      seq,
+      client_event_id: event.client_event_id,
+      op: event.op,
+      target: event.target,
+      error: message,
+      ts: new Date().toISOString(),
+    });
+    // Still notify so the UI can surface the error
+    if (onEvent) onEvent({ ...fullEvent, meta: { ...fullEvent.meta, _error: message } });
+    return seq;
   }
 
-  // 5. Execute operator-specific logic (helix dispatch)
-  await executeOperator(store, fullEvent);
-
-  // 6. Recompute fold-computed EVA-active dependents (with cycle guard)
+  // 7. Recompute fold-computed EVA-active dependents (with cycle guard)
   await recomputeDependents(store, fullEvent.target, new Set());
 
-  // 7. Detect dependency cycles and emit system-generated REC if found
+  // 8. Detect dependency cycles and emit system-generated REC if found
   await detectAndEmitREC(store, fullEvent.target, fullEvent, onEvent);
 
-  // 8. Cascade upward: if this target is a constituent of any derived entity, re-evaluate it
+  // 9. Cascade upward: if this target is a constituent of any derived entity, re-evaluate it
   await cascadeUpward(store, fullEvent.target, fullEvent, onEvent);
 
-  // 9. Notify listeners (Zustand store callback replaces Feed)
+  // 10. Notify listeners (Zustand store callback replaces Feed)
   if (onEvent) {
     onEvent(fullEvent);
   }

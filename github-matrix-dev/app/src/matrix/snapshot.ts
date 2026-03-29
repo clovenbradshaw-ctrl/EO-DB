@@ -3,17 +3,21 @@
  *
  * Snapshots are hydration accelerators stored as encrypted binary blobs
  * in the Matrix media store. The room event history is the source of truth.
+ *
+ * Full snapshots include the event log so that a device hydrated from a
+ * snapshot can serve as a peer sync source for other devices.
  */
 
 import { pack, unpack } from 'msgpackr';
 import type { MatrixClient } from 'matrix-js-sdk';
 import type { EoStore } from '../db/encrypted-store';
 import type { EoState, GraphEdge, EvaRegistration, EoEvent } from '../db/types';
+import { processEvent } from '../db/fold';
 import { EO_SNAPSHOT_TYPE } from './event-bridge';
 import { readLogSince } from '../db/log';
 
 interface Snapshot {
-  version: 1;
+  version: 2;
   seq: number;
   ts: string;
   created_by: string;
@@ -21,10 +25,14 @@ interface Snapshot {
   graph_fwd: Record<string, GraphEdge>;
   graph_rev: Record<string, GraphEdge>;
   eva: Record<string, EvaRegistration>;
+  /** Event log — included so hydrated devices can serve as peer sync sources. */
+  log?: EoEvent[];
+  /** Idempotency keys — included so hydrated devices don't re-fold events. */
+  idem?: Record<string, number>;
 }
 
 /**
- * Create a snapshot from current store state.
+ * Create a snapshot from current store state, including the event log.
  */
 export async function createSnapshot(
   store: EoStore,
@@ -56,10 +64,20 @@ export async function createSnapshot(
     eva[target] = value as EvaRegistration;
   }
 
+  // Include the event log so hydrated devices have full history
+  const log = await readLogSince(store, 0);
+
+  // Include idempotency keys so hydrated devices don't re-process events
+  const idem: Record<string, number> = {};
+  const idemEntries = await store.iterator('idem:');
+  for (const [key, value] of idemEntries) {
+    idem[key.slice(5)] = value as number; // remove 'idem:'
+  }
+
   const seq = await store.getCurrentSeq();
 
   return {
-    version: 1,
+    version: 2,
     seq,
     ts: new Date().toISOString(),
     created_by: myUserId,
@@ -67,6 +85,8 @@ export async function createSnapshot(
     graph_fwd,
     graph_rev,
     eva,
+    log,
+    idem,
   };
 }
 
@@ -152,6 +172,10 @@ export async function findLatestSnapshot(
 
 /**
  * Download and apply a snapshot to the store.
+ *
+ * Loads state, graph, EVA registrations, and (if present) the event log
+ * and idempotency keys. The seq counter is set to the snapshot's seq so
+ * new events continue from the right place.
  */
 export async function applySnapshot(
   client: MatrixClient,
@@ -163,7 +187,7 @@ export async function applySnapshot(
 
   const response = await fetch(httpUrl);
   const buffer = await response.arrayBuffer();
-  const snapshot: Snapshot = unpack(new Uint8Array(buffer));
+  const snapshot = unpack(new Uint8Array(buffer)) as Snapshot;
 
   // Load state
   for (const [target, state] of Object.entries(snapshot.state)) {
@@ -181,6 +205,21 @@ export async function applySnapshot(
   // Load EVA registrations
   for (const [target, reg] of Object.entries(snapshot.eva)) {
     await store.put(`eva:${target}`, reg);
+  }
+
+  // Load event log (v2 snapshots include this)
+  if (snapshot.log) {
+    for (const event of snapshot.log) {
+      const padded = String(event.seq).padStart(12, '0');
+      await store.put(`log:${padded}`, event);
+    }
+  }
+
+  // Load idempotency keys (v2 snapshots include this)
+  if (snapshot.idem) {
+    for (const [id, seq] of Object.entries(snapshot.idem)) {
+      await store.put(`idem:${id}`, seq);
+    }
   }
 
   return snapshot.seq;
@@ -285,12 +324,14 @@ export async function downloadDeltaSnapshot(
  *
  * Walks the prev_mxc chain backwards from the given mxc URI, collecting
  * deltas until it reaches the local seq (i.e. events we already have).
- * Then applies them in chronological order.
+ * Then applies them in chronological order through the fold engine,
+ * which handles deduplication via content-addressable hashing.
  */
 export async function restoreFromDeltaChain(
   client: MatrixClient,
   store: EoStore,
   latestMxc: string,
+  onEvent?: (event: any) => void,
 ): Promise<number> {
   const localSeq = await store.getCurrentSeq();
   const deltas: DeltaSnapshot[] = [];
@@ -310,12 +351,15 @@ export async function restoreFromDeltaChain(
     currentMxc = delta.prev_mxc;
   }
 
-  // Apply events from each delta in order, skipping any we already have
+  // Apply events from each delta through the fold engine.
+  // processEvent handles dedup: events we already have are skipped
+  // via the idempotency check (content hash or client_event_id).
   let lastAppliedSeq = localSeq;
   for (const delta of deltas) {
     for (const event of delta.events) {
-      if (event.seq <= localSeq) continue; // already have this one
-      lastAppliedSeq = Math.max(lastAppliedSeq, event.seq);
+      if (event.seq <= localSeq) continue; // fast-skip known events
+      const seq = await processEvent(store, event, onEvent);
+      lastAppliedSeq = Math.max(lastAppliedSeq, seq);
     }
   }
 

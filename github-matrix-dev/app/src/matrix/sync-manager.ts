@@ -4,14 +4,23 @@
  * Data is persisted as encrypted binary snapshots in Matrix media.
  * On a fresh device, the latest snapshot is downloaded and applied.
  * Snapshots are auto-saved every 1000 events and on explicit saveSnapshot() calls.
+ *
+ * Offline queue is append-only via atomic read-modify-write through the
+ * queue mutex. Events that fail to send are retried individually on reconnect;
+ * idempotency hashing on the receiver side handles duplicates naturally.
  */
 
 import type { MatrixClient, MatrixEvent } from 'matrix-js-sdk';
 import type { EoStore } from '../db/encrypted-store';
 import type { EoEventInput } from '../db/types';
 import { processEvent } from '../db/fold';
+import { eventHash } from '../db/hash';
+import { AsyncMutex } from '../db/mutex';
 import { EO_EVENT_TYPE, matrixEventToEo, sendEoEvent } from './event-bridge';
 import { findLatestSnapshot, applySnapshot, maybeCreateSnapshot, createSnapshot, uploadSnapshot, createDeltaSnapshot, uploadDeltaSnapshot } from './snapshot';
+
+/** Mutex protecting the offline queue from concurrent read-modify-write. */
+const queueMutex = new AsyncMutex();
 
 export class SyncManager {
   private client: MatrixClient;
@@ -124,19 +133,33 @@ export class SyncManager {
 
   /**
    * Process a locally created event.
-   * 1. Generate client_event_id
+   * 1. Generate content-addressable client_event_id via hash
    * 2. Fold immediately (instant UI update)
    * 3. Send to Matrix room async (may fail if offline)
+   * 4. If send fails, queue for later — the queue is protected by a mutex
+   *    so concurrent failures don't clobber each other.
    */
   async processLocalEvent(
     event: Omit<EoEventInput, 'client_event_id' | 'agent' | 'ts'>,
   ): Promise<number> {
-    const clientEventId = crypto.randomUUID();
+    const ts = new Date().toISOString();
+    const agent = this.client.getUserId()!;
+
+    // Derive deterministic ID from content — same event from two devices
+    // offline will produce the same hash and dedup on fold.
+    const clientEventId = await eventHash({
+      op: event.op,
+      target: event.target,
+      operand: event.operand,
+      agent,
+      ts,
+    });
+
     const localEvent: EoEventInput = {
       ...event,
       client_event_id: clientEventId,
-      agent: this.client.getUserId()!,
-      ts: new Date().toISOString(),
+      agent,
+      ts,
     };
 
     // Fold immediately
@@ -146,10 +169,8 @@ export class SyncManager {
     try {
       await sendEoEvent(this.client, this.roomId, localEvent);
     } catch {
-      // Offline — store for later sync
-      const queue = (await this.store.get('meta:offline_queue')) || [];
-      queue.push(localEvent);
-      await this.store.put('meta:offline_queue', queue);
+      // Offline — queue for later sync (mutex-protected append)
+      await this.enqueueOfflineEvent(localEvent);
     }
 
     // Auto-snapshot to Matrix media every 1000 events
@@ -160,36 +181,67 @@ export class SyncManager {
 
   /**
    * Process an incoming room event — dedup by client_event_id, then fold.
+   *
+   * The fold engine's idempotency check (via content hash) handles the case
+   * where we already folded this event locally. Events without a
+   * client_event_id get one derived from their content in processEvent().
    */
   private async processIncomingEvent(matrixEvent: MatrixEvent): Promise<void> {
     const eoEvent = matrixEventToEo(matrixEvent);
 
-    // Dedup: if we already processed this event locally, skip
+    // Fast path: if we have a client_event_id, check locally before entering
+    // the fold mutex. This avoids queueing behind the mutex for events we
+    // already processed.
     if (eoEvent.client_event_id) {
       const existing = await this.store.get(`idem:${eoEvent.client_event_id}`);
       if (existing != null) return;
     }
 
+    // The fold engine will also check idempotency inside the mutex,
+    // and will derive a content hash if client_event_id is missing.
     await processEvent(this.store, eoEvent, this.onEvent);
   }
 
   /**
+   * Append an event to the offline queue atomically.
+   * The mutex ensures two concurrent send-failures don't race on the queue.
+   */
+  private async enqueueOfflineEvent(event: EoEventInput): Promise<void> {
+    await queueMutex.run(async () => {
+      const queue: EoEventInput[] = (await this.store.get('meta:offline_queue')) || [];
+      queue.push(event);
+      await this.store.put('meta:offline_queue', queue);
+    });
+  }
+
+  /**
    * Flush queued offline events to the room.
+   *
+   * Tries every event independently — a failure on event #2 does NOT
+   * prevent event #3 from being attempted. Successfully sent events are
+   * removed from the queue; failed ones stay for the next flush cycle.
+   *
+   * The receiver deduplicates via content hash, so re-sending an event
+   * that was already received (e.g., via peer sync) is harmless.
    */
   private async flushUnsyncedEvents(): Promise<void> {
-    const queue: EoEventInput[] = (await this.store.get('meta:offline_queue')) || [];
-    if (queue.length === 0) return;
+    await queueMutex.run(async () => {
+      const queue: EoEventInput[] = (await this.store.get('meta:offline_queue')) || [];
+      if (queue.length === 0) return;
 
-    const remaining: EoEventInput[] = [];
-    for (const event of queue) {
-      try {
-        await sendEoEvent(this.client, this.roomId, event);
-      } catch {
-        remaining.push(event);
-        break; // still offline
+      const remaining: EoEventInput[] = [];
+      for (const event of queue) {
+        try {
+          await sendEoEvent(this.client, this.roomId, event);
+        } catch {
+          remaining.push(event);
+          // Don't break — try the rest. Individual event failures
+          // (e.g., size limit) shouldn't block other events.
+          // If we're fully offline, they'll all fail fast anyway.
+        }
       }
-    }
 
-    await this.store.put('meta:offline_queue', remaining);
+      await this.store.put('meta:offline_queue', remaining);
+    });
   }
 }
