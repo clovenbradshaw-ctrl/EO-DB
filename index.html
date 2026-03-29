@@ -4275,9 +4275,6 @@ async function runImport() {
 
   for (let i = 0; i < total; i++) {
     const row = importParsedRows[i];
-    const pct = Math.round(((i + 1) / total) * 100);
-    fillEl.style.width = pct + '%';
-    textEl.textContent = `${i + 1} / ${total} — ${processed} ok, ${skipped} skipped`;
 
     try {
       const event = {
@@ -4299,8 +4296,12 @@ async function runImport() {
       if (haltOnError) break;
     }
 
-    // Yield to UI every 50 events
-    if (i % 50 === 49) await new Promise(r => setTimeout(r, 0));
+    const pct = Math.round(((i + 1) / total) * 100);
+    fillEl.style.width = pct + '%';
+    textEl.textContent = `${i + 1} / ${total} — ${processed} ok, ${skipped} skipped`;
+
+    // Yield to UI so the browser can repaint progress
+    if (i % 5 === 4) await new Promise(r => setTimeout(r, 0));
   }
 
   await loadFromIndexedDB();
