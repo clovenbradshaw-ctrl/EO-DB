@@ -6,7 +6,7 @@ import type { AuthenticatedRequest } from '../auth/matrix.js';
 import type { ExternalOperator } from '../db/types.js';
 
 // REC is system-generated — only the eight human-initiated operators are exposed via API.
-const OPS: ExternalOperator[] = ['INS', 'DEF', 'CON', 'SEG', 'SYN', 'EVA'];
+const OPS: ExternalOperator[] = ['NUL', 'INS', 'DEF', 'CON', 'SEG', 'SYN', 'EVA'];
 
 export function registerOpsRoutes(app: FastifyInstance, db: EoDb, feed: Feed): void {
   for (const op of OPS) {

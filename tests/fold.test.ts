@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { createDb, type EoDb, decode } from '../src/db/level.js';
-import { processEvent } from '../src/db/fold.js';
+import { processEvent, setRecConfig, nearEqual } from '../src/db/fold.js';
 import { getState, getStateByPrefix } from '../src/db/state.js';
 import { getEdgesFrom, getEdgesTo } from '../src/db/graph.js';
+import { getDepEdgesFrom, getDepEdgesTo } from '../src/db/dep-graph.js';
 import { readLogSince } from '../src/db/log.js';
 import { resolveAlias } from '../src/db/helpers.js';
 import type { EoEventInput } from '../src/db/types.js';
@@ -826,6 +827,292 @@ describe('Dependent Recomputation', () => {
 });
 
 // --- Full Fixture Sequence ---
+
+// --- Dependency Graph (dep:fwd/rev) Tests ---
+
+describe('Dependency Graph', () => {
+  it('formula with explicit references creates dep edges, not CON edges', async () => {
+    await processEvent(db, ev({ target: 'dep.A', operand: { val: 10 } }));
+    await processEvent(db, ev({ target: 'dep.B', operand: { val: 20 } }));
+
+    // DEF with formula that declares references — no CON needed
+    await processEvent(db, ev({
+      op: 'DEF', target: 'dep.A',
+      operand: { formula: 'B * 2', references: ['dep.B'] },
+    }));
+
+    // Dep graph should have an edge: dep.A → dep.B
+    const depsFrom = await getDepEdgesFrom(db, 'dep.A');
+    expect(depsFrom).toHaveLength(1);
+    expect(depsFrom[0].dest).toBe('dep.B');
+
+    // Reverse: dep.B is referenced by dep.A
+    const depsTo = await getDepEdgesTo(db, 'dep.B');
+    expect(depsTo).toHaveLength(1);
+    expect(depsTo[0].source).toBe('dep.A');
+
+    // CON graph should NOT have these edges (no CON event was issued)
+    const conEdges = await getEdgesFrom(db, 'dep.A');
+    expect(conEdges).toHaveLength(0);
+  });
+
+  it('redefining formula updates dep edges (clears old, adds new)', async () => {
+    await processEvent(db, ev({ target: 'redef.A', operand: { val: 1 } }));
+    await processEvent(db, ev({ target: 'redef.B', operand: { val: 2 } }));
+    await processEvent(db, ev({ target: 'redef.C', operand: { val: 3 } }));
+
+    // First formula: A depends on B
+    await processEvent(db, ev({
+      op: 'DEF', target: 'redef.A',
+      operand: { formula: 'B + 1', references: ['redef.B'] },
+    }));
+    let deps = await getDepEdgesFrom(db, 'redef.A');
+    expect(deps.map(d => d.dest)).toEqual(['redef.B']);
+
+    // Redefine: A now depends on C instead
+    await processEvent(db, ev({
+      op: 'DEF', target: 'redef.A',
+      operand: { formula: 'C + 1', references: ['redef.C'] },
+    }));
+    deps = await getDepEdgesFrom(db, 'redef.A');
+    expect(deps.map(d => d.dest)).toEqual(['redef.C']);
+
+    // Old dep edge to B should be gone
+    const depsToB = await getDepEdgesTo(db, 'redef.B');
+    expect(depsToB).toHaveLength(0);
+  });
+
+  it('cycle detection uses dep graph, not CON graph', async () => {
+    // Create two targets with formulas referencing each other via references field
+    await processEvent(db, ev({ target: 'dcycle.A', operand: { val: 1 } }));
+    await processEvent(db, ev({ target: 'dcycle.B', operand: { val: 2 } }));
+
+    // No CON events. Only DEF with references.
+    await processEvent(db, ev({
+      op: 'DEF', target: 'dcycle.A',
+      operand: { formula: 'F(B)', references: ['dcycle.B'] },
+    }));
+    await processEvent(db, ev({
+      op: 'DEF', target: 'dcycle.B',
+      operand: { formula: 'G(A)', references: ['dcycle.A'] },
+    }));
+
+    // Cycle should be detected via dep graph — REC event should be emitted
+    const allEvents = await readLogSince(db, 0);
+    const recEvents = allEvents.filter(e => e.op === 'REC');
+    expect(recEvents.length).toBeGreaterThanOrEqual(1);
+    expect(recEvents[0].agent).toBe('system');
+  });
+
+  it('fallback to CON edges when formula has no references field', async () => {
+    await processEvent(db, ev({ target: 'compat.A', operand: { val: 1 } }));
+    await processEvent(db, ev({ target: 'compat.B', operand: { val: 2 } }));
+
+    // Set up CON edge (old behavior)
+    await processEvent(db, ev({
+      op: 'CON', target: 'compat.A', operand: { added: ['compat.B'] },
+    }));
+
+    // Formula without references field — should fall back to CON edges
+    await processEvent(db, ev({
+      op: 'DEF', target: 'compat.A',
+      operand: { formula: 'SUM(B)' },
+    }));
+
+    // Dep graph should be populated from CON fallback
+    const deps = await getDepEdgesFrom(db, 'compat.A');
+    expect(deps).toHaveLength(1);
+    expect(deps[0].dest).toBe('compat.B');
+  });
+});
+
+// --- Near-Equality and Convergence Tests ---
+
+describe('Convergence Detection', () => {
+  it('nearEqual treats close floating-point values as equal', () => {
+    expect(nearEqual(1.0, 1.0 + 1e-12)).toBe(true);
+    expect(nearEqual(1.0, 1.1)).toBe(false);
+    expect(nearEqual(0.0, 1e-12)).toBe(true);
+    expect(nearEqual(0.0, 0.01)).toBe(false);
+  });
+
+  it('nearEqual handles nested objects with floats', () => {
+    const a = { val: 3.14159265358, nested: { x: 1.000000000001 } };
+    const b = { val: 3.14159265358, nested: { x: 1.0 } };
+    expect(nearEqual(a, b)).toBe(true);
+  });
+
+  it('nearEqual handles NaN', () => {
+    expect(nearEqual(NaN, NaN)).toBe(true);
+    expect(nearEqual(NaN, 0)).toBe(false);
+  });
+
+  it('nearEqual handles arrays', () => {
+    expect(nearEqual([1.0, 2.0], [1.0 + 1e-12, 2.0])).toBe(true);
+    expect(nearEqual([1.0], [1.0, 2.0])).toBe(false);
+  });
+});
+
+// --- REC Configuration Tests ---
+
+describe('REC Configuration', () => {
+  afterEach(() => {
+    // Reset to defaults after each test
+    setRecConfig({});
+  });
+
+  it('respects configurable max iterations (safety net)', async () => {
+    setRecConfig({ maxIterations: 3 });
+
+    await processEvent(db, ev({ target: 'cfg.A', operand: { val: 1 } }));
+    await processEvent(db, ev({ target: 'cfg.B', operand: { val: 2 } }));
+
+    await processEvent(db, ev({
+      op: 'DEF', target: 'cfg.A',
+      operand: { formula: 'F(B)', references: ['cfg.B'] },
+    }));
+    await processEvent(db, ev({
+      op: 'DEF', target: 'cfg.B',
+      operand: { formula: 'G(A)', references: ['cfg.A'] },
+    }));
+
+    const state = await getState(db, 'cfg.B');
+    expect(state?.value?._rec?.result?.iterations).toBeLessThanOrEqual(3);
+  });
+
+  it('finds 3-hop cycles via standard DFS (no depth limit needed)', async () => {
+    // A→B→C→A is a 3-hop cycle. DFS with visited set finds it.
+    await processEvent(db, ev({ target: 'tri.A', operand: { val: 1 } }));
+    await processEvent(db, ev({ target: 'tri.B', operand: { val: 2 } }));
+    await processEvent(db, ev({ target: 'tri.C', operand: { val: 3 } }));
+
+    await processEvent(db, ev({
+      op: 'DEF', target: 'tri.A',
+      operand: { formula: 'F(C)', references: ['tri.C'] },
+    }));
+    await processEvent(db, ev({
+      op: 'DEF', target: 'tri.B',
+      operand: { formula: 'G(A)', references: ['tri.A'] },
+    }));
+    await processEvent(db, ev({
+      op: 'DEF', target: 'tri.C',
+      operand: { formula: 'H(B)', references: ['tri.B'] },
+    }));
+
+    const allEvents = await readLogSince(db, 0);
+    const recEvents = allEvents.filter(e => e.op === 'REC');
+    expect(recEvents.length).toBeGreaterThanOrEqual(1);
+    expect(recEvents[0].agent).toBe('system');
+  });
+});
+
+// --- Critical REC (Phase Transition) Tests ---
+
+describe('Critical REC', () => {
+  it('fires critical REC when a new formula bridges two separate components', async () => {
+    // Component 1: A↔B (separate cycle)
+    await processEvent(db, ev({ target: 'cr.A', operand: { val: 1 } }));
+    await processEvent(db, ev({ target: 'cr.B', operand: { val: 2 } }));
+    await processEvent(db, ev({
+      op: 'DEF', target: 'cr.A',
+      operand: { formula: 'F(B)', references: ['cr.B'] },
+    }));
+    await processEvent(db, ev({
+      op: 'DEF', target: 'cr.B',
+      operand: { formula: 'G(A)', references: ['cr.A'] },
+    }));
+
+    // Component 2: C↔D (separate cycle)
+    await processEvent(db, ev({ target: 'cr.C', operand: { val: 3 } }));
+    await processEvent(db, ev({ target: 'cr.D', operand: { val: 4 } }));
+    await processEvent(db, ev({
+      op: 'DEF', target: 'cr.C',
+      operand: { formula: 'H(D)', references: ['cr.D'] },
+    }));
+    await processEvent(db, ev({
+      op: 'DEF', target: 'cr.D',
+      operand: { formula: 'J(C)', references: ['cr.C'] },
+    }));
+
+    // Bridge: redefine B to also reference C — merges the two components
+    const bridgeSeq = await processEvent(db, ev({
+      op: 'DEF', target: 'cr.B',
+      operand: { formula: 'G(A, C)', references: ['cr.A', 'cr.C'] },
+    }));
+
+    // Should produce a critical REC
+    const allEvents = await readLogSince(db, 0);
+    const recEvents = allEvents.filter(e => e.op === 'REC');
+    const criticalRecs = recEvents.filter(e => e.operand?.critical === true);
+    expect(criticalRecs.length).toBeGreaterThanOrEqual(1);
+
+    const crit = criticalRecs[criticalRecs.length - 1];
+    expect(crit.agent).toBe('system');
+    expect(crit.operand.component_size).toBeGreaterThanOrEqual(4); // A, B, C, D
+
+    // The pivot should have _rec with critical: true
+    const pivotState = await getState(db, 'cr.B');
+    expect(pivotState?.value?._rec?.critical).toBe(true);
+    expect(pivotState?.value?._rec?.result?.iterations).toBe(1); // single pass — snap
+  });
+
+  it('critical REC produces derived entity with topology "critical"', async () => {
+    // Two separate single-formula targets (no pre-existing cycles to cascade)
+    await processEvent(db, ev({ target: 'ct.X', operand: { val: 10 } }));
+    await processEvent(db, ev({ target: 'ct.Y', operand: { val: 20 } }));
+    await processEvent(db, ev({ target: 'ct.Z', operand: { val: 30 } }));
+
+    // Component 1: X references Y
+    await processEvent(db, ev({
+      op: 'DEF', target: 'ct.X',
+      operand: { formula: 'F(Y)', references: ['ct.Y'] },
+    }));
+
+    // Component 2: Z references nothing yet — it's isolated
+    await processEvent(db, ev({
+      op: 'DEF', target: 'ct.Z',
+      operand: { formula: 'H()', references: [] },
+    }));
+
+    // Now Y gets a formula referencing both X and Z — bridges components
+    await processEvent(db, ev({
+      op: 'DEF', target: 'ct.Y',
+      operand: { formula: 'G(X, Z)', references: ['ct.X', 'ct.Z'] },
+    }));
+
+    // Find the derived entity with critical topology
+    const allEvents = await readLogSince(db, 0);
+    const sysIns = allEvents.filter(e => e.op === 'INS' && e.agent === 'system');
+    const criticalIns = sysIns.filter(e => e.operand?.topology === 'critical');
+    expect(criticalIns.length).toBeGreaterThanOrEqual(1);
+
+    const derived = criticalIns[criticalIns.length - 1];
+    expect(derived.operand.topology).toBe('critical');
+    expect(derived.operand.constituents.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('iterative REC still fires for simple cycles (no component merge)', async () => {
+    // Simple A↔B cycle — no merge, should be iterative
+    await processEvent(db, ev({ target: 'iter.A', operand: { val: 1 } }));
+    await processEvent(db, ev({ target: 'iter.B', operand: { val: 2 } }));
+    await processEvent(db, ev({
+      op: 'DEF', target: 'iter.A',
+      operand: { formula: 'F(B)', references: ['iter.B'] },
+    }));
+    await processEvent(db, ev({
+      op: 'DEF', target: 'iter.B',
+      operand: { formula: 'G(A)', references: ['iter.A'] },
+    }));
+
+    const allEvents = await readLogSince(db, 0);
+    const recEvents = allEvents.filter(e => e.op === 'REC');
+    expect(recEvents.length).toBeGreaterThanOrEqual(1);
+
+    // Should NOT be critical — it's a simple cycle, not a merge
+    const criticalRecs = recEvents.filter(e => e.operand?.critical === true);
+    expect(criticalRecs).toHaveLength(0);
+  });
+});
 
 describe('Full Fixture Sequence', () => {
   it('processes all 10 fixture events correctly (REC no longer externally submitted)', async () => {
