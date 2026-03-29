@@ -2083,8 +2083,8 @@ body {
         <div class="compose-row">
           <div class="compose-label">Operator</div>
           <div class="compose-op-group" id="composeOpGroup">
-            <div class="compose-op-btn op-INS" style="background:rgba(74,222,128,0.12);color:var(--ins);" onclick="selectOp('INS')">INS</div>
-            <div class="compose-op-btn op-DEF selected" style="background:rgba(56,189,248,0.12);color:var(--def);border-color:var(--def);" onclick="selectOp('DEF')">DEF</div>
+            <div class="compose-op-btn op-INS selected" style="background:rgba(74,222,128,0.12);color:var(--ins);border-color:var(--ins);" onclick="selectOp('INS')">INS</div>
+            <div class="compose-op-btn op-DEF" style="background:rgba(56,189,248,0.12);color:var(--def);" onclick="selectOp('DEF')">DEF</div>
             <div class="compose-op-btn op-CON" style="background:rgba(167,139,250,0.12);color:var(--con);" onclick="selectOp('CON')">CON</div>
             <div class="compose-op-btn op-SEG" style="background:rgba(244,114,182,0.12);color:var(--seg);" onclick="selectOp('SEG')">SEG</div>
             <div class="compose-op-btn op-SYN" style="background:rgba(251,191,36,0.12);color:var(--syn);" onclick="selectOp('SYN')">SYN</div>
@@ -2465,7 +2465,7 @@ body {
 <script>
 // ── IndexedDB Storage Layer ──
 const DB_NAME = 'eo-db';
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 let db = null;
 
 function openDB() {
@@ -2534,20 +2534,25 @@ async function appendEvent(event) {
   // Pre-read any data we need BEFORE opening the write transaction.
   // Using await inside an IDB transaction causes the transaction to auto-close,
   // which silently aborts all subsequent operations and hangs the promise.
+  // Only open a read transaction when actually needed to avoid overlapping
+  // transactions that can cause the write transaction to hang.
   let existingState = null;
   let fwdEntries = {};
   let revEntries = {};
 
-  const readTx = db.transaction(['state', 'graph_fwd', 'graph_rev'], 'readonly');
-  if (['DEF'].includes(ev.op)) {
-    existingState = await idbGet(readTx.objectStore('state'), ev.target);
-  }
-  if (ev.op === 'CON' && ev.operand && ev.operand.added) {
-    const fwdStore = readTx.objectStore('graph_fwd');
-    const revStore = readTx.objectStore('graph_rev');
-    fwdEntries[ev.target] = await idbGet(fwdStore, ev.target);
-    for (const dest of ev.operand.added) {
-      revEntries[dest] = await idbGet(revStore, dest);
+  const needsRead = ev.op === 'DEF' || (ev.op === 'CON' && ev.operand && ev.operand.added);
+  if (needsRead) {
+    const readTx = db.transaction(['state', 'graph_fwd', 'graph_rev'], 'readonly');
+    if (ev.op === 'DEF') {
+      existingState = await idbGet(readTx.objectStore('state'), ev.target);
+    }
+    if (ev.op === 'CON' && ev.operand && ev.operand.added) {
+      const fwdStore = readTx.objectStore('graph_fwd');
+      const revStore = readTx.objectStore('graph_rev');
+      fwdEntries[ev.target] = await idbGet(fwdStore, ev.target);
+      for (const dest of ev.operand.added) {
+        revEntries[dest] = await idbGet(revStore, dest);
+      }
     }
   }
 
@@ -2714,6 +2719,33 @@ async function getEventCount() {
 let matrixToken = localStorage.getItem('eo_matrix_token');
 let matrixUserId = localStorage.getItem('eo_matrix_user_id');
 let matrixDisplayName = localStorage.getItem('eo_matrix_displayname');
+let matrixHomeserver = localStorage.getItem('eo_matrix_homeserver') || 'https://app.aminoimmigration.com';
+
+// Validate stored session on load — if the token is stale, clear it
+async function validateSession() {
+  if (!matrixToken) return;
+  try {
+    const res = await fetch(`${matrixHomeserver}/_matrix/client/v3/account/whoami`, {
+      headers: { 'Authorization': `Bearer ${matrixToken}` },
+    });
+    if (!res.ok) {
+      // Token expired or revoked — force re-login
+      console.warn('[auth] Stored token is no longer valid, clearing session');
+      doLogout();
+      showLogin();
+      return;
+    }
+    const data = await res.json();
+    // Refresh userId in case it changed
+    if (data.user_id && data.user_id !== matrixUserId) {
+      matrixUserId = data.user_id;
+      localStorage.setItem('eo_matrix_user_id', matrixUserId);
+    }
+  } catch (e) {
+    // Network error — keep session, user may be offline
+    console.warn('[auth] Could not validate session (network error):', e.message);
+  }
+}
 
 function updateTopbarUser() {
   const el = document.getElementById('topbarUser');
@@ -2777,9 +2809,10 @@ async function doLogin() {
 
     matrixToken = loginData.access_token;
     matrixUserId = loginData.user_id;
+    matrixHomeserver = homeserver;
     localStorage.setItem('eo_matrix_token', matrixToken);
     localStorage.setItem('eo_matrix_user_id', matrixUserId);
-    localStorage.setItem('eo_matrix_homeserver', homeserver);
+    localStorage.setItem('eo_matrix_homeserver', matrixHomeserver);
 
     // Fetch profile (displayname) from Matrix directly
     try {
@@ -2810,9 +2843,11 @@ function doLogout() {
   matrixToken = null;
   matrixUserId = null;
   matrixDisplayName = null;
+  matrixHomeserver = 'https://app.aminoimmigration.com';
   localStorage.removeItem('eo_matrix_token');
   localStorage.removeItem('eo_matrix_user_id');
   localStorage.removeItem('eo_matrix_displayname');
+  localStorage.removeItem('eo_matrix_homeserver');
   updateTopbarUser();
 }
 
@@ -3188,7 +3223,7 @@ document.addEventListener('click', (e) => {
 });
 
 // ── Compose ──
-let selectedOp = 'DEF';
+let selectedOp = 'INS';
 let conDirection = 'two-way';
 
 const OP_HINTS = {
@@ -3521,8 +3556,8 @@ function updateLoggingLabel() {
 
 document.getElementById('loggingToggle').addEventListener('change', updateLoggingLabel);
 
-// Initialize structured operand to match default selected operator (DEF)
-showStructuredOperand('DEF');
+// Initialize structured operand to match default selected operator (INS)
+showStructuredOperand('INS');
 
 async function submitEvent() {
   const resultEl = document.getElementById('composeResult');
@@ -3538,6 +3573,12 @@ async function submitEvent() {
 
   try {
     const agent = matrixUserId || '@local:device';
+
+    // Validate: a base must exist before any operations can be submitted
+    const bases = await getAllBases();
+    if (bases.length === 0) {
+      throw new Error('Create a base first — go to the BASES tab to create one');
+    }
 
     // Validate: operators that act on existing targets require a non-empty DB
     const OPS_REQUIRING_EXISTING = ['DEF', 'CON', 'SEG', 'SYN', 'EVA', 'REC'];
@@ -4994,8 +5035,18 @@ async function createNewBase() {
   };
 
   await putBase(base);
+
+  // Creating a base is an INS — instantiate the base target in the event log
+  await appendEvent({
+    op: 'INS',
+    target: base.target_prefix,
+    operand: { name: base.name, description: base.description || '', type: 'base', base_id: base.id },
+    agent: owner,
+  });
+
   nameEl.value = '';
   descEl.value = '';
+  await loadFromIndexedDB();
   await loadBases();
   selectBase(id);
 }
@@ -5210,12 +5261,17 @@ async function deleteSelectedBase() {
     await loadFromIndexedDB();
   } catch (e) {
     console.error('IndexedDB init failed:', e);
+    const statusEl = document.getElementById('localStatusText');
+    if (statusEl) statusEl.textContent = 'ready (no events)';
   }
   updateTopbarUser();
   updateStatusBar();
   renderHorizon();
   renderLog();
-  if (matrixToken) connectSync();
+  if (matrixToken) {
+    validateSession();
+    connectSync();
+  }
 })();
 </script>
 </body>
