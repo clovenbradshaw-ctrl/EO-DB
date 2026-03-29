@@ -3297,7 +3297,11 @@ async function appendEvent(event) {
   }
 
   return new Promise((resolve, reject) => {
-    tx.oncomplete = () => resolve(ev);
+    tx.oncomplete = () => {
+      // Trigger debounced auto-backup to Filen after every write
+      if (typeof scheduleAutoBackup === 'function') scheduleAutoBackup();
+      resolve(ev);
+    };
     tx.onerror = () => reject(tx.error);
     tx.onabort = () => reject(tx.error || new Error('Transaction aborted'));
   });
@@ -4052,6 +4056,31 @@ async function filenDeriveAuth(rawPassword, authVersion, salt) {
   return { derivedPassword, derivedMasterKeys };
 }
 
+function filenRandomString(len) {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  const arr = crypto.getRandomValues(new Uint8Array(len));
+  return Array.from(arr, b => chars[b % chars.length]).join('');
+}
+
+/**
+ * Encrypt metadata string using Filen v002 format:
+ *   "002" + 12-char IV + base64(AES-GCM ciphertext + 16-byte authTag)
+ * Key derived via PBKDF2(masterKey, masterKey, 1 iteration, SHA-512, 256 bits)
+ */
+async function filenEncryptMetadata(plaintext, masterKey) {
+  const enc = new TextEncoder();
+  const pbk = await crypto.subtle.importKey('raw', enc.encode(masterKey), 'PBKDF2', false, ['deriveBits']);
+  const keyBits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', salt: enc.encode(masterKey), iterations: 1, hash: 'SHA-512' }, pbk, 256
+  );
+  const aesKey = await crypto.subtle.importKey('raw', keyBits, 'AES-GCM', false, ['encrypt']);
+  const iv = filenRandomString(12);
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv: enc.encode(iv) }, aesKey, enc.encode(plaintext)
+  );
+  return '002' + iv + btoa(String.fromCharCode(...new Uint8Array(ciphertext)));
+}
+
 async function filenDecryptMetadata(metadata, key) {
   try {
     if (!metadata || metadata.length < 4 || metadata.slice(0, 3) !== '002') return null;
@@ -4081,6 +4110,167 @@ async function filenApi(endpoint, data) {
   if (backupAuth?.apiKey) headers['Authorization'] = `Bearer ${backupAuth.apiKey}`;
   const r = await fetch(`${FILEN_API}${endpoint}`, { method: 'POST', headers, body: JSON.stringify(data) });
   return r.json();
+}
+
+/**
+ * Encrypt a chunk of file data using AES-256-GCM with a random 12-byte IV.
+ * Returns Uint8Array: [12-byte IV | ciphertext | 16-byte authTag]
+ */
+async function filenEncryptChunk(data, fileKey) {
+  const enc = new TextEncoder();
+  const keyBytes = enc.encode(fileKey);
+  // Pad or hash key to 32 bytes for AES-256
+  const keyHash = await crypto.subtle.digest('SHA-256', keyBytes);
+  const aesKey = await crypto.subtle.importKey('raw', keyHash, 'AES-GCM', false, ['encrypt']);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, aesKey, data);
+  const result = new Uint8Array(12 + ciphertext.byteLength);
+  result.set(iv, 0);
+  result.set(new Uint8Array(ciphertext), 12);
+  return result;
+}
+
+/**
+ * Upload a file to Filen with full E2E encryption.
+ *
+ * Steps:
+ *  1. Generate new UUID, encryption key, upload key
+ *  2. Split into 1 MiB chunks, encrypt each with AES-256-GCM
+ *  3. POST each chunk to ingest.filen.io/v3/upload
+ *  4. Finalize with POST /v3/upload/done (encrypted metadata)
+ *
+ * Returns { uuid, key } of the uploaded file.
+ */
+async function filenUploadFile(parentUuid, fileName, fileData, onProgress) {
+  const masterKey = backupMasterKeys[0];
+  const fileUuid = crypto.randomUUID();
+  const fileKey = filenRandomString(32);
+  const uploadKey = filenRandomString(32);
+  const CHUNK_SIZE = 1048576; // 1 MiB
+  const totalChunks = Math.max(1, Math.ceil(fileData.byteLength / CHUNK_SIZE));
+
+  for (let i = 0; i < totalChunks; i++) {
+    const start = i * CHUNK_SIZE;
+    const end = Math.min(start + CHUNK_SIZE, fileData.byteLength);
+    const chunk = fileData.slice(start, end);
+
+    const encrypted = await filenEncryptChunk(chunk, fileKey);
+    const hashHex = await filenSha512Bytes(encrypted);
+
+    const url = `https://ingest.filen.io/v3/upload?uuid=${fileUuid}&index=${i}&parent=${parentUuid}&uploadKey=${uploadKey}&hash=${hashHex}`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${backupAuth.apiKey}` },
+      body: encrypted,
+    });
+    if (!res.ok) throw new Error(`Chunk upload failed: ${res.status}`);
+    if (onProgress) onProgress(i + 1, totalChunks);
+  }
+
+  // Finalize upload
+  const mimeType = 'application/octet-stream';
+  const metadataJson = JSON.stringify({
+    name: fileName,
+    size: fileData.byteLength,
+    mime: mimeType,
+    key: fileKey,
+    lastModified: Date.now(),
+  });
+
+  const nameHashed = await filenSha512(fileName.toLowerCase());
+  const done = await filenApi('/v3/upload/done', {
+    uuid: fileUuid,
+    name: await filenEncryptMetadata(fileName, masterKey),
+    nameHashed,
+    size: String(fileData.byteLength),
+    chunks: totalChunks,
+    mime: await filenEncryptMetadata(mimeType, masterKey),
+    rm: filenRandomString(12),
+    metadata: await filenEncryptMetadata(metadataJson, masterKey),
+    version: 2,
+    uploadKey,
+    parent: parentUuid,
+  });
+
+  if (!done.status) throw new Error(done.message || 'Upload finalize failed');
+  return { uuid: fileUuid, key: fileKey };
+}
+
+/** SHA-512 hash of raw bytes, returned as hex string. */
+async function filenSha512Bytes(data) {
+  const hash = await crypto.subtle.digest('SHA-512', data);
+  return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+/**
+ * Find a file by name in a Filen directory.
+ * Returns { uuid, key, size } or null.
+ */
+async function filenFindFileByName(parentUuid, fileName) {
+  const res = await filenApi('/v3/dir/content', { uuid: parentUuid });
+  if (!res.status) return null;
+  for (const f of (res.data.uploads || [])) {
+    const dec = await filenTryDecrypt(f.metadata);
+    if (!dec) continue;
+    try {
+      const p = JSON.parse(dec);
+      if (p.name === fileName) return { uuid: f.uuid, key: p.key, size: p.size };
+    } catch { /* skip */ }
+  }
+  return null;
+}
+
+/**
+ * Find or create an "eo-db-backups" folder inside the base folder.
+ * Returns the folder UUID.
+ */
+async function filenEnsureBackupFolder() {
+  const folderName = 'eo-db-backups';
+  const res = await filenApi('/v3/dir/content', { uuid: backupBaseFolderUuid });
+  if (res.status) {
+    for (const f of (res.data.folders || [])) {
+      const dec = await filenTryDecrypt(f.name);
+      if (!dec) continue;
+      try {
+        const parsed = JSON.parse(dec);
+        if (parsed.name === folderName) return f.uuid;
+      } catch {
+        if (dec === folderName) return f.uuid;
+      }
+    }
+  }
+  // Create the folder
+  const masterKey = backupMasterKeys[0];
+  const uuid = crypto.randomUUID();
+  const nameHashed = await filenSha512(folderName.toLowerCase());
+  const createRes = await filenApi('/v3/dir/create', {
+    uuid,
+    name: await filenEncryptMetadata(JSON.stringify({ name: folderName }), masterKey),
+    nameHashed,
+    parent: backupBaseFolderUuid,
+  });
+  if (!createRes.status) throw new Error(createRes.message || 'Failed to create backup folder');
+  return uuid;
+}
+
+/**
+ * Overwrite a file on Filen: upload new version, then trash the old one.
+ * If no existing file, just uploads.
+ * Returns { uuid, key } of the new file.
+ */
+async function filenOverwriteFile(parentUuid, fileName, fileData, onProgress) {
+  // Find existing file first (before upload, so we know what to trash)
+  const existing = await filenFindFileByName(parentUuid, fileName);
+
+  // Upload the new version
+  const result = await filenUploadFile(parentUuid, fileName, fileData, onProgress);
+
+  // Trash the old version (non-blocking — ok if it fails)
+  if (existing) {
+    filenApi('/v3/file/trash', { uuid: existing.uuid }).catch(() => {});
+  }
+
+  return result;
 }
 
 // ── Connect / disconnect ──
@@ -4139,6 +4329,9 @@ async function connectFilen() {
     backupCurrentFolderUuid = backupBaseFolderUuid;
   }
 
+  // Persist credentials so Filen auto-reconnects as default backup
+  saveFilenCredentials(email, backupAuth.apiKey, derivedMasterKeys, backupBaseFolderUuid);
+
   showBackupConnected(`Filen · ${email}`);
   clearBackupStatus();
   registerFilenSyncTarget();
@@ -4193,6 +4386,7 @@ function showBackupConnected(label) {
 }
 
 function disconnectBackup() {
+  clearFilenCredentials();
   backupAuth = null;
   backupMasterKeys = [];
   backupBaseFolderUuid = '';
@@ -4316,8 +4510,16 @@ async function backupSnapshot() {
     const sizeKB = (compressed.byteLength / 1024).toFixed(1);
 
     if (backupAuth.provider === 'filen') {
-      showBackupStatus('Uploading to Filen...', 'info');
-      showBackupStatus(`Filen encrypted upload coming soon — snapshot ready: ${snapshot.event_count} events, ${sizeKB} KB`, 'info');
+      showBackupStatus(`Uploading to Filen (${sizeKB} KB)...`, 'info');
+      const backupFolderUuid = await filenEnsureBackupFolder();
+      const result = await filenOverwriteFile(backupFolderUuid, filename, compressed, (chunk, total) => {
+        showBackupStatus(`Uploading chunk ${chunk}/${total}...`, 'info');
+      });
+      localStorage.setItem(`eo_backup:filen:${space.id}`, JSON.stringify({
+        file_uuid: result.uuid, file_key: result.key, seq: snapshot.seq,
+        ts: snapshot.ts, size: compressed.byteLength, folder_uuid: backupFolderUuid,
+      }));
+      showBackupStatus(`Backed up ${snapshot.event_count} events (${sizeKB} KB) → Filen/eo-db-backups/${filename}`, 'success');
     } else if (backupAuth.provider === 'pixeldrain') {
       showBackupStatus('Uploading to Pixeldrain...', 'info');
       const blob = new Blob([compressed], { type: 'application/octet-stream' });
@@ -4353,9 +4555,20 @@ function registerFilenSyncTarget() {
     name: 'Filen Backup',
     id: 'filen-backup',
     available() { return !!(backupAuth && backupAuth.provider === 'filen'); },
-    async connect(space) { return { space }; },
+    async connect(space) {
+      const folderUuid = await filenEnsureBackupFolder();
+      return { space, folderUuid };
+    },
     async writeEvents(ctx, events, onProgress) {
       const { snapshot, compressed } = await buildSpaceSnapshot(ctx.space);
+      const filename = `eo-backup-${ctx.space.id}.bin`;
+      const result = await filenOverwriteFile(ctx.folderUuid, filename, compressed, (chunk, total) => {
+        onProgress(Math.round((chunk / total) * events.length), events.length);
+      });
+      localStorage.setItem(`eo_backup:filen:${ctx.space.id}`, JSON.stringify({
+        file_uuid: result.uuid, file_key: result.key, seq: snapshot.seq,
+        ts: snapshot.ts, size: compressed.byteLength, folder_uuid: ctx.folderUuid,
+      }));
       onProgress(events.length, events.length);
     },
   });
@@ -4497,6 +4710,133 @@ function updateBackupBreadcrumb(newName) {
 
 function backupBrowserRefresh() {
   if (backupCurrentFolderUuid) loadBackupFolder(backupCurrentFolderUuid);
+}
+
+// ── Debounced auto-backup ─────────────────────────────────────────────────
+//
+// When Filen is connected as backup, every write triggers a debounced
+// backup. The debounce coalesces rapid-fire writes (e.g. bulk imports or
+// fast manual edits) into a single snapshot upload. The timer resets on
+// each write so we don't upload mid-burst.
+//
+// - BACKUP_DEBOUNCE_MS: wait time after last write before triggering backup
+// - BACKUP_MAX_WAIT_MS: maximum wall-clock time before forcing a backup
+//   even if writes keep coming (prevents infinite deferral during sustained
+//   high-throughput ingestion)
+
+const BACKUP_DEBOUNCE_MS = 30000;   // 30 s after last write
+const BACKUP_MAX_WAIT_MS = 300000;  // 5 min hard ceiling
+
+let _backupDebounceTimer = null;
+let _backupMaxTimer = null;
+let _backupInFlight = false;
+let _backupPendingSinceLastUpload = false;
+
+function scheduleAutoBackup() {
+  if (!backupAuth || backupAuth.provider !== 'filen') return;
+  if (!activeNulspaceId) return;
+
+  _backupPendingSinceLastUpload = true;
+
+  // Reset the short debounce timer on every write
+  clearTimeout(_backupDebounceTimer);
+  _backupDebounceTimer = setTimeout(runAutoBackup, BACKUP_DEBOUNCE_MS);
+
+  // Start the hard ceiling timer only once per burst
+  if (!_backupMaxTimer) {
+    _backupMaxTimer = setTimeout(runAutoBackup, BACKUP_MAX_WAIT_MS);
+  }
+}
+
+async function runAutoBackup() {
+  clearTimeout(_backupDebounceTimer);
+  clearTimeout(_backupMaxTimer);
+  _backupDebounceTimer = null;
+  _backupMaxTimer = null;
+
+  if (_backupInFlight || !_backupPendingSinceLastUpload) return;
+  if (!backupAuth || backupAuth.provider !== 'filen') return;
+  if (!activeNulspaceId) return;
+
+  _backupInFlight = true;
+  _backupPendingSinceLastUpload = false;
+
+  try {
+    const space = await getSpaceById(activeNulspaceId);
+    if (!space) return;
+
+    const { snapshot, compressed } = await buildSpaceSnapshot(space);
+    const filename = `eo-backup-${space.id}.bin`;
+    const folderUuid = await filenEnsureBackupFolder();
+    const result = await filenOverwriteFile(folderUuid, filename, compressed);
+
+    localStorage.setItem(`eo_backup:filen:${space.id}`, JSON.stringify({
+      file_uuid: result.uuid, file_key: result.key, seq: snapshot.seq,
+      ts: snapshot.ts, size: compressed.byteLength, folder_uuid: folderUuid,
+    }));
+
+    console.log(`[auto-backup] ${snapshot.event_count} events → Filen (${(compressed.byteLength / 1024).toFixed(1)} KB)`);
+  } catch (e) {
+    console.error('[auto-backup] failed:', e);
+    // Re-mark pending so next write retries
+    _backupPendingSinceLastUpload = true;
+  } finally {
+    _backupInFlight = false;
+    // If writes came in during upload, schedule another round
+    if (_backupPendingSinceLastUpload) {
+      scheduleAutoBackup();
+    }
+  }
+}
+
+// ── Filen credential persistence (auto-reconnect) ────────────────────────
+
+function saveFilenCredentials(email, apiKey, masterKey, baseFolderUuid) {
+  try {
+    localStorage.setItem('eo_filen_creds', JSON.stringify({ email, apiKey, masterKey, baseFolderUuid }));
+  } catch { /* quota exceeded — not critical */ }
+}
+
+function clearFilenCredentials() {
+  localStorage.removeItem('eo_filen_creds');
+}
+
+/**
+ * On page load, if Filen credentials are saved, reconnect automatically.
+ * This makes Filen the persistent default backup without re-entering creds.
+ */
+async function tryAutoReconnectFilen() {
+  try {
+    const raw = localStorage.getItem('eo_filen_creds');
+    if (!raw) return;
+    const { email, apiKey, masterKey, baseFolderUuid: savedBase } = JSON.parse(raw);
+    if (!email || !apiKey || !masterKey) return;
+
+    backupAuth = { apiKey, email, provider: 'filen' };
+    backupMasterKeys = [masterKey];
+    backupBaseFolderUuid = savedBase || '';
+
+    // Verify the API key is still valid
+    const check = await filenApi('/v3/user/baseFolder', {});
+    if (!check.status) {
+      // Credentials expired — clear and bail
+      backupAuth = null; backupMasterKeys = []; clearFilenCredentials();
+      return;
+    }
+    backupBaseFolderUuid = check.data.uuid;
+    backupCurrentFolderUuid = backupBaseFolderUuid;
+
+    showBackupConnected(`Filen · ${email}`);
+    registerFilenSyncTarget();
+    document.getElementById('backupFileBrowser').classList.add('active');
+    backupNavStack = [];
+    updateBackupBreadcrumb();
+    loadBackupFolder(backupCurrentFolderUuid);
+    console.log('[filen] auto-reconnected as', email);
+  } catch (e) {
+    console.warn('[filen] auto-reconnect failed:', e);
+    backupAuth = null; backupMasterKeys = [];
+  }
 }
 
 /* ── Hydration Sources ───────────────────────────────────────────────────── */
@@ -7990,6 +8330,9 @@ async function createDemoSpace() {
     localStorage.setItem('eo-active-nulspace', spaces[0].id);
     await updateNulspaceLabel();
   }
+
+  // Auto-reconnect Filen as default backup (non-blocking)
+  tryAutoReconnectFilen();
 })();
 </script>
 </body>
