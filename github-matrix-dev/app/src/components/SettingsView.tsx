@@ -3,6 +3,7 @@ import { useEoStore } from '../store/eo-store';
 import { useTheme, type Theme } from '../theme';
 import type { MatrixSession } from '../matrix/client';
 import { RoomDataViewer } from './RoomDataViewer';
+import { FilenStorageWidget } from './FilenStorageWidget';
 
 interface SettingsViewProps {
   session: MatrixSession;
@@ -24,11 +25,6 @@ export function SettingsView({ session }: SettingsViewProps) {
   const [deleteError, setDeleteError] = useState('');
 
 
-  // Hydration sources
-  const [hydLabel, setHydLabel] = useState('');
-  const [hydEndpoint, setHydEndpoint] = useState('');
-  const [hydApiKey, setHydApiKey] = useState('');
-  const [hydSources, setHydSources] = useState<Array<{ label: string; endpoint: string }>>([]);
 
   useEffect(() => {
     setEventCount(recentEvents.length);
@@ -60,26 +56,6 @@ export function SettingsView({ session }: SettingsViewProps) {
     }
   }
 
-  useEffect(() => {
-    const storedHyd = JSON.parse(localStorage.getItem('eo-hyd-sources') || '[]');
-    setHydSources(storedHyd);
-  }, []);
-
-  function handleAddHydSource() {
-    if (!hydLabel || !hydEndpoint) return;
-    const newSources = [...hydSources, { label: hydLabel, endpoint: hydEndpoint }];
-    setHydSources(newSources);
-    localStorage.setItem('eo-hyd-sources', JSON.stringify(newSources));
-    setHydLabel('');
-    setHydEndpoint('');
-    setHydApiKey('');
-  }
-
-  function removeHydSource(i: number) {
-    const next = hydSources.filter((_, j) => j !== i);
-    setHydSources(next);
-    localStorage.setItem('eo-hyd-sources', JSON.stringify(next));
-  }
 
   const displayName = session.userId.startsWith('@')
     ? session.userId.slice(1).split(':')[0]
@@ -140,27 +116,9 @@ export function SettingsView({ session }: SettingsViewProps) {
           </div>
         </Section>
 
-        {/* Hydration Sources */}
-        <Section title="Hydration Sources" theme={theme}>
-          {hydSources.length > 0 && (
-            <div style={{ marginBottom: 8 }}>
-              {hydSources.map((src, i) => (
-                <div key={i} style={s.keyRow}>
-                  <div>
-                    <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: theme.text }}>{src.label}</div>
-                    <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, color: theme.textMuted }}>{src.endpoint}</div>
-                  </div>
-                  <button style={s.removeBtn} onClick={() => removeHydSource(i)}>Remove</button>
-                </div>
-              ))}
-            </div>
-          )}
-          <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 6 }}>
-            <input style={s.input} value={hydLabel} onChange={(e) => setHydLabel(e.target.value)} placeholder="Label (e.g. Cloudflare R2)" />
-            <input style={s.input} value={hydEndpoint} onChange={(e) => setHydEndpoint(e.target.value)} placeholder="Endpoint URL" />
-            <input style={s.input} type="password" value={hydApiKey} onChange={(e) => setHydApiKey(e.target.value)} placeholder="API key (optional)" />
-            <button style={s.actionBtn} onClick={handleAddHydSource}>Add Source</button>
-          </div>
+        {/* Filen Storage */}
+        <Section title="Extra Storage" theme={theme}>
+          <FilenStorageWidget />
         </Section>
 
         {/* Danger Zone */}
@@ -254,24 +212,6 @@ function styles(t: Theme): Record<string, React.CSSProperties> {
       fontSize: 10,
       fontWeight: 600,
       cursor: 'pointer',
-    },
-    removeBtn: {
-      padding: '3px 10px',
-      background: 'transparent',
-      border: `1px solid ${t.border}`,
-      borderRadius: 4,
-      color: t.danger,
-      fontFamily: "'JetBrains Mono', monospace",
-      fontSize: 9,
-      fontWeight: 600,
-      cursor: 'pointer',
-    },
-    keyRow: {
-      display: 'flex',
-      justifyContent: 'space-between',
-      alignItems: 'center',
-      padding: '8px 0',
-      borderBottom: `1px solid ${t.borderLight}`,
     },
   };
 }
