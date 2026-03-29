@@ -3938,28 +3938,30 @@ const matrixRoomTarget = {
     return !!(matrixToken && matrixUserId);
   },
 
-  async connect(space) {
+  async connect(space, { isNew = false } = {}) {
     // Check if we already have a room ID cached on this space
     if (space.matrix_room_id) {
       const maxSeq = await this._readRemoteMaxSeq(space.matrix_room_id);
       return { roomId: space.matrix_room_id, remoteMaxSeq: maxSeq };
     }
 
-    const domain = matrixUserId.split(':').slice(1).join(':');
-    const alias = `#eo-db-${space.id}:${domain}`;
+    // For existing spaces, try resolving the room alias first
+    if (!isNew) {
+      const domain = matrixUserId.split(':').slice(1).join(':');
+      const alias = `#eo-db-${space.id}:${domain}`;
 
-    // Try resolving existing alias — 404 is expected for new spaces
-    const aliasRes = await fetch(
-      `${matrixHomeserver}/_matrix/client/v3/directory/room/${encodeURIComponent(alias)}`,
-      { headers: { 'Authorization': `Bearer ${matrixToken}` } }
-    ).catch(() => null);
+      const aliasRes = await fetch(
+        `${matrixHomeserver}/_matrix/client/v3/directory/room/${encodeURIComponent(alias)}`,
+        { headers: { 'Authorization': `Bearer ${matrixToken}` } }
+      ).catch(() => null);
 
-    if (aliasRes && aliasRes.ok) {
-      const { room_id } = await aliasRes.json();
-      space.matrix_room_id = room_id;
-      await putSpace(space);
-      const maxSeq = await this._readRemoteMaxSeq(room_id);
-      return { roomId: room_id, remoteMaxSeq: maxSeq };
+      if (aliasRes && aliasRes.ok) {
+        const { room_id } = await aliasRes.json();
+        space.matrix_room_id = room_id;
+        await putSpace(space);
+        const maxSeq = await this._readRemoteMaxSeq(room_id);
+        return { roomId: room_id, remoteMaxSeq: maxSeq };
+      }
     }
 
     // Build invite list from space sharing
@@ -8761,8 +8763,8 @@ async function createNewSpace() {
     agent: owner,
   });
 
-  // Ensure Matrix room exists for the new space
-  await ensureMatrixRoomForSpace(space);
+  // Ensure Matrix room exists for the new space (skip alias lookup — room can't exist yet)
+  await ensureMatrixRoomForSpace(space, { isNew: true });
 
   nameEl.value = '';
   descEl.value = '';
@@ -8976,11 +8978,11 @@ async function deleteSelectedSpace() {
 }
 
 // ── Matrix Room Provisioning ──
-async function ensureMatrixRoomForSpace(space) {
+async function ensureMatrixRoomForSpace(space, { isNew = false } = {}) {
   if (!matrixToken || !matrixUserId) return; // not signed in — skip silently
   if (space.matrix_room_id) return; // already has a room
   try {
-    const result = await matrixRoomTarget.connect(space);
+    const result = await matrixRoomTarget.connect(space, { isNew });
     if (result && result.roomId) {
       console.log(`Matrix room created for space "${space.name}": ${result.roomId}`);
     }
