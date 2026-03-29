@@ -14,6 +14,10 @@ import { ErrorBoundary } from './ErrorBoundary';
 import { SyncProgress } from './SyncProgress';
 import { AirtableSettings } from './AirtableSettings';
 import { DataSyncDashboard } from './DataSyncDashboard';
+import { LogView } from './LogView';
+
+type View = 'horizon' | 'log' | 'graph' | 'compose' | 'settings';
+const TABS: View[] = ['horizon', 'log', 'graph', 'compose', 'settings'];
 
 interface LayoutProps {
   session: MatrixSession;
@@ -25,11 +29,18 @@ export function Layout({ session, onLogout }: LayoutProps) {
   const teardown = useEoStore((s) => s.teardown);
   const ready = useEoStore((s) => s.ready);
   const lastSeq = useEoStore((s) => s.lastSeq);
+  const recentEvents = useEoStore((s) => s.recentEvents);
   const [selectedScope, setSelectedScope] = useState<string | null>(null);
   const [selectedRecord, setSelectedRecord] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
-  const [activeView, setActiveView] = useState<'records' | 'sync'>('records');
+  const [activeView, setActiveView] = useState<View>('horizon');
+  const [spaceOpen, setSpaceOpen] = useState(false);
   const connectionState = useConnectionState();
+
+  // Compute target count from recent events
+  const targetCount = new Set(recentEvents.map((e) => e.target)).size;
+  // Compute edge count (CON events)
+  const edgeCount = recentEvents.filter((e) => e.op === 'CON').length;
 
   // Initialize encrypted store and sync from Matrix on mount
   useEffect(() => {
@@ -103,61 +114,110 @@ export function Layout({ session, onLogout }: LayoutProps) {
     onLogout();
   }
 
+  // Extract display name from Matrix user ID
+  const displayName = session.userId.startsWith('@')
+    ? session.userId.slice(1).split(':')[0]
+    : session.userId;
+
   return (
     <div style={styles.container}>
-      <header style={styles.header}>
-        <div style={styles.headerLeft}>
-          <span style={styles.logo}>Amino Immigration</span>
+      {/* Top bar */}
+      <header style={styles.topBar}>
+        <div style={styles.topBarLeft}>
+          <span style={styles.logo}>
+            <span style={{ color: '#22c55e' }}>EO</span>
+            <span style={{ color: '#1e293b' }}>///</span>
+            <span style={{ color: '#cbd5e1' }}>DB</span>
+          </span>
+
           <div style={styles.divider} />
-          <span style={styles.section}>Case Management</span>
-        </div>
-        <div style={styles.headerRight}>
-          <ConnectionStatus state={connectionState} />
-          <div style={styles.seqBadge}>seq: {lastSeq}</div>
-          <div style={styles.viewTabs}>
+
+          {/* NULSpace selector */}
+          <div style={{ position: 'relative' as const }}>
             <button
-              onClick={() => setActiveView('records')}
-              style={{
-                ...styles.viewTab,
-                ...(activeView === 'records' ? styles.viewTabActive : {}),
-              }}
+              onClick={() => setSpaceOpen(!spaceOpen)}
+              style={styles.nulspaceBtn}
             >
-              Records
+              <span style={styles.nulTag}>NUL</span>
+              <span style={styles.nulspaceName}>default</span>
+              <svg width="10" height="10" viewBox="0 0 10 10" fill="none" style={{ marginLeft: 2 }}>
+                <path d="M2.5 4L5 6.5L7.5 4" stroke="#475569" strokeWidth="1.2" strokeLinecap="round" />
+              </svg>
             </button>
-            <button
-              onClick={() => setActiveView('sync')}
-              style={{
-                ...styles.viewTab,
-                ...(activeView === 'sync' ? styles.viewTabActive : {}),
-              }}
-            >
-              Sync
-            </button>
+
+            {spaceOpen && (
+              <div style={styles.nulspaceDropdown}>
+                <button
+                  onClick={() => setSpaceOpen(false)}
+                  style={{ ...styles.nulspaceItem, background: '#1e293b' }}
+                >
+                  <span style={{ fontFamily: 'var(--mono)', fontSize: 12 }}>default</span>
+                  <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: '#475569' }}>
+                    {targetCount} targets
+                  </span>
+                </button>
+                <div style={{ borderTop: '1px solid #1e293b', margin: '4px 0' }} />
+                <button style={{
+                  ...styles.nulspaceItem,
+                  color: '#22c55e',
+                  fontFamily: 'var(--mono)',
+                  fontSize: 11,
+                  gap: 5,
+                }}>
+                  <span style={{ fontSize: 14, lineHeight: 1 }}>+</span>
+                  new nulspace
+                </button>
+              </div>
+            )}
           </div>
-          <button
-            onClick={() => setShowSettings(true)}
-            style={styles.settingsBtn}
-            title="Airtable Settings"
-          >
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-              <circle cx="8" cy="8" r="2.5" />
-              <path d="M8 1.5v1.2M8 13.3v1.2M3.4 3.4l.85.85M11.75 11.75l.85.85M1.5 8h1.2M13.3 8h1.2M3.4 12.6l.85-.85M11.75 4.25l.85-.85" />
-            </svg>
-          </button>
-          <span style={styles.user}>{session.userId}</span>
+        </div>
+
+        <div style={styles.topBarRight}>
+          <div style={styles.stats}>
+            <span>seq <span style={{ color: '#64748b' }}>{lastSeq}</span></span>
+            <span>events <span style={{ color: '#64748b' }}>{recentEvents.length}</span></span>
+            <span>targets <span style={{ color: '#64748b' }}>{targetCount}</span></span>
+            <span>edges <span style={{ color: '#64748b' }}>{edgeCount}</span></span>
+          </div>
+          <div style={styles.divider} />
+          <ConnectionStatus state={connectionState} />
+          <div style={styles.divider} />
+          <div style={styles.userArea}>
+            <div style={styles.userAvatar}>
+              {displayName.charAt(0).toUpperCase()}
+            </div>
+            <span style={{ fontSize: 11, color: '#64748b' }}>{displayName}</span>
+          </div>
           <button onClick={handleLogout} style={styles.logoutBtn}>Sign out</button>
         </div>
       </header>
-      {activeView === 'sync' ? (
+
+      {/* Tab bar */}
+      <div style={styles.tabBar}>
+        {TABS.map((tab) => (
+          <button
+            key={tab}
+            onClick={() => setActiveView(tab)}
+            style={{
+              ...styles.tab,
+              color: activeView === tab ? '#e2e8f0' : '#334155',
+              borderBottom: activeView === tab ? '1.5px solid #22c55e' : '1.5px solid transparent',
+            }}
+          >
+            {tab === 'compose' ? '+ COMPOSE' : tab.toUpperCase()}
+          </button>
+        ))}
+      </div>
+
+      {/* Body */}
+      {activeView === 'log' ? (
         <div style={styles.body}>
-          <main style={{ ...styles.main, flex: 1 }}>
-            <ErrorBoundary>
-              <DataSyncDashboard session={session} />
-            </ErrorBoundary>
-          </main>
+          <ErrorBoundary>
+            <LogView />
+          </ErrorBoundary>
         </div>
-      ) : (
-        <div style={styles.body}>
+      ) : activeView === 'horizon' ? (
+        <div style={styles.bodyLight}>
           <aside style={styles.sidebar}>
             {ready ? (
               <HolonNav
@@ -169,7 +229,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
               <SyncProgress message="Initializing store..." detail="Deriving encryption key" />
             )}
           </aside>
-          <main style={styles.main}>
+          <main style={styles.mainLight}>
             <ErrorBoundary>
               {selectedScope ? (
                 <TableView
@@ -196,6 +256,17 @@ export function Layout({ session, onLogout }: LayoutProps) {
             />
           )}
         </div>
+      ) : (
+        <div style={styles.body}>
+          <div style={styles.emptyDark}>
+            <div style={{ fontSize: 13, color: '#334155', fontFamily: 'var(--mono)' }}>
+              {activeView.toUpperCase()}
+            </div>
+            <div style={{ fontSize: 11, color: '#1e293b', fontFamily: 'var(--mono)' }}>
+              not yet implemented
+            </div>
+          </div>
+        </div>
       )}
       {showSettings && (
         <AirtableSettings session={session} onClose={() => setShowSettings(false)} />
@@ -206,92 +277,178 @@ export function Layout({ session, onLogout }: LayoutProps) {
 
 const styles: Record<string, React.CSSProperties> = {
   container: {
+    '--mono': "'JetBrains Mono', 'SF Mono', 'Fira Code', monospace",
+    '--sans': "'Inter', -apple-system, system-ui, sans-serif",
     display: 'flex',
     flexDirection: 'column',
     height: '100vh',
-    background: '#faf9f7',
-    color: '#2c2a26',
-    fontFamily: "'Outfit', system-ui, -apple-system, sans-serif",
-  },
-  header: {
+    background: '#080c12',
+    color: '#e2e8f0',
+    fontFamily: 'var(--sans)',
+  } as React.CSSProperties,
+
+  // Top bar
+  topBar: {
     display: 'flex',
-    justifyContent: 'space-between',
     alignItems: 'center',
-    padding: '0 24px',
-    height: 52,
-    background: '#fff',
-    borderBottom: '1px solid #e5e2dd',
+    justifyContent: 'space-between',
+    padding: '0 16px',
+    height: 42,
+    borderBottom: '1px solid #141a24',
+    background: '#0a0f16',
+    flexShrink: 0,
   },
-  headerLeft: { display: 'flex', alignItems: 'center', gap: 12 },
+  topBarLeft: { display: 'flex', alignItems: 'center', gap: 14 },
+  topBarRight: { display: 'flex', alignItems: 'center', gap: 16 },
   logo: {
-    fontFamily: "'Source Serif 4', Georgia, serif",
-    fontSize: 17,
-    fontWeight: 600,
-    color: '#1a1816',
+    fontFamily: 'var(--mono)',
+    fontWeight: 700,
+    fontSize: 13.5,
+    letterSpacing: '-0.03em',
   },
-  divider: { width: 1, height: 20, background: '#d4d0ca' },
-  section: { fontSize: 13, color: '#7a756d', fontWeight: 400 },
-  headerRight: { display: 'flex', alignItems: 'center', gap: 16 },
-  seqBadge: {
-    fontFamily: "'JetBrains Mono', monospace",
-    fontSize: 10,
-    color: '#aba69e',
-    padding: '2px 8px',
-    borderRadius: 4,
-    background: '#f4f3f0',
-    border: '1px solid #e5e2dd',
-  },
-  viewTabs: {
+  divider: { width: 1, height: 18, background: '#1e293b' },
+
+  // NULSpace selector
+  nulspaceBtn: {
     display: 'flex',
-    border: '1px solid #e5e2dd',
-    borderRadius: 6,
-    overflow: 'hidden',
-  },
-  viewTab: {
-    padding: '5px 12px',
-    fontSize: 11,
-    fontWeight: 500,
-    border: 'none',
-    background: 'transparent',
-    color: '#7a756d',
+    alignItems: 'center',
+    gap: 6,
+    background: '#111827',
+    border: '1px solid #1e293b',
+    borderRadius: 4,
+    padding: '4px 10px 4px 8px',
     cursor: 'pointer',
-    fontFamily: "'JetBrains Mono', monospace",
-    borderRight: '1px solid #e5e2dd',
+    color: '#e2e8f0',
+  },
+  nulTag: {
+    fontSize: 8,
+    fontWeight: 700,
+    color: '#475569',
+    fontFamily: 'var(--mono)',
+    letterSpacing: '0.06em',
+    background: '#0a0f16',
+    borderRadius: 2,
+    padding: '1px 4px',
+    border: '1px solid #1e293b',
+  },
+  nulspaceName: {
+    fontFamily: 'var(--mono)',
+    fontSize: 12,
+    fontWeight: 500,
+  },
+  nulspaceDropdown: {
+    position: 'absolute',
+    top: 'calc(100% + 4px)',
+    left: 0,
+    background: '#111827',
+    border: '1px solid #1e293b',
+    borderRadius: 6,
+    padding: 4,
+    minWidth: 200,
+    boxShadow: '0 8px 24px rgba(0,0,0,0.4)',
+    zIndex: 100,
   } as React.CSSProperties,
-  viewTabActive: {
-    background: '#1a6dd4',
-    color: '#fff',
-  } as React.CSSProperties,
-  settingsBtn: {
+  nulspaceItem: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    width: '100%',
+    padding: '7px 10px',
+    background: 'transparent',
+    border: 'none',
+    borderRadius: 4,
+    cursor: 'pointer',
+    color: '#e2e8f0',
+    textAlign: 'left' as const,
+  },
+
+  // Stats
+  stats: {
+    display: 'flex',
+    gap: 12,
+    fontSize: 10,
+    color: '#334155',
+    fontFamily: 'var(--mono)',
+  },
+
+  // User area
+  userArea: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+  },
+  userAvatar: {
+    width: 22,
+    height: 22,
+    borderRadius: '50%',
+    background: '#1e293b',
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
-    width: 32,
-    height: 32,
-    border: '1px solid #e5e2dd',
-    borderRadius: 6,
-    background: 'transparent',
-    color: '#7a756d',
-    cursor: 'pointer',
+    fontSize: 10,
+    fontWeight: 600,
+    color: '#64748b',
   },
-  user: { fontSize: 12, color: '#7a756d' },
+
   logoutBtn: {
-    padding: '6px 14px',
-    fontSize: 12,
-    border: '1px solid #e5e2dd',
-    borderRadius: 6,
+    padding: '4px 10px',
+    fontSize: 10,
+    border: '1px solid #1e293b',
+    borderRadius: 4,
     background: 'transparent',
-    color: '#7a756d',
+    color: '#475569',
     cursor: 'pointer',
+    fontFamily: 'var(--mono)',
   },
-  body: { display: 'flex', flex: 1, overflow: 'hidden' },
+
+  // Tab bar
+  tabBar: {
+    display: 'flex',
+    padding: '0 16px',
+    borderBottom: '1px solid #141a24',
+    background: '#0a0f16',
+    flexShrink: 0,
+  },
+  tab: {
+    padding: '9px 14px',
+    background: 'transparent',
+    border: 'none',
+    cursor: 'pointer',
+    fontSize: 10,
+    fontWeight: 600,
+    letterSpacing: '0.06em',
+    fontFamily: 'var(--mono)',
+    color: '#334155',
+    borderBottom: '1.5px solid transparent',
+  },
+
+  // Body
+  body: {
+    display: 'flex',
+    flex: 1,
+    overflow: 'hidden',
+    background: '#080c12',
+  },
+  bodyLight: {
+    display: 'flex',
+    flex: 1,
+    overflow: 'hidden',
+    background: '#faf9f7',
+  },
+
+  // Sidebar (for HORIZON view)
   sidebar: {
     width: 280,
     borderRight: '1px solid #e5e2dd',
     background: '#fff',
   },
-  main: { flex: 1, overflowY: 'auto', background: '#faf9f7' },
-  loading: { padding: 18, fontSize: 13, color: '#aba69e' },
+  mainLight: {
+    flex: 1,
+    overflowY: 'auto',
+    background: '#faf9f7',
+  },
+
+  // Empty states
   empty: {
     display: 'flex',
     flexDirection: 'column',
@@ -302,4 +459,12 @@ const styles: Record<string, React.CSSProperties> = {
   },
   emptyText: { fontSize: 14, color: '#7a756d', fontWeight: 300 },
   emptySub: { fontSize: 12, color: '#aba69e' },
+  emptyDark: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flex: 1,
+    gap: 8,
+  },
 };
