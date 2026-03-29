@@ -37,6 +37,9 @@ interface EoDbState {
   /** Get all states under a prefix */
   getStateByPrefix: (prefix: string) => Promise<EoState[]>;
 
+  /** Take a manual delta snapshot and record its URI in a NUL event */
+  manualSnapshot: () => Promise<{ mxc: string; seq: number }>;
+
   /** Tear down the store (logout) */
   teardown: () => void;
 }
@@ -94,6 +97,12 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     const { store } = get();
     if (!store) throw new Error('Store not initialized');
     return getStateByPrefix(store, prefix);
+  },
+
+  async manualSnapshot() {
+    const { syncManager } = get();
+    if (!syncManager) throw new Error('Sync manager not initialized — connect to Matrix first');
+    return syncManager.manualSnapshot();
   },
 
   teardown() {

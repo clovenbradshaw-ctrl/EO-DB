@@ -11,7 +11,7 @@ import type { EoStore } from '../db/encrypted-store';
 import type { EoEventInput } from '../db/types';
 import { processEvent } from '../db/fold';
 import { EO_EVENT_TYPE, matrixEventToEo, sendEoEvent } from './event-bridge';
-import { findLatestSnapshot, applySnapshot, maybeCreateSnapshot, createSnapshot, uploadSnapshot } from './snapshot';
+import { findLatestSnapshot, applySnapshot, maybeCreateSnapshot, createSnapshot, uploadSnapshot, createDeltaSnapshot, uploadDeltaSnapshot } from './snapshot';
 
 export class SyncManager {
   private client: MatrixClient;
@@ -76,6 +76,50 @@ export class SyncManager {
     const snapshot = await createSnapshot(this.store, this.client.getUserId()!);
     await uploadSnapshot(this.client, this.roomId, snapshot);
     await this.store.put('meta:snapshot_seq', seq);
+  }
+
+  /**
+   * Manual delta snapshot — captures log events since the last snapshot,
+   * uploads to Matrix media, and records the mxc URI in a NUL log event.
+   *
+   * This creates a reconstructable chain: each NUL snapshot event points
+   * to its delta blob, and each delta references the previous one via prev_mxc.
+   */
+  async manualSnapshot(): Promise<{ mxc: string; seq: number }> {
+    const currentSeq = await this.store.getCurrentSeq();
+    const lastSnapshotSeq: number = (await this.store.get('meta:snapshot_seq')) || 0;
+
+    if (currentSeq === lastSnapshotSeq) {
+      throw new Error('No new events since last snapshot');
+    }
+
+    // 1. Create delta snapshot (events since last snapshot)
+    const delta = await createDeltaSnapshot(this.store, this.client.getUserId()!);
+
+    // 2. Upload to Matrix media
+    const mxc = await uploadDeltaSnapshot(this.client, delta);
+
+    // 3. Record the mxc URI in a NUL event — this makes the snapshot
+    //    discoverable from the event log itself
+    await this.processLocalEvent({
+      op: 'NUL',
+      target: 'system.snapshot',
+      operand: {
+        mxc,
+        type: 'delta',
+        from_seq: delta.from_seq,
+        to_seq: delta.to_seq,
+        prev_mxc: delta.prev_mxc,
+        event_count: delta.events.length,
+      },
+      acquired_ts: new Date().toISOString(),
+    });
+
+    // 4. Update snapshot bookkeeping
+    await this.store.put('meta:snapshot_seq', currentSeq);
+    await this.store.put('meta:snapshot_mxc', mxc);
+
+    return { mxc, seq: currentSeq };
   }
 
   /**

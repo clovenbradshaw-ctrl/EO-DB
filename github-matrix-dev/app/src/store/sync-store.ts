@@ -51,6 +51,8 @@ interface SyncStoreState {
   offlineQueueSize: number;
   /** Last snapshot seq */
   lastSnapshotSeq: number;
+  /** Last snapshot mxc URI */
+  lastSnapshotMxc: string | null;
 
   /** Initialize from session + store state */
   initialize: (opts: {
@@ -60,6 +62,7 @@ interface SyncStoreState {
     localSeq: number;
     offlineQueueSize: number;
     lastSnapshotSeq: number;
+    lastSnapshotMxc: string | null;
     syncRoomId: string | null;
   }) => void;
 
@@ -78,8 +81,8 @@ interface SyncStoreState {
   /** Update offline queue size */
   setOfflineQueueSize: (size: number) => void;
 
-  /** Update last snapshot seq */
-  setLastSnapshotSeq: (seq: number) => void;
+  /** Update last snapshot seq and optional mxc URI */
+  setLastSnapshotSeq: (seq: number, mxc?: string) => void;
 }
 
 export const useSyncStore = create<SyncStoreState>((set, get) => ({
@@ -90,8 +93,9 @@ export const useSyncStore = create<SyncStoreState>((set, get) => ({
   syncRoomId: null,
   offlineQueueSize: 0,
   lastSnapshotSeq: 0,
+  lastSnapshotMxc: null,
 
-  initialize({ userId, deviceId, homeserver, localSeq, offlineQueueSize, lastSnapshotSeq, syncRoomId }) {
+  initialize({ userId, deviceId, homeserver, localSeq, offlineQueueSize, lastSnapshotSeq, lastSnapshotMxc, syncRoomId }) {
     const localPeer: PeerInfo = {
       userId,
       deviceId,
@@ -135,6 +139,7 @@ export const useSyncStore = create<SyncStoreState>((set, get) => ({
       syncRoomId,
       offlineQueueSize,
       lastSnapshotSeq,
+      lastSnapshotMxc,
     });
   },
 
@@ -189,9 +194,10 @@ export const useSyncStore = create<SyncStoreState>((set, get) => ({
     set({ offlineQueueSize: size });
   },
 
-  setLastSnapshotSeq(seq: number) {
+  setLastSnapshotSeq(seq: number, mxc?: string) {
     set((s) => ({
       lastSnapshotSeq: seq,
+      lastSnapshotMxc: mxc ?? s.lastSnapshotMxc,
       storageLocations: s.storageLocations.map((loc) =>
         loc.id === 'matrix-snapshots'
           ? { ...loc, sizeEstimate: `snapshot @ seq ${seq}` }
