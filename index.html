@@ -9,7 +9,7 @@
 
 * { margin:0; padding:0; box-sizing:border-box; }
 
-:root {
+:root, [data-theme="dark"] {
   --bg: #0a0b0e;
   --bg1: #10121a;
   --bg2: #161926;
@@ -35,6 +35,34 @@
 
   --accent: #38bdf8;
   --danger: #ef4444;
+}
+
+[data-theme="light"] {
+  --bg: #f5f5f0;
+  --bg1: #ffffff;
+  --bg2: #eeeee8;
+  --bg3: #e4e4dc;
+  --bg4: #d8d8d0;
+  --border: #ccccc4;
+  --border2: #b8b8b0;
+  --text: #2c2a26;
+  --text-dim: #6b6960;
+  --text-faint: #9b9890;
+  --white: #1a1816;
+
+  /* Operator colors — slightly deeper for legibility on light bg */
+  --nul: #5c5f7a;
+  --sig: #2a7fad;
+  --ins: #16a34a;
+  --seg: #d946a8;
+  --con: #7c3aed;
+  --syn: #c2700a;
+  --def: #0284c7;
+  --eva: #059669;
+  --rec: #ea580c;
+
+  --accent: #1a6dd4;
+  --danger: #dc2626;
 }
 
 body {
@@ -68,6 +96,112 @@ body {
 }
 
 .topbar-logo span { color: var(--accent); }
+
+/* ── NULspace Selector (top bar) ── */
+.nulspace-selector {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px 4px 8px;
+  border-radius: 6px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  transition: border-color 0.15s;
+  position: relative;
+}
+.nulspace-selector:hover { border-color: var(--accent); }
+
+.nulspace-badge {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: rgba(92,95,122,0.25);
+  color: var(--nul);
+  border: 1px solid rgba(92,95,122,0.35);
+}
+
+.nulspace-name {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.nulspace-chevron {
+  font-size: 8px;
+  color: var(--text-dim);
+  margin-left: 2px;
+}
+
+.nulspace-dropdown {
+  display: none;
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  min-width: 240px;
+  background: var(--bg2);
+  border: 1px solid var(--border2);
+  border-radius: 8px;
+  padding: 6px 0;
+  z-index: 300;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+}
+.nulspace-dropdown.open { display: block; }
+
+.nulspace-dropdown-item {
+  padding: 8px 14px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--text);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  transition: background 0.1s;
+}
+.nulspace-dropdown-item:hover { background: var(--bg3); }
+.nulspace-dropdown-item.active { color: var(--accent); }
+.nulspace-dropdown-item .ndd-desc {
+  font-size: 9px;
+  color: var(--text-faint);
+  margin-left: auto;
+}
+.nulspace-dropdown-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 0;
+}
+.nulspace-dropdown-action {
+  padding: 8px 14px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  color: var(--accent);
+  cursor: pointer;
+  transition: background 0.1s;
+}
+.nulspace-dropdown-action:hover { background: var(--bg3); }
+
+/* ── Theme Toggle ── */
+.theme-toggle {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+.theme-toggle:hover { border-color: var(--accent); color: var(--text); }
 
 .topbar-status {
   display: flex;
@@ -1961,6 +2095,15 @@ body {
 ::-webkit-scrollbar-thumb { background: var(--bg4); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--border2); }
 
+/* ── Light mode adjustments ── */
+[data-theme="light"] .nulspace-dropdown,
+[data-theme="light"] .online-popover,
+[data-theme="light"] .login-card {
+  box-shadow: 0 8px 24px rgba(0,0,0,0.12);
+}
+[data-theme="light"] .op-NUL { background: rgba(92,95,122,0.08); }
+[data-theme="light"] .nulspace-badge { background: rgba(92,95,122,0.15); }
+
 /* ── Responsive ── */
 @media (max-width: 900px) {
   .detail-drawer { width: 300px; }
@@ -1972,7 +2115,16 @@ body {
 
 <!-- Top Bar -->
 <div class="topbar">
-  <div class="topbar-logo">EO<span>///</span>DB</div>
+  <div style="display:flex;align-items:center;gap:16px;">
+    <div class="topbar-logo">EO<span>///</span>DB</div>
+    <!-- NULspace Selector -->
+    <div class="nulspace-selector" id="nulspaceSelector" onclick="toggleNulspaceDropdown(event)">
+      <span class="nulspace-badge">NUL</span>
+      <span class="nulspace-name" id="nulspaceName">no space</span>
+      <span class="nulspace-chevron">&#9662;</span>
+      <div class="nulspace-dropdown" id="nulspaceDropdown"></div>
+    </div>
+  </div>
   <div class="topbar-status">
     <div class="status-dot"></div>
     <span class="status-item">seq <b id="currentSeq">—</b></span>
@@ -1980,16 +2132,19 @@ body {
     <span class="status-item">targets <b>—</b></span>
     <span class="status-item">edges <b>—</b></span>
   </div>
-  <div class="online-indicator" id="onlineIndicator" onclick="toggleOnlinePopover()" style="display:none;">
-    <div class="online-dot disconnected" id="onlineDot"></div>
-    <span class="online-count" id="onlineCount">0 online</span>
-    <div class="online-popover" id="onlinePopover">
-      <div class="online-popover-title">Connected Users</div>
-      <div id="onlineList"><div class="online-popover-empty">No one else online</div></div>
+  <div style="display:flex;align-items:center;gap:10px;">
+    <button class="theme-toggle" id="themeToggle" onclick="toggleTheme()" title="Toggle light/dark mode">&#9790;</button>
+    <div class="online-indicator" id="onlineIndicator" onclick="toggleOnlinePopover()" style="display:none;">
+      <div class="online-dot disconnected" id="onlineDot"></div>
+      <span class="online-count" id="onlineCount">0 online</span>
+      <div class="online-popover" id="onlinePopover">
+        <div class="online-popover-title">Connected Users</div>
+        <div id="onlineList"><div class="online-popover-empty">No one else online</div></div>
+      </div>
     </div>
-  </div>
-  <div class="topbar-user" id="topbarUser">
-    <button class="topbar-user-btn" onclick="showLogin()">Sign In</button>
+    <div class="topbar-user" id="topbarUser">
+      <button class="topbar-user-btn" onclick="showLogin()">Sign In</button>
+    </div>
   </div>
 </div>
 
@@ -2006,7 +2161,6 @@ body {
   <div class="nav-tab" onclick="switchTab('log')">Log</div>
   <div class="nav-tab" onclick="switchTab('graph')">Graph</div>
   <div class="nav-tab" onclick="switchTab('compose')" style="color:var(--ins);">+ Compose</div>
-  <div class="nav-tab" onclick="switchTab('spaces')">NUL Spaces</div>
   <div class="nav-tab" onclick="switchTab('import')">Import</div>
   <div class="nav-tab" onclick="switchTab('settings')">Settings</div>
 </div>
@@ -2556,6 +2710,87 @@ INS,app.tbl.rec1,"{""name"":""Alice""}"</pre>
 </div>
 
 <script>
+// ── Theme Toggle ──
+function getTheme() {
+  const saved = localStorage.getItem('eo-theme');
+  if (saved === 'light' || saved === 'dark') return saved;
+  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
+
+function applyTheme(mode) {
+  document.documentElement.setAttribute('data-theme', mode);
+  localStorage.setItem('eo-theme', mode);
+  const btn = document.getElementById('themeToggle');
+  if (btn) btn.innerHTML = mode === 'dark' ? '&#9790;' : '&#9788;';
+}
+
+function toggleTheme() {
+  const current = document.documentElement.getAttribute('data-theme') || getTheme();
+  applyTheme(current === 'dark' ? 'light' : 'dark');
+}
+
+// Apply on load
+applyTheme(getTheme());
+
+// ── NULspace Selector (top bar) ──
+let activeNulspaceId = localStorage.getItem('eo-active-nulspace') || null;
+
+function toggleNulspaceDropdown(e) {
+  e.stopPropagation();
+  const dd = document.getElementById('nulspaceDropdown');
+  dd.classList.toggle('open');
+  if (dd.classList.contains('open')) renderNulspaceDropdown();
+}
+
+document.addEventListener('click', () => {
+  const dd = document.getElementById('nulspaceDropdown');
+  if (dd) dd.classList.remove('open');
+});
+
+async function renderNulspaceDropdown() {
+  const dd = document.getElementById('nulspaceDropdown');
+  const spaces = db ? await getAllSpaces() : [];
+  let html = '';
+  if (spaces.length > 0) {
+    spaces.forEach(s => {
+      const isActive = activeNulspaceId === s.id;
+      html += `<div class="nulspace-dropdown-item ${isActive ? 'active' : ''}" onclick="selectNulspace('${s.id}', event)">
+        <span>${escHtml(s.name)}</span>
+        ${s.description ? `<span class="ndd-desc">${escHtml(s.description)}</span>` : ''}
+      </div>`;
+    });
+    html += '<div class="nulspace-dropdown-divider"></div>';
+  }
+  html += `<div class="nulspace-dropdown-action" onclick="event.stopPropagation();document.getElementById('nulspaceDropdown').classList.remove('open');switchTab('spaces');">+ New NUL Space</div>`;
+  html += `<div class="nulspace-dropdown-action" onclick="event.stopPropagation();document.getElementById('nulspaceDropdown').classList.remove('open');switchTab('spaces');">Manage Spaces</div>`;
+  dd.innerHTML = html;
+}
+
+async function selectNulspace(id, e) {
+  if (e) e.stopPropagation();
+  activeNulspaceId = id;
+  localStorage.setItem('eo-active-nulspace', id);
+  document.getElementById('nulspaceDropdown').classList.remove('open');
+  await updateNulspaceLabel();
+}
+
+async function updateNulspaceLabel() {
+  const nameEl = document.getElementById('nulspaceName');
+  if (!nameEl) return;
+  if (!activeNulspaceId || !db) {
+    nameEl.textContent = 'no space';
+    return;
+  }
+  const space = await getSpaceById(activeNulspaceId);
+  if (space) {
+    nameEl.textContent = space.name;
+  } else {
+    activeNulspaceId = null;
+    localStorage.removeItem('eo-active-nulspace');
+    nameEl.textContent = 'no space';
+  }
+}
+
 // ── IndexedDB Storage Layer ──
 const DB_NAME = 'eo-db';
 const DB_VERSION = 4;
@@ -5465,6 +5700,8 @@ async function createNewSpace() {
   await loadFromIndexedDB();
   await loadSpaces();
   selectSpace(id);
+  // Also activate in top bar selector
+  await selectNulspace(id);
 }
 
 async function loadSpaces() {
@@ -5684,6 +5921,7 @@ async function deleteSelectedSpace() {
   updateStatusBar();
   renderHorizon();
   renderLog();
+  await updateNulspaceLabel();
   if (matrixToken) {
     validateSession();
     connectSync();
@@ -5695,6 +5933,11 @@ async function deleteSelectedSpace() {
     switchTab('spaces');
     const nameEl = document.getElementById('newSpaceName');
     if (nameEl) nameEl.focus();
+  } else if (!activeNulspaceId) {
+    // Auto-select the first space
+    activeNulspaceId = spaces[0].id;
+    localStorage.setItem('eo-active-nulspace', spaces[0].id);
+    await updateNulspaceLabel();
   }
 })();
 </script>
