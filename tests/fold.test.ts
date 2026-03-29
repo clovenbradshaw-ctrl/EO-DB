@@ -467,18 +467,114 @@ describe('REC', () => {
     const allEvents = await readLogSince(db, 0);
 
     // The log now contains two kinds of entries:
-    // Observations (human-initiated) and Discoveries (system-generated REC)
-    const humanEvents = allEvents.filter(e => e.op !== 'REC');
+    // Observations (human-initiated) and Discoveries (system-generated REC + INS2+)
+    const humanEvents = allEvents.filter(e => e.agent !== 'system');
     for (const e of humanEvents) {
       expect(e.agent).toBe(AGENT);
     }
 
-    const sysEvents = allEvents.filter(e => e.op === 'REC');
+    const sysEvents = allEvents.filter(e => e.agent === 'system');
     expect(sysEvents.length).toBeGreaterThanOrEqual(1);
     for (const e of sysEvents) {
       expect(e.agent).toBe('system');
       expect(e.triggered_by).toBeDefined();
     }
+  });
+});
+
+// --- INS Levels Tests ---
+
+describe('INS Levels', () => {
+  it('all externally created entities are level 1', async () => {
+    await processEvent(db, ev({ target: 'lvl.test', operand: { x: 1 } }));
+    const state = await getState(db, 'lvl.test');
+    expect(state?.level).toBe(1);
+  });
+
+  it('DEF auto-instantiated entities are level 1', async () => {
+    await processEvent(db, ev({ op: 'DEF', target: 'lvl.auto', operand: { y: 2 } }));
+    const state = await getState(db, 'lvl.auto');
+    expect(state?.level).toBe(1);
+  });
+
+  it('system-generated REC produces INS2 derived entity', async () => {
+    // Set up cycle
+    await processEvent(db, ev({ target: 'ins2.A', operand: { val: 1 } }));
+    await processEvent(db, ev({ target: 'ins2.B', operand: { val: 2 } }));
+    await processEvent(db, ev({ op: 'CON', target: 'ins2.A', operand: { added: ['ins2.B'] } }));
+    await processEvent(db, ev({ op: 'CON', target: 'ins2.B', operand: { added: ['ins2.A'] } }));
+    await processEvent(db, ev({ op: 'DEF', target: 'ins2.A', operand: { formula: 'F(B)' } }));
+    await processEvent(db, ev({ op: 'DEF', target: 'ins2.B', operand: { formula: 'G(A)' } }));
+
+    // Check that a system.rec.* derived entity was created at level 2
+    const allEvents = await readLogSince(db, 0);
+    const insEvents = allEvents.filter(e => e.op === 'INS' && e.agent === 'system');
+    expect(insEvents.length).toBeGreaterThanOrEqual(1);
+
+    const derivedIns = insEvents[0];
+    expect(derivedIns.level).toBe(2);
+    expect(derivedIns.target).toMatch(/^system\.rec\./);
+
+    const derivedState = await getState(db, derivedIns.target);
+    expect(derivedState?.level).toBe(2);
+    expect(derivedState?.value?.constituents).toBeDefined();
+    expect(derivedState?.value?.topology).toBe('cycle');
+  });
+
+  it('rejects DEF on core content of derived entity', async () => {
+    // Set up cycle to create INS2 entity
+    await processEvent(db, ev({ target: 'guard.A', operand: { val: 1 } }));
+    await processEvent(db, ev({ target: 'guard.B', operand: { val: 2 } }));
+    await processEvent(db, ev({ op: 'CON', target: 'guard.A', operand: { added: ['guard.B'] } }));
+    await processEvent(db, ev({ op: 'CON', target: 'guard.B', operand: { added: ['guard.A'] } }));
+    await processEvent(db, ev({ op: 'DEF', target: 'guard.A', operand: { formula: 'F(B)' } }));
+    await processEvent(db, ev({ op: 'DEF', target: 'guard.B', operand: { formula: 'G(A)' } }));
+
+    // Find the derived entity
+    const allEvents = await readLogSince(db, 0);
+    const derivedIns = allEvents.find(e => e.op === 'INS' && e.agent === 'system');
+    expect(derivedIns).toBeDefined();
+
+    // Attempting to DEF the derived entity's core content should fail
+    await expect(processEvent(db, ev({
+      op: 'DEF',
+      target: derivedIns!.target,
+      operand: { hacked: true },
+    }))).rejects.toThrow('Cannot DEF core content of derived entity');
+  });
+
+  it('allows DEF on annotation sub-paths of derived entities', async () => {
+    // Set up cycle
+    await processEvent(db, ev({ target: 'annot.A', operand: { val: 1 } }));
+    await processEvent(db, ev({ target: 'annot.B', operand: { val: 2 } }));
+    await processEvent(db, ev({ op: 'CON', target: 'annot.A', operand: { added: ['annot.B'] } }));
+    await processEvent(db, ev({ op: 'CON', target: 'annot.B', operand: { added: ['annot.A'] } }));
+    await processEvent(db, ev({ op: 'DEF', target: 'annot.A', operand: { formula: 'F(B)' } }));
+    await processEvent(db, ev({ op: 'DEF', target: 'annot.B', operand: { formula: 'G(A)' } }));
+
+    // Find the derived entity
+    const allEvents = await readLogSince(db, 0);
+    const derivedIns = allEvents.find(e => e.op === 'INS' && e.agent === 'system');
+    expect(derivedIns).toBeDefined();
+
+    // DEF on a sub-path (annotation) should succeed — it auto-instantiates at level 1
+    await processEvent(db, ev({
+      op: 'DEF',
+      target: `${derivedIns!.target}.severity`,
+      operand: 'high',
+    }));
+
+    const annotState = await getState(db, `${derivedIns!.target}.severity`);
+    expect(annotState?.value).toBe('high');
+    expect(annotState?.level).toBe(1); // annotation is level 1
+  });
+
+  it('level is preserved through operations', async () => {
+    await processEvent(db, ev({ target: 'pres.test', operand: { a: 1 } }));
+    await processEvent(db, ev({ op: 'DEF', target: 'pres.test', operand: { b: 2 } }));
+    const state = await getState(db, 'pres.test');
+    expect(state?.level).toBe(1);
+    expect(state?.last_op).toBe('DEF');
   });
 });
 

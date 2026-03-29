@@ -3,7 +3,7 @@ import { appendToLog } from './log.js';
 import { getState, setState } from './state.js';
 import { addEdge, removeEdge, getEdgesFrom, getEdgesTo } from './graph.js';
 import { resolveAlias, checkExists } from './helpers.js';
-import type { EoEvent, EoEventInput, EoState, EvaRegistration, RecResult, ExternalOperator } from './types.js';
+import type { EoEvent, EoEventInput, EoState, EvaRegistration, RecResult, ExternalOperator, DerivedEntity } from './types.js';
 import { isEncryptedOperand } from './crypto-types.js';
 import type { Feed } from './feed.js';
 import { seedHash, chainHash } from './hash.js';
@@ -57,7 +57,10 @@ export async function processEvent(
   // 8. Detect dependency cycles and emit system-generated REC if found
   await detectAndEmitREC(db, fullEvent.target, fullEvent, feed);
 
-  // 9. Notify changefeed
+  // 9. Cascade upward: if this target is a constituent of any derived entity, re-evaluate it
+  await cascadeUpward(db, fullEvent.target, fullEvent, feed);
+
+  // 10. Notify changefeed
   if (feed) {
     feed.notify(fullEvent);
   }
@@ -95,6 +98,7 @@ function stateFromEvent(event: EoEvent, op: EoEvent['op']) {
 
 // --- INS: Instantiate ---
 // Inherited: NUL (existence check), SIG (coordinate targeting)
+// External INS is always level 1. System-generated INS (from REC convergence) carries level 2+.
 async function handleINS(db: EoDb, event: EoEvent): Promise<void> {
   // NUL capacity: observe keyspace to check for duplicates
   const existing = await checkExists(db, event.target);
@@ -106,6 +110,7 @@ async function handleINS(db: EoDb, event: EoEvent): Promise<void> {
     target: event.target,
     value: event.operand ?? {},
     hash: seedHash(event),
+    level: event.level ?? 1,
     ...stateFromEvent(event, 'INS'),
   });
 }
@@ -123,6 +128,7 @@ async function handleSEG(db: EoDb, event: EoEvent): Promise<void> {
     target: event.target,
     value: event.operand,
     hash: chainHash(existing.hash, event),
+    level: existing.level,
     ...stateFromEvent(event, 'SEG'),
   });
 }
@@ -168,6 +174,7 @@ async function handleCON(db: EoDb, event: EoEvent): Promise<void> {
     target: event.target,
     value: { linked: currentEdges.map(e => e.dest), edge_type: operand.edge_type },
     hash: chainHash(sourceState!.hash, event),
+    level: sourceState!.level,
     ...stateFromEvent(event, 'CON'),
   });
 }
@@ -198,6 +205,7 @@ async function handleSYN(db: EoDb, event: EoEvent): Promise<void> {
       target: mergedTarget,
       value: mergedValue,
       hash: seedHash(event),
+      level: 1,
       ...stateFromEvent(event, 'SYN'),
     });
 
@@ -224,6 +232,7 @@ async function handleSYN(db: EoDb, event: EoEvent): Promise<void> {
       target: a,
       value: { _alias: mergedTarget },
       hash: chainHash(stateA.hash, event),
+      level: stateA.level,
       ...stateFromEvent(event, 'SYN'),
     });
     if (b !== mergedTarget) {
@@ -231,6 +240,7 @@ async function handleSYN(db: EoDb, event: EoEvent): Promise<void> {
         target: b,
         value: { _alias: mergedTarget },
         hash: chainHash(stateB.hash, event),
+        level: stateB.level,
         ...stateFromEvent(event, 'SYN'),
       });
     }
@@ -250,9 +260,18 @@ async function handleDEF(db: EoDb, event: EoEvent): Promise<void> {
       target,
       value: {},
       hash: seedHash(event),
+      level: 1,
       ...stateFromEvent(event, 'INS'),
     };
     await setState(db, existing);
+  }
+
+  // Level guard: reject DEFs on core content of derived entities (INS2+).
+  // Annotations at sub-paths are allowed — only the core path is protected.
+  if (existing.level > 1 && event.agent !== 'system') {
+    throw new Error(
+      `Cannot DEF core content of derived entity at level ${existing.level}: ${target}`
+    );
   }
 
   // DEF's own logic: merge operand into existing state
@@ -262,6 +281,7 @@ async function handleDEF(db: EoDb, event: EoEvent): Promise<void> {
     target,
     value: merged,
     hash: chainHash(existing.hash, event),
+    level: existing.level,
     ...stateFromEvent(event, 'DEF'),
   });
 
@@ -284,6 +304,7 @@ async function handleEVA(db: EoDb, event: EoEvent): Promise<void> {
     target,
     value: event.operand,
     hash: existing ? chainHash(existing.hash, event) : seedHash(event),
+    level: existing?.level ?? 1,
     ...stateFromEvent(event, 'EVA'),
   });
 }
@@ -401,6 +422,7 @@ async function handleREC(db: EoDb, event: EoEvent): Promise<void> {
       result,
     },
     hash: existing ? chainHash(existing.hash, event) : seedHash(event),
+    level: existing?.level ?? 1,
     ...stateFromEvent(event, 'REC'),
   });
 }
@@ -426,6 +448,7 @@ function stripEphemeral(val: any): any {
  * Detect dependency cycles involving the changed target.
  * If a cycle exists (all members have fold-mode EVA registrations),
  * run the fixed-point iteration and emit a system-generated REC event.
+ * On convergence, produce an INS at the next level (INS2+).
  */
 async function detectAndEmitREC(
   db: EoDb,
@@ -451,6 +474,19 @@ async function detectAndEmitREC(
   }
 
   if (registrations.length === 0) return;
+
+  // Determine the level of the constituents — INS level of the cycle members
+  let maxConstituentLevel = 1;
+  const constituentTargets: string[] = [];
+  for (const target of cycleTargets) {
+    constituentTargets.push(target);
+    const state = await getState(db, target);
+    if (state && state.level > maxConstituentLevel) {
+      maxConstituentLevel = state.level;
+    }
+  }
+  constituentTargets.push(changedTarget);
+  const derivedLevel = maxConstituentLevel + 1;
 
   // Build the set of targets to watch for convergence
   const watchedTargets = new Set<string>(cycleTargets);
@@ -521,10 +557,10 @@ async function detectAndEmitREC(
   }));
 
   // Produce the REC event with system as agent
-  const seq = await nextSeq(db);
+  const recSeq = await nextSeq(db);
   const now = new Date().toISOString();
   const recEvent: EoEvent = {
-    seq,
+    seq: recSeq,
     op: 'REC',
     target: changedTarget,
     operand: {
@@ -540,12 +576,12 @@ async function detectAndEmitREC(
   // Log the REC event
   await appendToLog(db, recEvent);
 
-  // Store REC result in state
-  const existing = await getState(db, changedTarget);
+  // Store REC result in state (on the pivot target, preserving its existing level)
+  const existingPivot = await getState(db, changedTarget);
   await setState(db, {
     target: changedTarget,
     value: {
-      ...existing?.value,
+      ...existingPivot?.value,
       _rec: {
         recursion: true,
         pivot: changedTarget,
@@ -554,13 +590,209 @@ async function detectAndEmitREC(
         result,
       },
     },
-    hash: existing ? chainHash(existing.hash, recEvent) : seedHash(recEvent),
+    hash: existingPivot ? chainHash(existingPivot.hash, recEvent) : seedHash(recEvent),
+    level: existingPivot?.level ?? 1,
     ...stateFromEvent(recEvent, 'REC'),
   });
 
-  // Notify changefeed
+  // Notify changefeed for REC
   if (feed) {
     feed.notify(recEvent);
+  }
+
+  // --- INS2+: Produce a derived entity when REC discovers something ---
+  // Generate a deterministic target for the derived entity based on constituents
+  const sortedConstituents = [...new Set(constituentTargets)].sort();
+  const derivedTargetId = derivedEntityTarget(sortedConstituents);
+
+  // Check if a derived entity already exists for this cycle
+  const existingDerived = await getState(db, derivedTargetId);
+
+  const derivedOperand = {
+    constituents: sortedConstituents,
+    topology: 'cycle',
+    result,
+  };
+
+  if (existingDerived) {
+    // Update existing derived entity's result (same cycle, new data)
+    const updateSeq = await nextSeq(db);
+    const updateEvent: EoEvent = {
+      seq: updateSeq,
+      op: 'DEF',
+      target: derivedTargetId,
+      operand: derivedOperand,
+      agent: 'system',
+      ts: now,
+      acquired_ts: now,
+      triggered_by: triggeringEvent.seq,
+    };
+    await appendToLog(db, updateEvent);
+    await setState(db, {
+      target: derivedTargetId,
+      value: derivedOperand,
+      hash: chainHash(existingDerived.hash, updateEvent),
+      level: existingDerived.level,
+      ...stateFromEvent(updateEvent, 'DEF'),
+    });
+    if (feed) feed.notify(updateEvent);
+  } else {
+    // INS the new derived entity at the next level
+    const insSeq = await nextSeq(db);
+    const insEvent: EoEvent = {
+      seq: insSeq,
+      op: 'INS',
+      target: derivedTargetId,
+      operand: derivedOperand,
+      agent: 'system',
+      level: derivedLevel,
+      ts: now,
+      acquired_ts: now,
+      triggered_by: triggeringEvent.seq,
+    };
+    await appendToLog(db, insEvent);
+    await setState(db, {
+      target: derivedTargetId,
+      value: derivedOperand,
+      hash: seedHash(insEvent),
+      level: derivedLevel,
+      ...stateFromEvent(insEvent, 'INS'),
+    });
+
+    // Register in the derived entity index
+    const derived: DerivedEntity = {
+      target: derivedTargetId,
+      level: derivedLevel,
+      constituents: sortedConstituents,
+      topology: 'cycle',
+      inert: false,
+    };
+    await db.put(`derived:${derivedTargetId}`, encode(derived));
+
+    // Update reverse dependency index: constituent → derived entity
+    for (const constituent of sortedConstituents) {
+      await addReverseDep(db, constituent, derivedTargetId);
+    }
+
+    if (feed) feed.notify(insEvent);
+  }
+
+  // Cascade upward: if the changed target or its derived entity is itself
+  // a constituent of higher-level entities, re-evaluate them
+  await cascadeUpward(db, derivedTargetId, triggeringEvent, feed);
+}
+
+/**
+ * Generate a deterministic target path for a derived entity from its constituents.
+ * The identity of a derived entity is its dependency cycle, not its result.
+ */
+function derivedEntityTarget(sortedConstituents: string[]): string {
+  // Use a short hash of the sorted constituents for identity
+  const key = sortedConstituents.join('|');
+  let hash = 0;
+  for (let i = 0; i < key.length; i++) {
+    hash = ((hash << 5) - hash + key.charCodeAt(i)) | 0;
+  }
+  const hexId = (hash >>> 0).toString(16).padStart(8, '0');
+  return `system.rec.${hexId}`;
+}
+
+/**
+ * Add a reverse dependency: constituent → derived entity that depends on it.
+ */
+async function addReverseDep(db: EoDb, constituent: string, derivedTarget: string): Promise<void> {
+  const key = `rdep:${constituent}:${derivedTarget}`;
+  await db.put(key, encode(derivedTarget));
+}
+
+/**
+ * Get all derived entities that depend on a given constituent.
+ */
+async function getReverseDeps(db: EoDb, constituent: string): Promise<string[]> {
+  const deps: string[] = [];
+  const prefix = `rdep:${constituent}:`;
+  for await (const [, value] of db.iterator({
+    gte: prefix,
+    lte: `${prefix}\xff`,
+  })) {
+    deps.push(decode(value) as string);
+  }
+  return deps;
+}
+
+/**
+ * Cascade re-evaluation upward through derived entity levels.
+ * When a constituent changes, all derived entities that depend on it
+ * need to re-run their REC loops.
+ */
+async function cascadeUpward(
+  db: EoDb,
+  changedTarget: string,
+  triggeringEvent: EoEvent,
+  feed?: Feed,
+): Promise<void> {
+  const dependentTargets = await getReverseDeps(db, changedTarget);
+  for (const derivedTarget of dependentTargets) {
+    // Look up the derived entity registration
+    let derived: DerivedEntity | null = null;
+    try {
+      const buf = await db.get(`derived:${derivedTarget}`);
+      derived = decode(buf) as DerivedEntity;
+    } catch (e: any) {
+      if (e.code === 'LEVEL_NOT_FOUND') continue;
+      throw e;
+    }
+
+    if (!derived || derived.inert) continue;
+
+    // Re-evaluate: collect current values of all constituents
+    const constituentValues: Record<string, any> = {};
+    for (const c of derived.constituents) {
+      const state = await getState(db, c);
+      constituentValues[c] = state?.value ?? null;
+    }
+
+    // Log a REC re-evaluation event on the derived entity
+    const reEvalSeq = await nextSeq(db);
+    const now = new Date().toISOString();
+    const reEvalEvent: EoEvent = {
+      seq: reEvalSeq,
+      op: 'REC',
+      target: derivedTarget,
+      operand: {
+        re_evaluation: true,
+        changed_constituent: changedTarget,
+        constituent_values: constituentValues,
+      },
+      agent: 'system',
+      ts: now,
+      acquired_ts: now,
+      triggered_by: triggeringEvent.seq,
+    };
+    await appendToLog(db, reEvalEvent);
+
+    // Update the derived entity's value with current constituent data
+    const existingDerived = await getState(db, derivedTarget);
+    if (existingDerived) {
+      await setState(db, {
+        target: derivedTarget,
+        value: {
+          ...existingDerived.value,
+          result: {
+            ...existingDerived.value?.result,
+            stable_state: constituentValues,
+          },
+        },
+        hash: chainHash(existingDerived.hash, reEvalEvent),
+        level: existingDerived.level,
+        ...stateFromEvent(reEvalEvent, 'REC'),
+      });
+    }
+
+    if (feed) feed.notify(reEvalEvent);
+
+    // Continue cascading upward if this derived entity is itself a constituent
+    await cascadeUpward(db, derivedTarget, triggeringEvent, feed);
   }
 }
 
@@ -657,6 +889,7 @@ async function evaluateFormula(db: EoDb, registration: EvaRegistration): Promise
     target: registration.target,
     value: { ...existing?.value, _computed: result },
     hash: existing?.hash || '',
+    level: existing?.level ?? 1,
     last_seq: existing?.last_seq || 0,
     last_op: existing?.last_op || 'DEF',
     last_agent: 'system:eva',

@@ -13,11 +13,12 @@ export interface EoEvent {
   op: LoggableOperator;
   target: string;
   operand: any;
-  agent: string;                  // Matrix user ID for human ops, "system" for REC
+  agent: string;                  // Matrix user ID for human ops, "system" for REC/INS2+
   ts: string;                     // submission timestamp — when the agent/user submitted this event (ISO 8601)
   acquired_ts: string;            // acquisition timestamp — when the system received this event (ISO 8601)
+  level?: number;                 // INS level: 1 = human-authored, 2+ = system-discovered
   client_event_id?: string;
-  triggered_by?: number;          // for REC: seq of the human-initiated event that caused the cycle
+  triggered_by?: number;          // for REC/INS2+: seq of the human-initiated event that caused the cycle
   meta?: Record<string, any>;
 }
 
@@ -25,11 +26,21 @@ export interface EoEvent {
 export interface EoState {
   target: string;
   value: any;
+  level: number;                  // 1 = human-authored (INS1), 2+ = system-discovered (INS2+)
   last_seq: number;
   last_op: Operator;
   last_agent: string;
   last_ts: string;                // submission timestamp of last event
   last_acquired_ts: string;       // acquisition timestamp of last event
+}
+
+// Derived entity registration — tracks INS2+ entities and their constituents
+export interface DerivedEntity {
+  target: string;
+  level: number;
+  constituents: string[];
+  topology: string;
+  inert: boolean;
 }
 
 // CON graph edge
