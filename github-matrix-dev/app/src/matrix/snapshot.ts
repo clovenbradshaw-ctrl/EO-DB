@@ -17,7 +17,7 @@ import type { MatrixClient } from 'matrix-js-sdk';
 import type { EoStore } from '../db/encrypted-store';
 import type { EoState, EoEvent, GraphEdge, EvaRegistration } from '../db/types';
 import { readLogSince } from '../db/log';
-import { EO_SNAPSHOT_TYPE } from './event-bridge';
+import { EO_EVENT_TYPE } from './event-bridge';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -88,7 +88,10 @@ export async function createSnapshot(
 
 /**
  * Serialize and upload a snapshot to the Matrix media store,
- * then post a pointer event into the room.
+ * then post a NUL event into the room as the pointer.
+ *
+ * NUL is the correct operator: a snapshot observes state without
+ * changing it. It's not a LoggableOperator, so the fold ignores it.
  */
 export async function uploadSnapshot(
   client: MatrixClient,
@@ -104,13 +107,18 @@ export async function uploadSnapshot(
 
   const mxcUrl = uploadResult.content_uri;
 
-  await client.sendEvent(roomId, EO_SNAPSHOT_TYPE as any, {
-    mxc: mxcUrl,
-    base_seq: snapshot.base_seq,
-    seq: snapshot.seq,
-    ts: snapshot.ts,
-    size_bytes: binary.byteLength,
-    version: snapshot.version,
+  // Snapshot pointer is a NUL op — no state change, just a reference
+  await client.sendEvent(roomId, EO_EVENT_TYPE as any, {
+    op: 'NUL',
+    target: '_snapshot',
+    operand: {
+      mxc: mxcUrl,
+      base_seq: snapshot.base_seq,
+      seq: snapshot.seq,
+      ts: snapshot.ts,
+      size_bytes: binary.byteLength,
+      version: snapshot.version,
+    },
   });
 
   return mxcUrl;
@@ -137,17 +145,20 @@ export async function findAllSnapshots(
 
   function collectFromTimeline() {
     for (const event of timeline.getEvents()) {
-      if (event.getType() !== EO_SNAPSHOT_TYPE) continue;
+      if (event.getType() !== EO_EVENT_TYPE) continue;
       const c = event.getContent();
-      if (seen.has(c.mxc)) continue;
-      seen.add(c.mxc);
+      // Snapshot pointers are NUL ops targeting '_snapshot'
+      if (c.op !== 'NUL' || c.target !== '_snapshot') continue;
+      const operand = c.operand;
+      if (!operand?.mxc || seen.has(operand.mxc)) continue;
+      seen.add(operand.mxc);
       refs.push({
-        mxc: c.mxc,
-        base_seq: c.base_seq ?? 0,        // v1 snapshots lack base_seq
-        seq: c.seq,
-        ts: c.ts,
-        size_bytes: c.size_bytes,
-        version: c.version ?? 1,
+        mxc: operand.mxc,
+        base_seq: operand.base_seq ?? 0,   // v1 snapshots lack base_seq
+        seq: operand.seq,
+        ts: operand.ts,
+        size_bytes: operand.size_bytes,
+        version: operand.version ?? 1,
       });
     }
   }

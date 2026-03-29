@@ -9,7 +9,6 @@ import type { MatrixClient, MatrixEvent } from 'matrix-js-sdk';
 import type { EoEventInput } from '../db/types';
 
 export const EO_EVENT_TYPE = 'com.aminoimmigration.eo.event';
-export const EO_SNAPSHOT_TYPE = 'com.aminoimmigration.eo.snapshot';
 export const DATA_ROOM_ALIAS = '#amino-data:app.aminoimmigration.com';
 
 /**
