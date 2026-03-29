@@ -3385,6 +3385,9 @@ function disconnectSync() {
   document.getElementById('onlineIndicator').style.display = 'none';
 }
 
+const EO_EVENT_TYPE = 'com.eo-db.event';
+const EO_SNAPSHOT_TYPE = 'com.eo-db.snapshot';
+
 /**
  * Read events from IndexedDB with seq > afterSeq, ordered by seq.
  */
@@ -3393,7 +3396,7 @@ function loadEventsSince(afterSeq) {
     if (!db) { resolve([]); return; }
     const tx = db.transaction('log', 'readonly');
     const idx = tx.objectStore('log').index('seq');
-    const range = IDBKeyRange.lowerBound(afterSeq, true); // exclusive lower bound
+    const range = IDBKeyRange.lowerBound(afterSeq, true);
     const req = idx.getAll(range);
     req.onsuccess = () => resolve(req.result || []);
     req.onerror = () => resolve([]);
@@ -3401,12 +3404,91 @@ function loadEventsSince(afterSeq) {
 }
 
 /**
- * Compress a UTF-8 string into a gzipped Uint8Array via CompressionStream.
+ * Compress a string into a gzipped binary blob.
  */
 async function gzipCompress(str) {
   const stream = new Blob([str]).stream().pipeThrough(new CompressionStream('gzip'));
-  const buf = await new Response(stream).arrayBuffer();
-  return new Uint8Array(buf);
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+/**
+ * Ensure we have a Matrix room ID for syncing.
+ * Resolves alias or creates an E2EE room on first use.
+ */
+async function ensureSyncRoom() {
+  const cached = localStorage.getItem('eo_matrix_room_id');
+  if (cached) return cached;
+
+  const localpart = matrixUserId.split(':')[0].replace('@', '');
+  const domain = matrixUserId.split(':').slice(1).join(':');
+  const alias = `#eo-db-${localpart}:${domain}`;
+
+  // Try resolving existing alias
+  try {
+    const res = await fetch(
+      `${matrixHomeserver}/_matrix/client/v3/directory/room/${encodeURIComponent(alias)}`,
+      { headers: { 'Authorization': `Bearer ${matrixToken}` } }
+    );
+    if (res.ok) {
+      const { room_id } = await res.json();
+      localStorage.setItem('eo_matrix_room_id', room_id);
+      return room_id;
+    }
+  } catch { /* doesn't exist yet */ }
+
+  // Create new E2EE room
+  const res = await fetch(`${matrixHomeserver}/_matrix/client/v3/createRoom`, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${matrixToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: 'EO-DB Sync',
+      topic: 'Event log sync room for EO///DB',
+      room_alias_name: `eo-db-${localpart}`,
+      visibility: 'private',
+      preset: 'private_chat',
+      initial_state: [{
+        type: 'm.room.encryption',
+        state_key: '',
+        content: { algorithm: 'm.megolm.v1.aes-sha2' },
+      }],
+    }),
+  });
+  if (!res.ok) throw new Error(`Failed to create sync room: ${await res.text()}`);
+  const { room_id } = await res.json();
+  localStorage.setItem('eo_matrix_room_id', room_id);
+  return room_id;
+}
+
+/**
+ * Upload binary blob to Matrix media store, return mxc:// URI.
+ */
+async function uploadToMedia(binary, filename) {
+  const res = await fetch(
+    `${matrixHomeserver}/_matrix/media/v3/upload?filename=${encodeURIComponent(filename)}`,
+    {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${matrixToken}`, 'Content-Type': 'application/octet-stream' },
+      body: binary,
+    }
+  );
+  if (!res.ok) throw new Error(`Media upload failed (${res.status}): ${await res.text()}`);
+  return (await res.json()).content_uri;
+}
+
+/**
+ * Send a snapshot pointer event into the room timeline.
+ * This records the mxc URI so the room log becomes an index of all snapshots.
+ */
+async function sendSnapshotEvent(roomId, snapshot) {
+  const txnId = `snap-${snapshot.from_seq}-${snapshot.to_seq}-${Date.now()}`;
+  const url = `${matrixHomeserver}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/${encodeURIComponent(EO_SNAPSHOT_TYPE)}/${encodeURIComponent(txnId)}`;
+  const res = await fetch(url, {
+    method: 'PUT',
+    headers: { 'Authorization': `Bearer ${matrixToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(snapshot),
+  });
+  if (!res.ok) throw new Error(`Snapshot event failed (${res.status}): ${await res.text()}`);
+  return (await res.json()).event_id;
 }
 
 async function syncToMatrix() {
@@ -3419,7 +3501,7 @@ async function syncToMatrix() {
   }
 
   const currentSeq = nextSeq - 1;
-  const lastSyncSeq = parseInt(localStorage.getItem('eo_media_snapshot_seq') || '0', 10);
+  const lastSyncSeq = parseInt(localStorage.getItem('eo_matrix_sync_seq') || '0', 10);
 
   if (currentSeq <= lastSyncSeq) {
     if (statusEl) { statusEl.textContent = 'Up to date'; statusEl.style.color = 'var(--accent)'; }
@@ -3431,61 +3513,63 @@ async function syncToMatrix() {
   if (statusEl) { statusEl.textContent = ''; statusEl.style.color = 'var(--text-dim)'; }
 
   try {
-    // 1. Read only new events since last sync
+    // 1. Get room
+    const roomId = await ensureSyncRoom();
+    if (statusEl) statusEl.textContent = 'Reading events...';
+
+    // 2. Read only new events since last sync
     const newEvents = await loadEventsSince(lastSyncSeq);
     if (newEvents.length === 0) {
       if (statusEl) { statusEl.textContent = 'Up to date'; statusEl.style.color = 'var(--accent)'; }
+      btn.disabled = false;
+      btn.textContent = 'Sync to Matrix';
       return;
     }
 
-    // 2. Build delta payload with chain pointer
-    const prevMxc = localStorage.getItem('eo_media_snapshot_mxc') || null;
+    // 3. Build delta and compress to binary
+    const prevMxc = localStorage.getItem('eo_matrix_snapshot_mxc') || null;
     const delta = {
       version: 1,
       type: 'delta',
       from_seq: lastSyncSeq,
       to_seq: currentSeq,
       prev_mxc: prevMxc,
-      ts: new Date().toISOString(),
       created_by: matrixUserId,
+      ts: new Date().toISOString(),
       event_count: newEvents.length,
       events: newEvents,
     };
 
-    // 3. Serialize → gzip → binary blob
+    if (statusEl) statusEl.textContent = 'Compressing...';
     const compressed = await gzipCompress(JSON.stringify(delta));
-    const blob = new Blob([compressed], { type: 'application/octet-stream' });
 
-    // 4. Upload to Matrix media store
+    // 4. Upload binary to Matrix media
+    if (statusEl) statusEl.textContent = 'Uploading snapshot...';
     const filename = `eo-delta-${lastSyncSeq}-${currentSeq}.bin`;
-    const uploadUrl = `${matrixHomeserver}/_matrix/media/v3/upload?filename=${encodeURIComponent(filename)}`;
-    const uploadRes = await fetch(uploadUrl, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${matrixToken}`,
-        'Content-Type': 'application/octet-stream',
-      },
-      body: blob,
+    const mxcUri = await uploadToMedia(compressed, filename);
+
+    // 5. Record the mxc URI in the room timeline as a snapshot pointer
+    if (statusEl) statusEl.textContent = 'Recording in room...';
+    await sendSnapshotEvent(roomId, {
+      mxc: mxcUri,
+      from_seq: lastSyncSeq,
+      to_seq: currentSeq,
+      prev_mxc: prevMxc,
+      event_count: newEvents.length,
+      size_bytes: compressed.byteLength,
+      ts: delta.ts,
     });
 
-    if (!uploadRes.ok) {
-      const errBody = await uploadRes.text();
-      throw new Error(`Upload failed (${uploadRes.status}): ${errBody}`);
-    }
+    // 6. Update local tracking
+    localStorage.setItem('eo_matrix_sync_seq', String(currentSeq));
+    localStorage.setItem('eo_matrix_snapshot_mxc', mxcUri);
 
-    const { content_uri } = await uploadRes.json();
-
-    // 5. Update local tracking — this mxc becomes prev_mxc for the next delta
-    localStorage.setItem('eo_media_snapshot_seq', String(currentSeq));
-    localStorage.setItem('eo_media_snapshot_mxc', content_uri);
-
-    // 6. Update UI
     const mediaSeqEl = document.getElementById('settingsMediaSnapshotSeq');
     if (mediaSeqEl) mediaSeqEl.textContent = String(currentSeq);
 
     const sizeKB = (compressed.byteLength / 1024).toFixed(1);
     if (statusEl) {
-      statusEl.textContent = `Synced ${newEvents.length} events (${sizeKB} KB) @ seq ${currentSeq}`;
+      statusEl.textContent = `${newEvents.length} events (${sizeKB} KB) → seq ${currentSeq}`;
       statusEl.style.color = 'var(--accent)';
     }
   } catch (err) {
@@ -5714,7 +5798,7 @@ async function loadSettings() {
 
   if (matrixToken && matrixUserId) {
     const hs = localStorage.getItem('eo_matrix_homeserver') || '';
-    const snapshotSeq = localStorage.getItem('eo_media_snapshot_seq');
+    const snapshotSeq = localStorage.getItem('eo_matrix_sync_seq');
 
     if (mediaStatusEl) mediaStatusEl.textContent = 'Connected';
     if (mediaStatusEl) mediaStatusEl.style.color = 'var(--accent)';
