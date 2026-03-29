@@ -7983,7 +7983,7 @@ async function atSync(label, mode) {
             await appendEvent({
               op: 'DEF',
               target,
-              operand: { fields: storable, _airtable: { record_id: rec.id, space_id: space.id, table_id: table.id, created_time: rec.createdTime } },
+              operand: { fields: storable, _airtable: { record_id: rec.id, base_id: base.id, table_id: table.id, created_time: rec.createdTime } },
               agent: matrixUserId || 'local',
               client_event_id: `at-sync:${base.id}:${table.id}:${rec.id}:${JSON.stringify(storable).length}`,
             });
