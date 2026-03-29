@@ -75,6 +75,32 @@ export interface SyncProgress {
   records_so_far?: number;
 }
 
+/**
+ * Options for customizing what gets synced and how.
+ */
+export interface SyncCustomization {
+  /**
+   * Which tables to sync, keyed by base ID.
+   * If undefined or empty, all tables are synced.
+   * Example: { 'appXYZ': ['tblA', 'tblB'] }
+   */
+  selectedTables?: Record<string, string[]>;
+
+  /**
+   * Field exclusions per table (by field ID or name pattern).
+   * Example: { 'tblA': { fields: ['fldXYZ'], patterns: ['^internal_'] } }
+   */
+  fieldExclusions?: Record<string, SyncExclusions>;
+
+  /**
+   * When true, never overwrite field values that already exist in EO-DB.
+   * New records are always added. For existing records, only fields that
+   * don't yet have a value in EO-DB are written.
+   * Default: true (safe mode — EO-DB is source of truth once populated).
+   */
+  preserveExisting?: boolean;
+}
+
 // ─── Cursor management (IndexedDB meta store) ─────────────────────────────
 
 function cursorKey(baseId: string, tableId: string): string {
@@ -193,13 +219,33 @@ async function ingestRecord(
   agent: string,
   fieldMeta: Map<string, FieldMeta>,
   exclusions: SyncExclusions = EMPTY_EXCLUSIONS,
+  preserveExisting: boolean = true,
   onEvent?: (event: any) => void,
 ): Promise<'ingested' | 'skipped_no_change' | 'skipped_duplicate'> {
   const target = recordTarget(baseId, tableId, record.id);
-  const storableFields = extractStorableFields(record.fields, fieldMeta, exclusions);
+  let storableFields = extractStorableFields(record.fields, fieldMeta, exclusions);
 
-  if (!await hasActualChanges(store, target, storableFields)) {
-    return 'skipped_no_change';
+  if (preserveExisting) {
+    // Only write fields that don't already exist in EO-DB.
+    // Existing field values are never overwritten — EO-DB is source of truth.
+    const existing = await getState(store, target);
+    const existingFields = existing?.value?.fields;
+    if (existingFields) {
+      const newFields: Record<string, any> = {};
+      for (const [key, val] of Object.entries(storableFields)) {
+        if (!(key in existingFields) || existingFields[key] === undefined || existingFields[key] === null) {
+          newFields[key] = val;
+        }
+      }
+      if (Object.keys(newFields).length === 0) {
+        return 'skipped_no_change';
+      }
+      storableFields = newFields;
+    }
+  } else {
+    if (!await hasActualChanges(store, target, storableFields)) {
+      return 'skipped_no_change';
+    }
   }
 
   const contentKey = stableStringify(storableFields);
@@ -266,6 +312,8 @@ async function syncTable(
   tableName: string,
   agent: string,
   cursorSince: string | null,
+  exclusions: SyncExclusions = EMPTY_EXCLUSIONS,
+  preserveExisting: boolean = true,
   onEvent?: (event: any) => void,
   onProgress?: (progress: SyncProgress) => void,
 ): Promise<SyncResult> {
@@ -289,7 +337,7 @@ async function syncTable(
   })) {
     for (const record of page) {
       fetched++;
-      const result = await ingestRecord(store, baseId, tableId, record, agent, fieldMeta, EMPTY_EXCLUSIONS, onEvent);
+      const result = await ingestRecord(store, baseId, tableId, record, agent, fieldMeta, exclusions, preserveExisting, onEvent);
       switch (result) {
         case 'ingested': ingested++; break;
         case 'skipped_no_change': skippedNoChange++; break;
@@ -324,15 +372,23 @@ export async function hydrationSync(
     onProgress?: (progress: SyncProgress) => void;
     onEvent?: (event: any) => void;
     onTableComplete?: (result: SyncResult) => void;
+    customization?: SyncCustomization;
   },
 ): Promise<HydrationResult> {
   const start = Date.now();
+  const preserveExisting = opts?.customization?.preserveExisting ?? true;
+  const selectedTables = opts?.customization?.selectedTables;
+  const fieldExclusions = opts?.customization?.fieldExclusions;
 
   opts?.onProgress?.({ phase: 'discovering' });
   const manifest = await discoverSchema(client);
   const syncResults: SyncResult[] = [];
 
   for (const base of manifest.bases) {
+    // If table selection exists but this base has no selected tables, skip
+    const baseTables = selectedTables?.[base.id];
+    if (selectedTables && !baseTables?.length) continue;
+
     // Register base container
     try {
       await processEvent(store, {
@@ -347,6 +403,9 @@ export async function hydrationSync(
     } catch { /* idempotent */ }
 
     for (const table of base.tables) {
+      // Skip tables not in the selection
+      if (baseTables && !baseTables.includes(table.id)) continue;
+
       // Register table container with schema
       try {
         await processEvent(store, {
@@ -367,8 +426,11 @@ export async function hydrationSync(
 
       opts?.onProgress?.({ phase: 'syncing', base: base.name, table: table.name });
 
+      const exclusions = fieldExclusions?.[table.id] ?? EMPTY_EXCLUSIONS;
+
       const result = await syncTable(
         store, client, base.id, table.id, table.name, agent, null,
+        exclusions, preserveExisting,
         opts?.onEvent, opts?.onProgress,
       );
       syncResults.push(result);
@@ -400,25 +462,39 @@ export async function updateSync(
     onProgress?: (progress: SyncProgress) => void;
     onEvent?: (event: any) => void;
     onTableComplete?: (result: SyncResult) => void;
+    customization?: SyncCustomization;
   },
 ): Promise<UpdateSyncResult> {
   const start = Date.now();
+  const preserveExisting = opts?.customization?.preserveExisting ?? true;
+  const selectedTables = opts?.customization?.selectedTables;
+  const fieldExclusions = opts?.customization?.fieldExclusions;
   const syncResults: SyncResult[] = [];
 
   opts?.onProgress?.({ phase: 'discovering' });
   const bases = await client.listBases();
 
   for (const base of bases) {
+    // If table selection exists but this base has no selected tables, skip
+    const baseTables = selectedTables?.[base.id];
+    if (selectedTables && !baseTables?.length) continue;
+
     const tables = await client.getBaseSchema(base.id);
 
     for (const table of tables) {
+      // Skip tables not in the selection
+      if (baseTables && !baseTables.includes(table.id)) continue;
+
       const cursor = await getCursor(store, base.id, table.id);
       if (!cursor) continue; // Not hydrated yet — skip
 
       opts?.onProgress?.({ phase: 'syncing', base: base.name, table: table.name });
 
+      const exclusions = fieldExclusions?.[table.id] ?? EMPTY_EXCLUSIONS;
+
       const result = await syncTable(
         store, client, base.id, table.id, table.name, agent, cursor,
+        exclusions, preserveExisting,
         opts?.onEvent, opts?.onProgress,
       );
       syncResults.push(result);

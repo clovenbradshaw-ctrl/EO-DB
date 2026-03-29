@@ -76,6 +76,32 @@ export interface UpdateSyncResult {
   duration_ms: number;
 }
 
+/**
+ * Options for customizing what gets synced and how.
+ */
+export interface SyncCustomization {
+  /**
+   * Which tables to sync, keyed by base ID.
+   * If undefined or empty, all tables are synced.
+   * Example: { 'appXYZ': ['tblA', 'tblB'] }
+   */
+  selectedTables?: Record<string, string[]>;
+
+  /**
+   * Field exclusions per table (by field ID or name pattern).
+   * Example: { 'tblA': { fields: ['fldXYZ'], patterns: ['^internal_'] } }
+   */
+  fieldExclusions?: Record<string, SyncExclusions>;
+
+  /**
+   * When true, never overwrite field values that already exist in EO-DB.
+   * New records are always added. For existing records, only fields that
+   * don't yet have a value in EO-DB are written.
+   * Default: true (safe mode — EO-DB is source of truth once populated).
+   */
+  preserveExisting?: boolean;
+}
+
 // ─── Cursor management ──────────────────────────────────────────────────────
 
 const CURSOR_PREFIX = 'ingestion:airtable:cursor:';
@@ -315,15 +341,35 @@ async function ingestRecord(
   agent: string,
   fieldMeta: Map<string, FieldMeta>,
   exclusions: SyncExclusions = EMPTY_EXCLUSIONS,
+  preserveExisting: boolean = true,
 ): Promise<'ingested' | 'skipped_no_change' | 'skipped_duplicate'> {
   const target = recordTarget(baseId, tableId, record.id);
 
   // 1. Extract only storable fields (skip computed/metadata, normalize values)
-  const storableFields = extractStorableFields(record.fields, fieldMeta, exclusions);
+  let storableFields = extractStorableFields(record.fields, fieldMeta, exclusions);
 
-  // 2. Check for non-transformation against normalized fields
-  if (!await hasActualChanges(db, target, storableFields)) {
-    return 'skipped_no_change';
+  if (preserveExisting) {
+    // Only write fields that don't already exist in EO-DB.
+    // Existing field values are never overwritten — EO-DB is source of truth.
+    const existing = await getState(db, target);
+    const existingFields = existing?.value?.fields;
+    if (existingFields) {
+      const newFields: Record<string, any> = {};
+      for (const [key, val] of Object.entries(storableFields)) {
+        if (!(key in existingFields) || existingFields[key] === undefined || existingFields[key] === null) {
+          newFields[key] = val;
+        }
+      }
+      if (Object.keys(newFields).length === 0) {
+        return 'skipped_no_change';
+      }
+      storableFields = newFields;
+    }
+  } else {
+    // 2. Check for non-transformation against normalized fields
+    if (!await hasActualChanges(db, target, storableFields)) {
+      return 'skipped_no_change';
+    }
   }
 
   // 3. Build idempotent event ID using normalized content hash for dedup
@@ -408,15 +454,24 @@ export async function hydrationSync(
     tableIds?: string[];
     /** Progress callback — called after each table. */
     onTableComplete?: (result: SyncResult) => void;
+    /** Customization options for table/field selection and preserve mode. */
+    customization?: SyncCustomization;
   },
 ): Promise<HydrationResult> {
   const start = Date.now();
+  const preserveExisting = opts?.customization?.preserveExisting ?? true;
+  const selectedTables = opts?.customization?.selectedTables;
+  const fieldExclusions = opts?.customization?.fieldExclusions;
   const manifest = await discoverSchema(client);
   const syncResults: SyncResult[] = [];
 
   // Register base-level targets
   for (const base of manifest.bases) {
     if (opts?.baseIds?.length && !opts.baseIds.includes(base.id)) continue;
+
+    // If table selection exists but this base has no selected tables, skip
+    const baseTables = selectedTables?.[base.id];
+    if (selectedTables && !baseTables?.length) continue;
 
     // INS the base as a container (idempotent via DEF)
     try {
@@ -433,6 +488,8 @@ export async function hydrationSync(
 
     for (const table of base.tables) {
       if (opts?.tableIds?.length && !opts.tableIds.includes(table.id)) continue;
+      // Skip tables not in the selection
+      if (baseTables && !baseTables.includes(table.id)) continue;
 
       // Register table as container
       try {
@@ -452,8 +509,10 @@ export async function hydrationSync(
         }, feed);
       } catch { /* ignore */ }
 
+      const exclusions = fieldExclusions?.[table.id] ?? EMPTY_EXCLUSIONS;
+
       // Sync all records in this table
-      const result = await syncTable(db, feed, client, base.id, table.id, table.name, agent, null);
+      const result = await syncTable(db, feed, client, base.id, table.id, table.name, agent, null, exclusions, preserveExisting);
       syncResults.push(result);
       opts?.onTableComplete?.(result);
     }
@@ -492,9 +551,13 @@ export async function updateSync(
     baseIds?: string[];
     tableIds?: string[];
     onTableComplete?: (result: SyncResult) => void;
+    customization?: SyncCustomization;
   },
 ): Promise<UpdateSyncResult> {
   const start = Date.now();
+  const preserveExisting = opts?.customization?.preserveExisting ?? true;
+  const selectedTables = opts?.customization?.selectedTables;
+  const fieldExclusions = opts?.customization?.fieldExclusions;
   const syncResults: SyncResult[] = [];
 
   // Discover what's available (or use cached schema from hydration)
@@ -503,26 +566,29 @@ export async function updateSync(
   for (const base of bases) {
     if (opts?.baseIds?.length && !opts.baseIds.includes(base.id)) continue;
 
+    // If table selection exists but this base has no selected tables, skip
+    const baseTables = selectedTables?.[base.id];
+    if (selectedTables && !baseTables?.length) continue;
+
     const tables = await client.getBaseSchema(base.id);
 
     for (const table of tables) {
       if (opts?.tableIds?.length && !opts.tableIds.includes(table.id)) continue;
+      // Skip tables not in the selection
+      if (baseTables && !baseTables.includes(table.id)) continue;
 
       const cursor = await getCursor(db, base.id, table.id);
 
-      // If no cursor exists, this table hasn't been hydrated yet — skip or do full pull
-      // For update sync, we require hydration first
+      // If no cursor exists, this table hasn't been hydrated yet — skip
       if (!cursor) continue;
 
       // Acquire lock to prevent concurrent syncs on this table
       const locked = await acquireLock(db, base.id, table.id, agent);
-      if (!locked) {
-        // Another device is syncing this table — skip (they'll handle it)
-        continue;
-      }
+      if (!locked) continue;
 
       try {
-        const result = await syncTable(db, feed, client, base.id, table.id, table.name, agent, cursor);
+        const exclusions = fieldExclusions?.[table.id] ?? EMPTY_EXCLUSIONS;
+        const result = await syncTable(db, feed, client, base.id, table.id, table.name, agent, cursor, exclusions, preserveExisting);
         syncResults.push(result);
         opts?.onTableComplete?.(result);
       } finally {
@@ -556,6 +622,7 @@ async function syncTable(
   agent: string,
   cursorSince: string | null,
   exclusions: SyncExclusions = EMPTY_EXCLUSIONS,
+  preserveExisting: boolean = true,
 ): Promise<SyncResult> {
   let fetched = 0;
   let ingested = 0;
@@ -564,8 +631,6 @@ async function syncTable(
   const now = new Date().toISOString();
 
   // Retrieve field metadata from the table's stored schema (set during hydration).
-  // This tells us which fields are computed/metadata (skip), which are links (con),
-  // and how to normalize values before comparison.
   const fieldMeta = await getTableFieldMeta(db, baseId, tableId);
 
   // Build filter: if we have a cursor, only fetch records modified since then
@@ -574,7 +639,6 @@ async function syncTable(
     : undefined;
 
   // Request records keyed by field ID (not name) so they align with schema metadata.
-  // This ensures extractStorableFields can match incoming fields to their types.
   const useFieldIds = fieldMeta.size > 0;
 
   for await (const page of client.paginateRecords(baseId, tableId, {
@@ -583,7 +647,7 @@ async function syncTable(
   })) {
     for (const record of page) {
       fetched++;
-      const result = await ingestRecord(db, feed, baseId, tableId, record, agent, fieldMeta, exclusions);
+      const result = await ingestRecord(db, feed, baseId, tableId, record, agent, fieldMeta, exclusions, preserveExisting);
       switch (result) {
         case 'ingested': ingested++; break;
         case 'skipped_no_change': skippedNoChange++; break;
@@ -620,3 +684,5 @@ export {
   extractStorableFields,
   buildFieldMetaMap,
 };
+
+export type { SyncCustomization };

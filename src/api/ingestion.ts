@@ -35,6 +35,7 @@ import {
   discoverSchema,
   hydrationSync,
   updateSync,
+  type SyncCustomization,
 } from '../ingestion/airtable-sync.js';
 
 export function registerIngestionRoutes(app: FastifyInstance, db: EoDb, feed: Feed): void {
@@ -122,6 +123,7 @@ export function registerIngestionRoutes(app: FastifyInstance, db: EoDb, feed: Fe
     const body = (request.body || {}) as {
       base_ids?: string[];
       table_ids?: string[];
+      customization?: SyncCustomization;
     };
 
     const keyEntry = await getApiKey(db, label);
@@ -139,6 +141,7 @@ export function registerIngestionRoutes(app: FastifyInstance, db: EoDb, feed: Fe
       const result = await hydrationSync(db, feed, client, agent, {
         baseIds,
         tableIds: body.table_ids,
+        customization: body.customization,
       });
       await touchApiKey(db, label);
       return reply.send(result);
@@ -160,6 +163,7 @@ export function registerIngestionRoutes(app: FastifyInstance, db: EoDb, feed: Fe
     const body = (request.body || {}) as {
       base_ids?: string[];
       table_ids?: string[];
+      customization?: SyncCustomization;
     };
 
     const keyEntry = await getApiKey(db, label);
@@ -176,6 +180,7 @@ export function registerIngestionRoutes(app: FastifyInstance, db: EoDb, feed: Fe
       const result = await updateSync(db, feed, client, agent, {
         baseIds,
         tableIds: body.table_ids,
+        customization: body.customization,
       });
       await touchApiKey(db, label);
       return reply.send(result);

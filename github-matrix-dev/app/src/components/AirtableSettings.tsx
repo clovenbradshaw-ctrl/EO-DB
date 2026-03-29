@@ -17,7 +17,13 @@ import { useState, useEffect, useCallback } from 'react';
 import { useEoStore } from '../store/eo-store';
 import type { MatrixSession } from '../matrix/client';
 import { AirtableClient } from '../ingestion/airtable-client';
-import { discoverSchema, hydrationSync, updateSync } from '../ingestion/airtable-sync';
+import {
+  discoverSchema,
+  hydrationSync,
+  updateSync,
+  type HydrationManifest,
+  type SyncCustomization,
+} from '../ingestion/airtable-sync';
 import { useTheme, type Theme } from '../theme';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -92,6 +98,15 @@ export function AirtableSettingsSection({ session }: { session: MatrixSession })
 
   // ── Sync state ──
   const [syncStatus, setSyncStatus] = useState<Record<string, SyncStatus>>({});
+
+  // ── Discovery manifest (for table picker) ──
+  const [manifests, setManifests] = useState<Record<string, HydrationManifest>>({});
+
+  // ── Table selection per key: { keyLabel: { baseId: [tableId, ...] } } ──
+  const [tableSelections, setTableSelections] = useState<Record<string, Record<string, string[]>>>({});
+
+  // ── Preserve existing toggle per key ──
+  const [preserveFlags, setPreserveFlags] = useState<Record<string, boolean>>({});
 
   // ── Load stored keys ──
   const loadKeys = useCallback(async () => {
@@ -208,12 +223,49 @@ export function AirtableSettingsSection({ session }: { session: MatrixSession })
     return state?.value?.api_key ?? null;
   }
 
+  // ── Build customization from current UI state ──
+  function buildCustomization(keyLabel: string): SyncCustomization {
+    const selection = tableSelections[keyLabel];
+    const hasSelection = selection && Object.values(selection).some(t => t.length > 0);
+    return {
+      selectedTables: hasSelection ? selection : undefined,
+      preserveExisting: preserveFlags[keyLabel] ?? true,
+    };
+  }
+
+  // ── Toggle table selection ──
+  function toggleTable(keyLabel: string, baseId: string, tableId: string) {
+    setTableSelections((prev) => {
+      const keySelection = { ...(prev[keyLabel] || {}) };
+      const baseTables = [...(keySelection[baseId] || [])];
+      const idx = baseTables.indexOf(tableId);
+      if (idx >= 0) {
+        baseTables.splice(idx, 1);
+      } else {
+        baseTables.push(tableId);
+      }
+      keySelection[baseId] = baseTables;
+      return { ...prev, [keyLabel]: keySelection };
+    });
+  }
+
+  // ── Select/deselect all tables in a base ──
+  function toggleAllTablesInBase(keyLabel: string, baseId: string, allTableIds: string[]) {
+    setTableSelections((prev) => {
+      const keySelection = { ...(prev[keyLabel] || {}) };
+      const current = keySelection[baseId] || [];
+      keySelection[baseId] = current.length === allTableIds.length ? [] : [...allTableIds];
+      return { ...prev, [keyLabel]: keySelection };
+    });
+  }
+
   // ── Trigger sync (runs entirely in the browser) ──
   async function handleSync(key: StoredKey, mode: 'hydrate' | 'sync') {
     const statusKey = `${key.label}-${mode}`;
+    const modeLabel = mode === 'hydrate' ? 'Full Sync' : 'Update Sync';
     setSyncStatus((prev) => ({
       ...prev,
-      [statusKey]: { state: 'syncing', message: `Starting ${mode}...` },
+      [statusKey]: { state: 'syncing', message: `Starting ${modeLabel}...` },
     }));
 
     try {
@@ -236,6 +288,7 @@ export function AirtableSettingsSection({ session }: { session: MatrixSession })
       }
 
       const client = new AirtableClient(rawKey);
+      const customization = buildCustomization(key.label);
       const onProgress = (p: { phase: string; table?: string; records_so_far?: number }) => {
         const msg = p.table
           ? `Syncing ${p.table}${p.records_so_far ? ` (${p.records_so_far} records)` : ''}...`
@@ -247,8 +300,8 @@ export function AirtableSettingsSection({ session }: { session: MatrixSession })
       };
 
       const result = mode === 'hydrate'
-        ? await hydrationSync(store, client, session.userId, { onProgress })
-        : await updateSync(store, client, session.userId, { onProgress });
+        ? await hydrationSync(store, client, session.userId, { onProgress, customization })
+        : await updateSync(store, client, session.userId, { onProgress, customization });
 
       const ingested = result.total_records_ingested;
       const skipped = result.total_records_skipped;
@@ -316,6 +369,16 @@ export function AirtableSettingsSection({ session }: { session: MatrixSession })
       const client = new AirtableClient(rawKey);
       const manifest = await discoverSchema(client);
 
+      // Store the manifest for table picker
+      setManifests((prev) => ({ ...prev, [key.label]: manifest }));
+
+      // Default: select all tables
+      const selection: Record<string, string[]> = {};
+      for (const base of manifest.bases) {
+        selection[base.id] = base.tables.map(t => t.id);
+      }
+      setTableSelections((prev) => ({ ...prev, [key.label]: selection }));
+
       const baseCount = manifest.bases.length;
       const tableCount = manifest.bases.reduce((t, b) => t + b.tables.length, 0);
 
@@ -338,7 +401,7 @@ export function AirtableSettingsSection({ session }: { session: MatrixSession })
     <div>
         {/* Add new key */}
         <div style={s.section}>
-          <div style={s.sectionTitle}>Add API Key</div>
+          <div style={s.sectionTitle}>Airtable Integration</div>
           <div style={s.form}>
             <input
               type="text"
@@ -382,7 +445,7 @@ export function AirtableSettingsSection({ session }: { session: MatrixSession })
                 opacity: saving || !label.trim() || !apiKey.trim() ? 0.5 : 1,
               }}
             >
-              {saving ? 'Saving...' : 'Save API Key'}
+              {saving ? 'Saving...' : 'Save Key'}
             </button>
           </div>
         </div>
@@ -422,7 +485,7 @@ export function AirtableSettingsSection({ session }: { session: MatrixSession })
                 )}
               </div>
 
-              {/* Actions */}
+              {/* Actions row: Discover + Remove */}
               <div style={s.keyActions}>
                 <button
                   onClick={() => handleDiscover(key)}
@@ -432,20 +495,6 @@ export function AirtableSettingsSection({ session }: { session: MatrixSession })
                   Discover
                 </button>
                 <button
-                  onClick={() => handleSync(key, 'hydrate')}
-                  disabled={syncStatus[`${key.label}-hydrate`]?.state === 'syncing'}
-                  style={s.actionBtn}
-                >
-                  Full Sync
-                </button>
-                <button
-                  onClick={() => handleSync(key, 'sync')}
-                  disabled={syncStatus[`${key.label}-sync`]?.state === 'syncing'}
-                  style={s.actionBtn}
-                >
-                  Update Sync
-                </button>
-                <button
                   onClick={() => handleDelete(key)}
                   style={s.deleteBtn}
                 >
@@ -453,26 +502,138 @@ export function AirtableSettingsSection({ session }: { session: MatrixSession })
                 </button>
               </div>
 
-              {/* Status messages */}
-              {(['discover', 'hydrate', 'sync'] as const).map((mode) => {
-                const status = syncStatus[`${key.label}-${mode}`];
+              {/* Discovery status */}
+              {(() => {
+                const status = syncStatus[`${key.label}-discover`];
                 if (!status || status.state === 'idle') return null;
                 return (
-                  <div
-                    key={mode}
-                    style={{
-                      ...s.statusMsg,
-                      color: status.state === 'error' ? theme.dangerText : status.state === 'done' ? theme.successText : theme.textSecondary,
-                    }}
-                  >
-                    {status.state === 'syncing' || status.state === 'discovering' ? (
-                      <span style={s.spinner} />
-                    ) : null}
+                  <div style={{
+                    ...s.statusMsg,
+                    color: status.state === 'error' ? theme.dangerText : status.state === 'done' ? theme.successText : theme.textSecondary,
+                  }}>
+                    {status.state === 'discovering' && <span style={s.spinner} />}
                     {status.message}
-                    {status.detail && <span style={s.statusDetail}> {status.detail}</span>}
                   </div>
                 );
-              })}
+              })()}
+
+              {/* Table picker (shown after discovery) */}
+              {manifests[key.label] && (
+                <div style={s.tablePickerSection}>
+                  <div style={s.tablePickerTitle}>Select tables to sync</div>
+                  {manifests[key.label].bases.map((base) => {
+                    const selection = tableSelections[key.label]?.[base.id] || [];
+                    const allIds = base.tables.map(t => t.id);
+                    const allSelected = allIds.length > 0 && selection.length === allIds.length;
+                    return (
+                      <div key={base.id} style={s.baseGroup}>
+                        <div style={s.baseHeader}>
+                          <label style={s.checkLabel}>
+                            <input
+                              type="checkbox"
+                              checked={allSelected}
+                              onChange={() => toggleAllTablesInBase(key.label, base.id, allIds)}
+                            />
+                            <span style={s.baseName}>{base.name}</span>
+                          </label>
+                          <span style={s.baseCount}>{base.tables.length} tables</span>
+                        </div>
+                        <div style={s.tableList}>
+                          {base.tables.map((table) => (
+                            <label key={table.id} style={s.tableItem}>
+                              <input
+                                type="checkbox"
+                                checked={selection.includes(table.id)}
+                                onChange={() => toggleTable(key.label, base.id, table.id)}
+                              />
+                              <span style={s.tableName}>{table.name}</span>
+                              <span style={s.fieldCount}>{table.fieldCount} fields</span>
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })}
+
+                  {/* Preserve existing toggle */}
+                  <div style={s.preserveRow}>
+                    <label style={s.checkLabel}>
+                      <input
+                        type="checkbox"
+                        checked={preserveFlags[key.label] ?? true}
+                        onChange={(e) => setPreserveFlags((prev) => ({ ...prev, [key.label]: e.target.checked }))}
+                      />
+                      <span>Preserve existing data in EO-DB</span>
+                    </label>
+                    <span style={s.preserveHint}>
+                      {(preserveFlags[key.label] ?? true)
+                        ? 'New records and empty fields are filled; existing values are never overwritten'
+                        : 'Airtable values will overwrite EO-DB values on every sync'}
+                    </span>
+                  </div>
+
+                  {/* Sync mode buttons */}
+                  <div style={s.syncModes}>
+                    <div style={s.syncModeCard}>
+                      <div style={s.syncModeTitle}>Full Sync</div>
+                      <div style={s.syncModeDesc}>
+                        Pull all records from selected tables. Skips records that already exist
+                        {(preserveFlags[key.label] ?? true) ? ' and never overwrites existing data' : ''}.
+                      </div>
+                      <button
+                        onClick={() => handleSync(key, 'hydrate')}
+                        disabled={syncStatus[`${key.label}-hydrate`]?.state === 'syncing'}
+                        style={s.syncModeBtn}
+                      >
+                        {syncStatus[`${key.label}-hydrate`]?.state === 'syncing' ? 'Syncing...' : 'Run Full Sync'}
+                      </button>
+                      {(() => {
+                        const status = syncStatus[`${key.label}-hydrate`];
+                        if (!status || status.state === 'idle') return null;
+                        return (
+                          <div style={{
+                            ...s.statusMsg,
+                            color: status.state === 'error' ? theme.dangerText : status.state === 'done' ? theme.successText : theme.textSecondary,
+                          }}>
+                            {status.state === 'syncing' && <span style={s.spinner} />}
+                            {status.message}
+                            {status.detail && <span style={s.statusDetail}> {status.detail}</span>}
+                          </div>
+                        );
+                      })()}
+                    </div>
+
+                    <div style={s.syncModeCard}>
+                      <div style={s.syncModeTitle}>Update Sync</div>
+                      <div style={s.syncModeDesc}>
+                        Pull only records modified since last sync. Requires a prior Full Sync
+                        {(preserveFlags[key.label] ?? true) ? '. Never overwrites existing data' : ''}.
+                      </div>
+                      <button
+                        onClick={() => handleSync(key, 'sync')}
+                        disabled={syncStatus[`${key.label}-sync`]?.state === 'syncing'}
+                        style={s.syncModeBtn}
+                      >
+                        {syncStatus[`${key.label}-sync`]?.state === 'syncing' ? 'Syncing...' : 'Run Update Sync'}
+                      </button>
+                      {(() => {
+                        const status = syncStatus[`${key.label}-sync`];
+                        if (!status || status.state === 'idle') return null;
+                        return (
+                          <div style={{
+                            ...s.statusMsg,
+                            color: status.state === 'error' ? theme.dangerText : status.state === 'done' ? theme.successText : theme.textSecondary,
+                          }}>
+                            {status.state === 'syncing' && <span style={s.spinner} />}
+                            {status.message}
+                            {status.detail && <span style={s.statusDetail}> {status.detail}</span>}
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -727,6 +888,117 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       fontWeight: 400,
       textTransform: 'none' as const,
       letterSpacing: 0,
+    },
+
+    // ── Table picker ──
+    tablePickerSection: {
+      marginTop: 12,
+      borderTop: `1px solid ${t.borderLight}`,
+      paddingTop: 12,
+    },
+    tablePickerTitle: {
+      fontSize: 11,
+      fontWeight: 600,
+      textTransform: 'uppercase' as const,
+      letterSpacing: '0.06em',
+      color: t.textMuted,
+      marginBottom: 8,
+    },
+    baseGroup: {
+      marginBottom: 8,
+    },
+    baseHeader: {
+      display: 'flex',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      marginBottom: 4,
+    },
+    checkLabel: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6,
+      fontSize: 12,
+      color: t.text,
+      cursor: 'pointer',
+    },
+    baseName: {
+      fontWeight: 600,
+      fontSize: 12,
+    },
+    baseCount: {
+      fontSize: 10,
+      color: t.textMuted,
+    },
+    tableList: {
+      paddingLeft: 20,
+      display: 'flex',
+      flexDirection: 'column' as const,
+      gap: 3,
+    },
+    tableItem: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6,
+      fontSize: 11,
+      color: t.text,
+      cursor: 'pointer',
+    },
+    tableName: {
+      flex: 1,
+    },
+    fieldCount: {
+      fontSize: 10,
+      color: t.textMuted,
+    },
+    preserveRow: {
+      marginTop: 10,
+      padding: '8px 0',
+      borderTop: `1px solid ${t.borderLight}`,
+      display: 'flex',
+      flexDirection: 'column' as const,
+      gap: 4,
+    },
+    preserveHint: {
+      fontSize: 10,
+      color: t.textMuted,
+      paddingLeft: 22,
+    },
+
+    // ── Sync modes ──
+    syncModes: {
+      display: 'flex',
+      gap: 8,
+      marginTop: 10,
+    },
+    syncModeCard: {
+      flex: 1,
+      padding: 10,
+      border: `1px solid ${t.border}`,
+      borderRadius: 6,
+      background: t.bgCard,
+    },
+    syncModeTitle: {
+      fontSize: 12,
+      fontWeight: 600,
+      color: t.textHeading,
+      marginBottom: 4,
+    },
+    syncModeDesc: {
+      fontSize: 10,
+      color: t.textMuted,
+      marginBottom: 8,
+      lineHeight: 1.4,
+    },
+    syncModeBtn: {
+      width: '100%',
+      padding: '7px 0',
+      fontSize: 11,
+      fontWeight: 600,
+      border: `1px solid ${t.border}`,
+      borderRadius: 5,
+      background: t.bg,
+      color: t.text,
+      cursor: 'pointer',
     },
   };
 }
