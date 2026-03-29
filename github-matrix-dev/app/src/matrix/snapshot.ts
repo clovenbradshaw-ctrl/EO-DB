@@ -1,21 +1,21 @@
 /**
- * Snapshot — incremental event-based snapshots stored in Matrix media.
+ * Snapshot — incremental event backups stored in Matrix media.
  *
- * Snapshots are hydration accelerators, NOT the source of truth.
- * The room event timeline is always authoritative.
+ * A snapshot is just a batch of raw events since the last save.
+ * It is NOT projected state — we never serialize the fold output.
+ * The room event timeline is the source of truth; snapshots only
+ * exist so a new device can hydrate faster than paginating the
+ * entire room history.
  *
- * Version 1 (legacy): full state dump — no longer created, still loadable.
- * Version 2 (current): incremental — stores only the events from base_seq+1 to seq.
- *
- * Non-destructive pruning: old snapshot media can be deleted from the
- * Matrix media store at any time. Hydration falls back to timeline
- * pagination for any gaps in the snapshot chain.
+ * Non-destructive pruning: old snapshot media can be deleted from
+ * the Matrix media store at any time. Hydration falls back to
+ * timeline pagination for any gaps in the snapshot chain.
  */
 
 import { pack, unpack } from 'msgpackr';
 import type { MatrixClient } from 'matrix-js-sdk';
 import type { EoStore } from '../db/encrypted-store';
-import type { EoState, EoEvent, GraphEdge, EvaRegistration } from '../db/types';
+import type { EoEvent } from '../db/types';
 import { readLogSince } from '../db/log';
 import { EO_EVENT_TYPE } from './event-bridge';
 
@@ -23,38 +23,23 @@ import { EO_EVENT_TYPE } from './event-bridge';
 // Types
 // ---------------------------------------------------------------------------
 
-/** Legacy full-state snapshot (read-only — we never create these anymore). */
-interface SnapshotV1 {
-  version: 1;
-  seq: number;
-  ts: string;
-  created_by: string;
-  state: Record<string, EoState>;
-  graph_fwd: Record<string, GraphEdge>;
-  graph_rev: Record<string, GraphEdge>;
-  eva: Record<string, EvaRegistration>;
-}
-
-/** Incremental snapshot — a batch of events since the previous snapshot. */
-export interface IncrementalSnapshot {
+/** A snapshot is a batch of raw events since the previous save. */
+export interface Snapshot {
   version: 2;
   base_seq: number;           // events start AFTER this seq (0 = from the beginning)
   seq: number;                // last event seq included
   ts: string;                 // creation timestamp
   created_by: string;         // Matrix user ID of creator
-  events: EoEvent[];          // the actual event batch
+  events: EoEvent[];          // the raw event batch — not projected state
 }
 
-type Snapshot = SnapshotV1 | IncrementalSnapshot;
-
-/** Pointer stored as a Matrix room event (com.aminoimmigration.eo.snapshot). */
+/** Pointer stored as a NUL op in the room timeline. */
 export interface SnapshotRef {
   mxc: string;
   base_seq: number;
   seq: number;
   ts: string;
   size_bytes: number;
-  version: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -62,12 +47,12 @@ export interface SnapshotRef {
 // ---------------------------------------------------------------------------
 
 /**
- * Create an incremental snapshot containing events from (base_seq, seq].
+ * Create a snapshot: raw events from (last_save_seq, current_seq].
  */
 export async function createSnapshot(
   store: EoStore,
   myUserId: string,
-): Promise<IncrementalSnapshot> {
+): Promise<Snapshot> {
   const lastSnapshotSeq: number = (await store.get('meta:snapshot_seq')) ?? 0;
   const currentSeq = await store.getCurrentSeq();
   const events = await readLogSince(store, lastSnapshotSeq);
@@ -90,13 +75,13 @@ export async function createSnapshot(
  * Serialize and upload a snapshot to the Matrix media store,
  * then post a NUL event into the room as the pointer.
  *
- * NUL is the correct operator: a snapshot observes state without
- * changing it. It's not a LoggableOperator, so the fold ignores it.
+ * NUL is the correct operator: a save observes the log without
+ * changing state. It's not a LoggableOperator, so the fold ignores it.
  */
 export async function uploadSnapshot(
   client: MatrixClient,
   roomId: string,
-  snapshot: IncrementalSnapshot,
+  snapshot: Snapshot,
 ): Promise<string> {
   const binary = pack(snapshot);
 
@@ -117,7 +102,6 @@ export async function uploadSnapshot(
       seq: snapshot.seq,
       ts: snapshot.ts,
       size_bytes: binary.byteLength,
-      version: snapshot.version,
     },
   });
 
@@ -154,11 +138,10 @@ export async function findAllSnapshots(
       seen.add(operand.mxc);
       refs.push({
         mxc: operand.mxc,
-        base_seq: operand.base_seq ?? 0,   // v1 snapshots lack base_seq
+        base_seq: operand.base_seq ?? 0,
         seq: operand.seq,
         ts: operand.ts,
         size_bytes: operand.size_bytes,
-        version: operand.version ?? 1,
       });
     }
   }
@@ -202,7 +185,7 @@ export async function findLatestSnapshot(
 // ---------------------------------------------------------------------------
 
 /**
- * Download a single snapshot blob and decode it.
+ * Download a snapshot blob and decode it.
  */
 async function downloadSnapshot(
   client: MatrixClient,
@@ -217,30 +200,11 @@ async function downloadSnapshot(
 }
 
 /**
- * Apply a legacy v1 full-state snapshot to the store.
+ * Apply a snapshot by replaying its raw events through the fold.
  */
-async function applyV1Snapshot(store: EoStore, snap: SnapshotV1): Promise<number> {
-  for (const [target, state] of Object.entries(snap.state)) {
-    await store.put(`state:${target}`, state);
-  }
-  for (const [key, edge] of Object.entries(snap.graph_fwd)) {
-    await store.put(key, edge);
-  }
-  for (const [key, edge] of Object.entries(snap.graph_rev)) {
-    await store.put(key, edge);
-  }
-  for (const [target, reg] of Object.entries(snap.eva)) {
-    await store.put(`eva:${target}`, reg);
-  }
-  return snap.seq;
-}
-
-/**
- * Apply an incremental v2 snapshot by replaying its events through the fold.
- */
-async function applyV2Snapshot(
+async function applySnapshot(
   store: EoStore,
-  snap: IncrementalSnapshot,
+  snap: Snapshot,
   processEvent: (store: EoStore, event: EoEvent) => Promise<number>,
 ): Promise<number> {
   for (const event of snap.events) {
@@ -250,13 +214,11 @@ async function applyV2Snapshot(
 }
 
 /**
- * Hydrate the store from the full snapshot chain.
+ * Hydrate the store from the snapshot chain.
  *
- * Applies snapshots in order. If there are gaps (pruned snapshots),
- * those ranges are skipped here — the SyncManager fills them from
- * the room timeline after snapshot hydration.
- *
- * Returns the highest seq reached, or 0 if no snapshots were applied.
+ * Downloads and replays each snapshot's events in order.
+ * If any snapshot media was pruned (404), the range is recorded
+ * as a gap — the SyncManager fills gaps from the room timeline.
  */
 export async function applySnapshotChain(
   client: MatrixClient,
@@ -270,49 +232,23 @@ export async function applySnapshotChain(
   const gaps: Array<{ from: number; to: number }> = [];
 
   for (const ref of refs) {
-    // Detect gap: if this snapshot starts after where we left off
+    // Detect gap: this snapshot starts after where we left off
     if (ref.base_seq > currentSeq) {
       gaps.push({ from: currentSeq, to: ref.base_seq });
     }
 
-    // Skip snapshots we've already passed (overlap from v1 full snapshots)
     if (ref.seq <= currentSeq) continue;
 
     try {
       const snap = await downloadSnapshot(client, ref.mxc);
-
-      if (snap.version === 1) {
-        currentSeq = await applyV1Snapshot(store, snap as SnapshotV1);
-      } else {
-        currentSeq = await applyV2Snapshot(store, snap as IncrementalSnapshot, processEvent);
-      }
+      currentSeq = await applySnapshot(store, snap, processEvent);
     } catch {
-      // Snapshot media was pruned or unreachable — record as gap
+      // Media was pruned or unreachable — record as gap
       gaps.push({ from: ref.base_seq, to: ref.seq });
     }
   }
 
   return { seq: currentSeq, gaps };
-}
-
-/**
- * Legacy single-snapshot apply (kept for backward compat with SyncManager).
- */
-export async function applySnapshot(
-  client: MatrixClient,
-  store: EoStore,
-  mxcUrl: string,
-): Promise<number> {
-  const snap = await downloadSnapshot(client, mxcUrl);
-  if (snap.version === 1) {
-    return applyV1Snapshot(store, snap as SnapshotV1);
-  }
-  // v2 without fold — just load events raw into the log
-  const v2 = snap as IncrementalSnapshot;
-  for (const event of v2.events) {
-    await store.put(`log:${String(event.seq).padStart(12, '0')}`, event);
-  }
-  return v2.seq;
 }
 
 // ---------------------------------------------------------------------------
