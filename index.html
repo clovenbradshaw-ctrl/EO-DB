@@ -4286,7 +4286,6 @@ async function decryptBinary(key, data) {
   const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ciphertext);
   return new Uint8Array(plaintext);
 }
-}
 
 async function backupSnapshot() {
   const btn = document.getElementById('backupSnapshotBtn');
