@@ -2089,7 +2089,7 @@ body {
             <div class="compose-op-btn op-SEG" style="background:rgba(244,114,182,0.12);color:var(--seg);" onclick="selectOp('SEG')">SEG</div>
             <div class="compose-op-btn op-SYN" style="background:rgba(251,191,36,0.12);color:var(--syn);" onclick="selectOp('SYN')">SYN</div>
             <div class="compose-op-btn op-EVA" style="background:rgba(52,211,153,0.12);color:var(--eva);" onclick="selectOp('EVA')">EVA</div>
-            <div class="compose-op-btn op-REC" style="background:rgba(251,146,60,0.12);color:var(--rec);" onclick="selectOp('REC')">REC</div>
+            <div class="compose-op-btn op-NUL" style="background:rgba(92,95,122,0.12);color:var(--nul);" onclick="selectOp('NUL')">NUL</div>
           </div>
         </div>
 
@@ -2221,27 +2221,13 @@ body {
             </div>
           </div>
 
-          <!-- REC: sub-operations + reason -->
-          <div class="structured-operand" id="operandREC">
-            <div class="structured-field-label">Sub-operations</div>
-            <div id="recSubOpsList">
-              <div class="rec-subop-row">
-                <select class="structured-select" style="width:80px;">
-                  <option value="DEF">DEF</option>
-                  <option value="INS">INS</option>
-                  <option value="CON">CON</option>
-                  <option value="SEG">SEG</option>
-                  <option value="SYN">SYN</option>
-                  <option value="EVA">EVA</option>
-                </select>
-                <input class="compose-input" placeholder="target" autocomplete="off">
-                <input class="compose-input" placeholder="operand (JSON)" autocomplete="off">
-                <button class="structured-remove-btn" onclick="removeRecSubOp(this)" title="Remove">&times;</button>
-              </div>
-            </div>
-            <button class="structured-add-btn" onclick="addRecSubOp()">+ Add sub-operation</button>
-            <div class="structured-field-label">Reason</div>
-            <input class="compose-input" id="recReason" placeholder="reason for this atomic change" autocomplete="off">
+          <!-- NUL: save point (timestamp + optional label) -->
+          <div class="structured-operand" id="operandNUL">
+            <div class="structured-field-label">Timestamp</div>
+            <input class="compose-input" id="nulTimestamp" type="datetime-local" step="1" autocomplete="off">
+            <button class="structured-add-btn" style="margin-top:4px;width:auto;" onclick="document.getElementById('nulTimestamp').value = new Date().toISOString().slice(0,19)">Now</button>
+            <div class="structured-field-label">Label <span style="color:var(--text-faint);font-weight:400;">(optional)</span></div>
+            <input class="compose-input" id="nulLabel" placeholder="e.g. pre-migration, daily snapshot" autocomplete="off">
           </div>
 
           <div class="operand-hint" id="operandHint"></div>
@@ -3234,10 +3220,10 @@ const OP_HINTS = {
   SEG: 'SEG: create a partition boundary on the target',
   SYN: 'SYN: merge source targets into a single destination',
   EVA: 'EVA: register an evaluation policy on the target',
-  REC: 'REC: atomic frame containing multiple sub-operations'
+  NUL: 'NUL: create a save point / snapshot at a given timestamp'
 };
 
-const ALL_STRUCTURED_IDS = ['operandINS', 'operandDEF', 'operandCON', 'operandSEG', 'operandSYN', 'operandEVA', 'operandREC'];
+const ALL_STRUCTURED_IDS = ['operandINS', 'operandDEF', 'operandCON', 'operandSEG', 'operandSYN', 'operandEVA', 'operandNUL'];
 
 function showStructuredOperand(op) {
   ALL_STRUCTURED_IDS.forEach(id => {
@@ -3277,6 +3263,11 @@ function selectOp(op) {
     if (op === 'DEF' || op === 'INS') {
       const target = document.getElementById('composeTarget').value.trim();
       if (target) autoFillOperandKeys(target);
+    }
+
+    // Auto-fill current timestamp for NUL
+    if (op === 'NUL') {
+      document.getElementById('nulTimestamp').value = new Date().toISOString().slice(0, 19);
     }
   }
 }
@@ -3323,33 +3314,6 @@ function removeStructuredTarget(btn, listId, minCount) {
   const min = minCount || 0;
   if (list.children.length > min) {
     btn.closest('.structured-target-entry').remove();
-  }
-}
-
-function addRecSubOp() {
-  const list = document.getElementById('recSubOpsList');
-  const row = document.createElement('div');
-  row.className = 'rec-subop-row';
-  row.innerHTML = `
-    <select class="structured-select" style="width:80px;">
-      <option value="DEF">DEF</option>
-      <option value="INS">INS</option>
-      <option value="CON">CON</option>
-      <option value="SEG">SEG</option>
-      <option value="SYN">SYN</option>
-      <option value="EVA">EVA</option>
-    </select>
-    <input class="compose-input" placeholder="target" autocomplete="off">
-    <input class="compose-input" placeholder="operand (JSON)" autocomplete="off">
-    <button class="structured-remove-btn" onclick="removeRecSubOp(this)" title="Remove">&times;</button>
-  `;
-  list.appendChild(row);
-}
-
-function removeRecSubOp(btn) {
-  const list = document.getElementById('recSubOpsList');
-  if (list.children.length > 1) {
-    btn.closest('.rec-subop-row').remove();
   }
 }
 
@@ -3418,22 +3382,12 @@ function collectStructuredOperand() {
       }
       return operand;
     }
-    case 'REC': {
-      const subOps = [];
-      document.querySelectorAll('#recSubOpsList .rec-subop-row').forEach(row => {
-        const inputs = row.querySelectorAll('.compose-input');
-        let operand = inputs[1].value.trim();
-        try { operand = JSON.parse(operand); } catch {}
-        subOps.push({
-          op: row.querySelector('.structured-select').value,
-          target: inputs[0].value.trim(),
-          operand: operand
-        });
-      });
-      return {
-        contains: subOps,
-        reason: document.getElementById('recReason').value
-      };
+    case 'NUL': {
+      const ts = document.getElementById('nulTimestamp').value;
+      const label = document.getElementById('nulLabel').value.trim();
+      const operand = { timestamp: ts ? new Date(ts).toISOString() : new Date().toISOString() };
+      if (label) operand.label = label;
+      return operand;
     }
     default:
       return null;
@@ -3581,7 +3535,7 @@ async function submitEvent() {
     }
 
     // Validate: operators that act on existing targets require a non-empty DB
-    const OPS_REQUIRING_EXISTING = ['DEF', 'CON', 'SEG', 'SYN', 'EVA', 'REC'];
+    const OPS_REQUIRING_EXISTING = ['DEF', 'CON', 'SEG', 'SYN', 'EVA'];
     if (OPS_REQUIRING_EXISTING.includes(selectedOp) && LOG.length === 0) {
       throw new Error(`${selectedOp} requires existing targets — use INS first to create one`);
     }

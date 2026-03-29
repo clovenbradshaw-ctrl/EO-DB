@@ -8,6 +8,7 @@ const OP_COLORS: Record<string, { bg: string; color: string; border: string }> =
   SYN: { bg: '#f3f0fa', color: '#7c5cbf', border: '#7c5cbf' },
   EVA: { bg: '#eef8f5', color: '#0e8a6e', border: '#0e8a6e' },
   REC: { bg: '#fef6ed', color: '#c2700a', border: '#c2700a' },
+  NUL: { bg: '#f0f0f5', color: '#5c5f7a', border: '#5c5f7a' },
 };
 
 // REC is system-generated — distinct style: dashed border, "SYS" label
