@@ -7,7 +7,7 @@ import { resolveAlias, checkExists } from './helpers.js';
 import type { EoEvent, EoEventInput, EoState, EvaRegistration, RecResult, ExternalOperator, DerivedEntity } from './types.js';
 import { isEncryptedOperand } from './crypto-types.js';
 import type { Feed } from './feed.js';
-import { seedHash, chainHash } from './hash.js';
+import { seedHash, chainHash, eventHash } from './hash.js';
 
 /** Configuration for REC loop runner. */
 export interface RecConfig {
@@ -46,6 +46,12 @@ export async function processEvent(
   // 0. REC is system-generated — reject external submissions
   if (event.op === 'REC') {
     throw new Error('REC is system-generated and cannot be submitted externally');
+  }
+
+  // 0.5. Deterministic event hashing — assign client_event_id from content hash
+  //       if not already provided, to prevent duplicate logging across sync paths
+  if (!event.client_event_id) {
+    event = { ...event, client_event_id: eventHash(event) };
   }
 
   // 1. Idempotency check
@@ -608,8 +614,7 @@ async function detectAndEmitREC(
   // Produce the REC event with system as agent
   const recSeq = await nextSeq(db);
   const now = new Date().toISOString();
-  const recEvent: EoEvent = {
-    seq: recSeq,
+  const recEventInput: EoEventInput = {
     op: 'REC',
     target: changedTarget,
     operand: {
@@ -621,9 +626,15 @@ async function detectAndEmitREC(
     acquired_ts: now,
     triggered_by: triggeringEvent.seq,
   };
+  const recEvent: EoEvent = {
+    ...recEventInput,
+    seq: recSeq,
+    client_event_id: eventHash(recEventInput),
+  };
 
-  // Log the REC event
+  // Log the REC event and store idempotency key
   await appendToLog(db, recEvent);
+  await db.put(`idem:${recEvent.client_event_id}`, encode(recSeq));
 
   // Store REC result in state (on the pivot target, preserving its existing level)
   const existingPivot = await getState(db, changedTarget);
@@ -801,8 +812,7 @@ async function emitCriticalREC(
   // Produce the REC event
   const recSeq = await nextSeq(db);
   const now = new Date().toISOString();
-  const recEvent: EoEvent = {
-    seq: recSeq,
+  const criticalRecInput: EoEventInput = {
     op: 'REC',
     target: changedTarget,
     operand: {
@@ -816,8 +826,14 @@ async function emitCriticalREC(
     acquired_ts: now,
     triggered_by: triggeringEvent.seq,
   };
+  const recEvent: EoEvent = {
+    ...criticalRecInput,
+    seq: recSeq,
+    client_event_id: eventHash(criticalRecInput),
+  };
 
   await appendToLog(db, recEvent);
+  await db.put(`idem:${recEvent.client_event_id}`, encode(recSeq));
 
   // Store REC result on the pivot target
   const existingPivot = await getState(db, changedTarget);
@@ -989,8 +1005,7 @@ async function cascadeUpward(
     // Log a REC re-evaluation event on the derived entity
     const reEvalSeq = await nextSeq(db);
     const now = new Date().toISOString();
-    const reEvalEvent: EoEvent = {
-      seq: reEvalSeq,
+    const reEvalInput: EoEventInput = {
       op: 'REC',
       target: derivedTarget,
       operand: {
@@ -1003,7 +1018,13 @@ async function cascadeUpward(
       acquired_ts: now,
       triggered_by: triggeringEvent.seq,
     };
+    const reEvalEvent: EoEvent = {
+      ...reEvalInput,
+      seq: reEvalSeq,
+      client_event_id: eventHash(reEvalInput),
+    };
     await appendToLog(db, reEvalEvent);
+    await db.put(`idem:${reEvalEvent.client_event_id}`, encode(reEvalSeq));
 
     // Update the derived entity's value with current constituent data
     const existingDerived = await getState(db, derivedTarget);

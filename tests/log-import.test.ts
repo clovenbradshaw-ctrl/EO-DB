@@ -160,7 +160,7 @@ describe('processImport', () => {
   it('captures errors without halting by default', async () => {
     const rows = [
       { op: 'INS', target: 'err.a', operand: {} },
-      { op: 'INS', target: 'err.a', operand: {} }, // duplicate — will error
+      { op: 'INS', target: 'err.a', operand: { different: true } }, // different operand — will error (not deduplicated)
       { op: 'INS', target: 'err.b', operand: {} },
     ];
 
@@ -172,10 +172,26 @@ describe('processImport', () => {
     expect(result.errors[0].error).toContain('already instantiated');
   });
 
+  it('deduplicates identical events via deterministic hashing', async () => {
+    const rows = [
+      { op: 'INS', target: 'dup.a', operand: {} },
+      { op: 'INS', target: 'dup.a', operand: {} }, // identical — deduplicated via event hash
+      { op: 'INS', target: 'dup.b', operand: {} },
+    ];
+
+    const result = await processImport(db, feed, rows, AGENT);
+    // All three are "processed" — the duplicate returns the cached seq (idempotent)
+    expect(result.processed).toBe(3);
+    expect(result.skipped).toBe(0);
+    expect(result.errors).toHaveLength(0);
+    // The duplicate returns the same seq as the first
+    expect(result.sequences[0]).toBe(result.sequences[1]);
+  });
+
   it('halts on first error with halt_on_error', async () => {
     const rows = [
       { op: 'INS', target: 'halt.a', operand: {} },
-      { op: 'INS', target: 'halt.a', operand: {} }, // error
+      { op: 'INS', target: 'halt.a', operand: { different: true } }, // different operand — error
       { op: 'INS', target: 'halt.b', operand: {} }, // never reached
     ];
 

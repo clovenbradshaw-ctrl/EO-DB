@@ -3,7 +3,8 @@ import { createDb, type EoDb } from '../src/db/level.js';
 import { processEvent } from '../src/db/fold.js';
 import { getState } from '../src/db/state.js';
 import type { EoEventInput } from '../src/db/types.js';
-import { seedHash, chainHash } from '../src/db/hash.js';
+import { seedHash, chainHash, eventHash } from '../src/db/hash.js';
+import { readLogSince } from '../src/db/log.js';
 import { rmSync, mkdtempSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -265,5 +266,115 @@ describe('Transformation Hash — Unit functions', () => {
     const h1 = chainHash('a'.repeat(64), event);
     const h2 = chainHash('b'.repeat(64), event);
     expect(h1).not.toBe(h2);
+  });
+});
+
+describe('Deterministic Log Hashing — eventHash', () => {
+  it('eventHash is deterministic', () => {
+    const event: EoEventInput = { op: 'DEF', target: 'a.b', operand: { x: 1 }, agent: AGENT, ts: TS, acquired_ts: TS };
+    const h1 = eventHash(event);
+    const h2 = eventHash(event);
+    expect(h1).toBe(h2);
+    expect(h1).toMatch(/^ev:[0-9a-f]{64}$/);
+  });
+
+  it('eventHash is key-order independent for operand', () => {
+    const e1: EoEventInput = { op: 'DEF', target: 'a.b', operand: { x: 1, y: 2 }, agent: AGENT, ts: TS, acquired_ts: TS };
+    const e2: EoEventInput = { op: 'DEF', target: 'a.b', operand: { y: 2, x: 1 }, agent: AGENT, ts: TS, acquired_ts: TS };
+    expect(eventHash(e1)).toBe(eventHash(e2));
+  });
+
+  it('eventHash handles deeply nested operands deterministically', () => {
+    const e1: EoEventInput = { op: 'DEF', target: 'a.b', operand: { a: { c: 3, b: 2 }, d: [1, { f: 6, e: 5 }] }, agent: AGENT, ts: TS, acquired_ts: TS };
+    const e2: EoEventInput = { op: 'DEF', target: 'a.b', operand: { d: [1, { e: 5, f: 6 }], a: { b: 2, c: 3 } }, agent: AGENT, ts: TS, acquired_ts: TS };
+    expect(eventHash(e1)).toBe(eventHash(e2));
+  });
+
+  it('eventHash differs with different op', () => {
+    const e1: EoEventInput = { op: 'INS', target: 'a.b', operand: {}, agent: AGENT, ts: TS, acquired_ts: TS };
+    const e2: EoEventInput = { op: 'DEF', target: 'a.b', operand: {}, agent: AGENT, ts: TS, acquired_ts: TS };
+    expect(eventHash(e1)).not.toBe(eventHash(e2));
+  });
+
+  it('eventHash differs with different target', () => {
+    const e1: EoEventInput = { op: 'DEF', target: 'a.b', operand: { x: 1 }, agent: AGENT, ts: TS, acquired_ts: TS };
+    const e2: EoEventInput = { op: 'DEF', target: 'a.c', operand: { x: 1 }, agent: AGENT, ts: TS, acquired_ts: TS };
+    expect(eventHash(e1)).not.toBe(eventHash(e2));
+  });
+
+  it('eventHash differs with different agent', () => {
+    const e1: EoEventInput = { op: 'DEF', target: 'a.b', operand: {}, agent: '@alice:ex.com', ts: TS, acquired_ts: TS };
+    const e2: EoEventInput = { op: 'DEF', target: 'a.b', operand: {}, agent: '@bob:ex.com', ts: TS, acquired_ts: TS };
+    expect(eventHash(e1)).not.toBe(eventHash(e2));
+  });
+
+  it('eventHash differs with different ts', () => {
+    const e1: EoEventInput = { op: 'DEF', target: 'a.b', operand: {}, agent: AGENT, ts: TS, acquired_ts: TS };
+    const e2: EoEventInput = { op: 'DEF', target: 'a.b', operand: {}, agent: AGENT, ts: TS2, acquired_ts: TS2 };
+    expect(eventHash(e1)).not.toBe(eventHash(e2));
+  });
+});
+
+describe('Deterministic Log Hashing — processEvent deduplication', () => {
+  it('identical events from different sync paths are deduplicated', async () => {
+    const event: EoEventInput = { op: 'INS', target: 'sync.a', operand: { name: 'Alice' }, agent: AGENT, ts: TS, acquired_ts: TS };
+
+    const seq1 = await processEvent(db, event);
+    const seq2 = await processEvent(db, { ...event }); // same content, new object
+    expect(seq1).toBe(seq2);
+
+    // Only one event in the log
+    const log = await readLogSince(db, 0);
+    const targetEvents = log.filter(e => e.target === 'sync.a');
+    expect(targetEvents).toHaveLength(1);
+  });
+
+  it('events with different operands are NOT deduplicated', async () => {
+    await processEvent(db, ev({ target: 'sync.b', operand: { v: 1 } }));
+    await expect(processEvent(db, ev({ target: 'sync.b', operand: { v: 2 } }))).rejects.toThrow('already instantiated');
+  });
+
+  it('all log events have a client_event_id after processing', async () => {
+    await processEvent(db, ev({ target: 'sync.c', operand: { name: 'Test' } }));
+    await processEvent(db, ev({ target: 'sync.c', op: 'DEF', operand: { email: 'test@test.com' } }));
+
+    const log = await readLogSince(db, 0);
+    const targetEvents = log.filter(e => e.target === 'sync.c');
+    for (const event of targetEvents) {
+      expect(event.client_event_id).toBeDefined();
+      expect(event.client_event_id).toMatch(/^ev:[0-9a-f]{64}$/);
+    }
+  });
+
+  it('preserves explicitly provided client_event_id', async () => {
+    const customId = 'custom-id-123';
+    await processEvent(db, ev({ target: 'sync.d', operand: {}, client_event_id: customId }));
+
+    const log = await readLogSince(db, 0);
+    const event = log.find(e => e.target === 'sync.d');
+    expect(event?.client_event_id).toBe(customId);
+  });
+
+  it('simulates cross-user sync deduplication', async () => {
+    // User A submits an event
+    const eventA: EoEventInput = {
+      op: 'INS', target: 'sync.shared', operand: { status: 'open' },
+      agent: '@alice:ex.com', ts: '2025-06-01T12:00:00.000Z', acquired_ts: '2025-06-01T12:00:01.000Z',
+    };
+    const seqA = await processEvent(db, eventA);
+
+    // User B's device syncs the exact same event (same op, target, operand, agent, ts)
+    const eventB: EoEventInput = {
+      op: 'INS', target: 'sync.shared', operand: { status: 'open' },
+      agent: '@alice:ex.com', ts: '2025-06-01T12:00:00.000Z', acquired_ts: '2025-06-01T12:00:05.000Z', // different acquired_ts
+    };
+    const seqB = await processEvent(db, eventB);
+
+    // Deduplicated — same seq returned
+    expect(seqA).toBe(seqB);
+
+    // Only one log entry
+    const log = await readLogSince(db, 0);
+    expect(log.filter(e => e.target === 'sync.shared')).toHaveLength(1);
   });
 });

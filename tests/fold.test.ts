@@ -57,9 +57,15 @@ describe('INS', () => {
     expect(state?.last_ts).toBe(TS);
   });
 
-  it('rejects duplicate target', async () => {
+  it('rejects duplicate target with different content', async () => {
     await processEvent(db, ev({}));
-    await expect(processEvent(db, ev({}))).rejects.toThrow('already instantiated');
+    await expect(processEvent(db, ev({ operand: { different: true } }))).rejects.toThrow('already instantiated');
+  });
+
+  it('deduplicates identical INS events via deterministic hash', async () => {
+    const seq1 = await processEvent(db, ev({}));
+    const seq2 = await processEvent(db, ev({}));
+    expect(seq1).toBe(seq2); // Same event returns cached seq
   });
 
   it('assigns sequential seq numbers', async () => {
