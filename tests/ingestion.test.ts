@@ -18,6 +18,7 @@ import { classifyFieldType, COMPUTED_TYPES, METADATA_TYPES } from '../src/ingest
 import { extractValue, valuesEqual, stableStringify } from '../src/ingestion/value-extract.js';
 import { isExcluded, mergeExclusions, EMPTY_EXCLUSIONS } from '../src/ingestion/exclusions.js';
 import { getState, setState } from '../src/db/state.js';
+import { readLogForTarget } from '../src/db/log.js';
 import { rmSync, mkdtempSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -661,6 +662,22 @@ describe('Ingestion API routes', () => {
     expect(aliceState!.value.fields.fldEmail).toBe('alice@test.com');
     // Formula field should NOT be stored — it's a computed Horizon output
     expect(aliceState!.value.fields.fldFormula).toBeUndefined();
+
+    // Verify explicit INS event exists in the log before DEF
+    const aliceLog = await readLogForTarget(db, 'at.appTEST1.tblTEST1.recA');
+    expect(aliceLog.length).toBeGreaterThanOrEqual(2);
+    expect(aliceLog[0].op).toBe('INS');
+    expect(aliceLog[1].op).toBe('DEF');
+    expect(aliceLog[0].client_event_id).toBe('at-ins:appTEST1:tblTEST1:recA');
+
+    // Verify base and table containers also have INS events
+    const baseLog = await readLogForTarget(db, 'at.appTEST1');
+    expect(baseLog[0].op).toBe('INS');
+    expect(baseLog[0].client_event_id).toBe('at-ins-base:appTEST1');
+
+    const tableLog = await readLogForTarget(db, 'at.appTEST1.tblTEST1');
+    expect(tableLog[0].op).toBe('INS');
+    expect(tableLog[0].client_event_id).toBe('at-ins-table:appTEST1:tblTEST1');
   });
 
   it('POST /ingestion/airtable/hydrate/:label — re-hydration skips unchanged', async () => {
@@ -685,6 +702,31 @@ describe('Ingestion API routes', () => {
     // Records should be skipped (either no_change or duplicate via idempotency)
     expect(body.total_records_skipped).toBe(2);
     expect(body.total_records_ingested).toBe(0);
+  });
+
+  it('POST /ingestion/airtable/hydrate/:label — re-hydration does not duplicate INS', async () => {
+    await storeApiKey(db, 'reins-key', 'patMOCK', '@testuser:matrix.example.com');
+
+    // First hydration
+    await app.inject({
+      method: 'POST',
+      url: '/ingestion/airtable/hydrate/reins-key',
+      headers: authHeaders(),
+      payload: {},
+    });
+
+    // Second hydration — same data
+    await app.inject({
+      method: 'POST',
+      url: '/ingestion/airtable/hydrate/reins-key',
+      headers: authHeaders(),
+      payload: {},
+    });
+
+    // Should still have exactly one INS event per record
+    const aliceLog = await readLogForTarget(db, 'at.appTEST1.tblTEST1.recA');
+    const insEvents = aliceLog.filter(e => e.op === 'INS');
+    expect(insEvents).toHaveLength(1);
   });
 
   // ── Update sync ───────────────────────────────────────────────────────

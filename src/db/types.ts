@@ -145,3 +145,41 @@ export interface SignalEntry {
   computed_at: string;
 }
 
+// ─── Ingestion job tracking ────────────────────────────────────────────────
+
+/** Per-table progress within a hydration/sync job. */
+export interface TableProgress {
+  base_id: string;
+  table_id: string;
+  table_name: string;
+  status: 'pending' | 'in_progress' | 'completed' | 'failed';
+  records_fetched: number;
+  records_ingested: number;
+  error?: string;
+  started_at?: string;
+  completed_at?: string;
+}
+
+/** Persistent job record for tracking hydration/sync progress across restarts. */
+export interface HydrationJob {
+  job_id: string;
+  type: 'hydration' | 'update';
+  api_key_label: string;
+  status: 'running' | 'completed' | 'failed' | 'interrupted';
+  agent: string;
+  started_at: string;
+  updated_at: string;
+  completed_at?: string;
+  error?: string;
+  /** Persisted manifest from schema discovery (survives crash). */
+  manifest_bases?: Array<{ id: string; name: string }>;
+  /** Per-table progress, keyed by `{baseId}:{tableId}`. */
+  table_progress: Record<string, TableProgress>;
+  totals: {
+    tables_total: number;
+    tables_completed: number;
+    records_ingested: number;
+    records_skipped: number;
+  };
+}
+

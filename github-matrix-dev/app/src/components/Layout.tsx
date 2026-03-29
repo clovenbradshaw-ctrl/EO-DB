@@ -9,16 +9,19 @@ import { resolveDataRoom } from '../matrix/event-bridge';
 import { HolonNav } from './HolonNav';
 import { TableView } from './TableView';
 import { RecordDetailDrawer } from './RecordDetailDrawer';
+import { HorizonQueryBar } from './HorizonQueryBar';
 import { ConnectionStatus, useConnectionState } from './ConnectionStatus';
 import { ErrorBoundary } from './ErrorBoundary';
 import { SyncProgress } from './SyncProgress';
-import { AirtableSettings } from './AirtableSettings';
+import { AirtableSettings, AirtableSettingsSection } from './AirtableSettings';
 import { DataSyncDashboard } from './DataSyncDashboard';
 import { LogView } from './LogView';
 import { useTheme, type Theme } from '../theme';
+import type { EoState } from '../db/types';
+import type { QueryResult } from './query-engine';
 
-type View = 'horizon' | 'log' | 'graph' | 'compose' | 'settings';
-const TABS: View[] = ['horizon', 'log', 'graph', 'compose', 'settings'];
+type View = 'horizon' | 'log' | 'import' | 'graph' | 'compose' | 'settings';
+const TABS: View[] = ['horizon', 'log', 'import', 'graph', 'compose', 'settings'];
 
 interface LayoutProps {
   session: MatrixSession;
@@ -36,9 +39,18 @@ export function Layout({ session, onLogout }: LayoutProps) {
   const [showSettings, setShowSettings] = useState(false);
   const [activeView, setActiveView] = useState<View>('horizon');
   const [spaceOpen, setSpaceOpen] = useState(false);
+  const [allStates, setAllStates] = useState<EoState[]>([]);
+  const [queryResults, setQueryResults] = useState<QueryResult | null>(null);
+  const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
   const connectionState = useConnectionState();
   const { theme, toggleTheme } = useTheme();
   const s = makeStyles(theme);
+
+  // Load all states for query bar autofill
+  useEffect(() => {
+    if (!ready) return;
+    getStateByPrefix('app.').then(setAllStates);
+  }, [ready, lastSeq, getStateByPrefix]);
 
   // Compute target count from recent events
   const targetCount = new Set(recentEvents.map((e) => e.target)).size;
@@ -235,7 +247,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
               borderBottom: activeView === tab ? `1.5px solid ${theme.success}` : '1.5px solid transparent',
             }}
           >
-            {tab === 'compose' ? '+ COMPOSE' : tab.toUpperCase()}
+            {tab === 'compose' ? '+ COMPOSE' : tab === 'import' ? 'IMPORT' : tab.toUpperCase()}
           </button>
         ))}
       </div>
@@ -248,6 +260,13 @@ export function Layout({ session, onLogout }: LayoutProps) {
           </ErrorBoundary>
         </div>
       ) : activeView === 'horizon' ? (
+        <>
+        <HorizonQueryBar
+          allStates={allStates}
+          onSelectScope={(scope) => { setSelectedScope(scope); setSelectedRecord(null); setQueryResults(null); }}
+          onSelectRecord={(target) => { setSelectedRecord(target); setQueryResults(null); }}
+          onQueryResults={setQueryResults}
+        />
         <div style={s.body}>
           <aside style={s.sidebar}>
             {ready ? (
@@ -268,6 +287,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
                   onSelectRecord={setSelectedRecord}
                   activeRecord={selectedRecord}
                   session={{ userId: session.userId }}
+                  queryResults={queryResults?.records}
                 />
               ) : (
                 <div style={s.empty}>
@@ -286,6 +306,17 @@ export function Layout({ session, onLogout }: LayoutProps) {
               onNavigate={(t) => setSelectedRecord(t)}
             />
           )}
+        </div>
+        </>
+      ) : activeView === 'import' ? (
+        <div style={s.body}>
+          <div style={s.importPage}>
+            <div style={s.importHeader}>
+              <div style={s.importTitle}>Import Data</div>
+              <div style={s.importSubtitle}>Connect external data sources and sync records into EO-DB</div>
+            </div>
+            <AirtableSettingsSection session={session} />
+          </div>
         </div>
       ) : (
         <div style={s.body}>
@@ -469,6 +500,31 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       background: t.bgCard,
     },
     main: { flex: 1, overflowY: 'auto', background: t.bg },
+
+    // Import page
+    importPage: {
+      flex: 1,
+      overflowY: 'auto' as const,
+      maxWidth: 640,
+      margin: '0 auto',
+      padding: '0 24px 40px',
+    },
+    importHeader: {
+      padding: '28px 0 8px',
+      borderBottom: `1px solid ${t.border}`,
+      marginBottom: 4,
+    },
+    importTitle: {
+      fontFamily: "'Source Serif 4', Georgia, serif",
+      fontSize: 20,
+      fontWeight: 600,
+      color: t.textHeading,
+    },
+    importSubtitle: {
+      fontSize: 12,
+      color: t.textSecondary,
+      marginTop: 4,
+    },
 
     // Empty states
     empty: {
