@@ -126,14 +126,8 @@ describe('Full Lifecycle E2E', () => {
     res = await post('/ops/def', { target: 'app.tblCases.rec101.fldDeadline', operand: { formula: 'DAYS_UNTIL(filed + 180)' } });
     expect(res.json().seq).toBe(10);
 
-    // 11. REC schema migration
-    res = await post('/ops/rec', {
-      target: 'schema.tblCases',
-      operand: {
-        contains: [{ op: 'DEF', target: 'schema.tblCases.fldUrgency', operand: { type: 'select' } }],
-        reason: 'Added urgency field',
-      },
-    });
+    // 11. DEF urgency field (REC removed — it is system-generated only)
+    res = await post('/ops/def', { target: 'schema.tblCases.fldUrgency', operand: { type: 'select' } });
     expect(res.json().seq).toBe(11);
 
     // --- Verify GET /horizon ---

@@ -334,214 +334,247 @@ describe('EVA', () => {
 // --- REC Tests ---
 
 describe('REC', () => {
-  it('applies sub-operations and converges when no feedback', async () => {
-    // REC that creates a schema target with a DEF inside — no circular deps, converges in 1 iteration
-    await processEvent(db, ev({
+  it('rejects external REC submissions', async () => {
+    await expect(processEvent(db, ev({
       op: 'REC',
       target: 'schema.tblCases',
       operand: {
-        pivot: 'schema.tblCases.fldUrgency',
         contains: [
           { op: 'DEF', target: 'schema.tblCases.fldUrgency', operand: { type: 'select' } },
         ],
-        reason: 'Added urgency field',
       },
-    }));
-
-    // The DEF sub-op should have created state
-    const state = await getState(db, 'schema.tblCases.fldUrgency');
-    expect(state).not.toBeNull();
-    expect(state?.value).toEqual({ type: 'select' });
-
-    // REC state should record convergence
-    const recState = await getState(db, 'schema.tblCases');
-    expect(recState?.value?.recursion).toBe(true);
-    expect(recState?.value?.result?.converged).toBe(true);
-    // 2 iterations: pass 1 sets values, pass 2 confirms no change
-    expect(recState?.value?.result?.iterations).toBe(2);
+    }))).rejects.toThrow('REC is system-generated and cannot be submitted externally');
   });
 
-  it('sub-operations do not get their own seq numbers', async () => {
+  it('emits system-generated REC when dependency cycle exists', async () => {
+    // Create two formula targets that depend on each other (cycle: A depends on B, B depends on A)
+    await processEvent(db, ev({ target: 'cycle.A', operand: { val: 1 } }));
+    await processEvent(db, ev({ target: 'cycle.B', operand: { val: 2 } }));
+
+    // CON: A depends on B
     await processEvent(db, ev({
-      op: 'REC',
-      target: 'schema.test',
-      operand: {
-        contains: [
-          { op: 'DEF', target: 'schema.test.fldA', operand: 'a' },
-          { op: 'DEF', target: 'schema.test.fldB', operand: 'b' },
-        ],
-      },
+      op: 'CON', target: 'cycle.A', operand: { added: ['cycle.B'] },
+    }));
+    // CON: B depends on A
+    await processEvent(db, ev({
+      op: 'CON', target: 'cycle.B', operand: { added: ['cycle.A'] },
     }));
 
-    // Only one log entry (the REC itself)
-    const events = await readLogSince(db, 0);
-    expect(events).toHaveLength(1);
-    expect(events[0].op).toBe('REC');
-  });
-
-  it('is one log entry with sub-ops affecting state', async () => {
-    const seq = await processEvent(db, ev({
-      op: 'REC',
-      target: 'frame.1',
-      operand: {
-        contains: [
-          { op: 'DEF', target: 'frame.1.fieldA', operand: 'value_a' },
-          { op: 'DEF', target: 'frame.1.fieldB', operand: 'value_b' },
-        ],
-        reason: 'batch update',
-      },
+    // Register fold-mode formula on A first (no cycle yet — B has no formula)
+    await processEvent(db, ev({
+      op: 'DEF', target: 'cycle.A', operand: { formula: 'F(B)' },
     }));
 
-    const stateA = await getState(db, 'frame.1.fieldA');
-    const stateB = await getState(db, 'frame.1.fieldB');
-    expect(stateA?.value).toBe('value_a');
-    expect(stateB?.value).toBe('value_b');
-    // Both share the REC's seq
-    expect(stateA?.last_seq).toBe(seq);
-    expect(stateB?.last_seq).toBe(seq);
+    // Register fold-mode formula on B — this completes the cycle.
+    // The fold detects the circular dependency and emits a system-generated REC.
+    const completingSeq = await processEvent(db, ev({
+      op: 'DEF', target: 'cycle.B', operand: { formula: 'G(A)' },
+    }));
+
+    // Check that a REC event was logged with agent: "system"
+    const allEvents = await readLogSince(db, 0);
+    const recEvents = allEvents.filter(e => e.op === 'REC');
+    expect(recEvents.length).toBeGreaterThanOrEqual(1);
+
+    const rec = recEvents[0];
+    expect(rec.agent).toBe('system');
+    expect(rec.triggered_by).toBe(completingSeq);
+
+    // The REC result should be stored in state
+    const state = await getState(db, 'cycle.B');
+    expect(state?.value?._rec).toBeDefined();
+    expect(state?.value?._rec?.recursion).toBe(true);
+    expect(state?.value?._rec?.triggered_by).toBe(completingSeq);
   });
 
-  it('can contain any mix of operators', async () => {
-    // First create some targets
-    await processEvent(db, ev({ target: 'rec.target1', operand: { status: 'active' } }));
-    await processEvent(db, ev({ target: 'rec.target2', operand: { status: 'active' } }));
+  it('system-generated REC records result with iteration count', async () => {
+    // Set up a cycle where formulas reference each other
+    await processEvent(db, ev({ target: 'stable.A', operand: { val: 1 } }));
+    await processEvent(db, ev({ target: 'stable.B', operand: { val: 2 } }));
 
     await processEvent(db, ev({
-      op: 'REC',
-      target: 'rec.frame',
-      operand: {
-        contains: [
-          { op: 'DEF', target: 'rec.target1', operand: { status: 'archived' } },
-          { op: 'SEG', target: 'rec.target2', operand: { boundary: 'exclude' } },
-        ],
-      },
+      op: 'CON', target: 'stable.A', operand: { added: ['stable.B'] },
+    }));
+    await processEvent(db, ev({
+      op: 'CON', target: 'stable.B', operand: { added: ['stable.A'] },
     }));
 
-    const state1 = await getState(db, 'rec.target1');
-    const state2 = await getState(db, 'rec.target2');
-    expect(state1?.value).toEqual({ status: 'archived' });
-    expect(state2?.value).toEqual({ boundary: 'exclude' });
+    // Register first formula (no cycle yet)
+    await processEvent(db, ev({
+      op: 'DEF', target: 'stable.A', operand: { formula: 'SUM(B)' },
+    }));
+
+    // Register second formula — completes the cycle, triggers REC
+    await processEvent(db, ev({
+      op: 'DEF', target: 'stable.B', operand: { formula: 'SUM(A)' },
+    }));
+
+    // The system-generated REC should record a result with iteration tracking
+    // (The placeholder formula engine embeds inputs in outputs, so convergence
+    // depends on the real formula engine. The structure is what matters here.)
+    const state = await getState(db, 'stable.B');
+    expect(state?.value?._rec).toBeDefined();
+    expect(state?.value?._rec?.recursion).toBe(true);
+    expect(state?.value?._rec?.result).toBeDefined();
+    expect(state?.value?._rec?.result?.iterations).toBeGreaterThanOrEqual(1);
+    // Result contains either converged state or oscillation data
+    expect(typeof state?.value?._rec?.result?.converged).toBe('boolean');
   });
 
-  it('converges when iterative DEFs stabilize', async () => {
-    // Set up two targets where the second DEF depends on the first but stabilizes
-    // Pass 1: set fieldA to 'x', set fieldB to 'y'
-    // Pass 2: set fieldA to 'x' (same), set fieldB to 'y' (same) → converged
+  it('no REC emitted when no dependency cycle exists', async () => {
+    // Linear dependency: A depends on B (no cycle)
+    await processEvent(db, ev({ target: 'linear.A', operand: { val: 1 } }));
+    await processEvent(db, ev({ target: 'linear.B', operand: { val: 2 } }));
+
     await processEvent(db, ev({
-      op: 'REC',
-      target: 'converge.test',
-      operand: {
-        pivot: 'converge.test',
-        contains: [
-          { op: 'DEF', target: 'converge.fieldA', operand: { v: 'stable' } },
-          { op: 'DEF', target: 'converge.fieldB', operand: { v: 'also_stable' } },
-        ],
-      },
+      op: 'CON', target: 'linear.A', operand: { added: ['linear.B'] },
     }));
 
-    const recState = await getState(db, 'converge.test');
-    expect(recState?.value?.result?.converged).toBe(true);
-    // 2 iterations: pass 1 sets values, pass 2 confirms stable
-    expect(recState?.value?.result?.iterations).toBe(2);
-    expect(recState?.value?.result?.stable_state).toBeDefined();
+    await processEvent(db, ev({
+      op: 'DEF', target: 'linear.A', operand: { formula: 'SUM(B)' },
+    }));
+
+    // Trigger — no cycle, so no REC
+    await processEvent(db, ev({
+      op: 'DEF', target: 'linear.B', operand: { val: 20 },
+    }));
+
+    const allEvents = await readLogSince(db, 0);
+    const recEvents = allEvents.filter(e => e.op === 'REC');
+    expect(recEvents).toHaveLength(0);
   });
 
-  it('detects oscillation when DEFs toggle each other', async () => {
-    // Simulate the housing subsidy paradox:
-    // We use a simple toggle pattern where each pass flips a value
-    // that undoes what the previous pass did.
-    //
-    // Set up: target with status 'a'. REC contains a DEF that flips 'a'->'b' or 'b'->'a'.
-    // Since our DEF just sets values (no real formula engine), we simulate the oscillation
-    // by having the contains array produce alternating states through conditional-like DEFs.
-    //
-    // For a true oscillation test, we need the sub-ops to produce different results
-    // on successive passes. We achieve this by having two DEFs that overwrite each other.
+  it('distinguishes human events from system discoveries in the log', async () => {
+    // Set up cycle
+    await processEvent(db, ev({ target: 'log.A', operand: { val: 1 } }));
+    await processEvent(db, ev({ target: 'log.B', operand: { val: 2 } }));
 
-    // Pre-create targets with initial state
-    await processEvent(db, ev({ target: 'osc.income', operand: { amount: 2000 } }));
-    await processEvent(db, ev({ target: 'osc.status', operand: { classification: 'insecure' } }));
-    await processEvent(db, ev({ target: 'osc.subsidy', operand: { amount: 0 } }));
-
-    // REC where the sub-ops create a stable (non-oscillating) chain since we don't have
-    // a real formula engine. Each DEF writes a fixed value, so it converges.
     await processEvent(db, ev({
-      op: 'REC',
-      target: 'osc.assessment',
-      operand: {
-        pivot: 'osc.status',
-        contains: [
-          { op: 'DEF', target: 'osc.income', operand: { amount: 2400 } },
-          { op: 'DEF', target: 'osc.status', operand: { classification: 'secure' } },
-          { op: 'DEF', target: 'osc.subsidy', operand: { amount: 400 } },
-        ],
-      },
+      op: 'CON', target: 'log.A', operand: { added: ['log.B'] },
+    }));
+    await processEvent(db, ev({
+      op: 'CON', target: 'log.B', operand: { added: ['log.A'] },
     }));
 
-    // With fixed DEFs (no formula engine), the values stabilize after 2 passes
-    const recState = await getState(db, 'osc.assessment');
-    expect(recState?.value?.result?.converged).toBe(true);
-    expect(recState?.value?.result?.iterations).toBe(2);
+    await processEvent(db, ev({
+      op: 'DEF', target: 'log.A', operand: { formula: 'F(B)' },
+    }));
+    // This DEF completes the cycle, triggering a system-generated REC
+    await processEvent(db, ev({
+      op: 'DEF', target: 'log.B', operand: { formula: 'G(A)' },
+    }));
+
+    const allEvents = await readLogSince(db, 0);
+
+    // The log now contains two kinds of entries:
+    // Observations (human-initiated) and Discoveries (system-generated REC + INS2+)
+    const humanEvents = allEvents.filter(e => e.agent !== 'system');
+    for (const e of humanEvents) {
+      expect(e.agent).toBe(AGENT);
+    }
+
+    const sysEvents = allEvents.filter(e => e.agent === 'system');
+    expect(sysEvents.length).toBeGreaterThanOrEqual(1);
+    for (const e of sysEvents) {
+      expect(e.agent).toBe('system');
+      expect(e.triggered_by).toBeDefined();
+    }
+  });
+});
+
+// --- INS Levels Tests ---
+
+describe('INS Levels', () => {
+  it('all externally created entities are level 1', async () => {
+    await processEvent(db, ev({ target: 'lvl.test', operand: { x: 1 } }));
+    const state = await getState(db, 'lvl.test');
+    expect(state?.level).toBe(1);
   });
 
-  it('records iteration count and stable_state on convergence', async () => {
-    await processEvent(db, ev({
-      op: 'REC',
-      target: 'iter.test',
-      operand: {
-        pivot: 'iter.test',
-        contains: [
-          { op: 'DEF', target: 'iter.fieldA', operand: { x: 1 } },
-          { op: 'DEF', target: 'iter.fieldB', operand: { y: 2 } },
-        ],
-      },
-    }));
-
-    const recState = await getState(db, 'iter.test');
-    const result = recState?.value?.result;
-    expect(result).toBeDefined();
-    expect(result.converged).toBe(true);
-    expect(result.iterations).toBeGreaterThanOrEqual(1);
-    expect(result.stable_state).toBeDefined();
-    expect(result.stable_state['iter.fieldA']).toEqual({ x: 1 });
-    expect(result.stable_state['iter.fieldB']).toEqual({ y: 2 });
+  it('DEF auto-instantiated entities are level 1', async () => {
+    await processEvent(db, ev({ op: 'DEF', target: 'lvl.auto', operand: { y: 2 } }));
+    const state = await getState(db, 'lvl.auto');
+    expect(state?.level).toBe(1);
   });
 
-  it('stores pivot in REC state', async () => {
-    await processEvent(db, ev({
-      op: 'REC',
-      target: 'pivot.test',
-      operand: {
-        pivot: 'pivot.watched_field',
-        contains: [
-          { op: 'DEF', target: 'pivot.watched_field', operand: 'done' },
-        ],
-      },
-    }));
+  it('system-generated REC produces INS2 derived entity', async () => {
+    // Set up cycle
+    await processEvent(db, ev({ target: 'ins2.A', operand: { val: 1 } }));
+    await processEvent(db, ev({ target: 'ins2.B', operand: { val: 2 } }));
+    await processEvent(db, ev({ op: 'CON', target: 'ins2.A', operand: { added: ['ins2.B'] } }));
+    await processEvent(db, ev({ op: 'CON', target: 'ins2.B', operand: { added: ['ins2.A'] } }));
+    await processEvent(db, ev({ op: 'DEF', target: 'ins2.A', operand: { formula: 'F(B)' } }));
+    await processEvent(db, ev({ op: 'DEF', target: 'ins2.B', operand: { formula: 'G(A)' } }));
 
-    const recState = await getState(db, 'pivot.test');
-    expect(recState?.value?.pivot).toBe('pivot.watched_field');
-    expect(recState?.value?.recursion).toBe(true);
+    // Check that a system.rec.* derived entity was created at level 2
+    const allEvents = await readLogSince(db, 0);
+    const insEvents = allEvents.filter(e => e.op === 'INS' && e.agent === 'system');
+    expect(insEvents.length).toBeGreaterThanOrEqual(1);
+
+    const derivedIns = insEvents[0];
+    expect(derivedIns.level).toBe(2);
+    expect(derivedIns.target).toMatch(/^system\.rec\./);
+
+    const derivedState = await getState(db, derivedIns.target);
+    expect(derivedState?.level).toBe(2);
+    expect(derivedState?.value?.constituents).toBeDefined();
+    expect(derivedState?.value?.topology).toBe('cycle');
   });
 
-  it('works without explicit pivot (watches all targets in contains)', async () => {
+  it('rejects DEF on core content of derived entity', async () => {
+    // Set up cycle to create INS2 entity
+    await processEvent(db, ev({ target: 'guard.A', operand: { val: 1 } }));
+    await processEvent(db, ev({ target: 'guard.B', operand: { val: 2 } }));
+    await processEvent(db, ev({ op: 'CON', target: 'guard.A', operand: { added: ['guard.B'] } }));
+    await processEvent(db, ev({ op: 'CON', target: 'guard.B', operand: { added: ['guard.A'] } }));
+    await processEvent(db, ev({ op: 'DEF', target: 'guard.A', operand: { formula: 'F(B)' } }));
+    await processEvent(db, ev({ op: 'DEF', target: 'guard.B', operand: { formula: 'G(A)' } }));
+
+    // Find the derived entity
+    const allEvents = await readLogSince(db, 0);
+    const derivedIns = allEvents.find(e => e.op === 'INS' && e.agent === 'system');
+    expect(derivedIns).toBeDefined();
+
+    // Attempting to DEF the derived entity's core content should fail
+    await expect(processEvent(db, ev({
+      op: 'DEF',
+      target: derivedIns!.target,
+      operand: { hacked: true },
+    }))).rejects.toThrow('Cannot DEF core content of derived entity');
+  });
+
+  it('allows DEF on annotation sub-paths of derived entities', async () => {
+    // Set up cycle
+    await processEvent(db, ev({ target: 'annot.A', operand: { val: 1 } }));
+    await processEvent(db, ev({ target: 'annot.B', operand: { val: 2 } }));
+    await processEvent(db, ev({ op: 'CON', target: 'annot.A', operand: { added: ['annot.B'] } }));
+    await processEvent(db, ev({ op: 'CON', target: 'annot.B', operand: { added: ['annot.A'] } }));
+    await processEvent(db, ev({ op: 'DEF', target: 'annot.A', operand: { formula: 'F(B)' } }));
+    await processEvent(db, ev({ op: 'DEF', target: 'annot.B', operand: { formula: 'G(A)' } }));
+
+    // Find the derived entity
+    const allEvents = await readLogSince(db, 0);
+    const derivedIns = allEvents.find(e => e.op === 'INS' && e.agent === 'system');
+    expect(derivedIns).toBeDefined();
+
+    // DEF on a sub-path (annotation) should succeed — it auto-instantiates at level 1
     await processEvent(db, ev({
-      op: 'REC',
-      target: 'nopivot.test',
-      operand: {
-        contains: [
-          { op: 'DEF', target: 'nopivot.a', operand: 'val_a' },
-          { op: 'DEF', target: 'nopivot.b', operand: 'val_b' },
-        ],
-      },
+      op: 'DEF',
+      target: `${derivedIns!.target}.severity`,
+      operand: 'high',
     }));
 
-    const recState = await getState(db, 'nopivot.test');
-    expect(recState?.value?.result?.converged).toBe(true);
-    expect(recState?.value?.pivot).toBeNull();
-    // stable_state should include both targets
-    expect(recState?.value?.result?.stable_state).toHaveProperty('nopivot.a');
-    expect(recState?.value?.result?.stable_state).toHaveProperty('nopivot.b');
+    const annotState = await getState(db, `${derivedIns!.target}.severity`);
+    expect(annotState?.value).toBe('high');
+    expect(annotState?.level).toBe(1); // annotation is level 1
+  });
+
+  it('level is preserved through operations', async () => {
+    await processEvent(db, ev({ target: 'pres.test', operand: { a: 1 } }));
+    await processEvent(db, ev({ op: 'DEF', target: 'pres.test', operand: { b: 2 } }));
+    const state = await getState(db, 'pres.test');
+    expect(state?.level).toBe(1);
+    expect(state?.last_op).toBe('DEF');
   });
 });
 
@@ -795,7 +828,7 @@ describe('Dependent Recomputation', () => {
 // --- Full Fixture Sequence ---
 
 describe('Full Fixture Sequence', () => {
-  it('processes all 11 fixture events correctly', async () => {
+  it('processes all 10 fixture events correctly (REC no longer externally submitted)', async () => {
     const fixtures: EoEventInput[] = [
       { op: 'INS', target: 'app.tblClients.rec001', operand: { name: 'Maria Garcia', status: 'active' }, client_event_id: 'fix-001', agent: '@intake:app.aminoimmigration.com', ts: TS },
       { op: 'INS', target: 'app.tblCases.rec101', operand: { type: 'H1B', filed: '2025-06-01' }, client_event_id: 'fix-002', agent: '@intake:app.aminoimmigration.com', ts: TS },
@@ -807,7 +840,6 @@ describe('Full Fixture Sequence', () => {
       { op: 'EVA', target: 'app.tblClients.rec001.fldEmail', operand: { strategy: 'latest' }, client_event_id: 'fix-008', agent: '@admin:app.aminoimmigration.com', ts: TS },
       { op: 'SEG', target: 'app.tblClients.rec001', operand: { boundary: 'exclude', reason: 'archived' }, client_event_id: 'fix-009', agent: '@admin:app.aminoimmigration.com', ts: TS },
       { op: 'DEF', target: 'app.tblCases.rec101.fldDeadline', operand: { formula: 'DAYS_UNTIL(filed + 180)' }, client_event_id: 'fix-010', agent: '@admin:app.aminoimmigration.com', ts: TS },
-      { op: 'REC', target: 'schema.tblCases', operand: { contains: [{ op: 'DEF', target: 'schema.tblCases.fldUrgency', operand: { type: 'select' } }], reason: 'Added urgency field' }, client_event_id: 'fix-011', agent: '@admin:app.aminoimmigration.com', ts: TS },
     ];
 
     const seqs: number[] = [];
@@ -815,8 +847,8 @@ describe('Full Fixture Sequence', () => {
       seqs.push(await processEvent(db, fixture));
     }
 
-    // 11 sequential seq numbers
-    expect(seqs).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+    // 10 sequential seq numbers (REC removed — it is system-generated only)
+    expect(seqs).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
 
     // Verify key states
     const client = await getState(db, 'app.tblClients.rec001');
@@ -832,15 +864,12 @@ describe('Full Fixture Sequence', () => {
     const deadline = await getState(db, 'app.tblCases.rec101.fldDeadline');
     expect(deadline?.value).toHaveProperty('formula');
 
-    const urgency = await getState(db, 'schema.tblCases.fldUrgency');
-    expect(urgency?.value).toEqual({ type: 'select' });
-
     // Verify CON graph
     const clientEdges = await getEdgesFrom(db, 'app.tblClients.rec001');
     expect(clientEdges.some(e => e.dest === 'app.tblCases.rec101')).toBe(true);
 
-    // Verify log has exactly 11 entries
+    // Verify log has exactly 10 entries (no external REC)
     const allEvents = await readLogSince(db, 0);
-    expect(allEvents).toHaveLength(11);
+    expect(allEvents).toHaveLength(10);
   });
 });

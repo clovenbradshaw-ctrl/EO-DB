@@ -3,7 +3,7 @@ import { appendToLog } from './log';
 import { getState, setState } from './state';
 import { addEdge, removeEdge, getEdgesFrom, getEdgesTo } from './graph';
 import { resolveAlias, checkExists } from './helpers';
-import type { EoEvent, EoEventInput, EoState, EvaRegistration, RecResult } from './types';
+import type { EoEvent, EoEventInput, EoState, EvaRegistration, RecResult, ExternalOperator, DerivedEntity } from './types';
 
 /**
  * Process a single EO event through the fold.
@@ -14,6 +14,11 @@ export async function processEvent(
   event: EoEventInput,
   onEvent?: (event: EoEvent) => void,
 ): Promise<number> {
+  // 0. REC is system-generated — reject external submissions
+  if (event.op === 'REC') {
+    throw new Error('REC is system-generated and cannot be submitted externally');
+  }
+
   // 1. Idempotency check
   if (event.client_event_id) {
     const existing = await store.get(`idem:${event.client_event_id}`);
@@ -37,10 +42,16 @@ export async function processEvent(
   // 5. Execute operator-specific logic (helix dispatch)
   await executeOperator(store, fullEvent);
 
-  // 6. Recompute fold-computed EVA-active dependents
-  await recomputeDependents(store, fullEvent.target);
+  // 6. Recompute fold-computed EVA-active dependents (with cycle guard)
+  await recomputeDependents(store, fullEvent.target, new Set());
 
-  // 7. Notify listeners (Zustand store callback replaces Feed)
+  // 7. Detect dependency cycles and emit system-generated REC if found
+  await detectAndEmitREC(store, fullEvent.target, fullEvent, onEvent);
+
+  // 8. Cascade upward: if this target is a constituent of any derived entity, re-evaluate it
+  await cascadeUpward(store, fullEvent.target, fullEvent, onEvent);
+
+  // 9. Notify listeners (Zustand store callback replaces Feed)
   if (onEvent) {
     onEvent(fullEvent);
   }
@@ -59,7 +70,8 @@ export async function executeOperator(store: EoStore, event: EoEvent): Promise<v
     case 'SYN': return handleSYN(store, event);
     case 'DEF': return handleDEF(store, event);
     case 'EVA': return handleEVA(store, event);
-    case 'REC': return handleREC(store, event);
+    // REC is not dispatched from outside — it is produced by the fold
+    // when it detects a circular dependency after applying a human-initiated event.
   }
 }
 
@@ -75,6 +87,7 @@ function stateFromEvent(event: EoEvent, op: EoEvent['op']) {
 }
 
 // --- INS: Instantiate ---
+// External INS is always level 1. System-generated INS carries level 2+.
 async function handleINS(store: EoStore, event: EoEvent): Promise<void> {
   const existing = await checkExists(store, event.target);
   if (existing) {
@@ -84,6 +97,7 @@ async function handleINS(store: EoStore, event: EoEvent): Promise<void> {
   await setState(store, {
     target: event.target,
     value: event.operand ?? {},
+    level: event.level ?? 1,
     ...stateFromEvent(event, 'INS'),
   });
 }
@@ -98,6 +112,7 @@ async function handleSEG(store: EoStore, event: EoEvent): Promise<void> {
   await setState(store, {
     target: event.target,
     value: event.operand,
+    level: existing.level,
     ...stateFromEvent(event, 'SEG'),
   });
 }
@@ -133,9 +148,11 @@ async function handleCON(store: EoStore, event: EoEvent): Promise<void> {
   }
 
   const currentEdges = await getEdgesFrom(store, event.target);
+  const sourceState = await getState(store, event.target);
   await setState(store, {
     target: event.target,
     value: { linked: currentEdges.map(e => e.dest), edge_type: operand.edge_type },
+    level: sourceState?.level ?? 1,
     ...stateFromEvent(event, 'CON'),
   });
 }
@@ -159,6 +176,7 @@ async function handleSYN(store: EoStore, event: EoEvent): Promise<void> {
     await setState(store, {
       target: mergedTarget,
       value: mergedValue,
+      level: 1,
       ...stateFromEvent(event, 'SYN'),
     });
 
@@ -181,12 +199,14 @@ async function handleSYN(store: EoStore, event: EoEvent): Promise<void> {
     await setState(store, {
       target: a,
       value: { _alias: mergedTarget },
+      level: stateA.level,
       ...stateFromEvent(event, 'SYN'),
     });
     if (b !== mergedTarget) {
       await setState(store, {
         target: b,
         value: { _alias: mergedTarget },
+        level: stateB.level,
         ...stateFromEvent(event, 'SYN'),
       });
     }
@@ -202,9 +222,17 @@ async function handleDEF(store: EoStore, event: EoEvent): Promise<void> {
     existing = {
       target,
       value: {},
+      level: 1,
       ...stateFromEvent(event, 'INS'),
     };
     await setState(store, existing);
+  }
+
+  // Level guard: reject DEFs on core content of derived entities (INS2+).
+  if (existing.level > 1 && event.agent !== 'system') {
+    throw new Error(
+      `Cannot DEF core content of derived entity at level ${existing.level}: ${target}`
+    );
   }
 
   const merged = mergeOperand(existing.value, event.operand);
@@ -212,6 +240,7 @@ async function handleDEF(store: EoStore, event: EoEvent): Promise<void> {
   await setState(store, {
     target,
     value: merged,
+    level: existing.level,
     ...stateFromEvent(event, 'DEF'),
   });
 
@@ -223,10 +252,12 @@ async function handleDEF(store: EoStore, event: EoEvent): Promise<void> {
 // --- EVA: Evaluate ---
 async function handleEVA(store: EoStore, event: EoEvent): Promise<void> {
   const target = await resolveAlias(store, event.target);
+  const existing = await getState(store, target);
 
   await setState(store, {
     target,
     value: event.operand,
+    level: existing?.level ?? 1,
     ...stateFromEvent(event, 'EVA'),
   });
 }
@@ -278,7 +309,7 @@ async function handleREC(store: EoStore, event: EoEvent): Promise<void> {
   while (iterations < maxIterations) {
     for (const subOp of subOps) {
       await executeOperator(store, subEvent(subOp));
-      await recomputeDependents(store, subOp.target);
+      await recomputeDependents(store, subOp.target, new Set());
     }
 
     iterations++;
@@ -317,6 +348,7 @@ async function handleREC(store: EoStore, event: EoEvent): Promise<void> {
     result.stable_state = finalSnap;
   }
 
+  const existingRec = await getState(store, event.target);
   await setState(store, {
     target: event.target,
     value: {
@@ -326,13 +358,333 @@ async function handleREC(store: EoStore, event: EoEvent): Promise<void> {
       reason: event.operand?.reason,
       result,
     },
+    level: existingRec?.level ?? 1,
     ...stateFromEvent(event, 'REC'),
   });
 }
 
+// --- System-Generated REC: Cycle Detection and Emission ---
+
+function stripEphemeral(val: any): any {
+  if (val == null || typeof val !== 'object') return val;
+  if (Array.isArray(val)) return val.map(stripEphemeral);
+  const result: Record<string, any> = {};
+  for (const [k, v] of Object.entries(val)) {
+    if (k === 'evaluated_at') continue;
+    result[k] = stripEphemeral(v);
+  }
+  return result;
+}
+
+async function detectAndEmitREC(
+  store: EoStore,
+  changedTarget: string,
+  triggeringEvent: EoEvent,
+  onEvent?: (event: EoEvent) => void,
+): Promise<void> {
+  const cycleTargets = await findRecomputationCycle(store, changedTarget);
+  if (!cycleTargets || cycleTargets.length === 0) return;
+
+  const registrations: EvaRegistration[] = [];
+  for (const target of cycleTargets) {
+    const reg = await store.get(`eva:${target}`) as EvaRegistration | null;
+    if (reg && reg.mode === 'fold') {
+      registrations.push(reg);
+    }
+  }
+
+  if (registrations.length === 0) return;
+
+  // Determine the level of the constituents
+  let maxConstituentLevel = 1;
+  const constituentTargets: string[] = [];
+  for (const target of cycleTargets) {
+    constituentTargets.push(target);
+    const state = await getState(store, target);
+    if (state && state.level > maxConstituentLevel) {
+      maxConstituentLevel = state.level;
+    }
+  }
+  constituentTargets.push(changedTarget);
+  const derivedLevel = maxConstituentLevel + 1;
+
+  const watchedTargets = new Set<string>(cycleTargets);
+  watchedTargets.add(changedTarget);
+
+  async function snapshot(): Promise<Record<string, any>> {
+    const snap: Record<string, any> = {};
+    for (const t of watchedTargets) {
+      const state = await getState(store, t);
+      snap[t] = stripEphemeral(state?.value ?? null);
+    }
+    return snap;
+  }
+
+  const initialSnap = await snapshot();
+  const history: Array<Record<string, any>> = [initialSnap];
+
+  let iterations = 0;
+  let converged = false;
+  let cycleLength = 0;
+
+  while (iterations < DEFAULT_MAX_ITERATIONS) {
+    for (const reg of registrations) {
+      await evaluateFormula(store, reg);
+    }
+
+    iterations++;
+    const currentSnap = await snapshot();
+
+    let matched = -1;
+    for (let i = 0; i < history.length; i++) {
+      if (deepEqual(currentSnap, history[i])) {
+        matched = i;
+        break;
+      }
+    }
+
+    if (matched >= 0) {
+      if (matched === history.length - 1) converged = true;
+      else cycleLength = history.length - matched;
+      break;
+    }
+
+    history.push(currentSnap);
+  }
+
+  const result: RecResult = { converged, iterations };
+  if (!converged && cycleLength > 0) {
+    result.cycle_length = cycleLength;
+    result.states = history.slice(history.length - cycleLength);
+  } else if (converged) {
+    result.stable_state = await snapshot();
+  }
+
+  const containsOps = registrations.map(reg => ({
+    op: 'DEF' as const,
+    target: reg.target,
+    operand: reg.formula,
+  }));
+
+  const recSeq = await store.nextSeq();
+  const now = new Date().toISOString();
+  const recEvent: EoEvent = {
+    seq: recSeq,
+    op: 'REC',
+    target: changedTarget,
+    operand: {
+      contains: containsOps,
+      pivot: changedTarget,
+    },
+    agent: 'system',
+    ts: now,
+    acquired_ts: now,
+    triggered_by: triggeringEvent.seq,
+  };
+
+  await appendToLog(store, recEvent);
+
+  const existingPivot = await getState(store, changedTarget);
+  await setState(store, {
+    target: changedTarget,
+    value: {
+      ...existingPivot?.value,
+      _rec: {
+        recursion: true,
+        pivot: changedTarget,
+        sub_ops: registrations.length,
+        triggered_by: triggeringEvent.seq,
+        result,
+      },
+    },
+    level: existingPivot?.level ?? 1,
+    ...stateFromEvent(recEvent, 'REC'),
+  });
+
+  if (onEvent) onEvent(recEvent);
+
+  // --- INS2+: Produce a derived entity ---
+  const sortedConstituents = [...new Set(constituentTargets)].sort();
+  const derivedTargetId = derivedEntityTarget(sortedConstituents);
+  const existingDerived = await getState(store, derivedTargetId);
+
+  const derivedOperand = {
+    constituents: sortedConstituents,
+    topology: 'cycle',
+    result,
+  };
+
+  if (existingDerived) {
+    const updateSeq = await store.nextSeq();
+    const updateEvent: EoEvent = {
+      seq: updateSeq,
+      op: 'DEF',
+      target: derivedTargetId,
+      operand: derivedOperand,
+      agent: 'system',
+      ts: now,
+      acquired_ts: now,
+      triggered_by: triggeringEvent.seq,
+    };
+    await appendToLog(store, updateEvent);
+    await setState(store, {
+      target: derivedTargetId,
+      value: derivedOperand,
+      level: existingDerived.level,
+      ...stateFromEvent(updateEvent, 'DEF'),
+    });
+    if (onEvent) onEvent(updateEvent);
+  } else {
+    const insSeq = await store.nextSeq();
+    const insEvent: EoEvent = {
+      seq: insSeq,
+      op: 'INS',
+      target: derivedTargetId,
+      operand: derivedOperand,
+      agent: 'system',
+      level: derivedLevel,
+      ts: now,
+      acquired_ts: now,
+      triggered_by: triggeringEvent.seq,
+    };
+    await appendToLog(store, insEvent);
+    await setState(store, {
+      target: derivedTargetId,
+      value: derivedOperand,
+      level: derivedLevel,
+      ...stateFromEvent(insEvent, 'INS'),
+    });
+
+    const derived: DerivedEntity = {
+      target: derivedTargetId,
+      level: derivedLevel,
+      constituents: sortedConstituents,
+      topology: 'cycle',
+      inert: false,
+    };
+    await store.put(`derived:${derivedTargetId}`, derived);
+
+    for (const constituent of sortedConstituents) {
+      await store.put(`rdep:${constituent}:${derivedTargetId}`, derivedTargetId);
+    }
+
+    if (onEvent) onEvent(insEvent);
+  }
+
+  await cascadeUpward(store, derivedTargetId, triggeringEvent, onEvent);
+}
+
+async function findRecomputationCycle(store: EoStore, startTarget: string): Promise<string[] | null> {
+  const visited = new Set<string>();
+  const path: string[] = [];
+
+  async function dfs(current: string): Promise<string[] | null> {
+    const reverseEdges = await getEdgesTo(store, current);
+    for (const edge of reverseEdges) {
+      const source = edge.source;
+
+      const reg = await store.get(`eva:${source}`) as EvaRegistration | null;
+      if (!reg || reg.mode !== 'fold') continue;
+
+      if (source === startTarget) {
+        return [...path, current];
+      }
+
+      if (!visited.has(source)) {
+        visited.add(source);
+        path.push(current);
+        const result = await dfs(source);
+        if (result) return result;
+        path.pop();
+      }
+    }
+    return null;
+  }
+
+  return dfs(startTarget);
+}
+
+function derivedEntityTarget(sortedConstituents: string[]): string {
+  const key = sortedConstituents.join('|');
+  let hash = 0;
+  for (let i = 0; i < key.length; i++) {
+    hash = ((hash << 5) - hash + key.charCodeAt(i)) | 0;
+  }
+  const hexId = (hash >>> 0).toString(16).padStart(8, '0');
+  return `system.rec.${hexId}`;
+}
+
+async function getReverseDeps(store: EoStore, constituent: string): Promise<string[]> {
+  const deps: string[] = [];
+  const results = await store.iterator(`rdep:${constituent}:`);
+  for (const [, value] of results) {
+    deps.push(value as string);
+  }
+  return deps;
+}
+
+async function cascadeUpward(
+  store: EoStore,
+  changedTarget: string,
+  triggeringEvent: EoEvent,
+  onEvent?: (event: EoEvent) => void,
+): Promise<void> {
+  const dependentTargets = await getReverseDeps(store, changedTarget);
+  for (const derivedTarget of dependentTargets) {
+    const derived = await store.get(`derived:${derivedTarget}`) as DerivedEntity | null;
+    if (!derived || derived.inert) continue;
+
+    const constituentValues: Record<string, any> = {};
+    for (const c of derived.constituents) {
+      const state = await getState(store, c);
+      constituentValues[c] = state?.value ?? null;
+    }
+
+    const reEvalSeq = await store.nextSeq();
+    const now = new Date().toISOString();
+    const reEvalEvent: EoEvent = {
+      seq: reEvalSeq,
+      op: 'REC',
+      target: derivedTarget,
+      operand: {
+        re_evaluation: true,
+        changed_constituent: changedTarget,
+        constituent_values: constituentValues,
+      },
+      agent: 'system',
+      ts: now,
+      acquired_ts: now,
+      triggered_by: triggeringEvent.seq,
+    };
+    await appendToLog(store, reEvalEvent);
+
+    const existingDerived = await getState(store, derivedTarget);
+    if (existingDerived) {
+      await setState(store, {
+        target: derivedTarget,
+        value: {
+          ...existingDerived.value,
+          result: {
+            ...existingDerived.value?.result,
+            stable_state: constituentValues,
+          },
+        },
+        level: existingDerived.level,
+        ...stateFromEvent(reEvalEvent, 'REC'),
+      });
+    }
+
+    if (onEvent) onEvent(reEvalEvent);
+    await cascadeUpward(store, derivedTarget, triggeringEvent, onEvent);
+  }
+}
+
 // --- Dependent Recomputation ---
 
-async function recomputeDependents(store: EoStore, changedTarget: string): Promise<void> {
+async function recomputeDependents(store: EoStore, changedTarget: string, visited: Set<string> = new Set()): Promise<void> {
+  if (visited.has(changedTarget)) return; // cycle guard
+  visited.add(changedTarget);
+
   const reverseEdges = await getEdgesTo(store, changedTarget);
 
   for (const edge of reverseEdges) {
@@ -341,7 +693,7 @@ async function recomputeDependents(store: EoStore, changedTarget: string): Promi
 
     if (registration.mode === 'fold') {
       await evaluateFormula(store, registration);
-      await recomputeDependents(store, registration.target);
+      await recomputeDependents(store, registration.target, visited);
     }
   }
 }
@@ -361,6 +713,7 @@ async function evaluateFormula(store: EoStore, registration: EvaRegistration): P
   await setState(store, {
     target: registration.target,
     value: { ...existing?.value, _computed: result },
+    level: existing?.level ?? 1,
     last_seq: existing?.last_seq || 0,
     last_op: existing?.last_op || 'DEF',
     last_agent: 'system:eva',
