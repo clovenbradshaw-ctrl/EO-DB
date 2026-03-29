@@ -2777,6 +2777,12 @@ async function checkAndEmitREC(conEvent) {
       // Deduplicate (source may appear twice)
       const cycleNodes = [...new Set(cyclePath)];
 
+      // Deterministic client_event_id so multiple clients detecting the same
+      // cycle don't produce duplicate REC events.  The log store's keyPath is
+      // client_event_id, so a second append with the same id simply fails.
+      const sortedCycle = [...cycleNodes].sort();
+      const cycleKey = 'rec:cycle:' + sortedCycle.join('+');
+
       const recEvent = {
         op: 'REC',
         target: source,
@@ -2787,9 +2793,15 @@ async function checkAndEmitREC(conEvent) {
         },
         agent: 'system',
         triggered_by: conEvent.seq,
+        client_event_id: cycleKey,
       };
-      const emitted = await appendEvent(recEvent);
-      console.log('[cycle] REC emitted — cycle detected:', cycleNodes.join(' → '), '→', cycleNodes[0], '(seq', emitted.seq + ')');
+      try {
+        const emitted = await appendEvent(recEvent);
+        console.log('[cycle] REC emitted — cycle detected:', cycleNodes.join(' → '), '→', cycleNodes[0], '(seq', emitted.seq + ')');
+      } catch (e) {
+        // Duplicate key = another client (or earlier import) already emitted this REC
+        console.log('[cycle] REC already exists for cycle:', sortedCycle.join(' + '));
+      }
       return emitted;
     }
   }
