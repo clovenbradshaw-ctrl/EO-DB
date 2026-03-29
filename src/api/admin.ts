@@ -20,6 +20,7 @@ import {
   removeBucketMember,
   addBucketServerMember,
   removeBucketServerMember,
+  findAccountsSameServer,
 } from '../auth/matrix-auth-config.js';
 
 const VALID_ACCESS_LEVELS: AccessLevel[] = ['read', 'write', 'read_write'];
@@ -72,6 +73,23 @@ export function registerAdminRoutes(app: FastifyInstance, db: EoDb): void {
     const actor = request.matrixUser?.user_id || 'unknown';
     const config = await setMatrixAuthEnabled(db, enabled, actor);
     return reply.send(config);
+  });
+
+  // ─── Same-server account discovery ──────────────────────────────────────
+
+  // GET /admin/matrix-auth/same-server — find other accounts on the same homeserver
+  app.get('/admin/matrix-auth/same-server', async (request: AuthenticatedRequest, reply) => {
+    const query = request.query as { user_id?: string };
+    // Use the provided user_id or fall back to the authenticated user
+    const user_id = query.user_id
+      ? decodeURIComponent(query.user_id)
+      : request.matrixUser?.user_id;
+    if (!user_id || !user_id.startsWith('@') || !user_id.includes(':')) {
+      return reply.code(400).send({ error: 'Invalid or missing user_id. Expected "@localpart:homeserver"' });
+    }
+    const accounts = await findAccountsSameServer(db, user_id);
+    const homeserver = user_id.slice(user_id.indexOf(':') + 1);
+    return reply.send({ user_id, homeserver, accounts, count: accounts.length });
   });
 
   // ─── Account allowlist ───────────────────────────────────────────────────
