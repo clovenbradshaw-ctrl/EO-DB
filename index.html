@@ -2333,10 +2333,186 @@ body {
   margin-top: 6px;
 }
 
+/* ── Sync Status View ── */
+.sync-panel {
+  flex-direction: column;
+  overflow-y: auto;
+  padding: 24px;
+  gap: 20px;
+}
+
+.sync-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 16px;
+  max-width: 1100px;
+}
+
+.sync-card {
+  background: var(--bg1);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  transition: border-color 0.2s;
+}
+
+.sync-card:hover { border-color: var(--border2); }
+
+.sync-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sync-card-title {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--white);
+}
+
+.sync-card-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.sync-card-dot.connected {
+  background: var(--ins);
+  box-shadow: 0 0 6px var(--ins);
+}
+
+.sync-card-dot.syncing {
+  background: var(--accent);
+  box-shadow: 0 0 6px var(--accent);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+.sync-card-dot.disconnected {
+  background: var(--text-faint);
+  box-shadow: none;
+}
+
+.sync-card-dot.error {
+  background: var(--danger);
+  box-shadow: 0 0 6px var(--danger);
+}
+
+.sync-card-dot.idle {
+  background: var(--syn);
+  box-shadow: 0 0 4px rgba(251,191,36,0.3);
+}
+
+.sync-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sync-card-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+}
+
+.sync-card-label { color: var(--text-dim); }
+.sync-card-value { color: var(--text); }
+.sync-card-value.accent { color: var(--accent); }
+.sync-card-value.good { color: var(--ins); }
+.sync-card-value.warn { color: var(--syn); }
+.sync-card-value.bad { color: var(--danger); }
+
+.sync-card-status {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  color: var(--text-faint);
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+  margin-top: 2px;
+}
+
+.sync-users-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.sync-user-chip {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 3px 10px 3px 6px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  color: var(--text);
+}
+
+.sync-user-chip .user-avatar {
+  width: 16px;
+  height: 16px;
+  font-size: 7px;
+}
+
+.sync-user-chip.self { border-color: var(--accent); color: var(--accent); }
+
+.sync-section-title {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-faint);
+  margin-top: 8px;
+}
+
+.sync-activity-log {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.sync-activity-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  color: var(--text-dim);
+  padding: 2px 0;
+}
+
+.sync-activity-time { color: var(--text-faint); flex-shrink: 0; }
+.sync-activity-msg { flex: 1; }
+
+.sync-auto-badge {
+  font-size: 8px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: rgba(56,189,248,0.12);
+  color: var(--accent);
+  font-family: 'JetBrains Mono', monospace;
+}
+
 /* ── Responsive ── */
 @media (max-width: 900px) {
   .detail-drawer { width: 300px; }
   .graph-sidebar { width: 200px; }
+  .sync-grid { grid-template-columns: 1fr; }
 }
 </style>
 </head>
@@ -2392,6 +2568,7 @@ body {
   <div class="nav-tab" onclick="switchTab('compose')" style="color:var(--ins);">+ Compose</div>
   <div class="nav-tab" onclick="switchTab('spaces')">Spaces</div>
   <div class="nav-tab" onclick="switchTab('import')">Import</div>
+  <div class="nav-tab" onclick="switchTab('sync')">Sync</div>
   <div class="nav-tab" onclick="switchTab('settings')">Settings</div>
 </div>
 
@@ -2820,6 +2997,29 @@ INS,app.tbl.rec1,"{""name"":""Alice""}"</pre>
           </div>
         </div>
 
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ Sync Status Panel ═══ -->
+  <div id="panel-sync" class="panel sync-panel">
+    <div style="display:flex;align-items:center;justify-content:space-between;">
+      <div style="display:flex;align-items:center;gap:10px;">
+        <span style="font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;color:var(--white);letter-spacing:1px;">SYNC STATUS</span>
+        <span class="sync-auto-badge" id="syncAutoLabel">AUTO</span>
+      </div>
+      <span id="syncLastRefresh" style="font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--text-faint);"></span>
+    </div>
+
+    <div class="sync-grid" id="syncGrid">
+      <!-- Cards rendered by JS -->
+    </div>
+
+    <div class="sync-section-title" style="margin-top:16px;">Activity Log</div>
+    <div class="sync-activity-log" id="syncActivityLog">
+      <div class="sync-activity-item">
+        <span class="sync-activity-time">--:--:--</span>
+        <span class="sync-activity-msg" style="color:var(--text-faint);font-style:italic;">Waiting for activity...</span>
       </div>
     </div>
   </div>
@@ -6524,6 +6724,326 @@ document.addEventListener('click', (e) => {
   }
 });
 
+// ── Sync Status View ─────────────────────────────────────────────────────
+//
+// Renders live sync status cards for: WebSocket, Matrix Room, Backup,
+// Airtable, and Online Users. Auto-refreshes every 5s when the Sync tab
+// is visible. Logs sync activity without spamming users.
+
+const syncActivityEntries = [];
+const SYNC_ACTIVITY_MAX = 50;
+let syncRefreshTimer = null;
+
+function logSyncActivity(msg) {
+  const now = new Date();
+  const ts = now.toTimeString().slice(0, 8);
+  syncActivityEntries.unshift({ ts, msg, at: now });
+  if (syncActivityEntries.length > SYNC_ACTIVITY_MAX) syncActivityEntries.pop();
+  renderSyncActivityLog();
+}
+
+function renderSyncActivityLog() {
+  const el = document.getElementById('syncActivityLog');
+  if (!el) return;
+  if (syncActivityEntries.length === 0) {
+    el.innerHTML = `<div class="sync-activity-item">
+      <span class="sync-activity-time">--:--:--</span>
+      <span class="sync-activity-msg" style="color:var(--text-faint);font-style:italic;">Waiting for activity...</span>
+    </div>`;
+    return;
+  }
+  el.innerHTML = syncActivityEntries.map(e =>
+    `<div class="sync-activity-item">
+      <span class="sync-activity-time">${e.ts}</span>
+      <span class="sync-activity-msg">${e.msg}</span>
+    </div>`
+  ).join('');
+}
+
+function getSyncCardHtml_websocket() {
+  const connected = syncSocket && syncSocket.readyState === WebSocket.OPEN;
+  const connecting = syncSocket && syncSocket.readyState === WebSocket.CONNECTING;
+  const isStatic = isStaticHosting();
+
+  let dotClass = 'disconnected';
+  let statusText = 'Disconnected';
+  if (isStatic) { dotClass = 'idle'; statusText = 'Static hosting — no server'; }
+  else if (connected) { dotClass = 'connected'; statusText = 'Connected'; }
+  else if (connecting) { dotClass = 'syncing'; statusText = 'Connecting...'; }
+  else if (!matrixToken) { statusText = 'Not signed in'; }
+
+  return `<div class="sync-card">
+    <div class="sync-card-header">
+      <span class="sync-card-title">WebSocket</span>
+      <div class="sync-card-dot ${dotClass}"></div>
+    </div>
+    <div class="sync-card-body">
+      <div class="sync-card-row">
+        <span class="sync-card-label">Status</span>
+        <span class="sync-card-value ${connected ? 'good' : isStatic ? 'warn' : ''}">${statusText}</span>
+      </div>
+      <div class="sync-card-row">
+        <span class="sync-card-label">Server</span>
+        <span class="sync-card-value">${getSyncServerUrl() || 'N/A'}</span>
+      </div>
+    </div>
+  </div>`;
+}
+
+function getSyncCardHtml_matrix() {
+  const available = !!(matrixToken && matrixUserId);
+  const space = activeNulspaceId ? null : null; // We'll read sync key directly
+  const syncKey = activeNulspaceId ? `eo_sync:matrix-room:${activeNulspaceId}` : null;
+  const lastSeq = syncKey ? localStorage.getItem(syncKey) : null;
+  const hasRoom = activeNulspaceId ? true : false; // simplified
+
+  let dotClass = available ? 'connected' : 'disconnected';
+  let statusText = available ? 'Ready' : 'Not signed in';
+  if (available && lastSeq) { statusText = 'Synced'; }
+
+  return `<div class="sync-card">
+    <div class="sync-card-header">
+      <span class="sync-card-title">Matrix Room</span>
+      <div class="sync-card-dot ${dotClass}"></div>
+    </div>
+    <div class="sync-card-body">
+      <div class="sync-card-row">
+        <span class="sync-card-label">Status</span>
+        <span class="sync-card-value ${available ? 'good' : ''}">${statusText}</span>
+      </div>
+      <div class="sync-card-row">
+        <span class="sync-card-label">User</span>
+        <span class="sync-card-value">${matrixUserId || '—'}</span>
+      </div>
+      <div class="sync-card-row">
+        <span class="sync-card-label">Last Synced Seq</span>
+        <span class="sync-card-value ${lastSeq ? 'accent' : ''}">${lastSeq || 'None'}</span>
+      </div>
+      <div class="sync-card-row">
+        <span class="sync-card-label">Space</span>
+        <span class="sync-card-value">${activeNulspaceId ? activeNulspaceId.slice(0, 12) + '...' : 'No space selected'}</span>
+      </div>
+    </div>
+    <div class="sync-card-status">Events are synced to an E2EE Matrix room per space</div>
+  </div>`;
+}
+
+function getSyncCardHtml_backup() {
+  const connected = !!backupAuth;
+  const provider = backupProvider || 'none';
+  const providerLabel = { filen: 'Filen', pixeldrain: 'Pixeldrain', s3: 'S3 / R2' }[provider] || provider;
+
+  let dotClass = connected ? 'connected' : 'disconnected';
+  let statusText = connected ? `Connected (${providerLabel})` : 'Not connected';
+
+  return `<div class="sync-card">
+    <div class="sync-card-header">
+      <span class="sync-card-title">Backup Storage</span>
+      <div class="sync-card-dot ${dotClass}"></div>
+    </div>
+    <div class="sync-card-body">
+      <div class="sync-card-row">
+        <span class="sync-card-label">Status</span>
+        <span class="sync-card-value ${connected ? 'good' : ''}">${statusText}</span>
+      </div>
+      <div class="sync-card-row">
+        <span class="sync-card-label">Provider</span>
+        <span class="sync-card-value">${connected ? providerLabel : '—'}</span>
+      </div>
+    </div>
+    <div class="sync-card-status">${connected ? 'Encrypted snapshots available' : 'Connect in Settings → Backup Storage'}</div>
+  </div>`;
+}
+
+function getSyncCardHtml_airtable() {
+  // Check if any Airtable keys are configured
+  let keys = [];
+  try {
+    keys = JSON.parse(localStorage.getItem('eo_airtable_keys') || '[]');
+  } catch {}
+
+  const hasKeys = keys.length > 0;
+  let dotClass = hasKeys ? 'idle' : 'disconnected';
+  let statusText = hasKeys ? `${keys.length} key${keys.length !== 1 ? 's' : ''} configured` : 'Not configured';
+
+  // Check for any recent sync status
+  const keyLabels = keys.map(k => k.label || 'unknown');
+  let lastSyncInfo = '';
+  for (const k of keys) {
+    if (k.last_sync_at) {
+      const ago = timeSince(new Date(k.last_sync_at));
+      lastSyncInfo = `${ago} ago`;
+      dotClass = 'connected';
+      statusText = 'Active';
+      break;
+    }
+  }
+
+  return `<div class="sync-card">
+    <div class="sync-card-header">
+      <span class="sync-card-title">Airtable</span>
+      <div class="sync-card-dot ${dotClass}"></div>
+    </div>
+    <div class="sync-card-body">
+      <div class="sync-card-row">
+        <span class="sync-card-label">Status</span>
+        <span class="sync-card-value ${hasKeys ? (dotClass === 'connected' ? 'good' : 'warn') : ''}">${statusText}</span>
+      </div>
+      <div class="sync-card-row">
+        <span class="sync-card-label">API Keys</span>
+        <span class="sync-card-value">${hasKeys ? keyLabels.join(', ') : '—'}</span>
+      </div>
+      ${lastSyncInfo ? `<div class="sync-card-row">
+        <span class="sync-card-label">Last Sync</span>
+        <span class="sync-card-value accent">${lastSyncInfo}</span>
+      </div>` : ''}
+    </div>
+    <div class="sync-card-status">${hasKeys ? 'Manual sync via Settings → Airtable' : 'Add keys in Settings → Airtable Integration'}</div>
+  </div>`;
+}
+
+function getSyncCardHtml_users() {
+  const unique = new Map();
+  for (const u of onlineUsers) {
+    if (!unique.has(u.user_id)) unique.set(u.user_id, u);
+  }
+  const users = Array.from(unique.values());
+  const count = users.length;
+  const wsConnected = syncSocket && syncSocket.readyState === WebSocket.OPEN;
+
+  let dotClass = wsConnected ? (count > 0 ? 'connected' : 'idle') : 'disconnected';
+
+  const chips = users.map(u => {
+    const isSelf = u.user_id === matrixUserId;
+    const name = u.user_id.split(':')[0].slice(1);
+    const initials = name.slice(0, 2).toUpperCase();
+    return `<div class="sync-user-chip ${isSelf ? 'self' : ''}">
+      <div class="user-avatar" style="width:16px;height:16px;font-size:7px;">${initials}</div>
+      ${name}${isSelf ? ' (you)' : ''}
+    </div>`;
+  }).join('');
+
+  return `<div class="sync-card">
+    <div class="sync-card-header">
+      <span class="sync-card-title">Online Users</span>
+      <div class="sync-card-dot ${dotClass}"></div>
+    </div>
+    <div class="sync-card-body">
+      <div class="sync-card-row">
+        <span class="sync-card-label">Connected</span>
+        <span class="sync-card-value ${count > 0 ? 'good' : ''}">${count} user${count !== 1 ? 's' : ''}</span>
+      </div>
+    </div>
+    ${chips ? `<div class="sync-users-list">${chips}</div>` : ''}
+    <div class="sync-card-status">${wsConnected ? 'Real-time presence via WebSocket' : 'Connect to see who\'s online'}</div>
+  </div>`;
+}
+
+function timeSince(date) {
+  const seconds = Math.floor((new Date() - date) / 1000);
+  if (seconds < 5) return 'just now';
+  if (seconds < 60) return seconds + 's';
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return minutes + 'm';
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return hours + 'h';
+  return Math.floor(hours / 24) + 'd';
+}
+
+function renderSyncView() {
+  const grid = document.getElementById('syncGrid');
+  if (!grid) return;
+
+  grid.innerHTML = [
+    getSyncCardHtml_websocket(),
+    getSyncCardHtml_matrix(),
+    getSyncCardHtml_backup(),
+    getSyncCardHtml_airtable(),
+    getSyncCardHtml_users(),
+  ].join('');
+
+  const refreshEl = document.getElementById('syncLastRefresh');
+  if (refreshEl) refreshEl.textContent = 'Updated ' + new Date().toTimeString().slice(0, 8);
+}
+
+function startSyncViewRefresh() {
+  if (syncRefreshTimer) return;
+  renderSyncView();
+  syncRefreshTimer = setInterval(() => {
+    if (currentTab === 'sync') renderSyncView();
+  }, 5000);
+}
+
+function stopSyncViewRefresh() {
+  if (syncRefreshTimer) {
+    clearInterval(syncRefreshTimer);
+    syncRefreshTimer = null;
+  }
+}
+
+// Hook into existing sync events to log activity
+const _origConnectSync = connectSync;
+connectSync = function() {
+  _origConnectSync.apply(this, arguments);
+  // Attach activity logging to the new socket after a tick
+  setTimeout(() => {
+    if (syncSocket && !syncSocket._syncViewHooked) {
+      syncSocket._syncViewHooked = true;
+      const origOnOpen = syncSocket.onopen;
+      syncSocket.onopen = function(e) {
+        logSyncActivity('WebSocket connected');
+        if (currentTab === 'sync') renderSyncView();
+        if (origOnOpen) origOnOpen.call(this, e);
+      };
+      const origOnClose = syncSocket.onclose;
+      syncSocket.onclose = function(e) {
+        logSyncActivity('WebSocket disconnected (code ' + e.code + ')');
+        if (currentTab === 'sync') renderSyncView();
+        if (origOnClose) origOnClose.call(this, e);
+      };
+      const origOnMessage = syncSocket.onmessage;
+      syncSocket.onmessage = function(e) {
+        try {
+          const msg = JSON.parse(e.data);
+          if (msg.type === 'presence') {
+            const action = msg.action === 'joined' ? 'joined' : 'left';
+            logSyncActivity(`User ${msg.user_id} ${action}`);
+            if (currentTab === 'sync') renderSyncView();
+          } else if (msg.type === 'sync_complete') {
+            logSyncActivity('Sync complete through seq ' + msg.through_seq);
+            if (currentTab === 'sync') renderSyncView();
+          }
+        } catch {}
+        if (origOnMessage) origOnMessage.call(this, e);
+      };
+    }
+  }, 100);
+};
+
+// Log Matrix room sync activity
+const _origDoSync = doSync;
+doSync = async function(targetId) {
+  logSyncActivity(`Sync started → ${targetId}`);
+  if (currentTab === 'sync') renderSyncView();
+  try {
+    await _origDoSync.apply(this, arguments);
+    logSyncActivity(`Sync completed → ${targetId}`);
+  } catch (e) {
+    logSyncActivity(`Sync failed → ${targetId}: ${e.message || 'error'}`);
+  }
+  if (currentTab === 'sync') renderSyncView();
+};
+
+// Log backup connect/disconnect
+const _origShowBackupConnected = typeof showBackupConnected === 'function' ? showBackupConnected : null;
+if (_origShowBackupConnected) {
+  showBackupConnected = function(label) {
+    logSyncActivity('Backup connected: ' + label);
+    _origShowBackupConnected.apply(this, arguments);
+    if (currentTab === 'sync') renderSyncView();
+  };
+}
+
 // ── Data (loaded from IndexedDB) ──
 let LOG = [];
 
@@ -7161,6 +7681,8 @@ function switchTab(tab) {
   if (tab === 'graph') renderGraph();
   if (tab === 'spaces') loadSpaces();
   if (tab === 'settings') loadSettings();
+  if (tab === 'sync') startSyncViewRefresh();
+  else stopSyncViewRefresh();
 }
 
 // ── Import ──
