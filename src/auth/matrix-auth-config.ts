@@ -640,6 +640,64 @@ export async function isAccountAllowed(db: EoDb, user_id: string): Promise<boole
  *   - allowed_homeservers is empty (no restriction), OR
  *   - The homeserver is in the legacy allowlist
  */
+/** Account info returned by findAccountsSameServer. */
+export interface SameServerAccount {
+  user_id: string;
+  label?: string;
+  access: AccessLevel;
+  source: 'account' | 'bucket';
+  bucket_name?: string;
+}
+
+/**
+ * Find all other accounts authorized on the same homeserver as the given user.
+ * Searches allowed_accounts and user_rules_buckets for matching homeserver domains.
+ */
+export async function findAccountsSameServer(
+  db: EoDb,
+  user_id: string,
+): Promise<SameServerAccount[]> {
+  const homeserver = extractHomeserver(user_id);
+  if (!homeserver) return [];
+
+  const config = await getMatrixAuthConfig(db);
+  const results: SameServerAccount[] = [];
+  const seen = new Set<string>();
+
+  // 1. Explicit allowed accounts on the same homeserver
+  for (const acct of config.allowed_accounts) {
+    if (acct.user_id === user_id) continue;
+    if (extractHomeserver(acct.user_id) === homeserver) {
+      results.push({
+        user_id: acct.user_id,
+        label: acct.label,
+        access: acct.access,
+        source: 'account',
+      });
+      seen.add(acct.user_id);
+    }
+  }
+
+  // 2. Bucket members on the same homeserver
+  for (const bucket of config.user_rules_buckets) {
+    for (const member of bucket.members) {
+      if (member === user_id) continue;
+      if (seen.has(member)) continue;
+      if (extractHomeserver(member) === homeserver) {
+        results.push({
+          user_id: member,
+          access: bucket.access,
+          source: 'bucket',
+          bucket_name: bucket.name,
+        });
+        seen.add(member);
+      }
+    }
+  }
+
+  return results;
+}
+
 export async function isHomeserverAllowed(db: EoDb, homeserver: string): Promise<boolean> {
   const config = await getMatrixAuthConfig(db);
   if (!config.enabled) return true;

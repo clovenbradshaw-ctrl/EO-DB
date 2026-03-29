@@ -115,6 +115,74 @@ body {
   font-weight: 600;
 }
 
+/* ── Online Users ── */
+.online-indicator {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 12px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  position: relative;
+  transition: border-color 0.2s;
+}
+.online-indicator:hover { border-color: var(--accent); }
+.online-dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--ins);
+  box-shadow: 0 0 6px var(--ins);
+}
+.online-dot.disconnected { background: var(--text-faint); box-shadow: none; }
+.online-count { font-size: 10px; color: var(--text-dim); white-space: nowrap; }
+
+.online-popover {
+  display: none;
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  min-width: 200px;
+  max-width: 280px;
+  background: var(--bg2);
+  border: 1px solid var(--border2);
+  border-radius: 8px;
+  padding: 8px 0;
+  z-index: 200;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+}
+.online-popover.open { display: block; }
+.online-popover-title {
+  padding: 4px 12px 8px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-faint);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+.online-popover-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  font-size: 11px;
+}
+.online-popover-item .user-avatar {
+  width: 20px; height: 20px;
+  font-size: 8px;
+  flex-shrink: 0;
+}
+.online-popover-item-name { color: var(--text); overflow: hidden; text-overflow: ellipsis; }
+.online-popover-item-self { color: var(--accent); }
+.online-popover-empty {
+  padding: 8px 12px;
+  font-size: 11px;
+  color: var(--text-faint);
+  font-style: italic;
+}
+
 /* ── Nav Tabs ── */
 .nav-tabs {
   display: flex;
@@ -1649,6 +1717,14 @@ body {
     <span class="status-item">targets <b>—</b></span>
     <span class="status-item">edges <b>—</b></span>
   </div>
+  <div class="online-indicator" id="onlineIndicator" onclick="toggleOnlinePopover()" style="display:none;">
+    <div class="online-dot disconnected" id="onlineDot"></div>
+    <span class="online-count" id="onlineCount">0 online</span>
+    <div class="online-popover" id="onlinePopover">
+      <div class="online-popover-title">Connected Users</div>
+      <div id="onlineList"><div class="online-popover-empty">No one else online</div></div>
+    </div>
+  </div>
   <div class="topbar-user" id="topbarUser">
     <button class="topbar-user-btn" onclick="showLogin()">Sign In</button>
   </div>
@@ -2335,6 +2411,7 @@ async function doLogin() {
 
     hideLogin();
     updateTopbarUser();
+    connectSync();
   } catch (e) {
     errEl.textContent = e.message;
     errEl.classList.add('visible');
@@ -2345,6 +2422,7 @@ async function doLogin() {
 }
 
 function doLogout() {
+  disconnectSync();
   matrixToken = null;
   matrixUserId = null;
   matrixDisplayName = null;
@@ -2358,6 +2436,154 @@ function doLogout() {
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !document.getElementById('loginOverlay').classList.contains('hidden')) {
     doLogin();
+  }
+});
+
+// ── WebSocket Sync & Presence ──
+let syncSocket = null;
+let onlineUsers = [];
+let syncReconnectTimer = null;
+const SYNC_RECONNECT_DELAY = 3000;
+
+function getSyncServerUrl() {
+  // Derive EO-DB server URL from current page location
+  const loc = window.location;
+  const protocol = loc.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${protocol}//${loc.host}/sync`;
+}
+
+function connectSync() {
+  if (syncSocket && (syncSocket.readyState === WebSocket.OPEN || syncSocket.readyState === WebSocket.CONNECTING)) {
+    return;
+  }
+  if (!matrixToken) return;
+
+  const url = `${getSyncServerUrl()}?access_token=${encodeURIComponent(matrixToken)}`;
+  try {
+    syncSocket = new WebSocket(url);
+  } catch (e) {
+    console.warn('WebSocket connect failed:', e);
+    scheduleReconnect();
+    return;
+  }
+
+  syncSocket.onopen = () => {
+    console.log('[sync] connected');
+    updateOnlineDot(true);
+  };
+
+  syncSocket.onmessage = (ev) => {
+    try {
+      const msg = JSON.parse(ev.data);
+      if (msg.type === 'connected') {
+        onlineUsers = msg.online_users || [];
+        renderOnlineUsers();
+      } else if (msg.type === 'presence') {
+        onlineUsers = msg.online_users || [];
+        renderOnlineUsers();
+      } else if (msg.type === 'who_response') {
+        onlineUsers = msg.online_users || [];
+        renderOnlineUsers();
+      }
+    } catch { /* ignore non-JSON */ }
+  };
+
+  syncSocket.onclose = (ev) => {
+    console.log('[sync] disconnected', ev.code);
+    syncSocket = null;
+    onlineUsers = [];
+    updateOnlineDot(false);
+    renderOnlineUsers();
+    // Reconnect unless it was an auth error
+    if (ev.code !== 4401 && ev.code !== 4403 && matrixToken) {
+      scheduleReconnect();
+    }
+  };
+
+  syncSocket.onerror = () => {
+    // onclose will fire after this
+  };
+}
+
+function disconnectSync() {
+  if (syncReconnectTimer) {
+    clearTimeout(syncReconnectTimer);
+    syncReconnectTimer = null;
+  }
+  if (syncSocket) {
+    syncSocket.close();
+    syncSocket = null;
+  }
+  onlineUsers = [];
+  updateOnlineDot(false);
+  renderOnlineUsers();
+  document.getElementById('onlineIndicator').style.display = 'none';
+}
+
+function scheduleReconnect() {
+  if (syncReconnectTimer) return;
+  syncReconnectTimer = setTimeout(() => {
+    syncReconnectTimer = null;
+    if (matrixToken) connectSync();
+  }, SYNC_RECONNECT_DELAY);
+}
+
+function updateOnlineDot(connected) {
+  const dot = document.getElementById('onlineDot');
+  if (connected) {
+    dot.classList.remove('disconnected');
+  } else {
+    dot.classList.add('disconnected');
+  }
+}
+
+function renderOnlineUsers() {
+  const indicator = document.getElementById('onlineIndicator');
+  const countEl = document.getElementById('onlineCount');
+  const listEl = document.getElementById('onlineList');
+
+  if (!matrixToken) {
+    indicator.style.display = 'none';
+    return;
+  }
+  indicator.style.display = 'flex';
+
+  // Deduplicate by user_id
+  const unique = new Map();
+  for (const u of onlineUsers) {
+    if (!unique.has(u.user_id)) unique.set(u.user_id, u);
+  }
+  const users = Array.from(unique.values());
+  const total = users.length;
+
+  countEl.textContent = `${total} online`;
+
+  if (users.length === 0) {
+    listEl.innerHTML = '<div class="online-popover-empty">No one connected</div>';
+    return;
+  }
+
+  listEl.innerHTML = users.map(u => {
+    const isSelf = u.user_id === matrixUserId;
+    const displayName = u.user_id.split(':')[0].slice(1); // @user:server → user
+    const initials = displayName.slice(0, 2).toUpperCase();
+    return `<div class="online-popover-item">
+      <div class="user-avatar">${initials}</div>
+      <span class="online-popover-item-name ${isSelf ? 'online-popover-item-self' : ''}">${u.user_id}${isSelf ? ' (you)' : ''}</span>
+    </div>`;
+  }).join('');
+}
+
+function toggleOnlinePopover() {
+  const popover = document.getElementById('onlinePopover');
+  popover.classList.toggle('open');
+}
+
+// Close popover when clicking outside
+document.addEventListener('click', (e) => {
+  const indicator = document.getElementById('onlineIndicator');
+  if (!indicator.contains(e.target)) {
+    document.getElementById('onlinePopover').classList.remove('open');
   }
 });
 
@@ -4001,6 +4227,7 @@ async function loadSettings() {
   updateStatusBar();
   renderHorizon();
   renderLog();
+  if (matrixToken) connectSync();
 })();
 </script>
 </body>

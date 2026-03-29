@@ -27,6 +27,7 @@ import {
   checkAccess,
   extractHomeserver,
   accessSatisfies,
+  findAccountsSameServer,
 } from '../src/auth/matrix-auth-config.js';
 import type { EoDb } from '../src/db/level.js';
 
@@ -473,5 +474,64 @@ describe('encryption config structure', () => {
     expect(loaded.encryption.algorithm).toBe('m.megolm.v1.aes-sha2');
     expect(loaded.encryption.key_version).toBe(1);
     expect(loaded.encryption.enabled).toBe(false);
+  });
+});
+
+describe('findAccountsSameServer', () => {
+  it('returns empty array when no other accounts share the homeserver', async () => {
+    await addAllowedAccount(db, '@alice:server-a.com', 'admin', 'Alice');
+    await addAllowedAccount(db, '@bob:server-b.com', 'admin', 'Bob');
+    const results = await findAccountsSameServer(db, '@alice:server-a.com');
+    expect(results).toEqual([]);
+  });
+
+  it('finds allowed accounts on the same homeserver', async () => {
+    await addAllowedAccount(db, '@alice:amino.com', 'admin', 'Alice');
+    await addAllowedAccount(db, '@bob:amino.com', 'admin', 'Bob');
+    await addAllowedAccount(db, '@carol:amino.com', 'admin', 'Carol', 'read');
+    await addAllowedAccount(db, '@dave:other.com', 'admin', 'Dave');
+
+    const results = await findAccountsSameServer(db, '@alice:amino.com');
+    expect(results).toHaveLength(2);
+    expect(results.map(r => r.user_id).sort()).toEqual(['@bob:amino.com', '@carol:amino.com']);
+    const carol = results.find(r => r.user_id === '@carol:amino.com')!;
+    expect(carol.access).toBe('read');
+    expect(carol.source).toBe('account');
+    expect(carol.label).toBe('Carol');
+  });
+
+  it('excludes the querying user from results', async () => {
+    await addAllowedAccount(db, '@alice:amino.com', 'admin', 'Alice');
+    const results = await findAccountsSameServer(db, '@alice:amino.com');
+    expect(results).toEqual([]);
+  });
+
+  it('finds bucket members on the same homeserver', async () => {
+    await createUserRulesBucket(db, 'writers', 'write', 'admin');
+    await addBucketMember(db, 'writers', '@bob:amino.com', 'admin');
+    await addBucketMember(db, 'writers', '@carol:other.com', 'admin');
+
+    const results = await findAccountsSameServer(db, '@alice:amino.com');
+    expect(results).toHaveLength(1);
+    expect(results[0].user_id).toBe('@bob:amino.com');
+    expect(results[0].source).toBe('bucket');
+    expect(results[0].bucket_name).toBe('writers');
+    expect(results[0].access).toBe('write');
+  });
+
+  it('deduplicates accounts found in both allowlist and buckets', async () => {
+    await addAllowedAccount(db, '@bob:amino.com', 'admin', 'Bob', 'read_write');
+    await createUserRulesBucket(db, 'team', 'read', 'admin');
+    await addBucketMember(db, 'team', '@bob:amino.com', 'admin');
+
+    const results = await findAccountsSameServer(db, '@alice:amino.com');
+    expect(results).toHaveLength(1);
+    expect(results[0].user_id).toBe('@bob:amino.com');
+    expect(results[0].source).toBe('account'); // account takes priority
+  });
+
+  it('returns empty for invalid user_id with no homeserver', async () => {
+    const results = await findAccountsSameServer(db, 'nocolon');
+    expect(results).toEqual([]);
   });
 });
