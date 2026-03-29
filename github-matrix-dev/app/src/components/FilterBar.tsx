@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { ColumnDef, FilterRule, FilterOperator } from './filter-types';
 import { operatorsForType, OPERATOR_LABELS } from './filter-types';
+import { useTheme, type Theme } from '../theme';
 
 interface FilterBarProps {
   columns: ColumnDef[];
@@ -18,6 +19,8 @@ export function FilterBar({
   const [open, setOpen] = useState(false);
   const [saveName, setSaveName] = useState('');
   const [showSave, setShowSave] = useState(false);
+  const { theme } = useTheme();
+  const s = makeStyles(theme);
 
   function addFilter() {
     const field = columns[0]?.key || '';
@@ -62,8 +65,8 @@ export function FilterBar({
     <div style={{ position: 'relative' }}>
       <button
         style={{
-          ...styles.filterBtn,
-          ...(activeCount > 0 ? styles.filterBtnActive : {}),
+          ...s.filterBtn,
+          ...(activeCount > 0 ? s.filterBtnActive : {}),
         }}
         onClick={() => setOpen(!open)}
       >
@@ -72,21 +75,21 @@ export function FilterBar({
         </svg>
         Filter
         {activeCount > 0 && (
-          <span style={styles.badge}>{activeCount}</span>
+          <span style={s.badge}>{activeCount}</span>
         )}
       </button>
 
       {open && (
         <>
-          <div style={styles.backdrop} onClick={() => setOpen(false)} />
-          <div style={styles.panel}>
-            <div style={styles.panelHeader}>
-              <span style={styles.panelTitle}>Filters</span>
-              <button style={styles.closeBtn} onClick={() => setOpen(false)}>&times;</button>
+          <div style={s.backdrop} onClick={() => setOpen(false)} />
+          <div style={s.panel}>
+            <div style={s.panelHeader}>
+              <span style={s.panelTitle}>Filters</span>
+              <button style={s.closeBtn} onClick={() => setOpen(false)}>&times;</button>
             </div>
 
             {filters.length === 0 && (
-              <div style={styles.emptyMsg}>No active filters. Add one to narrow your view.</div>
+              <div style={s.emptyMsg}>No active filters. Add one to narrow your view.</div>
             )}
 
             {filters.map((filter, idx) => {
@@ -96,13 +99,13 @@ export function FilterBar({
               const isSelect = col?.type === 'select';
 
               return (
-                <div key={filter.id} style={styles.filterRow}>
+                <div key={filter.id} style={s.filterRow}>
                   {/* Conjunction label */}
                   {idx === 0 ? (
-                    <span style={styles.conjLabel}>Where</span>
+                    <span style={s.conjLabel}>Where</span>
                   ) : (
                     <button
-                      style={styles.conjToggle}
+                      style={s.conjToggle}
                       onClick={() => onConjunctionChange(conjunction === 'AND' ? 'OR' : 'AND')}
                     >
                       {conjunction}
@@ -113,7 +116,7 @@ export function FilterBar({
                   <select
                     value={filter.field}
                     onChange={(e) => updateFilter(filter.id, { field: e.target.value })}
-                    style={styles.select}
+                    style={s.select}
                   >
                     {columns.map((c) => (
                       <option key={c.key} value={c.key}>{c.label}</option>
@@ -124,7 +127,7 @@ export function FilterBar({
                   <select
                     value={filter.operator}
                     onChange={(e) => updateFilter(filter.id, { operator: e.target.value as FilterOperator })}
-                    style={styles.select}
+                    style={s.select}
                   >
                     {ops.map((op) => (
                       <option key={op} value={op}>{OPERATOR_LABELS[op]}</option>
@@ -137,7 +140,7 @@ export function FilterBar({
                       <select
                         value={filter.value}
                         onChange={(e) => updateFilter(filter.id, { value: e.target.value })}
-                        style={styles.select}
+                        style={s.select}
                       >
                         <option value="">--</option>
                         {col.selectOptions.map((opt) => (
@@ -150,14 +153,14 @@ export function FilterBar({
                         value={filter.value}
                         onChange={(e) => updateFilter(filter.id, { value: e.target.value })}
                         placeholder="value"
-                        style={styles.input}
+                        style={s.input}
                       />
                     )
                   )}
 
                   {/* Remove */}
                   <button
-                    style={styles.removeBtn}
+                    style={s.removeBtn}
                     onClick={() => removeFilter(filter.id)}
                   >
                     &times;
@@ -166,15 +169,15 @@ export function FilterBar({
               );
             })}
 
-            <div style={styles.panelFooter}>
-              <button style={styles.addBtn} onClick={addFilter}>
+            <div style={s.panelFooter}>
+              <button style={s.addBtn} onClick={addFilter}>
                 + Add filter
               </button>
 
               {filters.length > 0 && (
                 <>
                   <button
-                    style={styles.clearBtn}
+                    style={s.clearBtn}
                     onClick={() => onFiltersChange([])}
                   >
                     Clear all
@@ -183,21 +186,21 @@ export function FilterBar({
                   <div style={{ flex: 1 }} />
 
                   {showSave ? (
-                    <div style={styles.saveRow}>
+                    <div style={s.saveRow}>
                       <input
                         value={saveName}
                         onChange={(e) => setSaveName(e.target.value)}
                         placeholder="Segment name"
-                        style={styles.saveInput}
+                        style={s.saveInput}
                         autoFocus
                         onKeyDown={(e) => { if (e.key === 'Enter') handleSave(); }}
                       />
-                      <button style={styles.saveBtn} onClick={handleSave}>Save</button>
-                      <button style={styles.cancelBtn} onClick={() => setShowSave(false)}>Cancel</button>
+                      <button style={s.saveBtn} onClick={handleSave}>Save</button>
+                      <button style={s.cancelBtn} onClick={() => setShowSave(false)}>Cancel</button>
                     </div>
                   ) : (
                     <button
-                      style={styles.segBtn}
+                      style={s.segBtn}
                       onClick={() => setShowSave(true)}
                     >
                       Save as segment
@@ -213,203 +216,205 @@ export function FilterBar({
   );
 }
 
-const styles: Record<string, React.CSSProperties> = {
-  filterBtn: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 6,
-    padding: '6px 12px',
-    fontSize: 12,
-    fontWeight: 500,
-    border: '1px solid #e5e2dd',
-    borderRadius: 6,
-    background: '#fff',
-    color: '#2c2a26',
-    cursor: 'pointer',
-  },
-  filterBtnActive: {
-    borderColor: '#1a6dd4',
-    color: '#1a6dd4',
-    background: '#eef5fd',
-  },
-  badge: {
-    fontSize: 10,
-    fontWeight: 600,
-    background: '#1a6dd4',
-    color: '#fff',
-    borderRadius: 8,
-    padding: '0 5px',
-    lineHeight: '16px',
-  },
-  backdrop: {
-    position: 'fixed' as const,
-    inset: 0,
-    zIndex: 99,
-  },
-  panel: {
-    position: 'absolute' as const,
-    right: 0,
-    top: '100%',
-    marginTop: 4,
-    width: 560,
-    background: '#fff',
-    border: '1px solid #e5e2dd',
-    borderRadius: 8,
-    boxShadow: '0 4px 16px rgba(0,0,0,0.08)',
-    zIndex: 100,
-  },
-  panelHeader: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    padding: '12px 16px',
-    borderBottom: '1px solid #f0eeeb',
-  },
-  panelTitle: {
-    fontSize: 12,
-    fontWeight: 600,
-    color: '#1a1816',
-  },
-  closeBtn: {
-    background: 'none',
-    border: 'none',
-    fontSize: 18,
-    color: '#aba69e',
-    cursor: 'pointer',
-    padding: 0,
-    lineHeight: 1,
-  },
-  emptyMsg: {
-    padding: '16px',
-    fontSize: 12,
-    color: '#aba69e',
-  },
-  filterRow: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 6,
-    padding: '8px 16px',
-    borderBottom: '1px solid #f0eeeb',
-  },
-  conjLabel: {
-    fontSize: 11,
-    fontWeight: 500,
-    color: '#aba69e',
-    width: 44,
-    flexShrink: 0,
-    textAlign: 'right' as const,
-  },
-  conjToggle: {
-    fontSize: 10,
-    fontWeight: 600,
-    color: '#1a6dd4',
-    background: '#eef5fd',
-    border: '1px solid #c5d9f0',
-    borderRadius: 4,
-    padding: '2px 8px',
-    cursor: 'pointer',
-    width: 44,
-    flexShrink: 0,
-    textAlign: 'center' as const,
-  },
-  select: {
-    padding: '6px 8px',
-    fontSize: 12,
-    border: '1px solid #e5e2dd',
-    borderRadius: 4,
-    background: '#faf9f7',
-    color: '#2c2a26',
-    outline: 'none',
-    minWidth: 80,
-  },
-  input: {
-    padding: '6px 8px',
-    fontSize: 12,
-    border: '1px solid #e5e2dd',
-    borderRadius: 4,
-    background: '#faf9f7',
-    color: '#2c2a26',
-    outline: 'none',
-    flex: 1,
-    minWidth: 60,
-  },
-  removeBtn: {
-    background: 'none',
-    border: 'none',
-    fontSize: 16,
-    color: '#aba69e',
-    cursor: 'pointer',
-    padding: '0 4px',
-    lineHeight: 1,
-    flexShrink: 0,
-  },
-  panelFooter: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 8,
-    padding: '10px 16px',
-    flexWrap: 'wrap' as const,
-  },
-  addBtn: {
-    fontSize: 12,
-    fontWeight: 500,
-    color: '#1a6dd4',
-    background: 'none',
-    border: 'none',
-    cursor: 'pointer',
-    padding: 0,
-  },
-  clearBtn: {
-    fontSize: 12,
-    fontWeight: 500,
-    color: '#aba69e',
-    background: 'none',
-    border: 'none',
-    cursor: 'pointer',
-    padding: 0,
-  },
-  segBtn: {
-    fontSize: 11,
-    fontWeight: 500,
-    padding: '5px 10px',
-    border: '1px solid #d9487a',
-    borderRadius: 5,
-    background: '#fff',
-    color: '#d9487a',
-    cursor: 'pointer',
-  },
-  saveRow: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 6,
-  },
-  saveInput: {
-    padding: '5px 8px',
-    fontSize: 12,
-    border: '1px solid #e5e2dd',
-    borderRadius: 4,
-    background: '#faf9f7',
-    color: '#2c2a26',
-    outline: 'none',
-    width: 130,
-  },
-  saveBtn: {
-    fontSize: 11,
-    fontWeight: 600,
-    padding: '5px 10px',
-    border: 'none',
-    borderRadius: 4,
-    background: '#d9487a',
-    color: '#fff',
-    cursor: 'pointer',
-  },
-  cancelBtn: {
-    fontSize: 11,
-    padding: '5px 8px',
-    border: '1px solid #e5e2dd',
-    borderRadius: 4,
-    background: 'transparent',
-    color: '#7a756d',
-    cursor: 'pointer',
-  },
-};
+function makeStyles(t: Theme): Record<string, React.CSSProperties> {
+  return {
+    filterBtn: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6,
+      padding: '6px 12px',
+      fontSize: 12,
+      fontWeight: 500,
+      border: `1px solid ${t.border}`,
+      borderRadius: 6,
+      background: t.bgCard,
+      color: t.text,
+      cursor: 'pointer',
+    },
+    filterBtnActive: {
+      borderColor: t.accent,
+      color: t.accent,
+      background: t.accentBg,
+    },
+    badge: {
+      fontSize: 10,
+      fontWeight: 600,
+      background: t.accent,
+      color: '#fff',
+      borderRadius: 8,
+      padding: '0 5px',
+      lineHeight: '16px',
+    },
+    backdrop: {
+      position: 'fixed' as const,
+      inset: 0,
+      zIndex: 99,
+    },
+    panel: {
+      position: 'absolute' as const,
+      right: 0,
+      top: '100%',
+      marginTop: 4,
+      width: 560,
+      background: t.bgCard,
+      border: `1px solid ${t.border}`,
+      borderRadius: 8,
+      boxShadow: `0 4px 16px ${t.shadow}`,
+      zIndex: 100,
+    },
+    panelHeader: {
+      display: 'flex',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      padding: '12px 16px',
+      borderBottom: `1px solid ${t.borderLight}`,
+    },
+    panelTitle: {
+      fontSize: 12,
+      fontWeight: 600,
+      color: t.textHeading,
+    },
+    closeBtn: {
+      background: 'none',
+      border: 'none',
+      fontSize: 18,
+      color: t.textMuted,
+      cursor: 'pointer',
+      padding: 0,
+      lineHeight: 1,
+    },
+    emptyMsg: {
+      padding: '16px',
+      fontSize: 12,
+      color: t.textMuted,
+    },
+    filterRow: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6,
+      padding: '8px 16px',
+      borderBottom: `1px solid ${t.borderLight}`,
+    },
+    conjLabel: {
+      fontSize: 11,
+      fontWeight: 500,
+      color: t.textMuted,
+      width: 44,
+      flexShrink: 0,
+      textAlign: 'right' as const,
+    },
+    conjToggle: {
+      fontSize: 10,
+      fontWeight: 600,
+      color: t.accent,
+      background: t.accentBg,
+      border: `1px solid ${t.accentBorder}`,
+      borderRadius: 4,
+      padding: '2px 8px',
+      cursor: 'pointer',
+      width: 44,
+      flexShrink: 0,
+      textAlign: 'center' as const,
+    },
+    select: {
+      padding: '6px 8px',
+      fontSize: 12,
+      border: `1px solid ${t.border}`,
+      borderRadius: 4,
+      background: t.bg,
+      color: t.text,
+      outline: 'none',
+      minWidth: 80,
+    },
+    input: {
+      padding: '6px 8px',
+      fontSize: 12,
+      border: `1px solid ${t.border}`,
+      borderRadius: 4,
+      background: t.bg,
+      color: t.text,
+      outline: 'none',
+      flex: 1,
+      minWidth: 60,
+    },
+    removeBtn: {
+      background: 'none',
+      border: 'none',
+      fontSize: 16,
+      color: t.textMuted,
+      cursor: 'pointer',
+      padding: '0 4px',
+      lineHeight: 1,
+      flexShrink: 0,
+    },
+    panelFooter: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      padding: '10px 16px',
+      flexWrap: 'wrap' as const,
+    },
+    addBtn: {
+      fontSize: 12,
+      fontWeight: 500,
+      color: t.accent,
+      background: 'none',
+      border: 'none',
+      cursor: 'pointer',
+      padding: 0,
+    },
+    clearBtn: {
+      fontSize: 12,
+      fontWeight: 500,
+      color: t.textMuted,
+      background: 'none',
+      border: 'none',
+      cursor: 'pointer',
+      padding: 0,
+    },
+    segBtn: {
+      fontSize: 11,
+      fontWeight: 500,
+      padding: '5px 10px',
+      border: `1px solid ${t.danger}`,
+      borderRadius: 5,
+      background: t.bgCard,
+      color: t.danger,
+      cursor: 'pointer',
+    },
+    saveRow: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6,
+    },
+    saveInput: {
+      padding: '5px 8px',
+      fontSize: 12,
+      border: `1px solid ${t.border}`,
+      borderRadius: 4,
+      background: t.bg,
+      color: t.text,
+      outline: 'none',
+      width: 130,
+    },
+    saveBtn: {
+      fontSize: 11,
+      fontWeight: 600,
+      padding: '5px 10px',
+      border: 'none',
+      borderRadius: 4,
+      background: t.danger,
+      color: '#fff',
+      cursor: 'pointer',
+    },
+    cancelBtn: {
+      fontSize: 11,
+      padding: '5px 8px',
+      border: `1px solid ${t.border}`,
+      borderRadius: 4,
+      background: 'transparent',
+      color: t.textSecondary,
+      cursor: 'pointer',
+    },
+  };
+}

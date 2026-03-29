@@ -11,6 +11,7 @@ import { useEffect, useState } from 'react';
 import { useSyncStore, type PeerInfo, type StorageLocation, type SyncPair } from '../store/sync-store';
 import { useEoStore } from '../store/eo-store';
 import type { MatrixSession } from '../matrix/client';
+import { useTheme, type Theme } from '../theme';
 
 interface DataSyncDashboardProps {
   session: MatrixSession;
@@ -33,6 +34,8 @@ export function DataSyncDashboard({ session }: DataSyncDashboardProps) {
   const lastSeq = useEoStore((s) => s.lastSeq);
   const store = useEoStore((s) => s.store);
   const ready = useEoStore((s) => s.ready);
+  const { theme } = useTheme();
+  const s = makeStyles(theme);
 
   // Initialize sync store once ready
   useEffect(() => {
@@ -65,13 +68,10 @@ export function DataSyncDashboard({ session }: DataSyncDashboardProps) {
   useEffect(() => {
     if (!ready) return;
 
-    // In a real deployment, these would come from Matrix room presence events.
-    // For now we show the local peer and simulate awareness of the Matrix room.
     const localDevice = localPeer;
     if (!localDevice) return;
 
-    // Build sync pairs between local and Matrix room (source of truth)
-    const matrixSeq = lastSeq; // Room is authoritative; local tracks it
+    const matrixSeq = lastSeq;
     updateSyncPair({
       sourceId: `${localDevice.userId}:${localDevice.deviceId}`,
       targetId: 'matrix-room',
@@ -107,33 +107,33 @@ export function DataSyncDashboard({ session }: DataSyncDashboardProps) {
 
   if (!ready) {
     return (
-      <div style={styles.loading}>
-        <div style={styles.spinner} />
+      <div style={s.loading}>
+        <div style={s.spinner} />
         <span>Initializing sync dashboard...</span>
       </div>
     );
   }
 
   return (
-    <div style={styles.container}>
-      <div style={styles.header}>
-        <h2 style={styles.title}>Data Sync Dashboard</h2>
-        <div style={styles.headerMeta}>
-          <span style={styles.seqBadge}>local seq: {lastSeq}</span>
+    <div style={s.container}>
+      <div style={s.header}>
+        <h2 style={s.title}>Data Sync Dashboard</h2>
+        <div style={s.headerMeta}>
+          <span style={s.seqBadge}>local seq: {lastSeq}</span>
           {offlineQueueSize > 0 && (
-            <span style={styles.queueBadge}>{offlineQueueSize} queued</span>
+            <span style={s.queueBadge}>{offlineQueueSize} queued</span>
           )}
         </div>
       </div>
 
       {/* Storage Locations */}
-      <section style={styles.section}>
-        <h3 style={styles.sectionTitle}>
+      <section style={s.section}>
+        <h3 style={s.sectionTitle}>
           <StorageIcon />
           Storage Locations
         </h3>
-        <p style={styles.sectionDesc}>Where your data lives across the sync network</p>
-        <div style={styles.cardGrid}>
+        <p style={s.sectionDesc}>Where your data lives across the sync network</p>
+        <div style={s.cardGrid}>
           {storageLocations.map((loc) => (
             <StorageCard key={loc.id} location={loc} />
           ))}
@@ -141,16 +141,16 @@ export function DataSyncDashboard({ session }: DataSyncDashboardProps) {
       </section>
 
       {/* Online Peers */}
-      <section style={styles.section}>
-        <h3 style={styles.sectionTitle}>
+      <section style={s.section}>
+        <h3 style={s.sectionTitle}>
           <PeersIcon />
           Connected Peers
         </h3>
-        <p style={styles.sectionDesc}>Users and devices in the sync room</p>
+        <p style={s.sectionDesc}>Users and devices in the sync room</p>
         {peers.length === 0 ? (
-          <div style={styles.emptyState}>No peers detected</div>
+          <div style={s.emptyState}>No peers detected</div>
         ) : (
-          <div style={styles.peerList}>
+          <div style={s.peerList}>
             {peers.map((peer) => (
               <PeerCard
                 key={`${peer.userId}:${peer.deviceId}`}
@@ -163,16 +163,16 @@ export function DataSyncDashboard({ session }: DataSyncDashboardProps) {
       </section>
 
       {/* Sync Status */}
-      <section style={styles.section}>
-        <h3 style={styles.sectionTitle}>
+      <section style={s.section}>
+        <h3 style={s.sectionTitle}>
           <SyncIcon />
           Sync Status
         </h3>
-        <p style={styles.sectionDesc}>Replication state between all storage tiers</p>
+        <p style={s.sectionDesc}>Replication state between all storage tiers</p>
         {syncPairs.length === 0 ? (
-          <div style={styles.emptyState}>No sync relationships established</div>
+          <div style={s.emptyState}>No sync relationships established</div>
         ) : (
-          <div style={styles.syncList}>
+          <div style={s.syncList}>
             {syncPairs.map((pair) => (
               <SyncPairRow key={`${pair.sourceId}->${pair.targetId}`} pair={pair} />
             ))}
@@ -181,8 +181,8 @@ export function DataSyncDashboard({ session }: DataSyncDashboardProps) {
       </section>
 
       {/* Architecture Diagram */}
-      <section style={styles.section}>
-        <h3 style={styles.sectionTitle}>
+      <section style={s.section}>
+        <h3 style={s.sectionTitle}>
           <DiagramIcon />
           Sync Architecture
         </h3>
@@ -200,11 +200,14 @@ export function DataSyncDashboard({ session }: DataSyncDashboardProps) {
 /* ── Sub-components ────────────────────────────────────── */
 
 function StorageCard({ location }: { location: StorageLocation }) {
+  const { theme } = useTheme();
+  const s = makeStyles(theme);
+
   const typeColors: Record<string, string> = {
-    indexeddb: '#1a6dd4',
-    'matrix-media': '#7c3aed',
-    leveldb: '#c2700a',
-    backup: '#16a34a',
+    indexeddb: theme.accent,
+    'matrix-media': theme.purple,
+    leveldb: theme.warning,
+    backup: theme.success,
   };
 
   const typeLabels: Record<string, string> = {
@@ -215,20 +218,20 @@ function StorageCard({ location }: { location: StorageLocation }) {
   };
 
   return (
-    <div style={styles.card}>
-      <div style={styles.cardHeader}>
-        <div style={{ ...styles.typeBadge, background: typeColors[location.type] || '#7a756d' }}>
+    <div style={s.card}>
+      <div style={s.cardHeader}>
+        <div style={{ ...s.typeBadge, background: typeColors[location.type] || theme.textSecondary }}>
           {typeLabels[location.type] || location.type}
         </div>
-        {location.encrypted && <span style={styles.encBadge}>E2EE</span>}
+        {location.encrypted && <span style={s.encBadge}>E2EE</span>}
       </div>
-      <div style={styles.cardLabel}>{location.label}</div>
-      <div style={styles.cardPath}>{location.path}</div>
+      <div style={s.cardLabel}>{location.label}</div>
+      <div style={s.cardPath}>{location.path}</div>
       {location.sizeEstimate && (
-        <div style={styles.cardMeta}>{location.sizeEstimate}</div>
+        <div style={s.cardMeta}>{location.sizeEstimate}</div>
       )}
       {location.lastWrite && (
-        <div style={styles.cardMeta}>
+        <div style={s.cardMeta}>
           Last write: {formatTime(location.lastWrite)}
         </div>
       )}
@@ -237,38 +240,41 @@ function StorageCard({ location }: { location: StorageLocation }) {
 }
 
 function PeerCard({ peer, isLocal }: { peer: PeerInfo; isLocal: boolean }) {
+  const { theme } = useTheme();
+  const s = makeStyles(theme);
+
   const statusColors: Record<string, string> = {
-    online: '#16a34a',
-    offline: '#d9487a',
-    syncing: '#c2700a',
+    online: theme.success,
+    offline: theme.danger,
+    syncing: theme.warning,
   };
 
   return (
-    <div style={{ ...styles.peerCard, ...(isLocal ? styles.peerCardLocal : {}) }}>
-      <div style={styles.peerHeader}>
-        <div style={{ ...styles.statusDot, background: statusColors[peer.status] }} />
-        <span style={styles.peerUser}>{peer.userId}</span>
-        {isLocal && <span style={styles.localBadge}>this device</span>}
+    <div style={{ ...s.peerCard, ...(isLocal ? s.peerCardLocal : {}) }}>
+      <div style={s.peerHeader}>
+        <div style={{ ...s.statusDot, background: statusColors[peer.status] }} />
+        <span style={s.peerUser}>{peer.userId}</span>
+        {isLocal && <span style={s.localBadge}>this device</span>}
       </div>
-      <div style={styles.peerDetails}>
-        <div style={styles.peerDetail}>
-          <span style={styles.peerDetailLabel}>Device</span>
-          <span style={styles.peerDetailValue}>{peer.deviceId.slice(0, 10)}...</span>
+      <div style={s.peerDetails}>
+        <div style={s.peerDetail}>
+          <span style={s.peerDetailLabel}>Device</span>
+          <span style={s.peerDetailValue}>{peer.deviceId.slice(0, 10)}...</span>
         </div>
-        <div style={styles.peerDetail}>
-          <span style={styles.peerDetailLabel}>Seq</span>
-          <span style={styles.peerDetailValue}>{peer.lastSeq}</span>
+        <div style={s.peerDetail}>
+          <span style={s.peerDetailLabel}>Seq</span>
+          <span style={s.peerDetailValue}>{peer.lastSeq}</span>
         </div>
-        <div style={styles.peerDetail}>
-          <span style={styles.peerDetailLabel}>Storage</span>
-          <span style={styles.peerDetailValue}>{peer.storageType}</span>
+        <div style={s.peerDetail}>
+          <span style={s.peerDetailLabel}>Storage</span>
+          <span style={s.peerDetailValue}>{peer.storageType}</span>
         </div>
-        <div style={styles.peerDetail}>
-          <span style={styles.peerDetailLabel}>Last Seen</span>
-          <span style={styles.peerDetailValue}>{formatTime(peer.lastSeen)}</span>
+        <div style={s.peerDetail}>
+          <span style={s.peerDetailLabel}>Last Seen</span>
+          <span style={s.peerDetailValue}>{formatTime(peer.lastSeen)}</span>
         </div>
       </div>
-      <div style={styles.peerHomeserver}>
+      <div style={s.peerHomeserver}>
         {peer.homeserver}
       </div>
     </div>
@@ -276,41 +282,44 @@ function PeerCard({ peer, isLocal }: { peer: PeerInfo; isLocal: boolean }) {
 }
 
 function SyncPairRow({ pair }: { pair: SyncPair }) {
+  const { theme } = useTheme();
+  const s = makeStyles(theme);
+
   const statusConfig: Record<string, { color: string; bg: string; label: string }> = {
-    synced:   { color: '#16a34a', bg: '#f0faf4', label: 'Synced' },
-    behind:   { color: '#c2700a', bg: '#fef6ed', label: 'Behind' },
-    ahead:    { color: '#1a6dd4', bg: '#eef5fd', label: 'Ahead' },
-    conflict: { color: '#d9487a', bg: '#fdf2f5', label: 'Conflict' },
-    offline:  { color: '#7a756d', bg: '#f4f3f0', label: 'Offline' },
+    synced:   { color: theme.success, bg: theme.successBg, label: 'Synced' },
+    behind:   { color: theme.warning, bg: theme.warningBg, label: 'Behind' },
+    ahead:    { color: theme.accent, bg: theme.accentBg, label: 'Ahead' },
+    conflict: { color: theme.danger, bg: theme.dangerBg, label: 'Conflict' },
+    offline:  { color: theme.textSecondary, bg: theme.bgMuted, label: 'Offline' },
   };
 
   const config = statusConfig[pair.status] || statusConfig.offline;
 
   return (
-    <div style={styles.syncRow}>
-      <div style={styles.syncEndpoints}>
-        <span style={styles.syncEndpoint}>{formatEndpoint(pair.sourceId)}</span>
-        <span style={styles.syncArrow}>
-          {pair.status === 'synced' ? '⇄' : pair.lag < 0 ? '→' : '←'}
+    <div style={s.syncRow}>
+      <div style={s.syncEndpoints}>
+        <span style={s.syncEndpoint}>{formatEndpoint(pair.sourceId)}</span>
+        <span style={s.syncArrow}>
+          {pair.status === 'synced' ? '\u21c4' : pair.lag < 0 ? '\u2192' : '\u2190'}
         </span>
-        <span style={styles.syncEndpoint}>{formatEndpoint(pair.targetId)}</span>
+        <span style={s.syncEndpoint}>{formatEndpoint(pair.targetId)}</span>
       </div>
-      <div style={styles.syncMeta}>
-        <div style={styles.syncSeqs}>
-          <span style={styles.syncSeqLabel}>src: {pair.sourceSeq}</span>
-          <span style={styles.syncSeqLabel}>dst: {pair.targetSeq}</span>
+      <div style={s.syncMeta}>
+        <div style={s.syncSeqs}>
+          <span style={s.syncSeqLabel}>src: {pair.sourceSeq}</span>
+          <span style={s.syncSeqLabel}>dst: {pair.targetSeq}</span>
           {pair.lag !== 0 && (
-            <span style={{ ...styles.syncLag, color: config.color }}>
+            <span style={{ ...s.syncLag, color: config.color }}>
               {pair.lag > 0 ? '+' : ''}{pair.lag}
             </span>
           )}
         </div>
-        <div style={{ ...styles.syncStatusBadge, color: config.color, background: config.bg, borderColor: config.color }}>
+        <div style={{ ...s.syncStatusBadge, color: config.color, background: config.bg, borderColor: config.color }}>
           {config.label}
         </div>
       </div>
       {pair.lastSync && (
-        <div style={styles.syncTime}>Last sync: {formatTime(pair.lastSync)}</div>
+        <div style={s.syncTime}>Last sync: {formatTime(pair.lastSync)}</div>
       )}
     </div>
   );
@@ -327,53 +336,56 @@ function SyncDiagram({
   syncPairs: SyncPair[];
   localPeer: PeerInfo | null;
 }) {
+  const { theme } = useTheme();
+  const s = makeStyles(theme);
+
   return (
-    <div style={styles.diagram}>
-      <div style={styles.diagramRow}>
+    <div style={s.diagram}>
+      <div style={s.diagramRow}>
         {/* Tier 1: Local devices */}
-        <div style={styles.diagramTier}>
-          <div style={styles.tierLabel}>Tier 1 — Local Devices</div>
-          <div style={styles.tierDesc}>IndexedDB (AES-GCM encrypted)</div>
-          <div style={styles.tierNodes}>
+        <div style={s.diagramTier}>
+          <div style={s.tierLabel}>Tier 1 — Local Devices</div>
+          <div style={s.tierDesc}>IndexedDB (AES-GCM encrypted)</div>
+          <div style={s.tierNodes}>
             {peers.map((p) => (
               <div
                 key={`${p.userId}:${p.deviceId}`}
                 style={{
-                  ...styles.diagramNode,
-                  borderColor: p.status === 'online' ? '#16a34a' : '#d9487a',
+                  ...s.diagramNode,
+                  borderColor: p.status === 'online' ? theme.success : theme.danger,
                 }}
               >
                 <div style={{
-                  ...styles.diagramNodeDot,
-                  background: p.status === 'online' ? '#16a34a' : '#d9487a',
+                  ...s.diagramNodeDot,
+                  background: p.status === 'online' ? theme.success : theme.danger,
                 }} />
-                <span style={styles.diagramNodeLabel}>
+                <span style={s.diagramNodeLabel}>
                   {p.userId.split(':')[0].replace('@', '')}
                 </span>
-                <span style={styles.diagramNodeSeq}>seq {p.lastSeq}</span>
+                <span style={s.diagramNodeSeq}>seq {p.lastSeq}</span>
               </div>
             ))}
           </div>
         </div>
 
         {/* Connector arrows */}
-        <div style={styles.diagramConnector}>
-          <div style={styles.connectorLine} />
-          <div style={styles.connectorLabel}>
+        <div style={s.diagramConnector}>
+          <div style={s.connectorLine} />
+          <div style={s.connectorLabel}>
             E2EE Megolm
           </div>
-          <div style={styles.connectorLine} />
+          <div style={s.connectorLine} />
         </div>
 
         {/* Tier 2: Matrix Room */}
-        <div style={styles.diagramTier}>
-          <div style={styles.tierLabel}>Tier 2 — Matrix Room</div>
-          <div style={styles.tierDesc}>Event timeline (source of truth)</div>
-          <div style={styles.tierNodes}>
-            <div style={{ ...styles.diagramNode, borderColor: '#7c3aed' }}>
-              <div style={{ ...styles.diagramNodeDot, background: '#7c3aed' }} />
-              <span style={styles.diagramNodeLabel}>#amino-data</span>
-              <span style={styles.diagramNodeSeq}>
+        <div style={s.diagramTier}>
+          <div style={s.tierLabel}>Tier 2 — Matrix Room</div>
+          <div style={s.tierDesc}>Event timeline (source of truth)</div>
+          <div style={s.tierNodes}>
+            <div style={{ ...s.diagramNode, borderColor: theme.purple }}>
+              <div style={{ ...s.diagramNodeDot, background: theme.purple }} />
+              <span style={s.diagramNodeLabel}>#amino-data</span>
+              <span style={s.diagramNodeSeq}>
                 {syncPairs.find((p) => p.targetId === 'matrix-room')
                   ? `seq ${syncPairs.find((p) => p.targetId === 'matrix-room')!.targetSeq}`
                   : 'connected'}
@@ -383,23 +395,23 @@ function SyncDiagram({
         </div>
 
         {/* Connector arrows */}
-        <div style={styles.diagramConnector}>
-          <div style={styles.connectorLine} />
-          <div style={styles.connectorLabel}>
+        <div style={s.diagramConnector}>
+          <div style={s.connectorLine} />
+          <div style={s.connectorLabel}>
             msgpack snapshots
           </div>
-          <div style={styles.connectorLine} />
+          <div style={s.connectorLine} />
         </div>
 
         {/* Tier 3: Snapshots / Backups */}
-        <div style={styles.diagramTier}>
-          <div style={styles.tierLabel}>Tier 3 — Snapshots</div>
-          <div style={styles.tierDesc}>Matrix media store (hydration)</div>
-          <div style={styles.tierNodes}>
-            <div style={{ ...styles.diagramNode, borderColor: '#c2700a' }}>
-              <div style={{ ...styles.diagramNodeDot, background: '#c2700a' }} />
-              <span style={styles.diagramNodeLabel}>Snapshots</span>
-              <span style={styles.diagramNodeSeq}>
+        <div style={s.diagramTier}>
+          <div style={s.tierLabel}>Tier 3 — Snapshots</div>
+          <div style={s.tierDesc}>Matrix media store (hydration)</div>
+          <div style={s.tierNodes}>
+            <div style={{ ...s.diagramNode, borderColor: theme.warning }}>
+              <div style={{ ...s.diagramNodeDot, background: theme.warning }} />
+              <span style={s.diagramNodeLabel}>Snapshots</span>
+              <span style={s.diagramNodeSeq}>
                 {localPeer && useSyncStore.getState().lastSnapshotSeq > 0
                   ? `@ seq ${useSyncStore.getState().lastSnapshotSeq}`
                   : 'none yet'}
@@ -410,21 +422,21 @@ function SyncDiagram({
       </div>
 
       {/* Legend */}
-      <div style={styles.diagramLegend}>
-        <div style={styles.legendItem}>
-          <div style={{ ...styles.legendDot, background: '#16a34a' }} />
+      <div style={s.diagramLegend}>
+        <div style={s.legendItem}>
+          <div style={{ ...s.legendDot, background: theme.success }} />
           <span>Online</span>
         </div>
-        <div style={styles.legendItem}>
-          <div style={{ ...styles.legendDot, background: '#d9487a' }} />
+        <div style={s.legendItem}>
+          <div style={{ ...s.legendDot, background: theme.danger }} />
           <span>Offline</span>
         </div>
-        <div style={styles.legendItem}>
-          <div style={{ ...styles.legendDot, background: '#c2700a' }} />
+        <div style={s.legendItem}>
+          <div style={{ ...s.legendDot, background: theme.warning }} />
           <span>Syncing</span>
         </div>
-        <div style={styles.legendItem}>
-          <div style={{ ...styles.legendDot, background: '#7c3aed' }} />
+        <div style={s.legendItem}>
+          <div style={{ ...s.legendDot, background: theme.purple }} />
           <span>Matrix</span>
         </div>
       </div>
@@ -452,7 +464,6 @@ function formatTime(iso: string): string {
 function formatEndpoint(id: string): string {
   if (id === 'matrix-room') return 'Matrix Room';
   if (id === 'matrix-snapshots') return 'Snapshots';
-  // userId:deviceId format
   const parts = id.split(':');
   if (parts.length >= 2) {
     const user = parts[0].replace('@', '');
@@ -510,391 +521,393 @@ function DiagramIcon() {
 
 /* ── Styles ────────────────────────────────────────────── */
 
-const styles: Record<string, React.CSSProperties> = {
-  container: {
-    padding: 32,
-    maxWidth: 960,
-    margin: '0 auto',
-  },
-  header: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 32,
-  },
-  title: {
-    fontSize: 20,
-    fontWeight: 600,
-    color: '#1a1816',
-    margin: 0,
-    fontFamily: "'Source Serif 4', Georgia, serif",
-  },
-  headerMeta: {
-    display: 'flex',
-    gap: 8,
-    alignItems: 'center',
-  },
-  seqBadge: {
-    fontFamily: "'JetBrains Mono', monospace",
-    fontSize: 11,
-    color: '#aba69e',
-    padding: '3px 10px',
-    borderRadius: 4,
-    background: '#f4f3f0',
-    border: '1px solid #e5e2dd',
-  },
-  queueBadge: {
-    fontFamily: "'JetBrains Mono', monospace",
-    fontSize: 11,
-    color: '#c2700a',
-    padding: '3px 10px',
-    borderRadius: 4,
-    background: '#fef6ed',
-    border: '1px solid #f0d9b8',
-  },
+function makeStyles(t: Theme): Record<string, React.CSSProperties> {
+  return {
+    container: {
+      padding: 32,
+      maxWidth: 960,
+      margin: '0 auto',
+    },
+    header: {
+      display: 'flex',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      marginBottom: 32,
+    },
+    title: {
+      fontSize: 20,
+      fontWeight: 600,
+      color: t.textHeading,
+      margin: 0,
+      fontFamily: "'Source Serif 4', Georgia, serif",
+    },
+    headerMeta: {
+      display: 'flex',
+      gap: 8,
+      alignItems: 'center',
+    },
+    seqBadge: {
+      fontFamily: "'JetBrains Mono', monospace",
+      fontSize: 11,
+      color: t.textMuted,
+      padding: '3px 10px',
+      borderRadius: 4,
+      background: t.bgMuted,
+      border: `1px solid ${t.border}`,
+    },
+    queueBadge: {
+      fontFamily: "'JetBrains Mono', monospace",
+      fontSize: 11,
+      color: t.warning,
+      padding: '3px 10px',
+      borderRadius: 4,
+      background: t.warningBg,
+      border: `1px solid ${t.warningBorder}`,
+    },
 
-  // Sections
-  section: {
-    marginBottom: 32,
-  },
-  sectionTitle: {
-    fontSize: 14,
-    fontWeight: 600,
-    color: '#1a1816',
-    margin: '0 0 4px',
-    display: 'flex',
-    alignItems: 'center',
-  },
-  sectionDesc: {
-    fontSize: 12,
-    color: '#7a756d',
-    margin: '0 0 16px',
-  },
+    // Sections
+    section: {
+      marginBottom: 32,
+    },
+    sectionTitle: {
+      fontSize: 14,
+      fontWeight: 600,
+      color: t.textHeading,
+      margin: '0 0 4px',
+      display: 'flex',
+      alignItems: 'center',
+    },
+    sectionDesc: {
+      fontSize: 12,
+      color: t.textSecondary,
+      margin: '0 0 16px',
+    },
 
-  // Storage cards
-  cardGrid: {
-    display: 'grid',
-    gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))',
-    gap: 12,
-  },
-  card: {
-    background: '#fff',
-    border: '1px solid #e5e2dd',
-    borderRadius: 8,
-    padding: 16,
-  },
-  cardHeader: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 8,
-    marginBottom: 10,
-  },
-  typeBadge: {
-    fontSize: 10,
-    fontWeight: 600,
-    color: '#fff',
-    padding: '2px 8px',
-    borderRadius: 4,
-    fontFamily: "'JetBrains Mono', monospace",
-    textTransform: 'uppercase' as const,
-    letterSpacing: 0.5,
-  },
-  encBadge: {
-    fontSize: 9,
-    fontWeight: 600,
-    color: '#16a34a',
-    padding: '2px 6px',
-    borderRadius: 3,
-    background: '#f0faf4',
-    border: '1px solid #b8e4ca',
-    fontFamily: "'JetBrains Mono', monospace",
-  },
-  cardLabel: {
-    fontSize: 13,
-    fontWeight: 600,
-    color: '#1a1816',
-    marginBottom: 4,
-  },
-  cardPath: {
-    fontSize: 11,
-    color: '#7a756d',
-    fontFamily: "'JetBrains Mono', monospace",
-    wordBreak: 'break-all' as const,
-    marginBottom: 8,
-  },
-  cardMeta: {
-    fontSize: 11,
-    color: '#aba69e',
-    marginTop: 4,
-  },
+    // Storage cards
+    cardGrid: {
+      display: 'grid',
+      gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))',
+      gap: 12,
+    },
+    card: {
+      background: t.bgCard,
+      border: `1px solid ${t.border}`,
+      borderRadius: 8,
+      padding: 16,
+    },
+    cardHeader: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      marginBottom: 10,
+    },
+    typeBadge: {
+      fontSize: 10,
+      fontWeight: 600,
+      color: '#fff',
+      padding: '2px 8px',
+      borderRadius: 4,
+      fontFamily: "'JetBrains Mono', monospace",
+      textTransform: 'uppercase' as const,
+      letterSpacing: 0.5,
+    },
+    encBadge: {
+      fontSize: 9,
+      fontWeight: 600,
+      color: t.success,
+      padding: '2px 6px',
+      borderRadius: 3,
+      background: t.successBg,
+      border: `1px solid ${t.successBorder}`,
+      fontFamily: "'JetBrains Mono', monospace",
+    },
+    cardLabel: {
+      fontSize: 13,
+      fontWeight: 600,
+      color: t.textHeading,
+      marginBottom: 4,
+    },
+    cardPath: {
+      fontSize: 11,
+      color: t.textSecondary,
+      fontFamily: "'JetBrains Mono', monospace",
+      wordBreak: 'break-all' as const,
+      marginBottom: 8,
+    },
+    cardMeta: {
+      fontSize: 11,
+      color: t.textMuted,
+      marginTop: 4,
+    },
 
-  // Peer list
-  peerList: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 8,
-  },
-  peerCard: {
-    background: '#fff',
-    border: '1px solid #e5e2dd',
-    borderRadius: 8,
-    padding: 14,
-  },
-  peerCardLocal: {
-    borderColor: '#1a6dd4',
-    borderWidth: 2,
-  },
-  peerHeader: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 8,
-    marginBottom: 10,
-  },
-  statusDot: {
-    width: 8,
-    height: 8,
-    borderRadius: '50%',
-    flexShrink: 0,
-  },
-  peerUser: {
-    fontSize: 13,
-    fontWeight: 600,
-    color: '#1a1816',
-    fontFamily: "'JetBrains Mono', monospace",
-  },
-  localBadge: {
-    fontSize: 9,
-    fontWeight: 600,
-    color: '#1a6dd4',
-    padding: '1px 6px',
-    borderRadius: 3,
-    background: '#eef5fd',
-    border: '1px solid #c4d9f2',
-    fontFamily: "'JetBrains Mono', monospace",
-  },
-  peerDetails: {
-    display: 'grid',
-    gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))',
-    gap: 8,
-  },
-  peerDetail: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 2,
-  },
-  peerDetailLabel: {
-    fontSize: 10,
-    color: '#aba69e',
-    textTransform: 'uppercase' as const,
-    letterSpacing: 0.5,
-    fontFamily: "'JetBrains Mono', monospace",
-  },
-  peerDetailValue: {
-    fontSize: 12,
-    color: '#2c2a26',
-    fontFamily: "'JetBrains Mono', monospace",
-  },
-  peerHomeserver: {
-    marginTop: 8,
-    fontSize: 10,
-    color: '#aba69e',
-    fontFamily: "'JetBrains Mono', monospace",
-  },
+    // Peer list
+    peerList: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 8,
+    },
+    peerCard: {
+      background: t.bgCard,
+      border: `1px solid ${t.border}`,
+      borderRadius: 8,
+      padding: 14,
+    },
+    peerCardLocal: {
+      borderColor: t.accent,
+      borderWidth: 2,
+    },
+    peerHeader: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      marginBottom: 10,
+    },
+    statusDot: {
+      width: 8,
+      height: 8,
+      borderRadius: '50%',
+      flexShrink: 0,
+    },
+    peerUser: {
+      fontSize: 13,
+      fontWeight: 600,
+      color: t.textHeading,
+      fontFamily: "'JetBrains Mono', monospace",
+    },
+    localBadge: {
+      fontSize: 9,
+      fontWeight: 600,
+      color: t.accent,
+      padding: '1px 6px',
+      borderRadius: 3,
+      background: t.accentBg,
+      border: `1px solid ${t.accentBorder}`,
+      fontFamily: "'JetBrains Mono', monospace",
+    },
+    peerDetails: {
+      display: 'grid',
+      gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))',
+      gap: 8,
+    },
+    peerDetail: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 2,
+    },
+    peerDetailLabel: {
+      fontSize: 10,
+      color: t.textMuted,
+      textTransform: 'uppercase' as const,
+      letterSpacing: 0.5,
+      fontFamily: "'JetBrains Mono', monospace",
+    },
+    peerDetailValue: {
+      fontSize: 12,
+      color: t.text,
+      fontFamily: "'JetBrains Mono', monospace",
+    },
+    peerHomeserver: {
+      marginTop: 8,
+      fontSize: 10,
+      color: t.textMuted,
+      fontFamily: "'JetBrains Mono', monospace",
+    },
 
-  // Sync pairs
-  syncList: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 8,
-  },
-  syncRow: {
-    background: '#fff',
-    border: '1px solid #e5e2dd',
-    borderRadius: 8,
-    padding: 14,
-  },
-  syncEndpoints: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 12,
-    marginBottom: 8,
-  },
-  syncEndpoint: {
-    fontSize: 12,
-    fontWeight: 600,
-    color: '#1a1816',
-    fontFamily: "'JetBrains Mono', monospace",
-  },
-  syncArrow: {
-    fontSize: 14,
-    color: '#7a756d',
-  },
-  syncMeta: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  syncSeqs: {
-    display: 'flex',
-    gap: 12,
-    alignItems: 'center',
-  },
-  syncSeqLabel: {
-    fontSize: 11,
-    color: '#aba69e',
-    fontFamily: "'JetBrains Mono', monospace",
-  },
-  syncLag: {
-    fontSize: 11,
-    fontWeight: 600,
-    fontFamily: "'JetBrains Mono', monospace",
-  },
-  syncStatusBadge: {
-    fontSize: 10,
-    fontWeight: 600,
-    padding: '2px 10px',
-    borderRadius: 12,
-    border: '1px solid',
-    fontFamily: "'JetBrains Mono', monospace",
-  },
-  syncTime: {
-    fontSize: 10,
-    color: '#aba69e',
-    marginTop: 6,
-  },
+    // Sync pairs
+    syncList: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 8,
+    },
+    syncRow: {
+      background: t.bgCard,
+      border: `1px solid ${t.border}`,
+      borderRadius: 8,
+      padding: 14,
+    },
+    syncEndpoints: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 12,
+      marginBottom: 8,
+    },
+    syncEndpoint: {
+      fontSize: 12,
+      fontWeight: 600,
+      color: t.textHeading,
+      fontFamily: "'JetBrains Mono', monospace",
+    },
+    syncArrow: {
+      fontSize: 14,
+      color: t.textSecondary,
+    },
+    syncMeta: {
+      display: 'flex',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+    },
+    syncSeqs: {
+      display: 'flex',
+      gap: 12,
+      alignItems: 'center',
+    },
+    syncSeqLabel: {
+      fontSize: 11,
+      color: t.textMuted,
+      fontFamily: "'JetBrains Mono', monospace",
+    },
+    syncLag: {
+      fontSize: 11,
+      fontWeight: 600,
+      fontFamily: "'JetBrains Mono', monospace",
+    },
+    syncStatusBadge: {
+      fontSize: 10,
+      fontWeight: 600,
+      padding: '2px 10px',
+      borderRadius: 12,
+      border: '1px solid',
+      fontFamily: "'JetBrains Mono', monospace",
+    },
+    syncTime: {
+      fontSize: 10,
+      color: t.textMuted,
+      marginTop: 6,
+    },
 
-  // Diagram
-  diagram: {
-    background: '#fff',
-    border: '1px solid #e5e2dd',
-    borderRadius: 8,
-    padding: 24,
-  },
-  diagramRow: {
-    display: 'flex',
-    alignItems: 'stretch',
-    justifyContent: 'center',
-    gap: 0,
-  },
-  diagramTier: {
-    flex: 1,
-    textAlign: 'center' as const,
-    padding: '12px 8px',
-  },
-  tierLabel: {
-    fontSize: 11,
-    fontWeight: 700,
-    color: '#1a1816',
-    marginBottom: 2,
-    textTransform: 'uppercase' as const,
-    letterSpacing: 0.5,
-    fontFamily: "'JetBrains Mono', monospace",
-  },
-  tierDesc: {
-    fontSize: 10,
-    color: '#aba69e',
-    marginBottom: 12,
-  },
-  tierNodes: {
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    gap: 8,
-  },
-  diagramNode: {
-    display: 'inline-flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    gap: 4,
-    padding: '10px 16px',
-    border: '2px solid',
-    borderRadius: 8,
-    background: '#faf9f7',
-    minWidth: 100,
-  },
-  diagramNodeDot: {
-    width: 8,
-    height: 8,
-    borderRadius: '50%',
-  },
-  diagramNodeLabel: {
-    fontSize: 11,
-    fontWeight: 600,
-    color: '#1a1816',
-    fontFamily: "'JetBrains Mono', monospace",
-  },
-  diagramNodeSeq: {
-    fontSize: 9,
-    color: '#aba69e',
-    fontFamily: "'JetBrains Mono', monospace",
-  },
-  diagramConnector: {
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    justifyContent: 'center',
-    width: 80,
-    gap: 4,
-  },
-  connectorLine: {
-    width: '100%',
-    height: 2,
-    background: '#e5e2dd',
-  },
-  connectorLabel: {
-    fontSize: 8,
-    color: '#aba69e',
-    fontFamily: "'JetBrains Mono', monospace",
-    whiteSpace: 'nowrap' as const,
-  },
-  diagramLegend: {
-    display: 'flex',
-    justifyContent: 'center',
-    gap: 20,
-    marginTop: 20,
-    paddingTop: 16,
-    borderTop: '1px solid #e5e2dd',
-  },
-  legendItem: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 6,
-    fontSize: 10,
-    color: '#7a756d',
-    fontFamily: "'JetBrains Mono', monospace",
-  },
-  legendDot: {
-    width: 8,
-    height: 8,
-    borderRadius: '50%',
-  },
+    // Diagram
+    diagram: {
+      background: t.bgCard,
+      border: `1px solid ${t.border}`,
+      borderRadius: 8,
+      padding: 24,
+    },
+    diagramRow: {
+      display: 'flex',
+      alignItems: 'stretch',
+      justifyContent: 'center',
+      gap: 0,
+    },
+    diagramTier: {
+      flex: 1,
+      textAlign: 'center' as const,
+      padding: '12px 8px',
+    },
+    tierLabel: {
+      fontSize: 11,
+      fontWeight: 700,
+      color: t.textHeading,
+      marginBottom: 2,
+      textTransform: 'uppercase' as const,
+      letterSpacing: 0.5,
+      fontFamily: "'JetBrains Mono', monospace",
+    },
+    tierDesc: {
+      fontSize: 10,
+      color: t.textMuted,
+      marginBottom: 12,
+    },
+    tierNodes: {
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      gap: 8,
+    },
+    diagramNode: {
+      display: 'inline-flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      gap: 4,
+      padding: '10px 16px',
+      border: '2px solid',
+      borderRadius: 8,
+      background: t.bg,
+      minWidth: 100,
+    },
+    diagramNodeDot: {
+      width: 8,
+      height: 8,
+      borderRadius: '50%',
+    },
+    diagramNodeLabel: {
+      fontSize: 11,
+      fontWeight: 600,
+      color: t.textHeading,
+      fontFamily: "'JetBrains Mono', monospace",
+    },
+    diagramNodeSeq: {
+      fontSize: 9,
+      color: t.textMuted,
+      fontFamily: "'JetBrains Mono', monospace",
+    },
+    diagramConnector: {
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      justifyContent: 'center',
+      width: 80,
+      gap: 4,
+    },
+    connectorLine: {
+      width: '100%',
+      height: 2,
+      background: t.border,
+    },
+    connectorLabel: {
+      fontSize: 8,
+      color: t.textMuted,
+      fontFamily: "'JetBrains Mono', monospace",
+      whiteSpace: 'nowrap' as const,
+    },
+    diagramLegend: {
+      display: 'flex',
+      justifyContent: 'center',
+      gap: 20,
+      marginTop: 20,
+      paddingTop: 16,
+      borderTop: `1px solid ${t.border}`,
+    },
+    legendItem: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6,
+      fontSize: 10,
+      color: t.textSecondary,
+      fontFamily: "'JetBrains Mono', monospace",
+    },
+    legendDot: {
+      width: 8,
+      height: 8,
+      borderRadius: '50%',
+    },
 
-  // Empty states
-  emptyState: {
-    padding: 24,
-    textAlign: 'center' as const,
-    fontSize: 13,
-    color: '#aba69e',
-    background: '#fff',
-    border: '1px solid #e5e2dd',
-    borderRadius: 8,
-  },
-  loading: {
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    justifyContent: 'center',
-    height: '100%',
-    gap: 16,
-    fontSize: 13,
-    color: '#7a756d',
-  },
-  spinner: {
-    width: 32,
-    height: 32,
-    border: '3px solid #e5e2dd',
-    borderTopColor: '#1a6dd4',
-    borderRadius: '50%',
-    animation: 'spin 0.8s linear infinite',
-  },
-};
+    // Empty states
+    emptyState: {
+      padding: 24,
+      textAlign: 'center' as const,
+      fontSize: 13,
+      color: t.textMuted,
+      background: t.bgCard,
+      border: `1px solid ${t.border}`,
+      borderRadius: 8,
+    },
+    loading: {
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      justifyContent: 'center',
+      height: '100%',
+      gap: 16,
+      fontSize: 13,
+      color: t.textSecondary,
+    },
+    spinner: {
+      width: 32,
+      height: 32,
+      border: `3px solid ${t.border}`,
+      borderTopColor: t.accent,
+      borderRadius: '50%',
+      animation: 'spin 0.8s linear infinite',
+    },
+  };
+}

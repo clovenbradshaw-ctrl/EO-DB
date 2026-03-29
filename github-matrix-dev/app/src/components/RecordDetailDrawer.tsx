@@ -1,4 +1,5 @@
 import { RecordView } from './RecordView';
+import { useTheme, type Theme } from '../theme';
 
 interface RecordDetailDrawerProps {
   target: string;
@@ -7,14 +8,17 @@ interface RecordDetailDrawerProps {
 }
 
 export function RecordDetailDrawer({ target, onClose, onNavigate }: RecordDetailDrawerProps) {
+  const { theme } = useTheme();
+  const s = makeStyles(theme);
+
   return (
-    <div style={styles.overlay} onClick={onClose}>
-      <div style={styles.panel} onClick={(e) => e.stopPropagation()}>
-        <div style={styles.header}>
-          <div style={styles.headerTarget}>{target}</div>
-          <button onClick={onClose} style={styles.closeBtn}>&times;</button>
+    <div style={s.overlay} onClick={onClose}>
+      <div style={s.panel} onClick={(e) => e.stopPropagation()}>
+        <div style={s.header}>
+          <div style={s.headerTarget}>{target}</div>
+          <button onClick={onClose} style={s.closeBtn}>&times;</button>
         </div>
-        <div style={styles.body}>
+        <div style={s.body}>
           <RecordView target={target} onNavigate={onNavigate} />
         </div>
       </div>
@@ -22,50 +26,52 @@ export function RecordDetailDrawer({ target, onClose, onNavigate }: RecordDetail
   );
 }
 
-const styles: Record<string, React.CSSProperties> = {
-  overlay: {
-    position: 'fixed',
-    inset: 0,
-    background: 'rgba(0,0,0,0.3)',
-    display: 'flex',
-    justifyContent: 'flex-end',
-    zIndex: 1000,
-  },
-  panel: {
-    width: 640,
-    maxWidth: '100vw',
-    height: '100vh',
-    background: '#faf9f7',
-    borderLeft: '1px solid #e5e2dd',
-    display: 'flex',
-    flexDirection: 'column',
-    boxShadow: '-4px 0 24px rgba(0,0,0,0.08)',
-  },
-  header: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    padding: '14px 20px',
-    borderBottom: '1px solid #e5e2dd',
-    background: '#fff',
-    flexShrink: 0,
-  },
-  headerTarget: {
-    fontFamily: "'JetBrains Mono', monospace",
-    fontSize: 12,
-    color: '#7a756d',
-  },
-  closeBtn: {
-    background: 'none',
-    border: 'none',
-    fontSize: 22,
-    color: '#7a756d',
-    cursor: 'pointer',
-    padding: '0 4px',
-    lineHeight: 1,
-  },
-  body: {
-    flex: 1,
-    overflowY: 'auto',
-  },
-};
+function makeStyles(t: Theme): Record<string, React.CSSProperties> {
+  return {
+    overlay: {
+      position: 'fixed',
+      inset: 0,
+      background: t.shadowOverlay,
+      display: 'flex',
+      justifyContent: 'flex-end',
+      zIndex: 1000,
+    },
+    panel: {
+      width: 640,
+      maxWidth: '100vw',
+      height: '100vh',
+      background: t.bg,
+      borderLeft: `1px solid ${t.border}`,
+      display: 'flex',
+      flexDirection: 'column',
+      boxShadow: t.shadowPanel,
+    },
+    header: {
+      display: 'flex',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      padding: '14px 20px',
+      borderBottom: `1px solid ${t.border}`,
+      background: t.bgCard,
+      flexShrink: 0,
+    },
+    headerTarget: {
+      fontFamily: "'JetBrains Mono', monospace",
+      fontSize: 12,
+      color: t.textSecondary,
+    },
+    closeBtn: {
+      background: 'none',
+      border: 'none',
+      fontSize: 22,
+      color: t.textSecondary,
+      cursor: 'pointer',
+      padding: '0 4px',
+      lineHeight: 1,
+    },
+    body: {
+      flex: 1,
+      overflowY: 'auto',
+    },
+  };
+}

@@ -1,4 +1,5 @@
 import type { NearbyEntry } from '../db/types';
+import { useTheme, type Theme } from '../theme';
 
 interface NearbyProps {
   entries: NearbyEntry[];
@@ -6,15 +7,18 @@ interface NearbyProps {
 }
 
 export function Nearby({ entries, onNavigate }: NearbyProps) {
+  const { theme } = useTheme();
+  const s = makeStyles(theme);
+
   return (
-    <div style={styles.grid}>
+    <div style={s.grid}>
       {entries.map((n) => (
-        <div key={n.target} style={styles.card} onClick={() => onNavigate(n.target)}>
-          <div style={styles.name}>{n.target}</div>
-          <div style={styles.reason}>distance: {n.distance}</div>
-          <div style={styles.tags}>
-            {n.shared.map((s, i) => (
-              <span key={i} style={styles.tag}>{s}</span>
+        <div key={n.target} style={s.card} onClick={() => onNavigate(n.target)}>
+          <div style={s.name}>{n.target}</div>
+          <div style={s.reason}>distance: {n.distance}</div>
+          <div style={s.tags}>
+            {n.shared.map((sh, i) => (
+              <span key={i} style={s.tag}>{sh}</span>
             ))}
           </div>
         </div>
@@ -23,25 +27,27 @@ export function Nearby({ entries, onNavigate }: NearbyProps) {
   );
 }
 
-const styles: Record<string, React.CSSProperties> = {
-  grid: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 },
-  card: {
-    padding: '14px 16px',
-    background: '#fff',
-    border: '1px solid #bce5d9',
-    borderRadius: 8,
-    cursor: 'pointer',
-  },
-  name: { fontWeight: 500, fontSize: 13, color: '#1a1816', marginBottom: 4 },
-  reason: { fontSize: 10, color: '#7a756d', marginBottom: 6 },
-  tags: { display: 'flex', flexWrap: 'wrap', gap: 4 },
-  tag: {
-    padding: '1px 6px',
-    borderRadius: 3,
-    fontFamily: "'JetBrains Mono', monospace",
-    fontSize: 9,
-    background: '#eef8f5',
-    color: '#0e8a6e',
-    border: '1px solid #bce5d9',
-  },
-};
+function makeStyles(t: Theme): Record<string, React.CSSProperties> {
+  return {
+    grid: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 },
+    card: {
+      padding: '14px 16px',
+      background: t.bgCard,
+      border: `1px solid ${t.tealBorder}`,
+      borderRadius: 8,
+      cursor: 'pointer',
+    },
+    name: { fontWeight: 500, fontSize: 13, color: t.textHeading, marginBottom: 4 },
+    reason: { fontSize: 10, color: t.textSecondary, marginBottom: 6 },
+    tags: { display: 'flex', flexWrap: 'wrap', gap: 4 },
+    tag: {
+      padding: '1px 6px',
+      borderRadius: 3,
+      fontFamily: "'JetBrains Mono', monospace",
+      fontSize: 9,
+      background: t.tealBg,
+      color: t.teal,
+      border: `1px solid ${t.tealBorder}`,
+    },
+  };
+}

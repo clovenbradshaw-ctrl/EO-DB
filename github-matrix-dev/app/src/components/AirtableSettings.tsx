@@ -18,6 +18,7 @@ import { useEoStore } from '../store/eo-store';
 import type { MatrixSession } from '../matrix/client';
 import { AirtableClient } from '../ingestion/airtable-client';
 import { discoverSchema, hydrationSync, updateSync } from '../ingestion/airtable-sync';
+import { useTheme, type Theme } from '../theme';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -75,6 +76,8 @@ function labelFromTarget(target: string, userId: string): { label: string; share
 export function AirtableSettingsSection({ session }: { session: MatrixSession }) {
   const dispatch = useEoStore((s) => s.dispatch);
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
+  const { theme } = useTheme();
+  const s = makeStyles(theme);
 
   // ── Form state ──
   const [label, setLabel] = useState('');
@@ -151,9 +154,6 @@ export function AirtableSettingsSection({ session }: { session: MatrixSession })
         ? `${ORG_PREFIX}${label.trim()}`
         : `${userPrefix(session.userId)}${label.trim()}`;
 
-      // Store the key in room data via a DEF event.
-      // The actual API key is stored in the event — it'll be encrypted
-      // by Matrix E2EE in the room and by AES-GCM in the local IndexedDB.
       await dispatch({
         op: 'DEF',
         target,
@@ -186,7 +186,6 @@ export function AirtableSettingsSection({ session }: { session: MatrixSession })
       ? `${ORG_PREFIX}${key.label}`
       : `${userPrefix(session.userId)}${key.label}`;
 
-    // Remove by setting to null (tombstone)
     await dispatch({
       op: 'DEF',
       target,
@@ -212,16 +211,16 @@ export function AirtableSettingsSection({ session }: { session: MatrixSession })
   // ── Trigger sync (runs entirely in the browser) ──
   async function handleSync(key: StoredKey, mode: 'hydrate' | 'sync') {
     const statusKey = `${key.label}-${mode}`;
-    setSyncStatus((s) => ({
-      ...s,
+    setSyncStatus((prev) => ({
+      ...prev,
       [statusKey]: { state: 'syncing', message: `Starting ${mode}...` },
     }));
 
     try {
       const rawKey = await getApiKey(key);
       if (!rawKey) {
-        setSyncStatus((s) => ({
-          ...s,
+        setSyncStatus((prev) => ({
+          ...prev,
           [statusKey]: { state: 'error', message: 'API key not found in store' },
         }));
         return;
@@ -229,8 +228,8 @@ export function AirtableSettingsSection({ session }: { session: MatrixSession })
 
       const store = useEoStore.getState().store;
       if (!store) {
-        setSyncStatus((s) => ({
-          ...s,
+        setSyncStatus((prev) => ({
+          ...prev,
           [statusKey]: { state: 'error', message: 'Store not initialized' },
         }));
         return;
@@ -241,8 +240,8 @@ export function AirtableSettingsSection({ session }: { session: MatrixSession })
         const msg = p.table
           ? `Syncing ${p.table}${p.records_so_far ? ` (${p.records_so_far} records)` : ''}...`
           : 'Discovering schema...';
-        setSyncStatus((s) => ({
-          ...s,
+        setSyncStatus((prev) => ({
+          ...prev,
           [statusKey]: { state: 'syncing', message: msg },
         }));
       };
@@ -278,8 +277,8 @@ export function AirtableSettingsSection({ session }: { session: MatrixSession })
         }
       } catch { /* best-effort update */ }
 
-      setSyncStatus((s) => ({
-        ...s,
+      setSyncStatus((prev) => ({
+        ...prev,
         [statusKey]: {
           state: 'done',
           message: `${ingested} records synced`,
@@ -289,8 +288,8 @@ export function AirtableSettingsSection({ session }: { session: MatrixSession })
 
       await loadKeys();
     } catch (e: any) {
-      setSyncStatus((s) => ({
-        ...s,
+      setSyncStatus((prev) => ({
+        ...prev,
         [statusKey]: { state: 'error', message: e.message || 'Sync failed' },
       }));
     }
@@ -299,16 +298,16 @@ export function AirtableSettingsSection({ session }: { session: MatrixSession })
   // ── Discover schema (browser-side) ──
   async function handleDiscover(key: StoredKey) {
     const statusKey = `${key.label}-discover`;
-    setSyncStatus((s) => ({
-      ...s,
+    setSyncStatus((prev) => ({
+      ...prev,
       [statusKey]: { state: 'discovering', message: 'Discovering bases & tables...' },
     }));
 
     try {
       const rawKey = await getApiKey(key);
       if (!rawKey) {
-        setSyncStatus((s) => ({
-          ...s,
+        setSyncStatus((prev) => ({
+          ...prev,
           [statusKey]: { state: 'error', message: 'API key not found in store' },
         }));
         return;
@@ -320,16 +319,16 @@ export function AirtableSettingsSection({ session }: { session: MatrixSession })
       const baseCount = manifest.bases.length;
       const tableCount = manifest.bases.reduce((t, b) => t + b.tables.length, 0);
 
-      setSyncStatus((s) => ({
-        ...s,
+      setSyncStatus((prev) => ({
+        ...prev,
         [statusKey]: {
           state: 'done',
           message: `Found ${baseCount} base${baseCount !== 1 ? 's' : ''}, ${tableCount} table${tableCount !== 1 ? 's' : ''}`,
         },
       }));
     } catch (e: any) {
-      setSyncStatus((s) => ({
-        ...s,
+      setSyncStatus((prev) => ({
+        ...prev,
         [statusKey]: { state: 'error', message: e.message || 'Discovery failed' },
       }));
     }
@@ -338,15 +337,15 @@ export function AirtableSettingsSection({ session }: { session: MatrixSession })
   return (
     <div>
         {/* Add new key */}
-        <div style={styles.section}>
-          <div style={styles.sectionTitle}>Add API Key</div>
-          <div style={styles.form}>
+        <div style={s.section}>
+          <div style={s.sectionTitle}>Add API Key</div>
+          <div style={s.form}>
             <input
               type="text"
               placeholder="Label (e.g. immigration-base)"
               value={label}
               onChange={(e) => setLabel(e.target.value)}
-              style={styles.input}
+              style={s.input}
               disabled={saving}
             />
             <input
@@ -354,12 +353,12 @@ export function AirtableSettingsSection({ session }: { session: MatrixSession })
               placeholder="Airtable Personal Access Token"
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
-              style={styles.input}
+              style={s.input}
               disabled={saving}
               autoComplete="off"
             />
-            <div style={styles.shareRow}>
-              <label style={styles.shareLabel}>
+            <div style={s.shareRow}>
+              <label style={s.shareLabel}>
                 <input
                   type="checkbox"
                   checked={shared}
@@ -368,18 +367,18 @@ export function AirtableSettingsSection({ session }: { session: MatrixSession })
                 />
                 <span style={{ marginLeft: 6 }}>Share with all users in the org</span>
               </label>
-              <span style={styles.shareHint}>
+              <span style={s.shareHint}>
                 {shared
                   ? 'All users in this room can use this key to sync'
                   : 'Only you and your devices can use this key'}
               </span>
             </div>
-            {error && <div style={styles.error}>{error}</div>}
+            {error && <div style={s.error}>{error}</div>}
             <button
               onClick={handleSave}
               disabled={saving || !label.trim() || !apiKey.trim()}
               style={{
-                ...styles.saveBtn,
+                ...s.saveBtn,
                 opacity: saving || !label.trim() || !apiKey.trim() ? 0.5 : 1,
               }}
             >
@@ -389,66 +388,66 @@ export function AirtableSettingsSection({ session }: { session: MatrixSession })
         </div>
 
         {/* Stored keys */}
-        <div style={styles.section}>
-          <div style={styles.sectionTitle}>
+        <div style={s.section}>
+          <div style={s.sectionTitle}>
             Stored Keys
-            {loadingKeys && <span style={styles.loadingDot}> loading...</span>}
+            {loadingKeys && <span style={s.loadingDot}> loading...</span>}
           </div>
 
           {!loadingKeys && keys.length === 0 && (
-            <div style={styles.emptyKeys}>
+            <div style={s.emptyKeys}>
               No API keys configured yet. Add one above to get started.
             </div>
           )}
 
           {keys.map((key) => (
-            <div key={`${key.label}-${key.shared}`} style={styles.keyCard}>
-              <div style={styles.keyHeader}>
-                <div style={styles.keyLabel}>{key.label}</div>
-                <div style={styles.keyBadges}>
-                  <span style={key.shared ? styles.badgeShared : styles.badgePrivate}>
+            <div key={`${key.label}-${key.shared}`} style={s.keyCard}>
+              <div style={s.keyHeader}>
+                <div style={s.keyLabel}>{key.label}</div>
+                <div style={s.keyBadges}>
+                  <span style={key.shared ? s.badgeShared : s.badgePrivate}>
                     {key.shared ? 'org' : 'private'}
                   </span>
                 </div>
               </div>
-              <div style={styles.keyMeta}>
+              <div style={s.keyMeta}>
                 <span>Key: {key.redactedKey}</span>
-                <span style={styles.keyMetaDivider} />
+                <span style={s.keyMetaDivider} />
                 <span>Added by {key.addedBy}</span>
                 {key.lastSyncAt && (
                   <>
-                    <span style={styles.keyMetaDivider} />
+                    <span style={s.keyMetaDivider} />
                     <span>Last sync: {new Date(key.lastSyncAt).toLocaleString()}</span>
                   </>
                 )}
               </div>
 
               {/* Actions */}
-              <div style={styles.keyActions}>
+              <div style={s.keyActions}>
                 <button
                   onClick={() => handleDiscover(key)}
                   disabled={syncStatus[`${key.label}-discover`]?.state === 'discovering'}
-                  style={styles.actionBtn}
+                  style={s.actionBtn}
                 >
                   Discover
                 </button>
                 <button
                   onClick={() => handleSync(key, 'hydrate')}
                   disabled={syncStatus[`${key.label}-hydrate`]?.state === 'syncing'}
-                  style={styles.actionBtn}
+                  style={s.actionBtn}
                 >
                   Full Sync
                 </button>
                 <button
                   onClick={() => handleSync(key, 'sync')}
                   disabled={syncStatus[`${key.label}-sync`]?.state === 'syncing'}
-                  style={styles.actionBtn}
+                  style={s.actionBtn}
                 >
                   Update Sync
                 </button>
                 <button
                   onClick={() => handleDelete(key)}
-                  style={styles.deleteBtn}
+                  style={s.deleteBtn}
                 >
                   Remove
                 </button>
@@ -462,15 +461,15 @@ export function AirtableSettingsSection({ session }: { session: MatrixSession })
                   <div
                     key={mode}
                     style={{
-                      ...styles.statusMsg,
-                      color: status.state === 'error' ? '#dc3545' : status.state === 'done' ? '#28a745' : '#6c757d',
+                      ...s.statusMsg,
+                      color: status.state === 'error' ? theme.dangerText : status.state === 'done' ? theme.successText : theme.textSecondary,
                     }}
                   >
                     {status.state === 'syncing' || status.state === 'discovering' ? (
-                      <span style={styles.spinner} />
+                      <span style={s.spinner} />
                     ) : null}
                     {status.message}
-                    {status.detail && <span style={styles.statusDetail}> {status.detail}</span>}
+                    {status.detail && <span style={s.statusDetail}> {status.detail}</span>}
                   </div>
                 );
               })}
@@ -486,15 +485,18 @@ export function AirtableSettingsSection({ session }: { session: MatrixSession })
  * Opens AirtableSettingsSection in a slide-out panel.
  */
 export function AirtableSettings({ session, onClose }: AirtableSettingsProps) {
+  const { theme } = useTheme();
+  const s = makeStyles(theme);
+
   return (
-    <div style={styles.overlay} onClick={onClose}>
-      <div style={styles.panel} onClick={(e) => e.stopPropagation()}>
-        <div style={styles.panelHeader}>
+    <div style={s.overlay} onClick={onClose}>
+      <div style={s.panel} onClick={(e) => e.stopPropagation()}>
+        <div style={s.panelHeader}>
           <div>
-            <div style={styles.panelTitle}>Airtable Integration</div>
-            <div style={styles.panelSubtitle}>Connect and sync data from Airtable bases</div>
+            <div style={s.panelTitle}>Airtable Integration</div>
+            <div style={s.panelSubtitle}>Connect and sync data from Airtable bases</div>
           </div>
-          <button onClick={onClose} style={styles.closeBtn}>&times;</button>
+          <button onClick={onClose} style={s.closeBtn}>&times;</button>
         </div>
         <AirtableSettingsSection session={session} />
       </div>
@@ -504,225 +506,227 @@ export function AirtableSettings({ session, onClose }: AirtableSettingsProps) {
 
 // ─── Styles ─────────────────────────────────────────────────────────────────
 
-const styles: Record<string, React.CSSProperties> = {
-  overlay: {
-    position: 'fixed',
-    inset: 0,
-    background: 'rgba(0,0,0,0.3)',
-    display: 'flex',
-    justifyContent: 'flex-end',
-    zIndex: 1000,
-  },
-  panel: {
-    width: 480,
-    maxWidth: '100vw',
-    height: '100vh',
-    background: '#fff',
-    borderLeft: '1px solid #e5e2dd',
-    overflowY: 'auto',
-    boxShadow: '-4px 0 24px rgba(0,0,0,0.08)',
-    fontFamily: "'Outfit', system-ui, -apple-system, sans-serif",
-  },
-  panelHeader: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    padding: '24px 24px 16px',
-    borderBottom: '1px solid #e5e2dd',
-  },
-  panelTitle: {
-    fontFamily: "'Source Serif 4', Georgia, serif",
-    fontSize: 18,
-    fontWeight: 600,
-    color: '#1a1816',
-  },
-  panelSubtitle: {
-    fontSize: 12,
-    color: '#7a756d',
-    marginTop: 2,
-  },
-  closeBtn: {
-    background: 'none',
-    border: 'none',
-    fontSize: 22,
-    color: '#7a756d',
-    cursor: 'pointer',
-    padding: '0 4px',
-    lineHeight: 1,
-  },
+function makeStyles(t: Theme): Record<string, React.CSSProperties> {
+  return {
+    overlay: {
+      position: 'fixed',
+      inset: 0,
+      background: t.shadowOverlay,
+      display: 'flex',
+      justifyContent: 'flex-end',
+      zIndex: 1000,
+    },
+    panel: {
+      width: 480,
+      maxWidth: '100vw',
+      height: '100vh',
+      background: t.bgCard,
+      borderLeft: `1px solid ${t.border}`,
+      overflowY: 'auto',
+      boxShadow: t.shadowPanel,
+      fontFamily: "'Outfit', system-ui, -apple-system, sans-serif",
+    },
+    panelHeader: {
+      display: 'flex',
+      justifyContent: 'space-between',
+      alignItems: 'flex-start',
+      padding: '24px 24px 16px',
+      borderBottom: `1px solid ${t.border}`,
+    },
+    panelTitle: {
+      fontFamily: "'Source Serif 4', Georgia, serif",
+      fontSize: 18,
+      fontWeight: 600,
+      color: t.textHeading,
+    },
+    panelSubtitle: {
+      fontSize: 12,
+      color: t.textSecondary,
+      marginTop: 2,
+    },
+    closeBtn: {
+      background: 'none',
+      border: 'none',
+      fontSize: 22,
+      color: t.textSecondary,
+      cursor: 'pointer',
+      padding: '0 4px',
+      lineHeight: 1,
+    },
 
-  section: {
-    padding: '20px 24px',
-    borderBottom: '1px solid #f0eeeb',
-  },
-  sectionTitle: {
-    fontSize: 11,
-    fontWeight: 600,
-    textTransform: 'uppercase' as const,
-    letterSpacing: '0.06em',
-    color: '#aba69e',
-    marginBottom: 12,
-  },
+    section: {
+      padding: '20px 24px',
+      borderBottom: `1px solid ${t.borderLight}`,
+    },
+    sectionTitle: {
+      fontSize: 11,
+      fontWeight: 600,
+      textTransform: 'uppercase' as const,
+      letterSpacing: '0.06em',
+      color: t.textMuted,
+      marginBottom: 12,
+    },
 
-  form: {
-    display: 'flex',
-    flexDirection: 'column' as const,
-    gap: 10,
-  },
-  input: {
-    padding: '10px 12px',
-    fontSize: 13,
-    border: '1px solid #e5e2dd',
-    borderRadius: 6,
-    background: '#faf9f7',
-    color: '#2c2a26',
-    outline: 'none',
-    fontFamily: "'JetBrains Mono', monospace",
-  },
-  shareRow: {
-    display: 'flex',
-    flexDirection: 'column' as const,
-    gap: 4,
-  },
-  shareLabel: {
-    display: 'flex',
-    alignItems: 'center',
-    fontSize: 13,
-    color: '#2c2a26',
-    cursor: 'pointer',
-  },
-  shareHint: {
-    fontSize: 11,
-    color: '#aba69e',
-    paddingLeft: 22,
-  },
-  error: {
-    color: '#dc3545',
-    fontSize: 12,
-    padding: '2px 0',
-  },
-  saveBtn: {
-    padding: '10px 0',
-    fontSize: 13,
-    fontWeight: 600,
-    border: 'none',
-    borderRadius: 6,
-    background: '#2563eb',
-    color: '#fff',
-    cursor: 'pointer',
-  },
+    form: {
+      display: 'flex',
+      flexDirection: 'column' as const,
+      gap: 10,
+    },
+    input: {
+      padding: '10px 12px',
+      fontSize: 13,
+      border: `1px solid ${t.border}`,
+      borderRadius: 6,
+      background: t.bg,
+      color: t.text,
+      outline: 'none',
+      fontFamily: "'JetBrains Mono', monospace",
+    },
+    shareRow: {
+      display: 'flex',
+      flexDirection: 'column' as const,
+      gap: 4,
+    },
+    shareLabel: {
+      display: 'flex',
+      alignItems: 'center',
+      fontSize: 13,
+      color: t.text,
+      cursor: 'pointer',
+    },
+    shareHint: {
+      fontSize: 11,
+      color: t.textMuted,
+      paddingLeft: 22,
+    },
+    error: {
+      color: t.dangerText,
+      fontSize: 12,
+      padding: '2px 0',
+    },
+    saveBtn: {
+      padding: '10px 0',
+      fontSize: 13,
+      fontWeight: 600,
+      border: 'none',
+      borderRadius: 6,
+      background: '#2563eb',
+      color: '#fff',
+      cursor: 'pointer',
+    },
 
-  emptyKeys: {
-    fontSize: 13,
-    color: '#aba69e',
-    padding: '12px 0',
-  },
+    emptyKeys: {
+      fontSize: 13,
+      color: t.textMuted,
+      padding: '12px 0',
+    },
 
-  keyCard: {
-    background: '#faf9f7',
-    border: '1px solid #e5e2dd',
-    borderRadius: 8,
-    padding: 14,
-    marginBottom: 10,
-  },
-  keyHeader: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 6,
-  },
-  keyLabel: {
-    fontFamily: "'JetBrains Mono', monospace",
-    fontSize: 13,
-    fontWeight: 600,
-    color: '#1a1816',
-  },
-  keyBadges: {
-    display: 'flex',
-    gap: 6,
-  },
-  badgeShared: {
-    fontSize: 10,
-    fontWeight: 600,
-    padding: '2px 8px',
-    borderRadius: 10,
-    background: '#dbeafe',
-    color: '#1d4ed8',
-  },
-  badgePrivate: {
-    fontSize: 10,
-    fontWeight: 600,
-    padding: '2px 8px',
-    borderRadius: 10,
-    background: '#fef3c7',
-    color: '#92400e',
-  },
-  keyMeta: {
-    fontSize: 11,
-    color: '#7a756d',
-    display: 'flex',
-    alignItems: 'center',
-    flexWrap: 'wrap' as const,
-    gap: 4,
-    marginBottom: 10,
-  },
-  keyMetaDivider: {
-    display: 'inline-block',
-    width: 3,
-    height: 3,
-    borderRadius: '50%',
-    background: '#d4d0ca',
-  },
+    keyCard: {
+      background: t.bg,
+      border: `1px solid ${t.border}`,
+      borderRadius: 8,
+      padding: 14,
+      marginBottom: 10,
+    },
+    keyHeader: {
+      display: 'flex',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      marginBottom: 6,
+    },
+    keyLabel: {
+      fontFamily: "'JetBrains Mono', monospace",
+      fontSize: 13,
+      fontWeight: 600,
+      color: t.textHeading,
+    },
+    keyBadges: {
+      display: 'flex',
+      gap: 6,
+    },
+    badgeShared: {
+      fontSize: 10,
+      fontWeight: 600,
+      padding: '2px 8px',
+      borderRadius: 10,
+      background: t.badgeSharedBg,
+      color: t.badgeSharedText,
+    },
+    badgePrivate: {
+      fontSize: 10,
+      fontWeight: 600,
+      padding: '2px 8px',
+      borderRadius: 10,
+      background: t.badgePrivateBg,
+      color: t.badgePrivateText,
+    },
+    keyMeta: {
+      fontSize: 11,
+      color: t.textSecondary,
+      display: 'flex',
+      alignItems: 'center',
+      flexWrap: 'wrap' as const,
+      gap: 4,
+      marginBottom: 10,
+    },
+    keyMetaDivider: {
+      display: 'inline-block',
+      width: 3,
+      height: 3,
+      borderRadius: '50%',
+      background: t.borderDivider,
+    },
 
-  keyActions: {
-    display: 'flex',
-    gap: 6,
-    flexWrap: 'wrap' as const,
-  },
-  actionBtn: {
-    padding: '6px 12px',
-    fontSize: 11,
-    fontWeight: 500,
-    border: '1px solid #e5e2dd',
-    borderRadius: 5,
-    background: '#fff',
-    color: '#2c2a26',
-    cursor: 'pointer',
-  },
-  deleteBtn: {
-    padding: '6px 12px',
-    fontSize: 11,
-    fontWeight: 500,
-    border: '1px solid #fecaca',
-    borderRadius: 5,
-    background: '#fff',
-    color: '#dc3545',
-    cursor: 'pointer',
-    marginLeft: 'auto',
-  },
+    keyActions: {
+      display: 'flex',
+      gap: 6,
+      flexWrap: 'wrap' as const,
+    },
+    actionBtn: {
+      padding: '6px 12px',
+      fontSize: 11,
+      fontWeight: 500,
+      border: `1px solid ${t.border}`,
+      borderRadius: 5,
+      background: t.bgCard,
+      color: t.text,
+      cursor: 'pointer',
+    },
+    deleteBtn: {
+      padding: '6px 12px',
+      fontSize: 11,
+      fontWeight: 500,
+      border: `1px solid ${t.dangerBorder}`,
+      borderRadius: 5,
+      background: t.bgCard,
+      color: t.dangerText,
+      cursor: 'pointer',
+      marginLeft: 'auto',
+    },
 
-  statusMsg: {
-    fontSize: 11,
-    marginTop: 8,
-    display: 'flex',
-    alignItems: 'center',
-    gap: 6,
-  },
-  statusDetail: {
-    color: '#aba69e',
-  },
-  spinner: {
-    display: 'inline-block',
-    width: 10,
-    height: 10,
-    border: '2px solid #e5e2dd',
-    borderTopColor: '#2563eb',
-    borderRadius: '50%',
-    animation: 'spin 0.6s linear infinite',
-  },
-  loadingDot: {
-    fontWeight: 400,
-    textTransform: 'none' as const,
-    letterSpacing: 0,
-  },
-};
+    statusMsg: {
+      fontSize: 11,
+      marginTop: 8,
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6,
+    },
+    statusDetail: {
+      color: t.textMuted,
+    },
+    spinner: {
+      display: 'inline-block',
+      width: 10,
+      height: 10,
+      border: `2px solid ${t.border}`,
+      borderTopColor: '#2563eb',
+      borderRadius: '50%',
+      animation: 'spin 0.6s linear infinite',
+    },
+    loadingDot: {
+      fontWeight: 400,
+      textTransform: 'none' as const,
+      letterSpacing: 0,
+    },
+  };
+}
