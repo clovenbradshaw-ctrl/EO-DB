@@ -13,11 +13,13 @@ import type { EoStore } from '../db/encrypted-store';
 import type { EoEventInput } from '../db/types';
 import { processEvent } from '../db/fold';
 import { readLogSince } from '../db/log';
+import { peerSyncEventTypes } from '../lib/matrix-domain';
 
-const SYNC_HELLO = 'com.aminoimmigration.eo.sync.hello';
-const SYNC_OFFER = 'com.aminoimmigration.eo.sync.offer';
-const SYNC_REQUEST = 'com.aminoimmigration.eo.sync.request';
-const SYNC_EVENTS = 'com.aminoimmigration.eo.sync.events';
+const _syncTypes = peerSyncEventTypes();
+const SYNC_HELLO = _syncTypes.hello;
+const SYNC_OFFER = _syncTypes.offer;
+const SYNC_REQUEST = _syncTypes.request;
+const SYNC_EVENTS = _syncTypes.events;
 
 const BATCH_SIZE = 50;
 

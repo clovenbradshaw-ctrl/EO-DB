@@ -65,17 +65,17 @@ describe('getMatrixAuthConfig', () => {
     const config = await getMatrixAuthConfig(db);
     config.enabled = true;
     config.allowed_accounts.push({
-      user_id: '@test:app.aminoimmigration.com',
+      user_id: '@test:matrix.example.com',
       access: 'read_write',
       added_at: new Date().toISOString(),
-      added_by: '@admin:app.aminoimmigration.com',
+      added_by: '@admin:matrix.example.com',
     });
     await setMatrixAuthConfig(db, config);
 
     const loaded = await getMatrixAuthConfig(db);
     expect(loaded.enabled).toBe(true);
     expect(loaded.allowed_accounts).toHaveLength(1);
-    expect(loaded.allowed_accounts[0].user_id).toBe('@test:app.aminoimmigration.com');
+    expect(loaded.allowed_accounts[0].user_id).toBe('@test:matrix.example.com');
     expect(loaded.allowed_accounts[0].access).toBe('read_write');
   });
 
@@ -118,12 +118,12 @@ describe('addAllowedAccount / removeAllowedAccount', () => {
   it('adds accounts with default read_write access', async () => {
     const config = await addAllowedAccount(
       db,
-      '@caseworker:app.aminoimmigration.com',
-      '@admin:app.aminoimmigration.com',
+      '@caseworker:matrix.example.com',
+      '@admin:matrix.example.com',
       'Maria',
     );
     expect(config.allowed_accounts).toHaveLength(1);
-    expect(config.allowed_accounts[0].user_id).toBe('@caseworker:app.aminoimmigration.com');
+    expect(config.allowed_accounts[0].user_id).toBe('@caseworker:matrix.example.com');
     expect(config.allowed_accounts[0].label).toBe('Maria');
     expect(config.allowed_accounts[0].access).toBe('read_write');
   });
@@ -446,9 +446,9 @@ describe('homeserver allowlist', () => {
 
   it('restricts to listed homeservers when populated', async () => {
     await setMatrixAuthEnabled(db, true, '@admin:example.com');
-    await addAllowedHomeserver(db, 'https://app.aminoimmigration.com', '@admin:example.com');
+    await addAllowedHomeserver(db, 'https://matrix.example.com', '@admin:example.com');
 
-    expect(await isHomeserverAllowed(db, 'https://app.aminoimmigration.com')).toBe(true);
+    expect(await isHomeserverAllowed(db, 'https://matrix.example.com')).toBe(true);
     expect(await isHomeserverAllowed(db, 'https://evil.server')).toBe(false);
   });
 

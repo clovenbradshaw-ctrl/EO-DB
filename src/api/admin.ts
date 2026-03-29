@@ -177,7 +177,7 @@ export function registerAdminRoutes(app: FastifyInstance, db: EoDb): void {
   app.post('/admin/matrix-auth/homeservers', async (request: AuthenticatedRequest, reply) => {
     const { homeserver } = request.body as { homeserver: string };
     if (!homeserver || typeof homeserver !== 'string') {
-      return reply.code(400).send({ error: 'Field "homeserver" is required (e.g. "https://app.aminoimmigration.com")' });
+      return reply.code(400).send({ error: 'Field "homeserver" is required (e.g. "https://matrix.example.com")' });
     }
     const actor = request.matrixUser?.user_id || 'unknown';
     const config = await addAllowedHomeserver(db, homeserver, actor);

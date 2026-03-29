@@ -6,6 +6,7 @@ import { registerWebhookRoutes } from '../src/api/webhook.js';
 import { registerOpsRoutes } from '../src/api/ops.js';
 import { registerQueryRoutes, registerHealthRoute } from '../src/api/query.js';
 import { authMiddleware, setAuthConfig, clearTokenCache } from '../src/auth/matrix.js';
+import { configureMatrixDomain } from '../src/config/matrix-domain.js';
 import { rmSync, mkdtempSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -24,10 +25,11 @@ beforeAll(async () => {
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
     return {
       ok: true,
-      json: async () => ({ user_id: '@testuser:app.aminoimmigration.com' }),
+      json: async () => ({ user_id: '@testuser:matrix.example.com' }),
     } as any;
   });
 
+  configureMatrixDomain({ webhookUser: '@webhook:matrix.example.com' });
   setAuthConfig({ webhookSecret: WEBHOOK_SECRET });
 });
 

@@ -119,7 +119,7 @@ export const useSyncStore = create<SyncStoreState>((set, get) => ({
         id: 'matrix-room',
         label: 'Matrix Room (E2EE)',
         type: 'matrix-media',
-        path: syncRoomId || '#amino-data:app.aminoimmigration.com',
+        path: syncRoomId || '(not configured)',
         encrypted: true,
       },
       {

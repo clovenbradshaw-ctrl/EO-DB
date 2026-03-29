@@ -18,7 +18,7 @@ import { join } from 'path';
 let db: EoDb;
 let dbPath: string;
 
-const AGENT = '@intake:app.aminoimmigration.com';
+const AGENT = '@intake:matrix.example.com';
 const TS = '2025-06-01T00:00:00.000Z';
 
 function ev(overrides: Partial<EoEventInput>): EoEventInput {

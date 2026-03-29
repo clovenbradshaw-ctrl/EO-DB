@@ -23,7 +23,7 @@ beforeEach(async () => {
   vi.restoreAllMocks();
   vi.spyOn(globalThis, 'fetch').mockImplementation(async () => ({
     ok: true,
-    json: async () => ({ user_id: '@testuser:app.aminoimmigration.com' }),
+    json: async () => ({ user_id: '@testuser:matrix.example.com' }),
   } as any));
   setAuthConfig({ webhookSecret: 'test-secret' });
   clearTokenCache();
@@ -35,7 +35,7 @@ beforeEach(async () => {
   // Allow the test user through auth config
   await setMatrixAuthConfig(db, {
     enabled: true,
-    allowed_accounts: [{ user_id: '@testuser:app.aminoimmigration.com', access: 'read_write' }],
+    allowed_accounts: [{ user_id: '@testuser:matrix.example.com', access: 'read_write' }],
     blacklisted_accounts: [],
     allowed_homeservers: [],
     server_rules: [],
@@ -94,7 +94,7 @@ describe('WebSocket /sync', () => {
     const ws = await connectWs();
     const msg = await waitForMessage(ws);
     expect(msg.type).toBe('connected');
-    expect(msg.user_id).toBe('@testuser:app.aminoimmigration.com');
+    expect(msg.user_id).toBe('@testuser:matrix.example.com');
     expect(typeof msg.current_seq).toBe('number');
     ws.close();
   });

@@ -11,11 +11,15 @@ import { registerAdminRoutes } from './api/admin.js';
 import { registerAuthRoutes } from './api/auth.js';
 import { registerIngestionRoutes } from './api/ingestion.js';
 import { registerLogImportRoutes } from './api/log-import.js';
+import { configureMatrixDomain } from './config/matrix-domain.js';
 
 const PORT = parseInt(process.env.EO_PORT || '3000', 10);
 const DATA_DIR = process.env.EO_DATA_DIR || './data';
-const HOMESERVER = process.env.EO_MATRIX_HOMESERVER || 'https://app.aminoimmigration.com';
+const HOMESERVER = process.env.EO_MATRIX_HOMESERVER || '';
 const WEBHOOK_SECRET = process.env.EO_WEBHOOK_SECRET || '';
+const WEBHOOK_USER = process.env.EO_WEBHOOK_USER || '';
+const EVENT_PREFIX = process.env.EO_EVENT_PREFIX || '';
+const DATA_ROOM_ALIAS = process.env.EO_DATA_ROOM_ALIAS || '';
 const LOG_LEVEL = process.env.EO_LOG_LEVEL || 'info';
 
 async function start(): Promise<void> {
@@ -24,7 +28,15 @@ async function start(): Promise<void> {
   await db.open();
   const feed = new Feed();
 
-  setAuthConfig({ homeserver: HOMESERVER, webhookSecret: WEBHOOK_SECRET });
+  // Centralise domain config so every module reads from the same source
+  configureMatrixDomain({
+    homeserver: HOMESERVER || undefined,
+    webhookUser: WEBHOOK_USER || undefined,
+    eventPrefix: EVENT_PREFIX || undefined,
+    dataRoomAlias: DATA_ROOM_ALIAS || undefined,
+  });
+
+  setAuthConfig({ homeserver: HOMESERVER, webhookSecret: WEBHOOK_SECRET, webhookUser: WEBHOOK_USER });
   setAuthDb(db);
 
   // CORS

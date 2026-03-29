@@ -14,7 +14,7 @@ import { join } from 'path';
 let db: EoDb;
 let dbPath: string;
 
-const AGENT = '@intake:app.aminoimmigration.com';
+const AGENT = '@intake:matrix.example.com';
 const TS = '2025-06-01T00:00:00.000Z';
 
 function ev(overrides: Partial<EoEventInput>): EoEventInput {
@@ -1123,16 +1123,16 @@ describe('Critical REC', () => {
 describe('Full Fixture Sequence', () => {
   it('processes all 10 fixture events correctly (REC no longer externally submitted)', async () => {
     const fixtures: EoEventInput[] = [
-      { op: 'INS', target: 'app.tblClients.rec001', operand: { name: 'Maria Garcia', status: 'active' }, client_event_id: 'fix-001', agent: '@intake:app.aminoimmigration.com', ts: TS },
-      { op: 'INS', target: 'app.tblCases.rec101', operand: { type: 'H1B', filed: '2025-06-01' }, client_event_id: 'fix-002', agent: '@intake:app.aminoimmigration.com', ts: TS },
-      { op: 'CON', target: 'app.tblClients.rec001', operand: { added: ['app.tblCases.rec101'] }, client_event_id: 'fix-003', agent: '@intake:app.aminoimmigration.com', ts: TS },
-      { op: 'DEF', target: 'app.tblCases.rec101.fldStatus', operand: 'pending', client_event_id: 'fix-004', agent: '@caseworker:app.aminoimmigration.com', ts: TS },
-      { op: 'DEF', target: 'app.tblCases.rec101.fldStatus', operand: 'approved', client_event_id: 'fix-005', agent: '@caseworker:app.aminoimmigration.com', ts: TS },
-      { op: 'DEF', target: 'app.tblClients.rec001.fldEmail', operand: 'maria@old.com', client_event_id: 'fix-006', agent: '@intake:app.aminoimmigration.com', ts: TS },
-      { op: 'DEF', target: 'app.tblClients.rec001.fldEmail', operand: 'maria@new.com', client_event_id: 'fix-007', agent: '@caseworker:app.aminoimmigration.com', ts: TS },
-      { op: 'EVA', target: 'app.tblClients.rec001.fldEmail', operand: { strategy: 'latest' }, client_event_id: 'fix-008', agent: '@admin:app.aminoimmigration.com', ts: TS },
-      { op: 'SEG', target: 'app.tblClients.rec001', operand: { boundary: 'exclude', reason: 'archived' }, client_event_id: 'fix-009', agent: '@admin:app.aminoimmigration.com', ts: TS },
-      { op: 'DEF', target: 'app.tblCases.rec101.fldDeadline', operand: { formula: 'DAYS_UNTIL(filed + 180)' }, client_event_id: 'fix-010', agent: '@admin:app.aminoimmigration.com', ts: TS },
+      { op: 'INS', target: 'app.tblClients.rec001', operand: { name: 'Maria Garcia', status: 'active' }, client_event_id: 'fix-001', agent: '@intake:matrix.example.com', ts: TS },
+      { op: 'INS', target: 'app.tblCases.rec101', operand: { type: 'H1B', filed: '2025-06-01' }, client_event_id: 'fix-002', agent: '@intake:matrix.example.com', ts: TS },
+      { op: 'CON', target: 'app.tblClients.rec001', operand: { added: ['app.tblCases.rec101'] }, client_event_id: 'fix-003', agent: '@intake:matrix.example.com', ts: TS },
+      { op: 'DEF', target: 'app.tblCases.rec101.fldStatus', operand: 'pending', client_event_id: 'fix-004', agent: '@caseworker:matrix.example.com', ts: TS },
+      { op: 'DEF', target: 'app.tblCases.rec101.fldStatus', operand: 'approved', client_event_id: 'fix-005', agent: '@caseworker:matrix.example.com', ts: TS },
+      { op: 'DEF', target: 'app.tblClients.rec001.fldEmail', operand: 'maria@old.com', client_event_id: 'fix-006', agent: '@intake:matrix.example.com', ts: TS },
+      { op: 'DEF', target: 'app.tblClients.rec001.fldEmail', operand: 'maria@new.com', client_event_id: 'fix-007', agent: '@caseworker:matrix.example.com', ts: TS },
+      { op: 'EVA', target: 'app.tblClients.rec001.fldEmail', operand: { strategy: 'latest' }, client_event_id: 'fix-008', agent: '@admin:matrix.example.com', ts: TS },
+      { op: 'SEG', target: 'app.tblClients.rec001', operand: { boundary: 'exclude', reason: 'archived' }, client_event_id: 'fix-009', agent: '@admin:matrix.example.com', ts: TS },
+      { op: 'DEF', target: 'app.tblCases.rec101.fldDeadline', operand: { formula: 'DAYS_UNTIL(filed + 180)' }, client_event_id: 'fix-010', agent: '@admin:matrix.example.com', ts: TS },
     ];
 
     const seqs: number[] = [];
