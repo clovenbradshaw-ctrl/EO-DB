@@ -202,6 +202,250 @@ body {
 .filter-btn:hover { background: var(--bg3); color: var(--text); }
 .filter-btn.active { background: var(--bg3); color: var(--accent); border-color: var(--accent); }
 
+/* ── Filter Panel (Airtable-style) ── */
+.filter-panel-wrap {
+  position: relative;
+  display: inline-block;
+}
+
+.filter-panel {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  width: 520px;
+  background: var(--bg1);
+  border: 1px solid var(--border2);
+  border-radius: 6px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+  z-index: 200;
+  display: none;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.filter-panel.open { display: block; }
+
+.filter-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.filter-panel-title {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-faint);
+}
+
+.filter-conjunction-toggle {
+  display: flex;
+  gap: 2px;
+  background: var(--bg);
+  border-radius: 3px;
+  padding: 2px;
+}
+
+.filter-conjunction-btn {
+  padding: 3px 10px;
+  font-size: 9px;
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 600;
+  background: transparent;
+  border: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  border-radius: 2px;
+}
+
+.filter-conjunction-btn.active {
+  background: var(--bg3);
+  color: var(--accent);
+}
+
+.filter-rules {
+  padding: 8px 14px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.filter-rule {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.filter-rule select, .filter-rule input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 6px 8px;
+  color: var(--text);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  outline: none;
+}
+
+.filter-rule select:focus, .filter-rule input:focus {
+  border-color: var(--accent);
+}
+
+.filter-rule select option {
+  background: var(--bg1);
+  color: var(--text);
+}
+
+.filter-rule .filter-field { width: 130px; }
+.filter-rule .filter-op { width: 120px; }
+.filter-rule .filter-val { flex: 1; min-width: 100px; }
+
+.filter-rule-remove {
+  background: none;
+  border: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 4px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.filter-rule-remove:hover {
+  color: var(--danger);
+  background: rgba(239,68,68,0.1);
+}
+
+.filter-panel-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 14px;
+  border-top: 1px solid var(--border);
+}
+
+.filter-add-btn {
+  background: none;
+  border: 1px dashed var(--border2);
+  border-radius: 3px;
+  padding: 5px 12px;
+  color: var(--text-faint);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.filter-add-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.filter-save-btn {
+  padding: 5px 12px;
+  background: rgba(244,114,182,0.12);
+  border: 1px solid rgba(244,114,182,0.25);
+  border-radius: 3px;
+  color: var(--seg);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.filter-save-btn:hover {
+  background: rgba(244,114,182,0.2);
+}
+
+.filter-clear-btn {
+  padding: 5px 12px;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text-faint);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.filter-clear-btn:hover {
+  color: var(--text);
+  border-color: var(--text-dim);
+}
+
+.filter-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  background: var(--accent);
+  color: var(--bg);
+  border-radius: 8px;
+  font-size: 9px;
+  font-weight: 700;
+  margin-left: 4px;
+  padding: 0 4px;
+}
+
+/* Saved segments bar */
+.saved-segments-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 16px;
+  background: var(--bg1);
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+  display: none;
+}
+
+.saved-segments-bar.has-segments { display: flex; }
+
+.saved-segment-chip {
+  padding: 4px 10px;
+  background: rgba(244,114,182,0.08);
+  border: 1px solid rgba(244,114,182,0.2);
+  border-radius: 3px;
+  color: var(--seg);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.saved-segment-chip:hover {
+  background: rgba(244,114,182,0.15);
+}
+
+.saved-segment-chip.active {
+  border-color: var(--seg);
+  background: rgba(244,114,182,0.2);
+}
+
+.saved-segment-chip .chip-remove {
+  font-size: 11px;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+
+.saved-segment-chip .chip-remove:hover {
+  color: var(--danger);
+}
+
+.saved-segments-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-faint);
+  margin-right: 4px;
+}
+
 .horizon-body {
   flex: 1;
   overflow: auto;
@@ -1341,9 +1585,34 @@ body {
     <div class="horizon-toolbar">
       <input class="horizon-search" placeholder="SEG — filter targets by value, path, or operator..." id="horizonSearch" oninput="filterHorizon()">
       <button class="filter-btn active" onclick="toggleRef(this,'all')">ALL</button>
+      <button class="filter-btn" onclick="toggleRef(this,'ins')">INS</button>
+      <button class="filter-btn" onclick="toggleRef(this,'def')">DEF</button>
       <button class="filter-btn" onclick="toggleRef(this,'con')">CON</button>
       <button class="filter-btn" onclick="toggleRef(this,'seg')">SEG</button>
       <button class="filter-btn" onclick="toggleRef(this,'eva')">EVA</button>
+      <div class="filter-panel-wrap">
+        <button class="filter-btn" id="filterPanelBtn" onclick="toggleFilterPanel()">FILTER</button>
+        <div class="filter-panel" id="filterPanel">
+          <div class="filter-panel-header">
+            <span class="filter-panel-title">Filter rules</span>
+            <div class="filter-conjunction-toggle">
+              <button class="filter-conjunction-btn active" onclick="setConjunction('and')">AND</button>
+              <button class="filter-conjunction-btn" onclick="setConjunction('or')">OR</button>
+            </div>
+          </div>
+          <div class="filter-rules" id="filterRules"></div>
+          <div class="filter-panel-actions">
+            <div style="display:flex;gap:6px;">
+              <button class="filter-add-btn" onclick="addFilterRule()">+ Add rule</button>
+              <button class="filter-clear-btn" onclick="clearFilterRules()">Clear</button>
+            </div>
+            <button class="filter-save-btn" onclick="saveFilterAsSegment()">SEG — Save</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="saved-segments-bar" id="savedSegmentsBar">
+      <span class="saved-segments-label">Segments:</span>
     </div>
     <div style="display:flex;flex:1;overflow:hidden;">
       <div class="horizon-body" style="flex:1;">
@@ -2036,6 +2305,8 @@ function updateReplaySlider() {
 }
 
 function refreshAll() {
+  loadSavedSegments();
+  renderSavedSegments();
   renderHorizon();
   renderLog();
   if (currentTab === 'graph') renderGraph();
@@ -2668,14 +2939,106 @@ function formatTs(ts) {
   return ts.replace('T', ' ').replace('Z', '').slice(0, 19);
 }
 
+// ── Filter state ──
+let horizonOpFilter = 'all'; // 'all', 'ins', 'def', 'con', 'seg', 'eva'
+let filterRules = []; // [{id, field, operator, value}]
+let filterConjunction = 'and'; // 'and' | 'or'
+let savedSegments = []; // [{name, rules, conjunction}]
+let activeSegmentName = null;
+
+const FILTER_OPERATORS = {
+  text: [
+    { value: 'contains', label: 'contains' },
+    { value: 'not_contains', label: 'does not contain' },
+    { value: 'equals', label: 'equals' },
+    { value: 'not_equals', label: 'does not equal' },
+    { value: 'starts_with', label: 'starts with' },
+    { value: 'ends_with', label: 'ends with' },
+    { value: 'is_empty', label: 'is empty' },
+    { value: 'is_not_empty', label: 'is not empty' },
+  ],
+  number: [
+    { value: 'equals', label: '=' },
+    { value: 'not_equals', label: '!=' },
+    { value: 'gt', label: '>' },
+    { value: 'lt', label: '<' },
+    { value: 'gte', label: '>=' },
+    { value: 'lte', label: '<=' },
+    { value: 'is_empty', label: 'is empty' },
+    { value: 'is_not_empty', label: 'is not empty' },
+  ],
+};
+
+function getHorizonFields() {
+  const state = foldState(replayIndex);
+  const fields = new Set(['target', 'last_op', 'last_agent']);
+  for (const s of Object.values(state)) {
+    if (s.value && typeof s.value === 'object') {
+      Object.keys(s.value).forEach(k => fields.add('value.' + k));
+    }
+  }
+  return Array.from(fields).sort();
+}
+
+function getFieldValue(entry, field) {
+  if (field === 'target') return entry.target;
+  if (field === 'last_op') return entry.last_op;
+  if (field === 'last_agent') return entry.last_agent;
+  if (field.startsWith('value.')) {
+    const key = field.slice(6);
+    if (entry.value && typeof entry.value === 'object') {
+      const v = entry.value[key];
+      if (v === undefined || v === null) return '';
+      if (typeof v === 'object') return JSON.stringify(v);
+      return String(v);
+    }
+    return '';
+  }
+  return '';
+}
+
+function evalFilterRule(entry, rule) {
+  const val = getFieldValue(entry, rule.field).toLowerCase();
+  const test = (rule.value || '').toLowerCase();
+  switch (rule.operator) {
+    case 'contains': return val.includes(test);
+    case 'not_contains': return !val.includes(test);
+    case 'equals': return val === test;
+    case 'not_equals': return val !== test;
+    case 'starts_with': return val.startsWith(test);
+    case 'ends_with': return val.endsWith(test);
+    case 'is_empty': return val === '' || val === 'null' || val === 'undefined';
+    case 'is_not_empty': return val !== '' && val !== 'null' && val !== 'undefined';
+    case 'gt': return parseFloat(val) > parseFloat(test);
+    case 'lt': return parseFloat(val) < parseFloat(test);
+    case 'gte': return parseFloat(val) >= parseFloat(test);
+    case 'lte': return parseFloat(val) <= parseFloat(test);
+    default: return true;
+  }
+}
+
 function renderHorizon() {
   const state = foldState(replayIndex);
   const search = document.getElementById('horizonSearch').value.toLowerCase();
   const tbody = document.getElementById('horizonBody');
 
-  const entries = Object.values(state)
+  let entries = Object.values(state)
+    .filter(s => !s.target.startsWith('_segments.')) // hide saved segment metadata
     .filter(s => !search || s.target.toLowerCase().includes(search) || JSON.stringify(s.value).toLowerCase().includes(search))
     .sort((a, b) => a.target.localeCompare(b.target));
+
+  // Apply operator type filter
+  if (horizonOpFilter !== 'all') {
+    entries = entries.filter(s => s.last_op.toLowerCase() === horizonOpFilter);
+  }
+
+  // Apply filter rules
+  if (filterRules.length > 0) {
+    entries = entries.filter(entry => {
+      const results = filterRules.map(r => evalFilterRule(entry, r));
+      return filterConjunction === 'and' ? results.every(Boolean) : results.some(Boolean);
+    });
+  }
 
   tbody.innerHTML = entries.map(s => `
     <tr onclick="selectTarget('${s.target}')">
@@ -2686,6 +3049,21 @@ function renderHorizon() {
       <td><span class="ts-tag">${formatTs(s.last_ts)}</span></td>
     </tr>
   `).join('');
+
+  // Update filter badge
+  const btn = document.getElementById('filterPanelBtn');
+  const count = filterRules.length;
+  const existingBadge = btn.querySelector('.filter-badge');
+  if (existingBadge) existingBadge.remove();
+  if (count > 0) {
+    btn.innerHTML = `FILTER<span class="filter-badge">${count}</span>`;
+    btn.classList.add('active');
+  } else {
+    btn.textContent = 'FILTER';
+    if (!document.getElementById('filterPanel').classList.contains('open')) {
+      btn.classList.remove('active');
+    }
+  }
 }
 
 function filterHorizon() {
@@ -2696,6 +3074,204 @@ function filterHorizon() {
     return;
   }
   renderHorizon();
+}
+
+// ── Filter panel ──
+function toggleFilterPanel() {
+  const panel = document.getElementById('filterPanel');
+  panel.classList.toggle('open');
+  if (panel.classList.contains('open') && filterRules.length === 0) {
+    addFilterRule();
+  }
+}
+
+function setConjunction(c) {
+  filterConjunction = c;
+  document.querySelectorAll('.filter-conjunction-btn').forEach(b => {
+    b.classList.toggle('active', b.textContent.toLowerCase() === c);
+  });
+  renderHorizon();
+}
+
+function addFilterRule() {
+  const id = 'fr_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
+  filterRules.push({ id, field: 'target', operator: 'contains', value: '' });
+  renderFilterRules();
+}
+
+function removeFilterRule(id) {
+  filterRules = filterRules.filter(r => r.id !== id);
+  renderFilterRules();
+  renderHorizon();
+}
+
+function clearFilterRules() {
+  filterRules = [];
+  activeSegmentName = null;
+  renderFilterRules();
+  renderHorizon();
+  renderSavedSegments();
+}
+
+function updateFilterRule(id, key, value) {
+  const rule = filterRules.find(r => r.id === id);
+  if (rule) {
+    rule[key] = value;
+    // Re-render if field changed (to update operator options)
+    if (key === 'field') renderFilterRules();
+    renderHorizon();
+  }
+}
+
+function renderFilterRules() {
+  const container = document.getElementById('filterRules');
+  const fields = getHorizonFields();
+
+  container.innerHTML = filterRules.map(rule => {
+    const fieldOptions = fields.map(f =>
+      `<option value="${f}" ${f === rule.field ? 'selected' : ''}>${f}</option>`
+    ).join('');
+
+    const ops = FILTER_OPERATORS.text; // use text ops for all fields
+    const opOptions = ops.map(o =>
+      `<option value="${o.value}" ${o.value === rule.operator ? 'selected' : ''}>${o.label}</option>`
+    ).join('');
+
+    const hideValue = rule.operator === 'is_empty' || rule.operator === 'is_not_empty';
+
+    return `<div class="filter-rule" data-id="${rule.id}">
+      <select class="filter-field" onchange="updateFilterRule('${rule.id}','field',this.value)">${fieldOptions}</select>
+      <select class="filter-op" onchange="updateFilterRule('${rule.id}','operator',this.value)">${opOptions}</select>
+      <input class="filter-val" value="${rule.value || ''}" placeholder="value..." oninput="updateFilterRule('${rule.id}','value',this.value)" ${hideValue ? 'style="display:none"' : ''}>
+      <button class="filter-rule-remove" onclick="removeFilterRule('${rule.id}')">&times;</button>
+    </div>`;
+  }).join('');
+}
+
+// ── Save/load segments via SEG ──
+async function saveFilterAsSegment() {
+  if (filterRules.length === 0) return;
+  const name = prompt('Segment name:');
+  if (!name || !name.trim()) return;
+
+  const agent = matrixUserId || '@local:device';
+  const segment = {
+    name: name.trim(),
+    rules: filterRules.map(r => ({ field: r.field, operator: r.operator, value: r.value })),
+    conjunction: filterConjunction,
+    created_at: new Date().toISOString(),
+    created_by: agent,
+  };
+
+  const target = '_segments.' + name.trim().replace(/\s+/g, '_').toLowerCase();
+
+  // Need to INS first if target doesn't exist
+  const state = foldState(replayIndex);
+  if (!state[target]) {
+    await appendAndFold({
+      op: 'INS',
+      target: target,
+      operand: {},
+      agent,
+      ts: new Date().toISOString(),
+      acquired_ts: new Date().toISOString(),
+    });
+  }
+
+  // Dispatch as SEG event
+  await appendAndFold({
+    op: 'SEG',
+    target: target,
+    operand: segment,
+    agent,
+    ts: new Date().toISOString(),
+    acquired_ts: new Date().toISOString(),
+  });
+
+  activeSegmentName = name.trim();
+  loadSavedSegments();
+  renderSavedSegments();
+
+  // Close the filter panel
+  document.getElementById('filterPanel').classList.remove('open');
+}
+
+function loadSavedSegments() {
+  const state = foldState(replayIndex);
+  savedSegments = [];
+  for (const s of Object.values(state)) {
+    if (s.target.startsWith('_segments.') && s.value && s.value.rules && !s.value._deleted) {
+      savedSegments.push(s.value);
+    }
+  }
+}
+
+function applySegment(name) {
+  const seg = savedSegments.find(s => s.name === name);
+  if (!seg) return;
+
+  activeSegmentName = name;
+  filterRules = seg.rules.map(r => ({
+    id: 'fr_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+    ...r,
+  }));
+  filterConjunction = seg.conjunction || 'and';
+
+  // Update conjunction UI
+  document.querySelectorAll('.filter-conjunction-btn').forEach(b => {
+    b.classList.toggle('active', b.textContent.toLowerCase() === filterConjunction);
+  });
+
+  renderFilterRules();
+  renderHorizon();
+  renderSavedSegments();
+}
+
+async function removeSegment(name) {
+  // Remove the segment state entry
+  const target = '_segments.' + name.replace(/\s+/g, '_').toLowerCase();
+  const state = foldState(replayIndex);
+  if (state[target]) {
+    await appendAndFold({
+      op: 'DEF',
+      target: target,
+      operand: { _deleted: true },
+      agent: matrixUserId || '@local:device',
+      ts: new Date().toISOString(),
+      acquired_ts: new Date().toISOString(),
+    });
+  }
+  if (activeSegmentName === name) {
+    activeSegmentName = null;
+    clearFilterRules();
+  }
+  loadSavedSegments();
+  renderSavedSegments();
+}
+
+function renderSavedSegments() {
+  const bar = document.getElementById('savedSegmentsBar');
+  const segments = savedSegments.filter(s => !s._deleted);
+
+  if (segments.length === 0) {
+    bar.classList.remove('has-segments');
+    return;
+  }
+
+  bar.classList.add('has-segments');
+  bar.innerHTML = '<span class="saved-segments-label">Segments:</span>' +
+    segments.map(s => `
+      <div class="saved-segment-chip ${s.name === activeSegmentName ? 'active' : ''}" onclick="applySegment('${s.name.replace(/'/g, "\\'")}')">
+        ${s.name}
+        <span class="chip-remove" onclick="event.stopPropagation(); removeSegment('${s.name.replace(/'/g, "\\'")}')">&times;</span>
+      </div>
+    `).join('');
+}
+
+// Helper: append event to LOG and re-fold
+async function appendAndFold(event) {
+  await appendEvent(event);
+  await loadFromIndexedDB();
 }
 
 function showDeleteModal() {
@@ -2808,10 +3384,21 @@ function toggleOpFilter(el, op) {
 }
 
 function toggleRef(el, type) {
-  document.querySelectorAll('.horizon-toolbar .filter-btn').forEach(b => b.classList.remove('active'));
+  // Don't touch the FILTER button
+  document.querySelectorAll('.horizon-toolbar > .filter-btn').forEach(b => b.classList.remove('active'));
   el.classList.add('active');
+  horizonOpFilter = type;
   renderHorizon();
 }
+
+// Close filter panel when clicking outside
+document.addEventListener('click', function(e) {
+  const panel = document.getElementById('filterPanel');
+  const btn = document.getElementById('filterPanelBtn');
+  if (panel && panel.classList.contains('open') && !panel.contains(e.target) && e.target !== btn) {
+    panel.classList.remove('open');
+  }
+});
 
 // ── Graph ──
 function renderGraph() {
