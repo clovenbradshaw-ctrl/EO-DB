@@ -4,7 +4,7 @@ import { getCurrentSeq } from '../db/level.js';
 import { readLogSince } from '../db/log.js';
 import { Feed } from '../db/feed.js';
 import { verifyMatrixToken } from '../auth/matrix.js';
-import { isAccountAllowed } from '../auth/matrix-auth-config.js';
+import { isAccountAllowed, extractHomeserver } from '../auth/matrix-auth-config.js';
 import type { EoEvent, Operator } from '../db/types.js';
 import websocketPlugin from '@fastify/websocket';
 
@@ -15,8 +15,39 @@ interface SyncMessage {
   ops?: Operator[];
 }
 
+/** Tracks all connected WebSocket users for presence. */
+export interface ConnectedUser {
+  user_id: string;
+  connected_at: string;
+}
+
+const connectedUsers = new Map</*socket id*/ string, ConnectedUser>();
+let socketCounter = 0;
+
+/** Get a snapshot of all currently connected users. */
+export function getConnectedUsers(): ConnectedUser[] {
+  return Array.from(connectedUsers.values());
+}
+
+/** Broadcast a message to all connected sockets except the sender. */
+function broadcastPresence(
+  sockets: Map<string, any>,
+  message: object,
+  excludeSocketId?: string,
+): void {
+  const payload = JSON.stringify(message);
+  for (const [id, socket] of sockets) {
+    if (id !== excludeSocketId && socket.readyState === 1) {
+      socket.send(payload);
+    }
+  }
+}
+
 export function registerSyncRoute(app: FastifyInstance, db: EoDb, feed: Feed): void {
   app.register(websocketPlugin);
+
+  // Map of socketId → raw WebSocket for broadcasting
+  const activeSockets = new Map<string, any>();
 
   app.register(async (instance) => {
     instance.get('/sync', { websocket: true }, (connection, request) => {
@@ -29,6 +60,8 @@ export function registerSyncRoute(app: FastifyInstance, db: EoDb, feed: Feed): v
         return;
       }
 
+      const socketId = `ws_${++socketCounter}`;
+
       verifyMatrixToken(token).then(async (user) => {
         // Enforce account allowlist for WebSocket connections
         const allowed = await isAccountAllowed(db, user.user_id);
@@ -40,11 +73,30 @@ export function registerSyncRoute(app: FastifyInstance, db: EoDb, feed: Feed): v
         const userId = user.user_id;
         const currentSeq = await getCurrentSeq(db);
 
+        // Register presence
+        const connectedUser: ConnectedUser = {
+          user_id: userId,
+          connected_at: new Date().toISOString(),
+        };
+        connectedUsers.set(socketId, connectedUser);
+        activeSockets.set(socketId, socket);
+
+        // Send connection ack with current online users
+        const onlineUsers = getConnectedUsers();
         socket.send(JSON.stringify({
           type: 'connected',
           user_id: userId,
           current_seq: currentSeq,
+          online_users: onlineUsers,
         }));
+
+        // Broadcast join to everyone else
+        broadcastPresence(activeSockets, {
+          type: 'presence',
+          action: 'joined',
+          user_id: userId,
+          online_users: getConnectedUsers(),
+        }, socketId);
 
         let feedSubId: string | null = null;
 
@@ -91,6 +143,13 @@ export function registerSyncRoute(app: FastifyInstance, db: EoDb, feed: Feed): v
                 feedSubId = null;
               }
             }
+
+            if (msg.type === 'who') {
+              socket.send(JSON.stringify({
+                type: 'who_response',
+                online_users: getConnectedUsers(),
+              }));
+            }
           } catch (e) {
             socket.send(JSON.stringify({ type: 'error', message: 'Invalid message' }));
           }
@@ -101,6 +160,15 @@ export function registerSyncRoute(app: FastifyInstance, db: EoDb, feed: Feed): v
             feed.unsubscribe(feedSubId);
             feedSubId = null;
           }
+          // Remove presence and broadcast departure
+          connectedUsers.delete(socketId);
+          activeSockets.delete(socketId);
+          broadcastPresence(activeSockets, {
+            type: 'presence',
+            action: 'left',
+            user_id: userId,
+            online_users: getConnectedUsers(),
+          });
         });
       }).catch(() => {
         socket.close(4401, 'Invalid access_token');
