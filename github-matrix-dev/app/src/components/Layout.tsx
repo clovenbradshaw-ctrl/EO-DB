@@ -14,6 +14,7 @@ import { ErrorBoundary } from './ErrorBoundary';
 import { SyncProgress } from './SyncProgress';
 import { AirtableSettings } from './AirtableSettings';
 import { DataSyncDashboard } from './DataSyncDashboard';
+import { useTheme, type Theme } from '../theme';
 
 interface LayoutProps {
   session: MatrixSession;
@@ -30,6 +31,8 @@ export function Layout({ session, onLogout }: LayoutProps) {
   const [showSettings, setShowSettings] = useState(false);
   const [activeView, setActiveView] = useState<'records' | 'sync'>('records');
   const connectionState = useConnectionState();
+  const { theme, toggleTheme } = useTheme();
+  const s = makeStyles(theme);
 
   // Initialize encrypted store and sync from Matrix on mount
   useEffect(() => {
@@ -64,8 +67,8 @@ export function Layout({ session, onLogout }: LayoutProps) {
       const roomId = await resolveDataRoom(matrixClient);
       const syncManager = new SyncManager(matrixClient, roomId, store, (event) => {
         // Update the Zustand store as events are replayed
-        useEoStore.setState((s) => ({
-          recentEvents: [...s.recentEvents.slice(-99), event],
+        useEoStore.setState((st) => ({
+          recentEvents: [...st.recentEvents.slice(-99), event],
           lastSeq: event.seq,
         }));
       });
@@ -104,22 +107,22 @@ export function Layout({ session, onLogout }: LayoutProps) {
   }
 
   return (
-    <div style={styles.container}>
-      <header style={styles.header}>
-        <div style={styles.headerLeft}>
-          <span style={styles.logo}>Amino Immigration</span>
-          <div style={styles.divider} />
-          <span style={styles.section}>Case Management</span>
+    <div style={s.container}>
+      <header style={s.header}>
+        <div style={s.headerLeft}>
+          <span style={s.logo}>Amino Immigration</span>
+          <div style={s.divider} />
+          <span style={s.section}>Case Management</span>
         </div>
-        <div style={styles.headerRight}>
+        <div style={s.headerRight}>
           <ConnectionStatus state={connectionState} />
-          <div style={styles.seqBadge}>seq: {lastSeq}</div>
-          <div style={styles.viewTabs}>
+          <div style={s.seqBadge}>seq: {lastSeq}</div>
+          <div style={s.viewTabs}>
             <button
               onClick={() => setActiveView('records')}
               style={{
-                ...styles.viewTab,
-                ...(activeView === 'records' ? styles.viewTabActive : {}),
+                ...s.viewTab,
+                ...(activeView === 'records' ? s.viewTabActive : {}),
               }}
             >
               Records
@@ -127,8 +130,8 @@ export function Layout({ session, onLogout }: LayoutProps) {
             <button
               onClick={() => setActiveView('sync')}
               style={{
-                ...styles.viewTab,
-                ...(activeView === 'sync' ? styles.viewTabActive : {}),
+                ...s.viewTab,
+                ...(activeView === 'sync' ? s.viewTabActive : {}),
               }}
             >
               Sync
@@ -136,7 +139,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
           </div>
           <button
             onClick={() => setShowSettings(true)}
-            style={styles.settingsBtn}
+            style={s.settingsBtn}
             title="Airtable Settings"
           >
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
@@ -144,21 +147,38 @@ export function Layout({ session, onLogout }: LayoutProps) {
               <path d="M8 1.5v1.2M8 13.3v1.2M3.4 3.4l.85.85M11.75 11.75l.85.85M1.5 8h1.2M13.3 8h1.2M3.4 12.6l.85-.85M11.75 4.25l.85-.85" />
             </svg>
           </button>
-          <span style={styles.user}>{session.userId}</span>
-          <button onClick={handleLogout} style={styles.logoutBtn}>Sign out</button>
+          {/* Theme toggle */}
+          <button
+            onClick={toggleTheme}
+            style={s.settingsBtn}
+            title={theme.mode === 'light' ? 'Switch to dark mode' : 'Switch to light mode'}
+          >
+            {theme.mode === 'light' ? (
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M13.5 8.5a5.5 5.5 0 0 1-7-7 5.5 5.5 0 1 0 7 7z" />
+              </svg>
+            ) : (
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="8" cy="8" r="3" />
+                <path d="M8 1v1.5M8 13.5V15M1 8h1.5M13.5 8H15M3.05 3.05l1.06 1.06M11.89 11.89l1.06 1.06M3.05 12.95l1.06-1.06M11.89 4.11l1.06-1.06" />
+              </svg>
+            )}
+          </button>
+          <span style={s.user}>{session.userId}</span>
+          <button onClick={handleLogout} style={s.logoutBtn}>Sign out</button>
         </div>
       </header>
       {activeView === 'sync' ? (
-        <div style={styles.body}>
-          <main style={{ ...styles.main, flex: 1 }}>
+        <div style={s.body}>
+          <main style={{ ...s.main, flex: 1 }}>
             <ErrorBoundary>
               <DataSyncDashboard session={session} />
             </ErrorBoundary>
           </main>
         </div>
       ) : (
-        <div style={styles.body}>
-          <aside style={styles.sidebar}>
+        <div style={s.body}>
+          <aside style={s.sidebar}>
             {ready ? (
               <HolonNav
                 selectedScope={selectedScope}
@@ -169,7 +189,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
               <SyncProgress message="Initializing store..." detail="Deriving encryption key" />
             )}
           </aside>
-          <main style={styles.main}>
+          <main style={s.main}>
             <ErrorBoundary>
               {selectedScope ? (
                 <TableView
@@ -179,9 +199,9 @@ export function Layout({ session, onLogout }: LayoutProps) {
                   session={{ userId: session.userId }}
                 />
               ) : (
-                <div style={styles.empty}>
-                  <div style={styles.emptyText}>Select an object type to view its records</div>
-                  <div style={styles.emptySub}>
+                <div style={s.empty}>
+                  <div style={s.emptyText}>Select an object type to view its records</div>
+                  <div style={s.emptySub}>
                     Choose from the hierarchy on the left to see records as a table
                   </div>
                 </div>
@@ -204,102 +224,104 @@ export function Layout({ session, onLogout }: LayoutProps) {
   );
 }
 
-const styles: Record<string, React.CSSProperties> = {
-  container: {
-    display: 'flex',
-    flexDirection: 'column',
-    height: '100vh',
-    background: '#faf9f7',
-    color: '#2c2a26',
-    fontFamily: "'Outfit', system-ui, -apple-system, sans-serif",
-  },
-  header: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    padding: '0 24px',
-    height: 52,
-    background: '#fff',
-    borderBottom: '1px solid #e5e2dd',
-  },
-  headerLeft: { display: 'flex', alignItems: 'center', gap: 12 },
-  logo: {
-    fontFamily: "'Source Serif 4', Georgia, serif",
-    fontSize: 17,
-    fontWeight: 600,
-    color: '#1a1816',
-  },
-  divider: { width: 1, height: 20, background: '#d4d0ca' },
-  section: { fontSize: 13, color: '#7a756d', fontWeight: 400 },
-  headerRight: { display: 'flex', alignItems: 'center', gap: 16 },
-  seqBadge: {
-    fontFamily: "'JetBrains Mono', monospace",
-    fontSize: 10,
-    color: '#aba69e',
-    padding: '2px 8px',
-    borderRadius: 4,
-    background: '#f4f3f0',
-    border: '1px solid #e5e2dd',
-  },
-  viewTabs: {
-    display: 'flex',
-    border: '1px solid #e5e2dd',
-    borderRadius: 6,
-    overflow: 'hidden',
-  },
-  viewTab: {
-    padding: '5px 12px',
-    fontSize: 11,
-    fontWeight: 500,
-    border: 'none',
-    background: 'transparent',
-    color: '#7a756d',
-    cursor: 'pointer',
-    fontFamily: "'JetBrains Mono', monospace",
-    borderRight: '1px solid #e5e2dd',
-  } as React.CSSProperties,
-  viewTabActive: {
-    background: '#1a6dd4',
-    color: '#fff',
-  } as React.CSSProperties,
-  settingsBtn: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    width: 32,
-    height: 32,
-    border: '1px solid #e5e2dd',
-    borderRadius: 6,
-    background: 'transparent',
-    color: '#7a756d',
-    cursor: 'pointer',
-  },
-  user: { fontSize: 12, color: '#7a756d' },
-  logoutBtn: {
-    padding: '6px 14px',
-    fontSize: 12,
-    border: '1px solid #e5e2dd',
-    borderRadius: 6,
-    background: 'transparent',
-    color: '#7a756d',
-    cursor: 'pointer',
-  },
-  body: { display: 'flex', flex: 1, overflow: 'hidden' },
-  sidebar: {
-    width: 280,
-    borderRight: '1px solid #e5e2dd',
-    background: '#fff',
-  },
-  main: { flex: 1, overflowY: 'auto', background: '#faf9f7' },
-  loading: { padding: 18, fontSize: 13, color: '#aba69e' },
-  empty: {
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    justifyContent: 'center',
-    height: '100%',
-    gap: 8,
-  },
-  emptyText: { fontSize: 14, color: '#7a756d', fontWeight: 300 },
-  emptySub: { fontSize: 12, color: '#aba69e' },
-};
+function makeStyles(t: Theme): Record<string, React.CSSProperties> {
+  return {
+    container: {
+      display: 'flex',
+      flexDirection: 'column',
+      height: '100vh',
+      background: t.bg,
+      color: t.text,
+      fontFamily: "'Outfit', system-ui, -apple-system, sans-serif",
+    },
+    header: {
+      display: 'flex',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      padding: '0 24px',
+      height: 52,
+      background: t.bgCard,
+      borderBottom: `1px solid ${t.border}`,
+    },
+    headerLeft: { display: 'flex', alignItems: 'center', gap: 12 },
+    logo: {
+      fontFamily: "'Source Serif 4', Georgia, serif",
+      fontSize: 17,
+      fontWeight: 600,
+      color: t.textHeading,
+    },
+    divider: { width: 1, height: 20, background: t.borderDivider },
+    section: { fontSize: 13, color: t.textSecondary, fontWeight: 400 },
+    headerRight: { display: 'flex', alignItems: 'center', gap: 16 },
+    seqBadge: {
+      fontFamily: "'JetBrains Mono', monospace",
+      fontSize: 10,
+      color: t.textMuted,
+      padding: '2px 8px',
+      borderRadius: 4,
+      background: t.bgMuted,
+      border: `1px solid ${t.border}`,
+    },
+    viewTabs: {
+      display: 'flex',
+      border: `1px solid ${t.border}`,
+      borderRadius: 6,
+      overflow: 'hidden',
+    },
+    viewTab: {
+      padding: '5px 12px',
+      fontSize: 11,
+      fontWeight: 500,
+      border: 'none',
+      background: 'transparent',
+      color: t.textSecondary,
+      cursor: 'pointer',
+      fontFamily: "'JetBrains Mono', monospace",
+      borderRight: `1px solid ${t.border}`,
+    } as React.CSSProperties,
+    viewTabActive: {
+      background: t.accent,
+      color: '#fff',
+    } as React.CSSProperties,
+    settingsBtn: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      width: 32,
+      height: 32,
+      border: `1px solid ${t.border}`,
+      borderRadius: 6,
+      background: 'transparent',
+      color: t.textSecondary,
+      cursor: 'pointer',
+    },
+    user: { fontSize: 12, color: t.textSecondary },
+    logoutBtn: {
+      padding: '6px 14px',
+      fontSize: 12,
+      border: `1px solid ${t.border}`,
+      borderRadius: 6,
+      background: 'transparent',
+      color: t.textSecondary,
+      cursor: 'pointer',
+    },
+    body: { display: 'flex', flex: 1, overflow: 'hidden' },
+    sidebar: {
+      width: 280,
+      borderRight: `1px solid ${t.border}`,
+      background: t.bgCard,
+    },
+    main: { flex: 1, overflowY: 'auto', background: t.bg },
+    loading: { padding: 18, fontSize: 13, color: t.textMuted },
+    empty: {
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      justifyContent: 'center',
+      height: '100%',
+      gap: 8,
+    },
+    emptyText: { fontSize: 14, color: t.textSecondary, fontWeight: 300 },
+    emptySub: { fontSize: 12, color: t.textMuted },
+  };
+}

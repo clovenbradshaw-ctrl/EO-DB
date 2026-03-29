@@ -4,11 +4,13 @@ import { Layout } from './components/Layout';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { restoreSession, type MatrixSession } from './matrix/client';
 import { useEoStore } from './store/eo-store';
+import { ThemeProvider, useTheme } from './theme';
 
-export function App() {
+function AppInner() {
   const [session, setSession] = useState<MatrixSession | null>(null);
   const [loading, setLoading] = useState(true);
   const teardown = useEoStore((s) => s.teardown);
+  const { theme } = useTheme();
 
   useEffect(() => {
     const saved = restoreSession();
@@ -24,7 +26,7 @@ export function App() {
   }
 
   if (loading) {
-    return <div style={{ padding: 40, textAlign: 'center', color: '#7a756d' }}>Loading...</div>;
+    return <div style={{ padding: 40, textAlign: 'center', color: theme.textSecondary }}>Loading...</div>;
   }
 
   if (!session) {
@@ -35,5 +37,13 @@ export function App() {
     <ErrorBoundary>
       <Layout session={session} onLogout={handleLogout} />
     </ErrorBoundary>
+  );
+}
+
+export function App() {
+  return (
+    <ThemeProvider>
+      <AppInner />
+    </ThemeProvider>
   );
 }
