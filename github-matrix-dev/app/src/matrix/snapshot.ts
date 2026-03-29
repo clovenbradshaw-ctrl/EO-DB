@@ -13,7 +13,7 @@ import type { MatrixClient } from 'matrix-js-sdk';
 import type { EoStore } from '../db/encrypted-store';
 import type { EoState, GraphEdge, EvaRegistration, EoEvent } from '../db/types';
 import { processEvent } from '../db/fold';
-import { EO_SNAPSHOT_TYPE } from './event-bridge';
+import { EO_SNAPSHOT_TYPE, EO_SNAPSHOT_STATE_TYPE } from './event-bridge';
 import { readLogSince } from '../db/log';
 
 interface Snapshot {
@@ -115,13 +115,44 @@ export async function uploadSnapshot(
     version: snapshot.version,
   });
 
+  // Store the URI in room state for instant hydration on fresh devices.
+  // This overwrites the previous state event so the latest URI is always
+  // available without paginating the timeline.
+  await setSnapshotStateEvent(client, roomId, mxcUrl, snapshot.seq, snapshot.version);
+
   return mxcUrl;
 }
 
 /**
- * Find the latest snapshot reference in the room timeline.
- * Paginates backwards through the timeline to find snapshot pointer events,
- * which is necessary on a fresh device where the SDK has minimal history.
+ * Store the latest snapshot URI in room state for instant hydration.
+ *
+ * Room state events are always available via `room.currentState` without
+ * pagination, making hydration O(1) instead of O(n) timeline walks.
+ * Each call overwrites the previous state event (state_key = "").
+ */
+export async function setSnapshotStateEvent(
+  client: MatrixClient,
+  roomId: string,
+  mxc: string,
+  seq: number,
+  version: number,
+): Promise<void> {
+  await client.sendStateEvent(roomId, EO_SNAPSHOT_STATE_TYPE as any, {
+    mxc,
+    seq,
+    version,
+    ts: new Date().toISOString(),
+  }, '');
+}
+
+/**
+ * Find the latest snapshot reference — fast path via room state, slow fallback
+ * via timeline pagination.
+ *
+ * Room state lookup is O(1) and works immediately after initial sync.
+ * The timeline fallback handles rooms that haven't been upgraded yet (no state
+ * event written). Once any device writes a snapshot, all future hydrations
+ * hit the fast path.
  */
 export async function findLatestSnapshot(
   client: MatrixClient,
@@ -130,8 +161,17 @@ export async function findLatestSnapshot(
   const room = client.getRoom(roomId);
   if (!room) return null;
 
-  // Paginate backwards to find snapshot events (they may not be in the
-  // initial sync window since they're only posted every 1000 events)
+  // Fast path: read the snapshot URI directly from room state.
+  const stateEvent = room.currentState.getStateEvents(EO_SNAPSHOT_STATE_TYPE, '');
+  if (stateEvent) {
+    const content = stateEvent.getContent();
+    if (content.mxc && typeof content.seq === 'number') {
+      return { mxc: content.mxc, seq: content.seq };
+    }
+  }
+
+  // Slow fallback: paginate backwards through the timeline.
+  // This handles rooms created before the state event was introduced.
   const timeline = room.getLiveTimeline();
   let canPaginate = true;
   let latest: { mxc: string; seq: number } | null = null;

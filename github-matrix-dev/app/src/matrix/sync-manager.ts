@@ -17,7 +17,7 @@ import { processEvent } from '../db/fold';
 import { eventHash } from '../db/hash';
 import { AsyncMutex } from '../db/mutex';
 import { EO_EVENT_TYPE, getDataRoom, matrixEventToEo, sendEoEvent } from './event-bridge';
-import { findLatestSnapshot, applySnapshot, maybeCreateSnapshot, createSnapshot, uploadSnapshot, createDeltaSnapshot, uploadDeltaSnapshot } from './snapshot';
+import { findLatestSnapshot, applySnapshot, maybeCreateSnapshot, createSnapshot, uploadSnapshot, createDeltaSnapshot, uploadDeltaSnapshot, setSnapshotStateEvent } from './snapshot';
 
 /** Mutex protecting the offline queue from concurrent read-modify-write. */
 const queueMutex = new AsyncMutex();
@@ -111,8 +111,9 @@ export class SyncManager {
     const seq = await this.store.getCurrentSeq();
     if (seq === 0) return; // nothing to snapshot
     const snapshot = await createSnapshot(this.store, this.client.getUserId()!);
-    await uploadSnapshot(this.client, this.roomId, snapshot);
+    const mxc = await uploadSnapshot(this.client, this.roomId, snapshot);
     await this.store.put('meta:snapshot_seq', seq);
+    await this.store.put('meta:snapshot_mxc', mxc);
   }
 
   /**
@@ -155,6 +156,9 @@ export class SyncManager {
     // 4. Update snapshot bookkeeping
     await this.store.put('meta:snapshot_seq', currentSeq);
     await this.store.put('meta:snapshot_mxc', mxc);
+
+    // 5. Update room state for fast hydration on fresh devices
+    await setSnapshotStateEvent(this.client, this.roomId, mxc, currentSeq, 1);
 
     return { mxc, seq: currentSeq };
   }
