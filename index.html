@@ -1605,6 +1605,94 @@ body {
 
 .settings-add-btn:hover { background: var(--bg4); color: var(--accent); }
 
+/* ── Airtable Integration ── */
+.at-key-card {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+}
+
+.at-key-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.at-key-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.at-key-meta {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  color: var(--text-faint);
+  margin-bottom: 8px;
+}
+
+.at-key-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.at-action-btn {
+  padding: 4px 10px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text-dim);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.at-action-btn:hover { color: var(--accent); border-color: var(--accent); }
+.at-action-btn:disabled { opacity: 0.4; cursor: default; }
+.at-action-btn.danger { color: var(--danger); }
+.at-action-btn.danger:hover { border-color: var(--danger); }
+
+.at-status {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.at-status.syncing { color: var(--accent); }
+.at-status.done { color: var(--ins); }
+.at-status.error { color: var(--danger); }
+
+.at-spinner {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border: 1.5px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+}
+
+.at-badge {
+  font-size: 8px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.at-badge-org { background: rgba(56,189,248,0.15); color: var(--accent); }
+.at-badge-private { background: rgba(251,191,36,0.15); color: var(--syn); }
+
 .settings-session-field {
   display: flex;
   justify-content: space-between;
@@ -2000,6 +2088,27 @@ body {
             <div class="settings-session-field"><span class="settings-session-key">Last Snapshot Seq</span><span class="settings-session-val" id="settingsMediaSnapshotSeq">—</span></div>
             <div class="settings-session-field"><span class="settings-session-key">Storage Tier</span><span class="settings-session-val" id="settingsMediaTier">—</span></div>
           </div>
+        </div>
+
+        <!-- Airtable Integration -->
+        <div class="settings-section">
+          <div class="settings-section-title">Airtable Integration</div>
+
+          <!-- Add API Key form -->
+          <div class="settings-add-row" style="flex-direction:column;gap:8px;">
+            <input class="settings-add-input" id="atKeyLabel" placeholder="Label (e.g. immigration-base)" autocomplete="off">
+            <input class="settings-add-input" id="atKeyToken" type="password" placeholder="Airtable Personal Access Token" autocomplete="off">
+            <div style="display:flex;align-items:center;gap:16px;">
+              <label style="display:flex;align-items:center;gap:6px;font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-dim);cursor:pointer;">
+                <input type="checkbox" id="atKeyShared" checked> Share with org
+              </label>
+              <button class="settings-add-btn" onclick="atSaveKey()">Save Key</button>
+            </div>
+          </div>
+          <div id="atKeyError" style="color:var(--danger);font-family:'JetBrains Mono',monospace;font-size:10px;margin-top:4px;"></div>
+
+          <!-- Stored keys list -->
+          <div id="atKeysList" style="margin-top:12px;"></div>
         </div>
 
         <!-- Danger Zone -->
@@ -3937,6 +4046,306 @@ function updateReplay() {
   if (currentTab === 'graph') renderGraph();
 }
 
+// ── Airtable Integration ──
+
+const AT_API = 'https://api.airtable.com/v0';
+const AT_META = 'https://api.airtable.com/v0/meta';
+const AT_KEY_PREFIX = 'at_key:';
+
+// Rate limiter
+const atBucket = { tokens: 4, last: Date.now(), rate: 4, burst: 4 };
+function atRefill() {
+  const now = Date.now();
+  atBucket.tokens = Math.min(atBucket.burst, atBucket.tokens + ((now - atBucket.last) / 1000) * atBucket.rate);
+  atBucket.last = now;
+}
+async function atAcquire() {
+  atRefill();
+  if (atBucket.tokens >= 1) { atBucket.tokens--; return; }
+  const wait = Math.ceil((1 - atBucket.tokens) / atBucket.rate * 1000);
+  await new Promise(r => setTimeout(r, wait));
+  atRefill();
+  atBucket.tokens--;
+}
+
+async function atRequest(url, apiKey) {
+  await atAcquire();
+  for (let attempt = 0; attempt <= 3; attempt++) {
+    const res = await fetch(url, { headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' } });
+    if (res.status === 429) { await new Promise(r => setTimeout(r, Math.pow(2, attempt + 1) * 1000)); continue; }
+    if (!res.ok) throw new Error(`Airtable API ${res.status}: ${await res.text()}`);
+    return res.json();
+  }
+  throw new Error('Airtable API: max retries exceeded');
+}
+
+// Field classification — skip computed/metadata fields
+const AT_SKIP_TYPES = new Set(['formula','rollup','lookup','count','createdTime','lastModifiedTime','createdBy','lastModifiedBy','autoNumber']);
+
+function atExtractStorable(fields, schema) {
+  if (!schema || schema.length === 0) return fields;
+  const result = {};
+  const schemaMap = new Map(schema.map(f => [f.id, f]));
+  for (const [id, val] of Object.entries(fields)) {
+    const meta = schemaMap.get(id);
+    if (meta && AT_SKIP_TYPES.has(meta.type)) continue;
+    // Normalize attachments (strip rotating URLs)
+    if (meta && meta.type === 'attachment' && Array.isArray(val)) {
+      result[id] = val.map(a => ({ id: a.id, filename: a.filename, size: a.size, type: a.type }));
+    } else if (meta && meta.type === 'multipleRecordLinks' && Array.isArray(val)) {
+      result[id] = val.map(r => typeof r === 'object' && r.id ? r.id : r);
+    } else {
+      result[id] = val;
+    }
+  }
+  return result;
+}
+
+// Store/load keys from IndexedDB meta store
+async function atStoreKey(label, token, shared) {
+  if (!db) return;
+  const tx = db.transaction('meta', 'readwrite');
+  tx.objectStore('meta').put({
+    key: AT_KEY_PREFIX + label,
+    value: {
+      label,
+      token,
+      redacted: token.length > 8 ? token.slice(0, 4) + '...' + token.slice(-4) : '***',
+      shared: !!shared,
+      added_by: matrixUserId || 'local',
+      added_at: new Date().toISOString(),
+      last_sync_at: null,
+    }
+  });
+  return new Promise((r, j) => { tx.oncomplete = r; tx.onerror = () => j(tx.error); });
+}
+
+async function atLoadKeys() {
+  if (!db) return [];
+  const tx = db.transaction('meta', 'readonly');
+  const store = tx.objectStore('meta');
+  return new Promise((resolve) => {
+    const req = store.getAll();
+    req.onsuccess = () => {
+      const all = (req.result || []).filter(r => r.key && r.key.startsWith(AT_KEY_PREFIX));
+      resolve(all.map(r => r.value));
+    };
+    req.onerror = () => resolve([]);
+  });
+}
+
+async function atDeleteKey(label) {
+  if (!db) return;
+  const tx = db.transaction('meta', 'readwrite');
+  tx.objectStore('meta').delete(AT_KEY_PREFIX + label);
+  return new Promise((r) => { tx.oncomplete = r; tx.onerror = r; });
+}
+
+async function atUpdateLastSync(label) {
+  if (!db) return;
+  const tx = db.transaction('meta', 'readwrite');
+  const store = tx.objectStore('meta');
+  const req = store.get(AT_KEY_PREFIX + label);
+  req.onsuccess = () => {
+    if (req.result) {
+      req.result.value.last_sync_at = new Date().toISOString();
+      store.put(req.result);
+    }
+  };
+}
+
+// Store/load sync cursors
+async function atGetCursor(baseId, tableId) {
+  if (!db) return null;
+  const tx = db.transaction('meta', 'readonly');
+  const req = tx.objectStore('meta').get(`at_cursor:${baseId}:${tableId}`);
+  return new Promise(r => { req.onsuccess = () => r(req.result?.value || null); req.onerror = () => r(null); });
+}
+
+async function atSetCursor(baseId, tableId, cursor) {
+  if (!db) return;
+  const tx = db.transaction('meta', 'readwrite');
+  tx.objectStore('meta').put({ key: `at_cursor:${baseId}:${tableId}`, value: cursor });
+}
+
+// UI: save key
+async function atSaveKey() {
+  const label = document.getElementById('atKeyLabel').value.trim();
+  const token = document.getElementById('atKeyToken').value.trim();
+  const shared = document.getElementById('atKeyShared').checked;
+  const errEl = document.getElementById('atKeyError');
+  errEl.textContent = '';
+
+  if (!label || !token) { errEl.textContent = 'Label and token are required'; return; }
+  if (!/^[a-zA-Z0-9_-]+$/.test(label)) { errEl.textContent = 'Label: alphanumeric, hyphens, underscores only'; return; }
+
+  try {
+    await atStoreKey(label, token, shared);
+    document.getElementById('atKeyLabel').value = '';
+    document.getElementById('atKeyToken').value = '';
+    atRenderKeys();
+  } catch (e) { errEl.textContent = e.message; }
+}
+
+// UI: render stored keys
+async function atRenderKeys() {
+  const keys = await atLoadKeys();
+  const container = document.getElementById('atKeysList');
+  if (!container) return;
+
+  if (keys.length === 0) {
+    container.innerHTML = '<div class="settings-empty">No API keys configured. Add one above to get started.</div>';
+    return;
+  }
+
+  container.innerHTML = keys.map(k => `
+    <div class="at-key-card" id="at-card-${k.label}">
+      <div class="at-key-header">
+        <span class="at-key-label">${k.label}</span>
+        <span class="at-badge ${k.shared ? 'at-badge-org' : 'at-badge-private'}">${k.shared ? 'org' : 'private'}</span>
+      </div>
+      <div class="at-key-meta">
+        Key: ${k.redacted} · Added by ${k.added_by}${k.last_sync_at ? ' · Last sync: ' + new Date(k.last_sync_at).toLocaleString() : ''}
+      </div>
+      <div class="at-key-actions">
+        <button class="at-action-btn" onclick="atDiscover('${k.label}')">Discover</button>
+        <button class="at-action-btn" onclick="atSync('${k.label}','hydrate')">Full Sync</button>
+        <button class="at-action-btn" onclick="atSync('${k.label}','update')">Update Sync</button>
+        <button class="at-action-btn danger" onclick="atRemoveKey('${k.label}')" style="margin-left:auto;">Remove</button>
+      </div>
+      <div id="at-status-${k.label}"></div>
+    </div>
+  `).join('');
+}
+
+function atSetStatus(label, cls, msg) {
+  const el = document.getElementById('at-status-' + label);
+  if (!el) return;
+  const spinner = cls === 'syncing' ? '<span class="at-spinner"></span>' : '';
+  el.innerHTML = `<div class="at-status ${cls}">${spinner}${msg}</div>`;
+}
+
+// Get the raw token for a key label
+async function atGetToken(label) {
+  const keys = await atLoadKeys();
+  const k = keys.find(k => k.label === label);
+  return k?.token || null;
+}
+
+// Discover bases & tables
+async function atDiscover(label) {
+  atSetStatus(label, 'syncing', 'Discovering bases & tables...');
+  try {
+    const token = await atGetToken(label);
+    if (!token) { atSetStatus(label, 'error', 'API key not found'); return; }
+
+    const basesRes = await atRequest(`${AT_META}/bases`, token);
+    let tableCount = 0;
+    for (const base of basesRes.bases) {
+      const schema = await atRequest(`${AT_META}/bases/${base.id}/tables`, token);
+      tableCount += schema.tables.length;
+    }
+    atSetStatus(label, 'done', `Found ${basesRes.bases.length} base${basesRes.bases.length !== 1 ? 's' : ''}, ${tableCount} table${tableCount !== 1 ? 's' : ''}`);
+  } catch (e) {
+    atSetStatus(label, 'error', e.message);
+  }
+}
+
+// Full or incremental sync
+async function atSync(label, mode) {
+  atSetStatus(label, 'syncing', `Starting ${mode}...`);
+  try {
+    const token = await atGetToken(label);
+    if (!token) { atSetStatus(label, 'error', 'API key not found'); return; }
+
+    const basesRes = await atRequest(`${AT_META}/bases`, token);
+    let totalIngested = 0, totalSkipped = 0;
+    const start = Date.now();
+
+    for (const base of basesRes.bases) {
+      // Register base as DEF
+      await appendEvent({ op: 'DEF', target: `at.${base.id}`, operand: { name: base.name, _airtable: { type: 'base', base_id: base.id } }, agent: matrixUserId || 'local', client_event_id: `at-base:${base.id}` });
+
+      const schema = await atRequest(`${AT_META}/bases/${base.id}/tables`, token);
+
+      for (const table of schema.tables) {
+        const cursor = mode === 'update' ? await atGetCursor(base.id, table.id) : null;
+        if (mode === 'update' && !cursor) continue; // Not hydrated yet
+
+        // Register table with schema
+        const fields = table.fields.map(f => ({ id: f.id, name: f.name, type: f.type }));
+        await appendEvent({ op: 'DEF', target: `at.${base.id}.${table.id}`, operand: { name: table.name, fields, _airtable: { type: 'table', base_id: base.id, table_id: table.id } }, agent: matrixUserId || 'local', client_event_id: `at-table:${base.id}:${table.id}` });
+
+        atSetStatus(label, 'syncing', `Syncing ${table.name}...`);
+
+        // Paginate records
+        let offset = undefined;
+        const filterByFormula = cursor ? `LAST_MODIFIED_TIME()>='${cursor}'` : undefined;
+        const useFieldIds = fields.length > 0;
+
+        do {
+          const params = new URLSearchParams({ pageSize: '100' });
+          if (filterByFormula) params.set('filterByFormula', filterByFormula);
+          if (useFieldIds) params.set('returnFieldsByFieldId', 'true');
+          if (offset) params.set('offset', offset);
+
+          const page = await atRequest(`${AT_API}/${base.id}/${encodeURIComponent(table.id)}?${params}`, token);
+
+          for (const rec of page.records) {
+            const target = `at.${base.id}.${table.id}.${rec.id}`;
+            const storable = atExtractStorable(rec.fields, useFieldIds ? fields : []);
+
+            // Check for actual changes (non-transformation detection)
+            const existing = await new Promise(r => {
+              const tx2 = db.transaction('state', 'readonly');
+              const req = tx2.objectStore('state').get(target);
+              req.onsuccess = () => r(req.result);
+              req.onerror = () => r(null);
+            });
+
+            if (existing && existing.value?.fields && JSON.stringify(existing.value.fields) === JSON.stringify(storable)) {
+              totalSkipped++;
+              continue;
+            }
+
+            await appendEvent({
+              op: 'DEF',
+              target,
+              operand: { fields: storable, _airtable: { record_id: rec.id, base_id: base.id, table_id: table.id, created_time: rec.createdTime } },
+              agent: matrixUserId || 'local',
+              client_event_id: `at-sync:${base.id}:${table.id}:${rec.id}:${JSON.stringify(storable).length}`,
+            });
+            totalIngested++;
+          }
+
+          offset = page.offset;
+          atSetStatus(label, 'syncing', `Syncing ${table.name}... ${totalIngested} records`);
+        } while (offset);
+
+        await atSetCursor(base.id, table.id, new Date().toISOString());
+      }
+    }
+
+    const duration = ((Date.now() - start) / 1000).toFixed(1);
+    await atUpdateLastSync(label);
+    atSetStatus(label, 'done', `${totalIngested} records synced, ${totalSkipped} unchanged (${duration}s)`);
+    atRenderKeys();
+
+    // Refresh UI
+    await loadFromIndexedDB();
+    renderHorizon();
+    renderLog();
+    updateStatusBar();
+  } catch (e) {
+    atSetStatus(label, 'error', e.message);
+  }
+}
+
+async function atRemoveKey(label) {
+  await atDeleteKey(label);
+  atRenderKeys();
+}
+
 // ── Settings ──
 
 async function loadSettings() {
@@ -3986,6 +4395,9 @@ async function loadSettings() {
     if (mediaSeqEl) mediaSeqEl.textContent = '—';
     if (mediaTierEl) mediaTierEl.textContent = '—';
   }
+
+  // Load Airtable keys
+  atRenderKeys();
 }
 
 // ── Init ──
