@@ -11,7 +11,9 @@ import { registerAdminRoutes } from './api/admin.js';
 import { registerAuthRoutes } from './api/auth.js';
 import { registerIngestionRoutes } from './api/ingestion.js';
 import { registerLogImportRoutes } from './api/log-import.js';
+import { registerRoomSyncRoutes } from './api/room-sync.js';
 import { configureMatrixDomain } from './config/matrix-domain.js';
+import { RoomSyncCoordinator } from './ingestion/room-sync-coordinator.js';
 
 const PORT = parseInt(process.env.EO_PORT || '3000', 10);
 const DATA_DIR = process.env.EO_DATA_DIR || './data';
@@ -48,8 +50,11 @@ async function start(): Promise<void> {
   // Auth proxy routes (login/whoami/profile — no EO auth required)
   registerAuthRoutes(app, HOMESERVER);
 
+  // Room sync coordinator — manages continuous Airtable sync per room
+  const coordinator = new RoomSyncCoordinator(db, feed);
+
   // WebSocket sync (has its own auth via query param)
-  registerSyncRoute(app, db, feed);
+  registerSyncRoute(app, db, feed, coordinator);
 
   // Auth-protected routes
   app.register(async (protectedApp) => {
@@ -60,11 +65,16 @@ async function start(): Promise<void> {
     registerAdminRoutes(protectedApp, db);
     registerIngestionRoutes(protectedApp, db, feed);
     registerLogImportRoutes(protectedApp, db, feed);
+    registerRoomSyncRoutes(protectedApp, db, coordinator);
   });
+
+  // Start the room sync coordinator after routes are registered
+  await coordinator.start();
 
   // Graceful shutdown
   const shutdown = async () => {
     app.log.info('Shutting down...');
+    coordinator.stop();
     await app.close();
     await db.close();
     process.exit(0);

@@ -6,6 +6,7 @@ import { Feed } from '../db/feed.js';
 import { verifyMatrixToken } from '../auth/matrix.js';
 import { isAccountAllowed, extractHomeserver } from '../auth/matrix-auth-config.js';
 import type { EoEvent, Operator } from '../db/types.js';
+import type { RoomSyncCoordinator } from '../ingestion/room-sync-coordinator.js';
 import websocketPlugin from '@fastify/websocket';
 
 interface SyncMessage {
@@ -13,20 +14,28 @@ interface SyncMessage {
   since?: number;
   pattern?: string;
   ops?: Operator[];
+  /** Room ID the user is joining (for room sync coordinator). */
+  room_id?: string;
 }
 
 /** Tracks all connected WebSocket users for presence. */
 export interface ConnectedUser {
   user_id: string;
   connected_at: string;
+  /** Rooms this user has joined (for room sync coordinator). */
+  rooms: Set<string>;
 }
 
 const connectedUsers = new Map</*socket id*/ string, ConnectedUser>();
 let socketCounter = 0;
 
-/** Get a snapshot of all currently connected users. */
-export function getConnectedUsers(): ConnectedUser[] {
-  return Array.from(connectedUsers.values());
+/** Get a snapshot of all currently connected users (serializable). */
+export function getConnectedUsers(): Array<{ user_id: string; connected_at: string; rooms: string[] }> {
+  return Array.from(connectedUsers.values()).map(u => ({
+    user_id: u.user_id,
+    connected_at: u.connected_at,
+    rooms: Array.from(u.rooms),
+  }));
 }
 
 /** Reset presence tracking (for tests). */
@@ -49,7 +58,12 @@ function broadcastPresence(
   }
 }
 
-export function registerSyncRoute(app: FastifyInstance, db: EoDb, feed: Feed): void {
+export function registerSyncRoute(
+  app: FastifyInstance,
+  db: EoDb,
+  feed: Feed,
+  coordinator?: RoomSyncCoordinator,
+): void {
   app.register(websocketPlugin);
 
   // Map of socketId → raw WebSocket for broadcasting
@@ -83,6 +97,7 @@ export function registerSyncRoute(app: FastifyInstance, db: EoDb, feed: Feed): v
         const connectedUser: ConnectedUser = {
           user_id: userId,
           connected_at: new Date().toISOString(),
+          rooms: new Set(),
         };
         connectedUsers.set(socketId, connectedUser);
         activeSockets.set(socketId, socket);
@@ -94,6 +109,10 @@ export function registerSyncRoute(app: FastifyInstance, db: EoDb, feed: Feed): v
           if (feedSubId) {
             feed.unsubscribe(feedSubId);
             feedSubId = null;
+          }
+          // Notify coordinator that this user left all their rooms
+          if (coordinator) {
+            coordinator.userLeft(userId);
           }
           // Remove presence and broadcast departure
           connectedUsers.delete(socketId);
@@ -154,6 +173,50 @@ export function registerSyncRoute(app: FastifyInstance, db: EoDb, feed: Feed): v
               socket.send(JSON.stringify({
                 type: 'who_response',
                 online_users: getConnectedUsers(),
+              }));
+            }
+
+            // ── Room sync: join/leave a room for coordinator election ──
+            if (msg.type === 'join_room' && msg.room_id) {
+              connectedUser.rooms.add(msg.room_id);
+              if (coordinator) {
+                coordinator.userJoined(msg.room_id, userId);
+              }
+              socket.send(JSON.stringify({
+                type: 'room_joined',
+                room_id: msg.room_id,
+              }));
+            }
+
+            if (msg.type === 'leave_room' && msg.room_id) {
+              connectedUser.rooms.delete(msg.room_id);
+              // Re-check if this user is still in the room via another socket
+              // (edge case: multiple tabs). Only tell coordinator to remove if
+              // no other socket for this user is in the room.
+              let stillInRoom = false;
+              for (const [sid, cu] of connectedUsers) {
+                if (sid !== socketId && cu.user_id === userId && cu.rooms.has(msg.room_id)) {
+                  stillInRoom = true;
+                  break;
+                }
+              }
+              if (!stillInRoom && coordinator) {
+                // Temporarily remove and re-add without this room
+                coordinator.userLeft(userId);
+                // Re-join any rooms this user is still in via other sockets
+                const remainingRooms = new Set<string>();
+                for (const cu of connectedUsers.values()) {
+                  if (cu.user_id === userId) {
+                    for (const r of cu.rooms) remainingRooms.add(r);
+                  }
+                }
+                for (const r of remainingRooms) {
+                  coordinator.userJoined(r, userId);
+                }
+              }
+              socket.send(JSON.stringify({
+                type: 'room_left',
+                room_id: msg.room_id,
               }));
             }
           } catch (e) {
