@@ -381,6 +381,8 @@ async function getTrajectory(db: EoDb, target: string): Promise<LoggableOperator
   let lastOp: LoggableOperator | null = null;
 
   for (const event of events) {
+    // NUL is observation-only — exclude from horizon trajectory
+    if (event.op === 'NUL') continue;
     if (event.op !== lastOp) {
       trajectory.push(event.op);
       lastOp = event.op;
