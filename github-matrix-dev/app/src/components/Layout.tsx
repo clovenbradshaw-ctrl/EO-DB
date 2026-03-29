@@ -13,7 +13,7 @@ import { HorizonQueryBar } from './HorizonQueryBar';
 import { ConnectionStatus, useConnectionState } from './ConnectionStatus';
 import { ErrorBoundary } from './ErrorBoundary';
 import { SyncProgress } from './SyncProgress';
-import { AirtableSettings, AirtableSettingsSection } from './AirtableSettings';
+import { AirtableSettingsSection } from './AirtableSettings';
 import { DataSyncDashboard } from './DataSyncDashboard';
 import { LogView } from './LogView';
 import { ComposeView } from './ComposeView';
@@ -39,7 +39,6 @@ export function Layout({ session, onLogout }: LayoutProps) {
   const recentEvents = useEoStore((s) => s.recentEvents);
   const [selectedScope, setSelectedScope] = useState<string | null>(null);
   const [selectedRecord, setSelectedRecord] = useState<string | null>(null);
-  const [showSettings, setShowSettings] = useState(false);
   const [activeView, setActiveView] = useState<View>('horizon');
   const [spaceOpen, setSpaceOpen] = useState(false);
   const [allStates, setAllStates] = useState<EoState[]>([]);
@@ -205,17 +204,6 @@ export function Layout({ session, onLogout }: LayoutProps) {
           <div style={s.divider} />
           <ConnectionStatus state={connectionState} />
           <div style={s.divider} />
-          {/* Settings */}
-          <button
-            onClick={() => setShowSettings(true)}
-            style={s.settingsBtn}
-            title="Airtable Settings"
-          >
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-              <circle cx="8" cy="8" r="2.5" />
-              <path d="M8 1.5v1.2M8 13.3v1.2M3.4 3.4l.85.85M11.75 11.75l.85.85M1.5 8h1.2M13.3 8h1.2M3.4 12.6l.85-.85M11.75 4.25l.85-.85" />
-            </svg>
-          </button>
           {/* Theme toggle */}
           <button
             onClick={toggleTheme}
@@ -345,9 +333,6 @@ export function Layout({ session, onLogout }: LayoutProps) {
           </ErrorBoundary>
         </div>
       ) : null}
-      {showSettings && (
-        <AirtableSettings session={session} onClose={() => setShowSettings(false)} />
-      )}
     </div>
   );
 }

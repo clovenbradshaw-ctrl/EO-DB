@@ -21,12 +21,6 @@ export function SettingsView({ session }: SettingsViewProps) {
   const [deleteConfirm, setDeleteConfirm] = useState('');
   const [deleteError, setDeleteError] = useState('');
 
-  // Airtable keys
-  const [atLabel, setAtLabel] = useState('');
-  const [atToken, setAtToken] = useState('');
-  const [atShared, setAtShared] = useState(true);
-  const [atKeys, setAtKeys] = useState<Array<{ label: string; shared: boolean; lastSync?: string }>>([]);
-  const [atError, setAtError] = useState('');
 
   // Hydration sources
   const [hydLabel, setHydLabel] = useState('');
@@ -64,25 +58,7 @@ export function SettingsView({ session }: SettingsViewProps) {
     }
   }
 
-  function handleSaveAtKey() {
-    if (!atLabel || !atToken) {
-      setAtError('Label and token are required');
-      return;
-    }
-    const newKey = { label: atLabel, shared: atShared };
-    setAtKeys([...atKeys, newKey]);
-    // Store in localStorage for persistence
-    const stored = JSON.parse(localStorage.getItem('eo-at-keys') || '[]');
-    stored.push({ label: atLabel, token: atToken, shared: atShared });
-    localStorage.setItem('eo-at-keys', JSON.stringify(stored));
-    setAtLabel('');
-    setAtToken('');
-    setAtError('');
-  }
-
   useEffect(() => {
-    const stored = JSON.parse(localStorage.getItem('eo-at-keys') || '[]');
-    setAtKeys(stored.map((k: any) => ({ label: k.label, shared: k.shared, lastSync: k.lastSync })));
     const storedHyd = JSON.parse(localStorage.getItem('eo-hyd-sources') || '[]');
     setHydSources(storedHyd);
   }, []);
@@ -95,13 +71,6 @@ export function SettingsView({ session }: SettingsViewProps) {
     setHydLabel('');
     setHydEndpoint('');
     setHydApiKey('');
-  }
-
-  function removeAtKey(i: number) {
-    const stored = JSON.parse(localStorage.getItem('eo-at-keys') || '[]');
-    stored.splice(i, 1);
-    localStorage.setItem('eo-at-keys', JSON.stringify(stored));
-    setAtKeys(stored.map((k: any) => ({ label: k.label, shared: k.shared })));
   }
 
   function removeHydSource(i: number) {
@@ -180,32 +149,6 @@ export function SettingsView({ session }: SettingsViewProps) {
             <input style={s.input} type="password" value={hydApiKey} onChange={(e) => setHydApiKey(e.target.value)} placeholder="API key (optional)" />
             <button style={s.actionBtn} onClick={handleAddHydSource}>Add Source</button>
           </div>
-        </Section>
-
-        {/* Airtable Integration */}
-        <Section title="Airtable Integration" theme={theme}>
-          <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 6, marginBottom: 12 }}>
-            <input style={s.input} value={atLabel} onChange={(e) => setAtLabel(e.target.value)} placeholder="Label (e.g. immigration-base)" />
-            <input style={s.input} type="password" value={atToken} onChange={(e) => setAtToken(e.target.value)} placeholder="Airtable Personal Access Token" />
-            <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: theme.textSecondary, cursor: 'pointer' }}>
-                <input type="checkbox" checked={atShared} onChange={(e) => setAtShared(e.target.checked)} /> Share with org
-              </label>
-              <button style={s.actionBtn} onClick={handleSaveAtKey}>Save Key</button>
-            </div>
-            {atError && <div style={{ color: theme.danger, fontFamily: "'JetBrains Mono', monospace", fontSize: 10 }}>{atError}</div>}
-          </div>
-          {atKeys.map((k, i) => (
-            <div key={i} style={s.keyRow}>
-              <div>
-                <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: theme.text }}>{k.label}</div>
-                <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, color: theme.textMuted }}>
-                  {k.shared ? 'shared' : 'private'}{k.lastSync ? ` · last sync ${k.lastSync}` : ''}
-                </div>
-              </div>
-              <button style={s.removeBtn} onClick={() => removeAtKey(i)}>Remove</button>
-            </div>
-          ))}
         </Section>
 
         {/* Danger Zone */}
