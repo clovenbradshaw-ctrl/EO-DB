@@ -5,8 +5,9 @@ import { Feed } from '../src/db/feed.js';
 import { registerHealthRoute, registerQueryRoutes } from '../src/api/query.js';
 import { registerWebhookRoutes } from '../src/api/webhook.js';
 import { registerOpsRoutes } from '../src/api/ops.js';
-import { registerSyncRoute } from '../src/api/sync.js';
+import { registerSyncRoute, resetPresence } from '../src/api/sync.js';
 import { authMiddleware, setAuthConfig, clearTokenCache } from '../src/auth/matrix.js';
+import { setMatrixAuthConfig } from '../src/auth/matrix-auth-config.js';
 import { rmSync, mkdtempSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -34,10 +35,22 @@ beforeEach(async () => {
   } as any));
   setAuthConfig({ webhookSecret: WEBHOOK_SECRET });
   clearTokenCache();
+  resetPresence();
 
   dbPath = mkdtempSync(join(tmpdir(), 'eo-db-e2e-'));
   db = createDb(dbPath);
   await db.open();
+
+  // Allow the e2e test user through auth config
+  await setMatrixAuthConfig(db, {
+    enabled: true,
+    allowed_accounts: [{ user_id: '@e2e:app.aminoimmigration.com', access: 'read_write' }],
+    blacklisted_accounts: [],
+    allowed_homeservers: [],
+    server_rules: [],
+    user_rules_buckets: [],
+  });
+
   feed = new Feed();
 
   app = Fastify();

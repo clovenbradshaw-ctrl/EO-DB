@@ -29,6 +29,12 @@ export function getConnectedUsers(): ConnectedUser[] {
   return Array.from(connectedUsers.values());
 }
 
+/** Reset presence tracking (for tests). */
+export function resetPresence(): void {
+  connectedUsers.clear();
+  socketCounter = 0;
+}
+
 /** Broadcast a message to all connected sockets except the sender. */
 function broadcastPresence(
   sockets: Map<string, any>,
@@ -51,7 +57,6 @@ export function registerSyncRoute(app: FastifyInstance, db: EoDb, feed: Feed): v
 
   app.register(async (instance) => {
     instance.get('/sync', { websocket: true }, (connection, request) => {
-      // connection is SocketStream; connection.socket is the actual WebSocket
       const socket = connection.socket;
 
       const token = (request.query as { access_token?: string }).access_token;
@@ -62,7 +67,8 @@ export function registerSyncRoute(app: FastifyInstance, db: EoDb, feed: Feed): v
 
       const socketId = `ws_${++socketCounter}`;
 
-      verifyMatrixToken(token).then(async (user) => {
+      // Return the promise so @fastify/websocket can handle errors
+      return verifyMatrixToken(token).then(async (user) => {
         // Enforce account allowlist for WebSocket connections
         const allowed = await isAccountAllowed(db, user.user_id);
         if (!allowed) {
@@ -81,24 +87,24 @@ export function registerSyncRoute(app: FastifyInstance, db: EoDb, feed: Feed): v
         connectedUsers.set(socketId, connectedUser);
         activeSockets.set(socketId, socket);
 
-        // Send connection ack with current online users
-        const onlineUsers = getConnectedUsers();
-        socket.send(JSON.stringify({
-          type: 'connected',
-          user_id: userId,
-          current_seq: currentSeq,
-          online_users: onlineUsers,
-        }));
-
-        // Broadcast join to everyone else
-        broadcastPresence(activeSockets, {
-          type: 'presence',
-          action: 'joined',
-          user_id: userId,
-          online_users: getConnectedUsers(),
-        }, socketId);
-
+        // Register close handler BEFORE sending messages to avoid race conditions
         let feedSubId: string | null = null;
+
+        socket.on('close', () => {
+          if (feedSubId) {
+            feed.unsubscribe(feedSubId);
+            feedSubId = null;
+          }
+          // Remove presence and broadcast departure
+          connectedUsers.delete(socketId);
+          activeSockets.delete(socketId);
+          broadcastPresence(activeSockets, {
+            type: 'presence',
+            action: 'left',
+            user_id: userId,
+            online_users: getConnectedUsers(),
+          });
+        });
 
         socket.on('message', async (data: any) => {
           try {
@@ -155,21 +161,23 @@ export function registerSyncRoute(app: FastifyInstance, db: EoDb, feed: Feed): v
           }
         });
 
-        socket.on('close', () => {
-          if (feedSubId) {
-            feed.unsubscribe(feedSubId);
-            feedSubId = null;
-          }
-          // Remove presence and broadcast departure
-          connectedUsers.delete(socketId);
-          activeSockets.delete(socketId);
-          broadcastPresence(activeSockets, {
-            type: 'presence',
-            action: 'left',
-            user_id: userId,
-            online_users: getConnectedUsers(),
-          });
-        });
+        // Send connection ack with current online users
+        const onlineUsers = getConnectedUsers();
+        socket.send(JSON.stringify({
+          type: 'connected',
+          user_id: userId,
+          current_seq: currentSeq,
+          online_users: onlineUsers,
+        }));
+
+        // Broadcast join to everyone else
+        broadcastPresence(activeSockets, {
+          type: 'presence',
+          action: 'joined',
+          user_id: userId,
+          online_users: getConnectedUsers(),
+        }, socketId);
+
       }).catch(() => {
         socket.close(4401, 'Invalid access_token');
       });

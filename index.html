@@ -2616,6 +2616,65 @@ function idbGet(store, key) {
   });
 }
 
+/** Push a locally created event to the server via HTTP API.
+ *  Only works when connected to a backend (not static hosting). */
+async function pushEventToServer(event) {
+  if (isStaticHosting() || !matrixToken) return;
+  const op = (event.op || '').toLowerCase();
+  if (!op) return;
+  try {
+    const res = await fetch(`/ops/${op}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${matrixToken}`,
+      },
+      body: JSON.stringify({
+        target: event.target,
+        operand: event.operand,
+        ts: event.ts,
+        client_event_id: event.client_event_id,
+      }),
+    });
+    if (!res.ok) {
+      console.warn('[sync] push to server failed:', res.status, await res.text());
+    }
+  } catch (e) {
+    console.warn('[sync] push to server error:', e);
+  }
+}
+
+/** Merge an event received from the server into local IndexedDB.
+ *  Skips if an event with the same client_event_id already exists. */
+async function mergeServerEvent(event) {
+  if (!db) return;
+  try {
+    // Check if we already have this event (by client_event_id or seq)
+    const tx = db.transaction('log', 'readonly');
+    const store = tx.objectStore('log');
+    if (event.client_event_id) {
+      const existing = await idbGet(store, event.client_event_id);
+      if (existing) return; // Already have it
+    }
+    // Check by seq
+    const idx = store.index('seq');
+    const bySeq = await new Promise(resolve => {
+      const req = idx.getAll(event.seq);
+      req.onsuccess = () => resolve(req.result || []);
+      req.onerror = () => resolve([]);
+    });
+    if (bySeq.length > 0) return; // Already have an event at this seq
+
+    // Write the server event into local store
+    await appendEvent({
+      ...event,
+      _from_server: true,
+    });
+  } catch (e) {
+    console.warn('[sync] mergeServerEvent error:', e);
+  }
+}
+
 async function loadAllEvents() {
   if (!db) return [];
   const tx = db.transaction('log', 'readonly');
@@ -2815,12 +2874,20 @@ function connectSync() {
       if (msg.type === 'connected') {
         onlineUsers = msg.online_users || [];
         renderOnlineUsers();
+        // Request full sync from server to get all events
+        syncSocket.send(JSON.stringify({ type: 'sync', since: 0 }));
       } else if (msg.type === 'presence') {
         onlineUsers = msg.online_users || [];
         renderOnlineUsers();
       } else if (msg.type === 'who_response') {
         onlineUsers = msg.online_users || [];
         renderOnlineUsers();
+      } else if (msg.type === 'event' && msg.event) {
+        // Received a synced event from the server — merge into local store
+        mergeServerEvent(msg.event);
+      } else if (msg.type === 'sync_complete') {
+        console.log('[sync] sync complete through seq', msg.through_seq);
+        loadFromIndexedDB();
       }
     } catch { /* ignore non-JSON */ }
   };
@@ -3496,6 +3563,7 @@ async function submitEvent() {
         const event = { op, target: source, operand: { added: dests }, agent };
         if (!logging) event.meta = { intended_op: selectedOp };
         const ev = await appendEvent(event);
+        pushEventToServer(ev);
         seqs.push(ev.seq);
       }
 
@@ -3515,6 +3583,7 @@ async function submitEvent() {
       const event = { op, target, operand, agent };
       if (!logging) event.meta = { intended_op: selectedOp };
       const ev = await appendEvent(event);
+      pushEventToServer(ev);
 
       resultEl.className = 'compose-result success';
       resultEl.textContent = `Event saved — seq ${ev.seq}`;
@@ -4152,7 +4221,8 @@ function renderSavedSegments() {
 
 // Helper: append event to LOG and re-fold
 async function appendAndFold(event) {
-  await appendEvent(event);
+  const ev = await appendEvent(event);
+  pushEventToServer(ev);
   await loadFromIndexedDB();
 }
 
