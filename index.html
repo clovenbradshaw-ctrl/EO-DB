@@ -2182,6 +2182,7 @@ body {
       <div style="display:flex;flex-direction:column;flex:1;overflow:hidden;">
         <div class="horizon-toolbar">
           <input class="horizon-search" placeholder="Filter records..." id="horizonSearch" oninput="filterHorizon()" style="max-width:300px;">
+          <button class="filter-btn" id="shareBtnToolbar" onclick="openShareDialog()" style="background:var(--accent);color:#fff;border-color:var(--accent);font-size:10px;padding:4px 12px;">SHARE</button>
           <div class="filter-panel-wrap">
             <button class="filter-btn" id="filterPanelBtn" onclick="toggleFilterPanel()">FILTER</button>
             <div class="filter-panel" id="filterPanel">
@@ -2623,6 +2624,31 @@ INS,app.tbl.rec1,"{""name"":""Alice""}"</pre>
             <div class="settings-session-field"><span class="settings-session-key">Last Snapshot Seq</span><span class="settings-session-val" id="settingsMediaSnapshotSeq">—</span></div>
             <div class="settings-session-field"><span class="settings-session-key">Storage Tier</span><span class="settings-session-val" id="settingsMediaTier">—</span></div>
           </div>
+          <div style="margin-top:12px;display:flex;align-items:center;gap:12px;">
+            <button class="settings-add-btn" id="matrixSyncBtn" onclick="syncToMatrix()" style="background:var(--accent);color:#fff;border-color:var(--accent);">Sync to Matrix</button>
+            <span id="matrixSyncStatus" style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-dim);"></span>
+          </div>
+        </div>
+
+        <!-- Hydration Sources -->
+        <div class="settings-section">
+          <div class="settings-section-title">Hydration Sources</div>
+          <div id="hydrationSourcesList" style="margin-bottom:8px;"></div>
+          <div style="display:flex;flex-direction:column;gap:6px;">
+            <input class="settings-add-input" id="hydSourceLabel" placeholder="Label (e.g. Cloudflare R2)" autocomplete="off">
+            <input class="settings-add-input" id="hydSourceEndpoint" placeholder="Endpoint URL (e.g. https://bucket.r2.dev/snapshots/)" autocomplete="off">
+            <input class="settings-add-input" id="hydSourceApiKey" type="password" placeholder="API key or auth header (optional)" autocomplete="off">
+            <div style="display:flex;gap:8px;">
+              <button class="settings-add-btn" onclick="addExternalSource()">Add Source</button>
+            </div>
+          </div>
+          <div id="hydSourceError" style="color:var(--danger);font-family:'JetBrains Mono',monospace;font-size:10px;margin-top:4px;"></div>
+        </div>
+
+        <!-- Shared Spaces -->
+        <div class="settings-section">
+          <div class="settings-section-title">Shared Spaces</div>
+          <div id="sharedSpacesList" style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-dim);">No shares yet</div>
         </div>
 
         <!-- Airtable Integration -->
@@ -2698,6 +2724,92 @@ INS,app.tbl.rec1,"{""name"":""Alice""}"</pre>
     <button class="login-btn" style="background:var(--danger);" id="deleteConfirmBtn" onclick="executeDeleteAll()">Erase Database</button>
     <div class="login-error" id="deleteError"></div>
     <div class="login-skip" onclick="hideDeleteModal()">Cancel</div>
+  </div>
+</div>
+
+<!-- Share Dialog -->
+<div class="login-overlay hidden" id="shareOverlay">
+  <div class="login-card" style="max-width:480px;">
+    <div class="login-title">Share Data</div>
+    <div class="login-subtitle" id="shareScope">Scope: all targets</div>
+
+    <div class="login-field">
+      <label>What to share</label>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;">
+          <input type="radio" name="shareType" value="table" checked onchange="updateShareDialog()"> Entire table
+        </label>
+        <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;">
+          <input type="radio" name="shareType" value="filtered" onchange="updateShareDialog()"> With current filters
+        </label>
+        <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;">
+          <input type="radio" name="shareType" value="records" onchange="updateShareDialog()"> Selected records
+        </label>
+      </div>
+    </div>
+
+    <div class="login-field">
+      <label>Access</label>
+      <div style="display:flex;gap:8px;">
+        <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;">
+          <input type="radio" name="shareMode" value="private" checked> Private (invite only)
+        </label>
+        <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;">
+          <input type="radio" name="shareMode" value="public"> Public (anyone with link)
+        </label>
+      </div>
+    </div>
+
+    <div class="login-field">
+      <label>Permission</label>
+      <div style="display:flex;gap:8px;">
+        <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;">
+          <input type="radio" name="sharePerm" value="view" checked> Can view
+        </label>
+        <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;">
+          <input type="radio" name="sharePerm" value="edit"> Can import
+        </label>
+      </div>
+    </div>
+
+    <div id="sharePublicWarning" style="display:none;background:rgba(250,204,21,0.1);border:1px solid rgba(250,204,21,0.3);border-radius:6px;padding:8px 12px;font-size:10px;color:var(--text-dim);margin-bottom:12px;">
+      Anyone with this link can access the data. Public shares cannot be revoked.
+    </div>
+
+    <div id="sharePreview" style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-dim);margin-bottom:12px;"></div>
+
+    <button class="login-btn" id="shareCreateBtn" onclick="handleCreateShare()">Create Share Link</button>
+
+    <div id="shareResult" style="display:none;margin-top:12px;">
+      <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--accent);margin-bottom:6px;">Share link created:</div>
+      <div style="display:flex;gap:6px;align-items:center;">
+        <input id="shareLinkInput" readonly style="flex:1;font-family:'JetBrains Mono',monospace;font-size:10px;padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);">
+        <button class="settings-add-btn" onclick="copyShareLink()" style="font-size:10px;padding:4px 10px;">Copy</button>
+      </div>
+    </div>
+
+    <div class="login-error" id="shareError"></div>
+
+    <div id="shareExistingList" style="margin-top:16px;border-top:1px solid var(--border);padding-top:12px;"></div>
+
+    <div class="login-skip" onclick="closeShareDialog()">Close</div>
+  </div>
+</div>
+
+<!-- Share Accept Overlay -->
+<div class="login-overlay hidden" id="shareAcceptOverlay">
+  <div style="width:100%;max-width:900px;max-height:90vh;display:flex;flex-direction:column;background:var(--bg);border-radius:12px;overflow:hidden;border:1px solid var(--border);">
+    <div id="shareAcceptHeader" style="display:flex;align-items:center;gap:12px;padding:12px 20px;border-bottom:1px solid var(--border);background:var(--bg2);flex-shrink:0;">
+      <div style="flex:1;font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);" id="shareAcceptInfo">Loading shared data...</div>
+      <button class="settings-add-btn" id="shareImportBtn" onclick="handleImportShare()" style="display:none;background:var(--accent);color:#fff;border-color:var(--accent);font-size:10px;padding:4px 12px;">Import to my database</button>
+      <button class="settings-add-btn" onclick="closeShareAcceptOverlay()" style="font-size:10px;padding:4px 10px;">Close</button>
+    </div>
+    <div id="shareAcceptFilterBadge" style="display:none;padding:6px 20px;background:rgba(250,204,21,0.08);border-bottom:1px solid var(--border);font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-dim);"></div>
+    <div id="shareAcceptBody" style="flex:1;overflow:auto;padding:0;">
+      <div style="padding:40px;text-align:center;color:var(--text-faint);font-family:'JetBrains Mono',monospace;font-size:11px;">
+        Joining space and reading data...
+      </div>
+    </div>
   </div>
 </div>
 
@@ -3379,6 +3491,1121 @@ function disconnectSync() {
   updateOnlineDot(false);
   renderOnlineUsers();
   document.getElementById('onlineIndicator').style.display = 'none';
+}
+
+const EO_EVENT_TYPE = 'com.eo-db.event';
+const EO_SNAPSHOT_TYPE = 'com.eo-db.snapshot';
+
+/**
+ * Read events from IndexedDB with seq > afterSeq, ordered by seq.
+ */
+function loadEventsSince(afterSeq) {
+  return new Promise((resolve) => {
+    if (!db) { resolve([]); return; }
+    const tx = db.transaction('log', 'readonly');
+    const idx = tx.objectStore('log').index('seq');
+    const range = IDBKeyRange.lowerBound(afterSeq, true);
+    const req = idx.getAll(range);
+    req.onsuccess = () => resolve(req.result || []);
+    req.onerror = () => resolve([]);
+  });
+}
+
+/**
+ * Compress a string into a gzipped binary blob.
+ */
+async function gzipCompress(str) {
+  const stream = new Blob([str]).stream().pipeThrough(new CompressionStream('gzip'));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+/**
+ * Decompress a gzipped binary blob back to string.
+ */
+async function gzipDecompress(data) {
+  const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream('gzip'));
+  return new Response(stream).text();
+}
+
+/* ── Media Encryption (AES-256-GCM) ─────────────────────────────────────── */
+
+const PBKDF2_ITERATIONS = 100000;
+const AES_KEY_LENGTH = 256;
+const IV_LENGTH = 12; // 96-bit IV for AES-GCM
+
+/**
+ * Derive an AES-256-GCM key from the Matrix session via PBKDF2.
+ * Uses accessToken as key material, userId as salt.
+ * Same user always produces the same key (any device can decrypt).
+ */
+async function deriveMediaKey() {
+  if (!matrixToken || !matrixUserId) throw new Error('Not signed in');
+  const enc = new TextEncoder();
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw', enc.encode(matrixToken), 'PBKDF2', false, ['deriveKey']
+  );
+  return crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt: enc.encode(matrixUserId), iterations: PBKDF2_ITERATIONS, hash: 'SHA-256' },
+    keyMaterial,
+    { name: 'AES-GCM', length: AES_KEY_LENGTH },
+    false,
+    ['encrypt', 'decrypt']
+  );
+}
+
+/**
+ * Encrypt a Uint8Array with AES-GCM.
+ * Returns [12-byte IV | ciphertext].
+ */
+async function encryptBinary(key, data) {
+  const iv = crypto.getRandomValues(new Uint8Array(IV_LENGTH));
+  const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, data);
+  const result = new Uint8Array(IV_LENGTH + ciphertext.byteLength);
+  result.set(iv, 0);
+  result.set(new Uint8Array(ciphertext), IV_LENGTH);
+  return result;
+}
+
+/**
+ * Decrypt an AES-GCM encrypted buffer (IV prepended).
+ */
+async function decryptBinary(key, data) {
+  const iv = data.slice(0, IV_LENGTH);
+  const ciphertext = data.slice(IV_LENGTH);
+  const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ciphertext);
+  return new Uint8Array(plaintext);
+}
+
+/**
+ * Ensure we have a Matrix room ID for syncing.
+ * Resolves alias or creates an E2EE room on first use.
+ */
+async function ensureSyncRoom() {
+  const cached = localStorage.getItem('eo_matrix_room_id');
+  if (cached) return cached;
+
+  const localpart = matrixUserId.split(':')[0].replace('@', '');
+  const domain = matrixUserId.split(':').slice(1).join(':');
+  const alias = `#eo-db-${localpart}:${domain}`;
+
+  // Try resolving existing alias
+  try {
+    const res = await fetch(
+      `${matrixHomeserver}/_matrix/client/v3/directory/room/${encodeURIComponent(alias)}`,
+      { headers: { 'Authorization': `Bearer ${matrixToken}` } }
+    );
+    if (res.ok) {
+      const { room_id } = await res.json();
+      localStorage.setItem('eo_matrix_room_id', room_id);
+      return room_id;
+    }
+  } catch { /* doesn't exist yet */ }
+
+  // Create new E2EE room
+  const res = await fetch(`${matrixHomeserver}/_matrix/client/v3/createRoom`, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${matrixToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: 'EO-DB Sync',
+      topic: 'Event log sync room for EO///DB',
+      room_alias_name: `eo-db-${localpart}`,
+      visibility: 'private',
+      preset: 'private_chat',
+      initial_state: [{
+        type: 'm.room.encryption',
+        state_key: '',
+        content: { algorithm: 'm.megolm.v1.aes-sha2' },
+      }],
+    }),
+  });
+  if (!res.ok) throw new Error(`Failed to create sync room: ${await res.text()}`);
+  const { room_id } = await res.json();
+  localStorage.setItem('eo_matrix_room_id', room_id);
+  return room_id;
+}
+
+/**
+ * Upload binary blob to Matrix media store, return mxc:// URI.
+ */
+async function uploadToMedia(binary, filename) {
+  const res = await fetch(
+    `${matrixHomeserver}/_matrix/media/v3/upload?filename=${encodeURIComponent(filename)}`,
+    {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${matrixToken}`, 'Content-Type': 'application/octet-stream' },
+      body: binary,
+    }
+  );
+  if (!res.ok) throw new Error(`Media upload failed (${res.status}): ${await res.text()}`);
+  return (await res.json()).content_uri;
+}
+
+/**
+ * Send a snapshot pointer event into the room timeline.
+ * This records the mxc URI so the room log becomes an index of all snapshots.
+ */
+async function sendSnapshotEvent(roomId, snapshot) {
+  const txnId = `snap-${snapshot.from_seq}-${snapshot.to_seq}-${Date.now()}`;
+  const url = `${matrixHomeserver}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/${encodeURIComponent(EO_SNAPSHOT_TYPE)}/${encodeURIComponent(txnId)}`;
+  const res = await fetch(url, {
+    method: 'PUT',
+    headers: { 'Authorization': `Bearer ${matrixToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(snapshot),
+  });
+  if (!res.ok) throw new Error(`Snapshot event failed (${res.status}): ${await res.text()}`);
+  return (await res.json()).event_id;
+}
+
+async function syncToMatrix() {
+  const btn = document.getElementById('matrixSyncBtn');
+  const statusEl = document.getElementById('matrixSyncStatus');
+
+  if (!matrixToken || !matrixUserId) {
+    if (statusEl) { statusEl.textContent = 'Not signed in'; statusEl.style.color = 'var(--danger)'; }
+    return;
+  }
+
+  const currentSeq = nextSeq - 1;
+  const lastSyncSeq = parseInt(localStorage.getItem('eo_matrix_sync_seq') || '0', 10);
+
+  if (currentSeq <= lastSyncSeq) {
+    if (statusEl) { statusEl.textContent = 'Up to date'; statusEl.style.color = 'var(--accent)'; }
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = 'Syncing...';
+  if (statusEl) { statusEl.textContent = ''; statusEl.style.color = 'var(--text-dim)'; }
+
+  try {
+    // 1. Get room
+    const roomId = await ensureSyncRoom();
+    if (statusEl) statusEl.textContent = 'Reading events...';
+
+    // 2. Read only new events since last sync
+    const newEvents = await loadEventsSince(lastSyncSeq);
+    if (newEvents.length === 0) {
+      if (statusEl) { statusEl.textContent = 'Up to date'; statusEl.style.color = 'var(--accent)'; }
+      btn.disabled = false;
+      btn.textContent = 'Sync to Matrix';
+      return;
+    }
+
+    // 3. Build delta and compress to binary
+    const prevMxc = localStorage.getItem('eo_matrix_snapshot_mxc') || null;
+    const delta = {
+      version: 1,
+      type: 'delta',
+      from_seq: lastSyncSeq,
+      to_seq: currentSeq,
+      prev_mxc: prevMxc,
+      created_by: matrixUserId,
+      ts: new Date().toISOString(),
+      event_count: newEvents.length,
+      events: newEvents,
+    };
+
+    if (statusEl) statusEl.textContent = 'Compressing...';
+    const compressed = await gzipCompress(JSON.stringify(delta));
+
+    // 3b. Encrypt the compressed binary
+    if (statusEl) statusEl.textContent = 'Encrypting...';
+    const mediaKey = await deriveMediaKey();
+    const encrypted = await encryptBinary(mediaKey, compressed);
+
+    // 4. Upload encrypted binary to Matrix media
+    if (statusEl) statusEl.textContent = 'Uploading snapshot...';
+    const filename = `eo-delta-${lastSyncSeq}-${currentSeq}.bin`;
+    const mxcUri = await uploadToMedia(encrypted, filename);
+
+    // 4b. Upload to configured external storage endpoints
+    const externalUrls = [];
+    const hydrationSources = loadHydrationSources();
+    for (const source of hydrationSources) {
+      if (source.type === 'external' && source.endpoint) {
+        try {
+          const url = await uploadToExternalStorage(encrypted, source.endpoint, filename, source.apiKey);
+          externalUrls.push({ id: source.id, url });
+        } catch (e) {
+          console.warn(`External upload to ${source.label} failed:`, e.message);
+        }
+      }
+    }
+
+    // 5. Record the mxc URI in the room timeline as a snapshot pointer
+    if (statusEl) statusEl.textContent = 'Recording in room...';
+    await sendSnapshotEvent(roomId, {
+      mxc: mxcUri,
+      from_seq: lastSyncSeq,
+      to_seq: currentSeq,
+      prev_mxc: prevMxc,
+      event_count: newEvents.length,
+      size_bytes: encrypted.byteLength,
+      encrypted: true,
+      external_urls: externalUrls.length > 0 ? externalUrls : undefined,
+      ts: delta.ts,
+    });
+
+    // 6. Update local tracking
+    localStorage.setItem('eo_matrix_sync_seq', String(currentSeq));
+    localStorage.setItem('eo_matrix_snapshot_mxc', mxcUri);
+
+    const mediaSeqEl = document.getElementById('settingsMediaSnapshotSeq');
+    if (mediaSeqEl) mediaSeqEl.textContent = String(currentSeq);
+
+    const sizeKB = (encrypted.byteLength / 1024).toFixed(1);
+    if (statusEl) {
+      statusEl.textContent = `${newEvents.length} events (${sizeKB} KB encrypted) → seq ${currentSeq}`;
+      statusEl.style.color = 'var(--accent)';
+    }
+  } catch (err) {
+    console.error('Matrix sync failed:', err);
+    if (statusEl) {
+      statusEl.textContent = err.message || 'Sync failed';
+      statusEl.style.color = 'var(--danger)';
+    }
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Sync to Matrix';
+  }
+}
+
+/* ── Hydration Sources ───────────────────────────────────────────────────── */
+
+function loadHydrationSources() {
+  try { return JSON.parse(localStorage.getItem('eo_hydration_sources') || '[]'); }
+  catch { return []; }
+}
+
+function saveHydrationSources(sources) {
+  localStorage.setItem('eo_hydration_sources', JSON.stringify(sources));
+}
+
+function addExternalSource() {
+  const label = document.getElementById('hydSourceLabel').value.trim();
+  const endpoint = document.getElementById('hydSourceEndpoint').value.trim();
+  const apiKey = document.getElementById('hydSourceApiKey').value.trim();
+  const errEl = document.getElementById('hydSourceError');
+
+  if (!label || !endpoint) {
+    errEl.textContent = 'Label and endpoint URL are required';
+    return;
+  }
+
+  const sources = loadHydrationSources();
+  sources.push({
+    id: 'ext-' + Date.now(),
+    type: 'external',
+    label,
+    endpoint: endpoint.replace(/\/+$/, ''),
+    apiKey: apiKey || undefined,
+    preferred: false,
+  });
+  saveHydrationSources(sources);
+
+  document.getElementById('hydSourceLabel').value = '';
+  document.getElementById('hydSourceEndpoint').value = '';
+  document.getElementById('hydSourceApiKey').value = '';
+  errEl.textContent = '';
+  renderHydrationSourcesUI();
+}
+
+function removeExternalSource(id) {
+  const sources = loadHydrationSources().filter(s => s.id !== id);
+  saveHydrationSources(sources);
+  renderHydrationSourcesUI();
+}
+
+function setPreferredSource(id) {
+  const sources = loadHydrationSources();
+  for (const s of sources) s.preferred = (s.id === id);
+  saveHydrationSources(sources);
+  renderHydrationSourcesUI();
+}
+
+function renderHydrationSourcesUI() {
+  const container = document.getElementById('hydrationSourcesList');
+  if (!container) return;
+
+  const sources = loadHydrationSources();
+  const matrixSyncSeq = localStorage.getItem('eo_matrix_sync_seq') || '0';
+  const anyPreferred = sources.some(s => s.preferred);
+
+  let html = `<div class="settings-session-field" style="display:flex;align-items:center;gap:8px;">
+    <input type="radio" name="hydSource" ${!anyPreferred ? 'checked' : ''} onchange="setPreferredSource('matrix')" style="margin:0;">
+    <span class="settings-session-key" style="flex:1;">Matrix Media</span>
+    <span class="settings-session-val">seq ${matrixSyncSeq}</span>
+    <button class="settings-add-btn" onclick="hydrateFromSource({type:'matrix'})" style="font-size:9px;padding:2px 8px;">Restore</button>
+  </div>`;
+
+  for (const s of sources) {
+    html += `<div class="settings-session-field" style="display:flex;align-items:center;gap:8px;">
+      <input type="radio" name="hydSource" ${s.preferred ? 'checked' : ''} onchange="setPreferredSource('${s.id}')" style="margin:0;">
+      <span class="settings-session-key" style="flex:1;">${escapeHtml(s.label)}</span>
+      <span class="settings-session-val" style="font-size:9px;max-width:120px;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(s.endpoint)}</span>
+      <button class="settings-add-btn" onclick="hydrateFromSource(loadHydrationSources().find(x=>x.id==='${s.id}'))" style="font-size:9px;padding:2px 8px;">Restore</button>
+      <button class="settings-delete-btn" onclick="removeExternalSource('${s.id}')" style="font-size:9px;padding:2px 8px;">×</button>
+    </div>`;
+  }
+
+  container.innerHTML = html;
+}
+
+/**
+ * Upload encrypted binary to an external storage endpoint.
+ */
+async function uploadToExternalStorage(encrypted, endpoint, filename, apiKey) {
+  const url = `${endpoint}/${encodeURIComponent(filename)}`;
+  const headers = { 'Content-Type': 'application/octet-stream' };
+  if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+
+  const res = await fetch(url, { method: 'PUT', headers, body: encrypted });
+  if (!res.ok) throw new Error(`External upload failed (${res.status}): ${await res.text()}`);
+  return url;
+}
+
+/**
+ * Restore database from a hydration source (Matrix media or external).
+ * Downloads encrypted snapshot chain, decrypts, decompresses, replays events.
+ */
+async function hydrateFromSource(source) {
+  if (!matrixToken || !matrixUserId) {
+    alert('Sign in to Matrix first');
+    return;
+  }
+
+  const statusEl = document.getElementById('matrixSyncStatus');
+  try {
+    if (statusEl) { statusEl.textContent = 'Restoring...'; statusEl.style.color = 'var(--text-dim)'; }
+
+    const mediaKey = await deriveMediaKey();
+
+    // Find latest snapshot pointer from the sync room
+    const roomId = localStorage.getItem('eo_matrix_room_id');
+    if (!roomId) throw new Error('No sync room configured — sync at least once first');
+
+    // Paginate room to find snapshot events
+    if (statusEl) statusEl.textContent = 'Finding snapshots...';
+    const stateRes = await fetch(
+      `${matrixHomeserver}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/messages?dir=b&limit=100`,
+      { headers: { 'Authorization': `Bearer ${matrixToken}` } }
+    );
+    if (!stateRes.ok) throw new Error('Failed to read room messages');
+    const messages = await stateRes.json();
+
+    // Find snapshot events and build chain
+    const snapshots = (messages.chunk || [])
+      .filter(e => e.type === EO_SNAPSHOT_TYPE)
+      .map(e => e.content)
+      .sort((a, b) => b.to_seq - a.to_seq);
+
+    if (snapshots.length === 0) throw new Error('No snapshots found in room');
+
+    // Walk chain from latest, downloading and replaying each delta
+    let imported = 0;
+    const localSeq = nextSeq - 1;
+
+    for (const snap of snapshots) {
+      if (snap.to_seq <= localSeq) break; // already have these events
+
+      if (statusEl) statusEl.textContent = `Downloading seq ${snap.from_seq}-${snap.to_seq}...`;
+
+      // Choose download URL based on source type
+      let downloadUrl;
+      if (source.type === 'external' && source.endpoint && snap.external_urls) {
+        const ext = snap.external_urls.find(u => u.id === source.id);
+        downloadUrl = ext ? ext.url : null;
+      }
+      if (!downloadUrl) {
+        // Fallback to Matrix media
+        const mxcParts = snap.mxc.replace('mxc://', '').split('/');
+        downloadUrl = `${matrixHomeserver}/_matrix/media/v3/download/${mxcParts[0]}/${mxcParts[1]}`;
+      }
+
+      const dlRes = await fetch(downloadUrl, {
+        headers: source.type === 'external' && source.apiKey
+          ? { 'Authorization': `Bearer ${source.apiKey}` }
+          : { 'Authorization': `Bearer ${matrixToken}` },
+      });
+      if (!dlRes.ok) throw new Error(`Download failed (${dlRes.status})`);
+
+      const encryptedData = new Uint8Array(await dlRes.arrayBuffer());
+
+      // Decrypt → decompress → parse
+      if (statusEl) statusEl.textContent = `Decrypting seq ${snap.from_seq}-${snap.to_seq}...`;
+      let jsonStr;
+      if (snap.encrypted) {
+        const compressed = await decryptBinary(mediaKey, encryptedData);
+        jsonStr = await gzipDecompress(compressed);
+      } else {
+        // Legacy unencrypted snapshots
+        jsonStr = await gzipDecompress(encryptedData);
+      }
+
+      const delta = JSON.parse(jsonStr);
+      if (!delta.events || !Array.isArray(delta.events)) continue;
+
+      if (statusEl) statusEl.textContent = `Importing ${delta.events.length} events (seq ${snap.from_seq}-${snap.to_seq})...`;
+
+      for (const event of delta.events) {
+        if (event.seq <= localSeq) continue; // skip events we already have
+        await processEvent(event);
+        imported++;
+      }
+    }
+
+    if (statusEl) {
+      statusEl.textContent = imported > 0
+        ? `Restored ${imported} events`
+        : 'Already up to date';
+      statusEl.style.color = 'var(--accent)';
+    }
+
+    if (imported > 0) {
+      renderHolonNav();
+      renderHorizon();
+    }
+  } catch (err) {
+    console.error('Hydration failed:', err);
+    if (statusEl) { statusEl.textContent = err.message || 'Restore failed'; statusEl.style.color = 'var(--danger)'; }
+  }
+}
+
+/* ── Share Data Tool ─────────────────────────────────────────────────────── */
+
+const SHARE_EVENT_TYPE = 'com.eo-db.share';
+const SHARE_CHUNK_TYPE = 'com.eo-db.share.chunk';
+const CHUNK_TARGET_SIZE = 50000; // ~50KB per chunk
+
+/**
+ * SHA-256 hash of a string → hex.
+ */
+async function sha256Hash(data) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(data));
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+/**
+ * Group EoState records into chunks of ~CHUNK_TARGET_SIZE bytes each.
+ * Returns array of { records, json, hash }.
+ */
+async function chunkRecords(states) {
+  const chunks = [];
+  let current = [];
+  let currentSize = 0;
+
+  for (const state of states) {
+    const json = JSON.stringify(state);
+    if (currentSize + json.length > CHUNK_TARGET_SIZE && current.length > 0) {
+      const chunkJson = JSON.stringify(current);
+      chunks.push({ records: current, json: chunkJson, hash: await sha256Hash(chunkJson) });
+      current = [];
+      currentSize = 0;
+    }
+    current.push(state);
+    currentSize += json.length;
+  }
+
+  if (current.length > 0) {
+    const chunkJson = JSON.stringify(current);
+    chunks.push({ records: current, json: chunkJson, hash: await sha256Hash(chunkJson) });
+  }
+
+  return chunks;
+}
+
+/* ── Space Management ───────────────────────────────────────── */
+
+/**
+ * Create a Matrix room to serve as a share space.
+ */
+async function createShareSpace(label, isPublic) {
+  const res = await fetch(`${matrixHomeserver}/_matrix/client/v3/createRoom`, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${matrixToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: `EO Share: ${label}`,
+      topic: `Shared data — ${label}`,
+      visibility: isPublic ? 'public' : 'private',
+      preset: isPublic ? 'public_chat' : 'private_chat',
+      initial_state: [{
+        type: 'm.room.encryption',
+        state_key: '',
+        content: { algorithm: 'm.megolm.v1.aes-sha2' },
+      }],
+    }),
+  });
+  if (!res.ok) throw new Error(`Failed to create share space: ${await res.text()}`);
+  return (await res.json()).room_id;
+}
+
+/**
+ * Invite a user to a share space.
+ */
+async function inviteToSpace(spaceId, userId) {
+  const res = await fetch(`${matrixHomeserver}/_matrix/client/v3/rooms/${encodeURIComponent(spaceId)}/invite`, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${matrixToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ user_id: userId }),
+  });
+  if (!res.ok) throw new Error(`Invite failed: ${await res.text()}`);
+}
+
+/**
+ * Join a share space.
+ */
+async function joinSpace(spaceIdOrAlias) {
+  const res = await fetch(`${matrixHomeserver}/_matrix/client/v3/join/${encodeURIComponent(spaceIdOrAlias)}`, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${matrixToken}`, 'Content-Type': 'application/json' },
+    body: '{}',
+  });
+  if (!res.ok) throw new Error(`Join failed: ${await res.text()}`);
+  return (await res.json()).room_id;
+}
+
+/**
+ * Post a state event to a share space.
+ */
+async function postSpaceState(spaceId, stateType, stateKey, content) {
+  const url = `${matrixHomeserver}/_matrix/client/v3/rooms/${encodeURIComponent(spaceId)}/state/${encodeURIComponent(stateType)}/${encodeURIComponent(stateKey)}`;
+  const res = await fetch(url, {
+    method: 'PUT',
+    headers: { 'Authorization': `Bearer ${matrixToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(content),
+  });
+  if (!res.ok) throw new Error(`State event failed: ${await res.text()}`);
+  return (await res.json()).event_id;
+}
+
+/**
+ * Read a state event from a share space.
+ */
+async function readSpaceState(spaceId, stateType, stateKey) {
+  const url = `${matrixHomeserver}/_matrix/client/v3/rooms/${encodeURIComponent(spaceId)}/state/${encodeURIComponent(stateType)}/${encodeURIComponent(stateKey || '')}`;
+  const res = await fetch(url, {
+    headers: { 'Authorization': `Bearer ${matrixToken}` },
+  });
+  if (!res.ok) return null;
+  return res.json();
+}
+
+/**
+ * Read all state events from a space, optionally filtered by type.
+ */
+async function readAllSpaceState(spaceId) {
+  const url = `${matrixHomeserver}/_matrix/client/v3/rooms/${encodeURIComponent(spaceId)}/state`;
+  const res = await fetch(url, {
+    headers: { 'Authorization': `Bearer ${matrixToken}` },
+  });
+  if (!res.ok) throw new Error(`Failed to read space state: ${await res.text()}`);
+  return res.json();
+}
+
+/* ── Share Lifecycle ─────────────────────────────────────────── */
+
+/**
+ * Collect EoState records matching the share scope.
+ */
+function collectShareData(scope, useFilters, selectedTargets) {
+  const state = foldState(replayIndex);
+  let entries = Object.values(state).filter(s => !s.target.startsWith('_segments.'));
+
+  if (selectedTargets && selectedTargets.length > 0) {
+    // Individual records mode
+    const targetSet = new Set(selectedTargets);
+    entries = entries.filter(s => targetSet.has(s.target));
+  } else if (scope) {
+    // Table/prefix mode
+    const scopePrefix = scope + '.';
+    const scopeDepth = scope.split('.').length;
+    entries = entries.filter(s => s.target.startsWith(scopePrefix) && s.target.split('.').length === scopeDepth + 1);
+  }
+
+  // Apply active filter rules if requested
+  if (useFilters && filterRules.length > 0) {
+    entries = entries.filter(entry => {
+      const results = filterRules.map(r => evalFilterRule(entry, r));
+      return filterConjunction === 'and' ? results.every(Boolean) : results.some(Boolean);
+    });
+  }
+
+  return entries;
+}
+
+/**
+ * Create a share: collect data → chunk → create space → post state events.
+ */
+async function createShare({ scope, mode, permissions, useFilters, selectedTargets }) {
+  if (!matrixToken || !matrixUserId) throw new Error('Not signed in');
+
+  const states = collectShareData(scope, useFilters, selectedTargets);
+  if (states.length === 0) throw new Error('No records to share');
+
+  const chunks = await chunkRecords(states);
+  const isPublic = mode === 'public';
+  const label = scope || `${states.length} records`;
+
+  // Create the share space
+  const spaceId = await createShareSpace(label, isPublic);
+
+  // Post each chunk as a state event (state_key = content hash)
+  for (const chunk of chunks) {
+    await postSpaceState(spaceId, SHARE_CHUNK_TYPE, chunk.hash, {
+      records: chunk.records,
+    });
+  }
+
+  // Post the manifest
+  const manifest = {
+    scope: scope || null,
+    share_type: selectedTargets ? 'records' : useFilters ? 'filtered' : 'table',
+    permissions,
+    mode,
+    chunk_hashes: chunks.map(c => c.hash),
+    record_count: states.length,
+    created_by: matrixUserId,
+    created_at: new Date().toISOString(),
+    filter_rules: useFilters ? { rules: filterRules, conjunction: filterConjunction } : undefined,
+  };
+  await postSpaceState(spaceId, SHARE_EVENT_TYPE, '', manifest);
+
+  // Build the share link
+  const link = `${window.location.origin}${window.location.pathname}#/share/${encodeURIComponent(spaceId)}`;
+
+  // Save to local tracking
+  saveShareRecord({
+    share_id: spaceId,
+    mode,
+    scope: scope || '(selected records)',
+    record_count: states.length,
+    permissions,
+    created_at: manifest.created_at,
+    link,
+  });
+
+  return { link, shareId: spaceId };
+}
+
+/**
+ * Accept a share: join space → read manifest → read chunks → reassemble.
+ */
+async function acceptShare(spaceIdOrAlias) {
+  if (!matrixToken || !matrixUserId) throw new Error('Sign in to Matrix first');
+
+  const spaceId = await joinSpace(spaceIdOrAlias);
+
+  // Read manifest
+  const manifest = await readSpaceState(spaceId, SHARE_EVENT_TYPE, '');
+  if (!manifest) throw new Error('No share manifest found in this space');
+
+  // Read all chunk state events
+  const allState = await readAllSpaceState(spaceId);
+  const chunkEvents = allState.filter(e => e.type === SHARE_CHUNK_TYPE);
+  const chunkByKey = {};
+  for (const e of chunkEvents) {
+    chunkByKey[e.state_key] = e.content;
+  }
+
+  // Reassemble records in order
+  const states = [];
+  for (const hash of manifest.chunk_hashes) {
+    const chunk = chunkByKey[hash];
+    if (!chunk || !chunk.records) throw new Error(`Missing chunk: ${hash.slice(0, 8)}...`);
+    states.push(...chunk.records);
+  }
+
+  return { metadata: manifest, states };
+}
+
+/**
+ * Import shared records into local store as INS events.
+ */
+async function importSharedData(states) {
+  let count = 0;
+  for (const state of states) {
+    await processEvent({
+      op: 'INS',
+      target: state.target,
+      operand: state.value,
+      agent: matrixUserId || 'import',
+      ts: new Date().toISOString(),
+      acquired_ts: new Date().toISOString(),
+      client_event_id: `share-import-${await sha256Hash(state.target + JSON.stringify(state.value))}`,
+    });
+    count++;
+  }
+  return count;
+}
+
+/**
+ * Revoke a share by kicking all non-self members.
+ */
+async function revokeShare(spaceId) {
+  // Get current members
+  const members = await fetch(
+    `${matrixHomeserver}/_matrix/client/v3/rooms/${encodeURIComponent(spaceId)}/joined_members`,
+    { headers: { 'Authorization': `Bearer ${matrixToken}` } }
+  );
+  if (!members.ok) throw new Error('Failed to get members');
+  const { joined } = await members.json();
+
+  // Kick everyone except self
+  for (const userId of Object.keys(joined)) {
+    if (userId === matrixUserId) continue;
+    await fetch(
+      `${matrixHomeserver}/_matrix/client/v3/rooms/${encodeURIComponent(spaceId)}/kick`,
+      {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${matrixToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: userId, reason: 'Share revoked' }),
+      }
+    );
+  }
+
+  removeShareRecord(spaceId);
+}
+
+/* ── Share Tracking (localStorage) ──────────────────────────── */
+
+function saveShareRecord(metadata) {
+  const shares = loadShareRecords();
+  shares.push(metadata);
+  localStorage.setItem('eo_shares', JSON.stringify(shares));
+}
+
+function loadShareRecords() {
+  try { return JSON.parse(localStorage.getItem('eo_shares') || '[]'); }
+  catch { return []; }
+}
+
+function removeShareRecord(shareId) {
+  const shares = loadShareRecords().filter(s => s.share_id !== shareId);
+  localStorage.setItem('eo_shares', JSON.stringify(shares));
+}
+
+function renderSharedSpacesUI() {
+  const container = document.getElementById('sharedSpacesList');
+  if (!container) return;
+
+  const shares = loadShareRecords();
+  if (shares.length === 0) {
+    container.innerHTML = '<div style="font-family:\'JetBrains Mono\',monospace;font-size:10px;color:var(--text-faint);">No shares yet</div>';
+    return;
+  }
+
+  container.innerHTML = shares.map(s => `
+    <div class="settings-session-field" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+      <span class="settings-session-key" style="flex:1;">${escapeHtml(s.scope)}</span>
+      <span class="settings-session-val" style="font-size:9px;">${s.record_count} records · ${s.mode} · ${s.permissions}</span>
+      <button class="settings-add-btn" onclick="navigator.clipboard.writeText('${escapeHtml(s.link)}')" style="font-size:9px;padding:2px 8px;">Copy Link</button>
+      ${s.mode === 'private' ? `<button class="settings-delete-btn" onclick="handleRevokeShare('${escapeHtml(s.share_id)}')" style="font-size:9px;padding:2px 8px;">Revoke</button>` : ''}
+    </div>
+  `).join('');
+}
+
+/* ── Share Dialog UI ─────────────────────────────────────────── */
+
+function openShareDialog() {
+  document.getElementById('shareOverlay').classList.remove('hidden');
+  document.getElementById('shareError').textContent = '';
+  document.getElementById('shareResult').style.display = 'none';
+  document.getElementById('shareCreateBtn').disabled = false;
+  document.getElementById('shareCreateBtn').textContent = 'Create Share Link';
+  updateShareDialog();
+  renderExistingSharesList();
+}
+
+function closeShareDialog() {
+  document.getElementById('shareOverlay').classList.add('hidden');
+}
+
+function updateShareDialog() {
+  const scope = selectedScope || '(all targets)';
+  document.getElementById('shareScope').textContent = `Scope: ${scope}`;
+
+  const shareType = document.querySelector('input[name="shareType"]:checked').value;
+  const mode = document.querySelector('input[name="shareMode"]:checked').value;
+
+  // Show/hide public warning
+  document.getElementById('sharePublicWarning').style.display = mode === 'public' ? 'block' : 'none';
+
+  // Preview record count
+  const states = collectShareData(
+    selectedScope,
+    shareType === 'filtered',
+    shareType === 'records' && selectedTarget ? [selectedTarget] : null
+  );
+  document.getElementById('sharePreview').textContent = `${states.length} records will be shared`;
+}
+
+async function handleCreateShare() {
+  const btn = document.getElementById('shareCreateBtn');
+  const errEl = document.getElementById('shareError');
+  errEl.textContent = '';
+
+  const shareType = document.querySelector('input[name="shareType"]:checked').value;
+  const mode = document.querySelector('input[name="shareMode"]:checked').value;
+  const permissions = document.querySelector('input[name="sharePerm"]:checked').value;
+
+  btn.disabled = true;
+  btn.textContent = 'Creating space...';
+
+  try {
+    const result = await createShare({
+      scope: selectedScope,
+      mode,
+      permissions,
+      useFilters: shareType === 'filtered',
+      selectedTargets: shareType === 'records' && selectedTarget ? [selectedTarget] : null,
+    });
+
+    document.getElementById('shareResult').style.display = 'block';
+    document.getElementById('shareLinkInput').value = result.link;
+    btn.textContent = 'Share Created';
+    renderExistingSharesList();
+    renderSharedSpacesUI();
+  } catch (err) {
+    errEl.textContent = err.message;
+    btn.disabled = false;
+    btn.textContent = 'Create Share Link';
+  }
+}
+
+function copyShareLink() {
+  const input = document.getElementById('shareLinkInput');
+  navigator.clipboard.writeText(input.value);
+  input.select();
+}
+
+async function handleRevokeShare(shareId) {
+  if (!confirm('Revoke this share? Members will lose access.')) return;
+  try {
+    await revokeShare(shareId);
+    renderExistingSharesList();
+    renderSharedSpacesUI();
+  } catch (err) {
+    alert('Revoke failed: ' + err.message);
+  }
+}
+
+function renderExistingSharesList() {
+  const container = document.getElementById('shareExistingList');
+  if (!container) return;
+
+  const shares = loadShareRecords();
+  if (shares.length === 0) {
+    container.innerHTML = '';
+    return;
+  }
+
+  container.innerHTML = `<div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-dim);margin-bottom:8px;">Previous shares:</div>` +
+    shares.map(s => `
+      <div style="display:flex;align-items:center;gap:6px;padding:4px 0;font-family:'JetBrains Mono',monospace;font-size:10px;">
+        <span style="flex:1;color:var(--text-dim);">${escapeHtml(s.scope)} · ${s.record_count} records · ${s.mode}</span>
+        <button class="settings-add-btn" onclick="navigator.clipboard.writeText('${escapeHtml(s.link)}')" style="font-size:9px;padding:2px 6px;">Copy</button>
+        ${s.mode === 'private' ? `<button class="settings-delete-btn" onclick="handleRevokeShare('${escapeHtml(s.share_id)}')" style="font-size:9px;padding:2px 6px;">Revoke</button>` : ''}
+      </div>
+    `).join('');
+}
+
+/* ── Share Accept Overlay ────────────────────────────────────── */
+
+let _pendingShareStates = null;
+let _pendingShareMetadata = null;
+
+function handleShareRoute() {
+  const hash = window.location.hash;
+  if (!hash.startsWith('#/share/')) return false;
+  const spaceId = decodeURIComponent(hash.slice('#/share/'.length));
+  if (!spaceId) return false;
+  showShareAcceptOverlay(spaceId);
+  return true;
+}
+
+async function showShareAcceptOverlay(spaceId) {
+  document.getElementById('shareAcceptOverlay').classList.remove('hidden');
+  document.getElementById('shareAcceptInfo').textContent = 'Joining space and reading data...';
+  document.getElementById('shareImportBtn').style.display = 'none';
+  document.getElementById('shareAcceptFilterBadge').style.display = 'none';
+  document.getElementById('shareAcceptBody').innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-faint);font-family:\'JetBrains Mono\',monospace;font-size:11px;">Joining space and reading data...</div>';
+
+  if (!matrixToken || !matrixUserId) {
+    document.getElementById('shareAcceptBody').innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-faint);font-family:\'JetBrains Mono\',monospace;font-size:11px;">Sign in to Matrix first to accept this share.</div>';
+    return;
+  }
+
+  try {
+    const { metadata, states } = await acceptShare(spaceId);
+    _pendingShareStates = states;
+    _pendingShareMetadata = metadata;
+
+    // Update header
+    const user = metadata.created_by ? metadata.created_by.replace(/:.*$/, '') : 'unknown';
+    const permLabel = metadata.permissions === 'edit' ? 'Can import' : 'View only';
+    document.getElementById('shareAcceptInfo').textContent =
+      `Shared by ${user} · ${states.length} records · ${metadata.scope || 'mixed'} · ${permLabel}`;
+
+    // Show import button
+    document.getElementById('shareImportBtn').style.display = 'inline-block';
+
+    // Show filter badge if applicable
+    if (metadata.filter_rules && metadata.filter_rules.rules && metadata.filter_rules.rules.length > 0) {
+      const badge = document.getElementById('shareAcceptFilterBadge');
+      badge.style.display = 'block';
+      badge.textContent = `Filtered: ${metadata.filter_rules.rules.length} rule(s), ${metadata.filter_rules.conjunction.toUpperCase()}`;
+    }
+
+    // Render shared data as a table
+    renderSharePreviewTable(states, metadata);
+  } catch (err) {
+    document.getElementById('shareAcceptBody').innerHTML =
+      `<div style="padding:40px;text-align:center;color:var(--danger);font-family:'JetBrains Mono',monospace;font-size:11px;">${escapeHtml(err.message)}</div>`;
+  }
+}
+
+function renderSharePreviewTable(states, metadata) {
+  const body = document.getElementById('shareAcceptBody');
+
+  if (states.length === 0) {
+    body.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-faint);font-family:\'JetBrains Mono\',monospace;font-size:11px;">This share contains no records</div>';
+    return;
+  }
+
+  // Card layout for individual records (≤3), table for larger sets
+  if (metadata.share_type === 'records' && states.length <= 3) {
+    body.innerHTML = states.map(s => {
+      const val = (s.value && typeof s.value === 'object') ? s.value : { value: s.value };
+      return `<div style="margin:16px 20px;padding:16px;border:1px solid var(--border);border-radius:8px;background:var(--bg2);">
+        <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--accent);margin-bottom:8px;">${escapeHtml(s.target)}</div>
+        ${Object.entries(val).map(([k, v]) => `
+          <div style="display:flex;gap:8px;padding:3px 0;font-family:'JetBrains Mono',monospace;font-size:10px;">
+            <span style="color:var(--text-dim);min-width:100px;">${escapeHtml(k)}</span>
+            <span style="color:var(--text);">${escapeHtml(formatShareValue(v))}</span>
+          </div>
+        `).join('')}
+        <div style="margin-top:6px;font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--text-faint);">
+          <span class="op-badge op-${s.last_op}">${s.last_op}</span> by ${s.last_agent || '—'}
+        </div>
+      </div>`;
+    }).join('');
+    return;
+  }
+
+  // Table layout (same as renderHorizon pattern)
+  const valueKeys = [];
+  const keySet = new Set();
+  let hasObjectValues = false;
+  for (const s of states) {
+    if (s.value && typeof s.value === 'object' && !Array.isArray(s.value)) {
+      hasObjectValues = true;
+      for (const k of Object.keys(s.value)) {
+        if (!k.startsWith('_') && !keySet.has(k)) {
+          keySet.add(k);
+          valueKeys.push(k);
+        }
+      }
+    }
+  }
+  valueKeys.sort((a, b) => {
+    if (a === 'name') return -1;
+    if (b === 'name') return 1;
+    if (a === 'status') return -1;
+    if (b === 'status') return 1;
+    return a.localeCompare(b);
+  });
+
+  // Build set of targets in the share for dangling-ref detection
+  const sharedTargets = new Set(states.map(s => s.target));
+
+  let html = '<table class="state-table" style="width:100%;">';
+
+  if (hasObjectValues && valueKeys.length > 0) {
+    html += `<thead><tr>
+      <th style="position:sticky;left:0;background:var(--bg);z-index:2;">Target</th>
+      ${valueKeys.map(k => `<th>${escapeHtml(k)}</th>`).join('')}
+      <th>Op</th>
+    </tr></thead><tbody>`;
+
+    for (const s of states) {
+      const val = (s.value && typeof s.value === 'object') ? s.value : {};
+      html += `<tr>
+        <td style="position:sticky;left:0;background:var(--bg);z-index:1;"><span class="target-leaf">${escapeHtml(s.target.split('.').pop())}</span></td>
+        ${valueKeys.map(k => `<td>${formatShareCellValue(val[k], sharedTargets)}</td>`).join('')}
+        <td><span class="op-badge op-${s.last_op}">${s.last_op}</span></td>
+      </tr>`;
+    }
+  } else {
+    html += `<thead><tr><th>Target</th><th>Value</th><th>Op</th></tr></thead><tbody>`;
+    for (const s of states) {
+      html += `<tr>
+        <td>${escapeHtml(s.target)}</td>
+        <td>${escapeHtml(formatShareValue(s.value))}</td>
+        <td><span class="op-badge op-${s.last_op}">${s.last_op}</span></td>
+      </tr>`;
+    }
+  }
+
+  html += '</tbody></table>';
+  body.innerHTML = html;
+}
+
+function formatShareValue(val) {
+  if (val === undefined || val === null) return '—';
+  if (typeof val === 'object') return JSON.stringify(val);
+  return String(val);
+}
+
+function formatShareCellValue(val, sharedTargets) {
+  if (val === undefined || val === null) return '<span class="val-null">—</span>';
+  if (typeof val === 'string') return `<span class="val-str">${escapeHtml(val)}</span>`;
+  if (typeof val === 'number' || typeof val === 'boolean') return `<span class="val-str">${val}</span>`;
+  if (typeof val === 'object') {
+    // Detect linked references and mark dangling ones
+    if (val.linked && Array.isArray(val.linked)) {
+      return val.linked.map(t => {
+        if (sharedTargets.has(t)) {
+          return `<span class="target-leaf">${escapeHtml(t)}</span>`;
+        }
+        return `<span style="color:var(--text-faint);text-decoration:line-through;">${escapeHtml(t)} (not shared)</span>`;
+      }).join(', ');
+    }
+    const str = JSON.stringify(val);
+    if (str.length > 60) return `<span class="val-obj" title="${escapeHtml(str)}">${escapeHtml(str.slice(0, 57))}…</span>`;
+    return `<span class="val-obj">${escapeHtml(str)}</span>`;
+  }
+  return `<span class="val-str">${escapeHtml(String(val))}</span>`;
+}
+
+async function handleImportShare() {
+  if (!_pendingShareStates || _pendingShareStates.length === 0) return;
+  const btn = document.getElementById('shareImportBtn');
+  btn.disabled = true;
+  btn.textContent = 'Importing...';
+
+  try {
+    const count = await importSharedData(_pendingShareStates);
+    btn.textContent = `Imported ${count} records`;
+    btn.style.background = 'var(--ins)';
+    renderHolonNav();
+    renderHorizon();
+    // Auto-close after a moment
+    setTimeout(closeShareAcceptOverlay, 1500);
+  } catch (err) {
+    btn.textContent = 'Import failed';
+    btn.style.background = 'var(--danger)';
+    console.error('Import failed:', err);
+  }
+}
+
+function closeShareAcceptOverlay() {
+  document.getElementById('shareAcceptOverlay').classList.add('hidden');
+  _pendingShareStates = null;
+  _pendingShareMetadata = null;
+  // Clear hash without triggering hashchange loop
+  if (window.location.hash.startsWith('#/share/')) {
+    history.replaceState(null, '', window.location.pathname);
+  }
 }
 
 function scheduleReconnect() {
@@ -5595,7 +6822,7 @@ async function loadSettings() {
 
   if (matrixToken && matrixUserId) {
     const hs = localStorage.getItem('eo_matrix_homeserver') || '';
-    const snapshotSeq = localStorage.getItem('eo_media_snapshot_seq');
+    const snapshotSeq = localStorage.getItem('eo_matrix_sync_seq');
 
     if (mediaStatusEl) mediaStatusEl.textContent = 'Connected';
     if (mediaStatusEl) mediaStatusEl.style.color = 'var(--accent)';
@@ -5607,6 +6834,12 @@ async function loadSettings() {
     if (mediaSeqEl) mediaSeqEl.textContent = '—';
     if (mediaTierEl) mediaTierEl.textContent = '—';
   }
+
+  // Load hydration sources
+  renderHydrationSourcesUI();
+
+  // Load shared spaces list
+  renderSharedSpacesUI();
 
   // Load Airtable keys
   atRenderKeys();
@@ -5927,6 +7160,10 @@ async function deleteSelectedSpace() {
     validateSession();
     connectSync();
   }
+
+  // Check for share link in URL hash
+  handleShareRoute();
+  window.addEventListener('hashchange', () => handleShareRoute());
 
   // If no spaces exist, prompt the user to create a NUL space
   const spaces = await getAllSpaces();
