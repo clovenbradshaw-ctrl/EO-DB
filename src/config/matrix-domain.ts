@@ -73,6 +73,25 @@ export function peerSyncEventTypes(prefix?: string) {
   } as const;
 }
 
+/**
+ * Room sync event types.
+ *
+ * These are used for coordinator-to-client communication about the
+ * Airtable sync status within a room. The actual data flows as normal
+ * EO events through the changefeed — these types are metadata only.
+ */
+export function roomSyncEventTypes(prefix?: string) {
+  const p = prefix ?? _eventPrefix;
+  return {
+    /** Broadcast when a primary syncer is elected/changed for a room binding. */
+    primaryElected: `${p}.room-sync.primary`,
+    /** Broadcast after each successful sync cycle with summary stats. */
+    syncComplete: `${p}.room-sync.complete`,
+    /** Broadcast when a sync cycle fails. */
+    syncError: `${p}.room-sync.error`,
+  } as const;
+}
+
 // ─── Setter (call once at startup) ──────────────────────────────────────────
 
 export interface MatrixDomainConfig {
