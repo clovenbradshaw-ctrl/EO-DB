@@ -1952,7 +1952,7 @@ body {
   font-style: italic;
 }
 
-/* ── NUL Spaces Panel ── */
+/* ── Spaces Panel ── */
 .spaces-panel { flex-direction: column; }
 
 .spaces-body {
@@ -2287,9 +2287,9 @@ body {
 <div class="topbar">
   <div style="display:flex;align-items:center;gap:16px;">
     <div class="topbar-logo">EO<span>///</span>DB</div>
-    <!-- NULspace Selector -->
+    <!-- Space Selector -->
     <div class="nulspace-selector" id="nulspaceSelector" onclick="toggleNulspaceDropdown(event)">
-      <span class="nulspace-badge">NUL</span>
+      <span class="nulspace-badge">SPACE</span>
       <span class="nulspace-name" id="nulspaceName">no space</span>
       <span class="nulspace-chevron">&#9662;</span>
       <div class="nulspace-dropdown" id="nulspaceDropdown"></div>
@@ -2331,6 +2331,7 @@ body {
   <div class="nav-tab" onclick="switchTab('log')">Log</div>
   <div class="nav-tab" onclick="switchTab('graph')">Graph</div>
   <div class="nav-tab" onclick="switchTab('compose')" style="color:var(--ins);">+ Compose</div>
+  <div class="nav-tab" onclick="switchTab('spaces')">Spaces</div>
   <div class="nav-tab" onclick="switchTab('import')">Import</div>
   <div class="nav-tab" onclick="switchTab('settings')">Settings</div>
 </div>
@@ -2621,26 +2622,26 @@ body {
     </div>
   </div>
 
-  <!-- ═══ NUL Spaces Panel ═══ -->
+  <!-- ═══ Spaces Panel ═══ -->
   <div id="panel-spaces" class="panel spaces-panel">
     <div class="spaces-body">
       <div class="spaces-form">
 
-        <!-- Create NUL Space -->
+        <!-- Create Space -->
         <div class="settings-section">
-          <div class="settings-section-title">Create New NUL Space</div>
+          <div class="settings-section-title">Create New Space</div>
           <div class="settings-add-row">
-            <input class="settings-add-input" id="newSpaceName" placeholder="NUL Space name">
+            <input class="settings-add-input" id="newSpaceName" placeholder="Space name">
             <input class="settings-add-input" id="newSpaceDesc" placeholder="Description (optional)" style="max-width:200px;">
             <button class="settings-add-btn" onclick="createNewSpace()">+ Create</button>
           </div>
         </div>
 
-        <!-- My NUL Spaces -->
+        <!-- My Spaces -->
         <div class="settings-section">
-          <div class="settings-section-title">My NUL Spaces</div>
+          <div class="settings-section-title">My Spaces</div>
           <div id="spacesListOwned" class="settings-list">
-            <div class="settings-empty">No NUL spaces yet</div>
+            <div class="settings-empty">No spaces yet</div>
           </div>
         </div>
 
@@ -2648,13 +2649,13 @@ body {
         <div class="settings-section">
           <div class="settings-section-title">Shared With Me</div>
           <div id="spacesListShared" class="settings-list">
-            <div class="settings-empty">No shared NUL spaces</div>
+            <div class="settings-empty">No shared spaces</div>
           </div>
         </div>
 
-        <!-- NUL Space Detail (shown when a space is selected) -->
+        <!-- Space Detail (shown when a space is selected) -->
         <div id="spaceDetailSection" class="space-detail" style="display:none;">
-          <div class="settings-section-title" id="spaceDetailTitle">NUL Space Detail</div>
+          <div class="settings-section-title" id="spaceDetailTitle">Space Detail</div>
 
           <div style="margin-bottom:16px;">
             <div class="settings-session-field"><span class="settings-session-key">ID</span><span class="settings-session-val" id="spaceDetailId">—</span></div>
@@ -2687,7 +2688,7 @@ body {
 
           <!-- Delete space (owner only) -->
           <div id="spaceDeleteRow" style="display:none;margin-top:16px;">
-            <button class="settings-delete-btn" onclick="deleteSelectedSpace()" style="padding:6px 16px;">Delete NUL Space</button>
+            <button class="settings-delete-btn" onclick="deleteSelectedSpace()" style="padding:6px 16px;">Delete Space</button>
           </div>
         </div>
 
@@ -3122,7 +3123,7 @@ async function renderNulspaceDropdown() {
     });
     html += '<div class="nulspace-dropdown-divider"></div>';
   }
-  html += `<div class="nulspace-dropdown-action" onclick="event.stopPropagation();document.getElementById('nulspaceDropdown').classList.remove('open');switchTab('spaces');">+ New NUL Space</div>`;
+  html += `<div class="nulspace-dropdown-action" onclick="event.stopPropagation();document.getElementById('nulspaceDropdown').classList.remove('open');switchTab('spaces');">+ New Space</div>`;
   html += `<div class="nulspace-dropdown-action" onclick="event.stopPropagation();document.getElementById('nulspaceDropdown').classList.remove('open');switchTab('spaces');">Manage Spaces</div>`;
   dd.innerHTML = html;
 }
@@ -3612,6 +3613,14 @@ async function doLogin() {
     hideLogin();
     updateTopbarUser();
     connectSync();
+
+    // Provision Matrix rooms for all existing spaces that don't have one yet
+    try {
+      const allSpaces = await getAllSpaces();
+      for (const s of allSpaces) {
+        await ensureMatrixRoomForSpace(s);
+      }
+    } catch (e) { console.warn('Room provisioning after login:', e); }
   } catch (e) {
     errEl.textContent = e.message;
     errEl.classList.add('visible');
@@ -3862,7 +3871,7 @@ const matrixRoomTarget = {
       headers: { 'Authorization': `Bearer ${matrixToken}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         name: `EO: ${space.name}`,
-        topic: `Event log for NUL space "${space.name}" (${space.id})`,
+        topic: `Event log for space "${space.name}" (${space.id})`,
         room_alias_name: `eo-db-${space.id}`,
         visibility: 'private',
         preset: 'private_chat',
@@ -5914,7 +5923,7 @@ async function submitEvent() {
     // Validate: a space must exist before any operations can be submitted
     const spaces = await getAllSpaces();
     if (spaces.length === 0) {
-      throw new Error('Create a NUL space first — go to the NUL SPACES tab to create one');
+      throw new Error('Create a space first — go to the Spaces tab to create one');
     }
 
     // Validate: operators that act on existing targets require a non-empty DB
@@ -6025,8 +6034,10 @@ function switchTab(tab) {
   currentTab = tab;
   document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
   document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
-  document.querySelector(`.nav-tab[onclick*="${tab}"]`).classList.add('active');
-  document.getElementById(`panel-${tab}`).classList.add('active');
+  const navEl = document.querySelector(`.nav-tab[onclick*="${tab}"]`);
+  if (navEl) navEl.classList.add('active');
+  const panelEl = document.getElementById(`panel-${tab}`);
+  if (panelEl) panelEl.classList.add('active');
   if (tab === 'graph') renderGraph();
   if (tab === 'spaces') loadSpaces();
   if (tab === 'settings') loadSettings();
@@ -6208,7 +6219,7 @@ async function runImport() {
   // Validate a space exists
   const spaces = await getAllSpaces();
   if (spaces.length === 0) {
-    showImportResult('error', 'Create a NUL space first — go to the NUL Spaces tab');
+    showImportResult('error', 'Create a space first — go to the Spaces tab');
     btn.disabled = false;
     btn.textContent = 'Import Events';
     progressEl.style.display = 'none';
@@ -7548,7 +7559,7 @@ async function loadSettings() {
   atRenderKeys();
 }
 
-// ── NUL Spaces ──
+// ── Spaces ──
 let selectedSpaceId = null;
 
 function generateSpaceId() {
@@ -7632,6 +7643,9 @@ async function createNewSpace() {
     agent: owner,
   });
 
+  // Ensure Matrix room exists for the new space
+  await ensureMatrixRoomForSpace(space);
+
   nameEl.value = '';
   descEl.value = '';
   await loadFromIndexedDB();
@@ -7652,7 +7666,7 @@ async function loadSpaces() {
   const sharedEl = document.getElementById('spacesListShared');
 
   if (owned.length === 0) {
-    ownedEl.innerHTML = '<div class="settings-empty">No NUL spaces yet — create one above</div>';
+    ownedEl.innerHTML = '<div class="settings-empty">No spaces yet — create one above</div>';
   } else {
     ownedEl.innerHTML = owned.map(b => `
       <div class="space-card ${selectedSpaceId === b.id ? 'active' : ''}" onclick="selectSpace('${b.id}')">
@@ -7670,7 +7684,7 @@ async function loadSpaces() {
   }
 
   if (shared.length === 0) {
-    sharedEl.innerHTML = '<div class="settings-empty">No shared NUL spaces</div>';
+    sharedEl.innerHTML = '<div class="settings-empty">No shared spaces</div>';
   } else {
     sharedEl.innerHTML = shared.map(b => {
       const myShare = b.sharing.find(s => s.user_id === currentUser);
@@ -7836,11 +7850,106 @@ async function deleteSelectedSpace() {
   const currentUser = matrixUserId || 'local';
   if (space.created_by !== currentUser) return;
 
-  if (!confirm(`Delete NUL space "${space.name}"? This cannot be undone.`)) return;
+  if (!confirm(`Delete space "${space.name}"? This cannot be undone.`)) return;
 
   await deleteSpaceById(selectedSpaceId);
   hideSpaceDetail();
   await loadSpaces();
+}
+
+// ── Matrix Room Provisioning ──
+async function ensureMatrixRoomForSpace(space) {
+  if (!matrixToken || !matrixUserId) return; // not signed in — skip silently
+  if (space.matrix_room_id) return; // already has a room
+  try {
+    const result = await matrixRoomTarget.connect(space);
+    if (result && result.roomId) {
+      console.log(`Matrix room created for space "${space.name}": ${result.roomId}`);
+    }
+  } catch (e) {
+    console.warn(`Could not create Matrix room for space "${space.name}":`, e);
+  }
+}
+
+// ── Demo Space Seed ──
+async function createDemoSpace() {
+  const id = 'demo_space';
+  const now = new Date().toISOString();
+  const owner = matrixUserId || 'local';
+  const prefix = `space.${id}`;
+
+  const space = {
+    id,
+    name: 'Demo Space',
+    description: 'Pre-loaded demo with sample data',
+    target_prefix: prefix,
+    created_by: owner,
+    created_at: now,
+    updated_by: owner,
+    updated_at: now,
+    sharing: [],
+  };
+  await putSpace(space);
+
+  // ── Seed events: a realistic multi-entity dataset ──
+  const agent = owner;
+
+  // 1. INS — create top-level objects
+  await appendEvent({ op: 'INS', target: `${prefix}.clients.maria`, operand: { name: 'Maria Garcia', email: 'maria@example.com', status: 'active', role: 'applicant' }, agent });
+  await appendEvent({ op: 'INS', target: `${prefix}.clients.james`, operand: { name: 'James Chen', email: 'james@techcorp.io', status: 'active', role: 'applicant' }, agent });
+  await appendEvent({ op: 'INS', target: `${prefix}.clients.priya`, operand: { name: 'Priya Patel', email: 'priya@startup.dev', status: 'pending', role: 'applicant' }, agent });
+
+  await appendEvent({ op: 'INS', target: `${prefix}.cases.h1b_001`, operand: { type: 'H-1B', filed: '2025-06-01', priority_date: '2025-06-01', status: 'pending' }, agent });
+  await appendEvent({ op: 'INS', target: `${prefix}.cases.h1b_002`, operand: { type: 'H-1B', filed: '2025-08-15', priority_date: '2025-08-15', status: 'rfe_issued' }, agent });
+  await appendEvent({ op: 'INS', target: `${prefix}.cases.gc_001`, operand: { type: 'Green Card', filed: '2024-12-01', priority_date: '2024-12-01', status: 'approved' }, agent });
+  await appendEvent({ op: 'INS', target: `${prefix}.cases.l1_001`, operand: { type: 'L-1A', filed: '2025-09-20', priority_date: '2025-09-20', status: 'initial_review' }, agent });
+
+  await appendEvent({ op: 'INS', target: `${prefix}.documents.doc_passport_maria`, operand: { type: 'passport', label: 'Maria — Passport', uploaded: '2025-05-28' }, agent });
+  await appendEvent({ op: 'INS', target: `${prefix}.documents.doc_i140_maria`, operand: { type: 'I-140', label: 'Maria — I-140 Receipt', uploaded: '2025-06-05' }, agent });
+  await appendEvent({ op: 'INS', target: `${prefix}.documents.doc_offer_james`, operand: { type: 'offer_letter', label: 'James — Offer Letter', uploaded: '2025-08-10' }, agent });
+  await appendEvent({ op: 'INS', target: `${prefix}.documents.doc_rfe_james`, operand: { type: 'rfe_response', label: 'James — RFE Response Draft', uploaded: '2025-10-01' }, agent });
+
+  await appendEvent({ op: 'INS', target: `${prefix}.tasks.task_001`, operand: { title: 'Prepare RFE response for James', assignee: 'paralegal@firm.com', due: '2025-10-15', status: 'in_progress' }, agent });
+  await appendEvent({ op: 'INS', target: `${prefix}.tasks.task_002`, operand: { title: 'File I-485 for Maria', assignee: 'attorney@firm.com', due: '2025-11-01', status: 'not_started' }, agent });
+  await appendEvent({ op: 'INS', target: `${prefix}.tasks.task_003`, operand: { title: 'Review L-1A petition for Priya', assignee: 'attorney@firm.com', due: '2025-10-30', status: 'not_started' }, agent });
+
+  // 2. CON — graph edges linking entities
+  await appendEvent({ op: 'CON', target: `${prefix}.clients.maria`, operand: { added: [`${prefix}.cases.h1b_001`, `${prefix}.cases.gc_001`], edge_type: 'has_case' }, agent });
+  await appendEvent({ op: 'CON', target: `${prefix}.clients.james`, operand: { added: [`${prefix}.cases.h1b_002`], edge_type: 'has_case' }, agent });
+  await appendEvent({ op: 'CON', target: `${prefix}.clients.priya`, operand: { added: [`${prefix}.cases.l1_001`], edge_type: 'has_case' }, agent });
+
+  await appendEvent({ op: 'CON', target: `${prefix}.cases.h1b_001`, operand: { added: [`${prefix}.documents.doc_passport_maria`, `${prefix}.documents.doc_i140_maria`], edge_type: 'has_document' }, agent });
+  await appendEvent({ op: 'CON', target: `${prefix}.cases.h1b_002`, operand: { added: [`${prefix}.documents.doc_offer_james`, `${prefix}.documents.doc_rfe_james`], edge_type: 'has_document' }, agent });
+
+  await appendEvent({ op: 'CON', target: `${prefix}.tasks.task_001`, operand: { added: [`${prefix}.cases.h1b_002`, `${prefix}.clients.james`], edge_type: 'relates_to' }, agent });
+  await appendEvent({ op: 'CON', target: `${prefix}.tasks.task_002`, operand: { added: [`${prefix}.cases.gc_001`, `${prefix}.clients.maria`], edge_type: 'relates_to' }, agent });
+  await appendEvent({ op: 'CON', target: `${prefix}.tasks.task_003`, operand: { added: [`${prefix}.cases.l1_001`, `${prefix}.clients.priya`], edge_type: 'relates_to' }, agent });
+
+  // 3. DEF — updates / field mutations showing state evolution
+  await appendEvent({ op: 'DEF', target: `${prefix}.cases.h1b_001`, operand: { status: 'approved', approved_date: '2025-09-10', notes: 'Approved without RFE' }, agent });
+  await appendEvent({ op: 'DEF', target: `${prefix}.cases.h1b_002`, operand: { rfe_due: '2025-10-20', rfe_category: 'specialty_occupation' }, agent });
+  await appendEvent({ op: 'DEF', target: `${prefix}.clients.maria`, operand: { email: 'maria.garcia@newdomain.com', phone: '+1-555-0142' }, agent });
+  await appendEvent({ op: 'DEF', target: `${prefix}.tasks.task_001`, operand: { status: 'in_review', notes: 'Draft completed, pending attorney review' }, agent });
+
+  // 4. SEG — boundary markers
+  await appendEvent({ op: 'SEG', target: `${prefix}.cases.gc_001`, operand: { boundary: 'exclude', reason: 'archived — case completed', archived_at: now }, agent });
+
+  // 5. EVA — evaluation strategies
+  await appendEvent({ op: 'EVA', target: `${prefix}.cases.h1b_002`, operand: { formula: 'DAYS_UNTIL(rfe_due)', mode: 'horizon', dependencies: [`${prefix}.cases.h1b_002`] }, agent });
+
+  // 6. SYN — merge two document references into a single alias
+  await appendEvent({ op: 'SYN', target: `${prefix}.documents.maria_bundle`, operand: { sources: [`${prefix}.documents.doc_passport_maria`, `${prefix}.documents.doc_i140_maria`], label: 'Maria — Complete Filing Package' }, agent });
+
+  // Activate this space
+  activeNulspaceId = id;
+  localStorage.setItem('eo-active-nulspace', id);
+
+  // Ensure Matrix room exists for this space (if signed in)
+  await ensureMatrixRoomForSpace(space);
+
+  // Reload everything
+  await loadFromIndexedDB();
+  await updateNulspaceLabel();
 }
 
 // ── Init ──
@@ -7868,12 +7977,13 @@ async function deleteSelectedSpace() {
   handleShareRoute();
   window.addEventListener('hashchange', () => handleShareRoute());
 
-  // If no spaces exist, prompt the user to create a NUL space
+  // If no spaces exist, create a demo space automatically
   const spaces = await getAllSpaces();
   if (spaces.length === 0) {
-    switchTab('spaces');
-    const nameEl = document.getElementById('newSpaceName');
-    if (nameEl) nameEl.focus();
+    await createDemoSpace();
+    await loadFromIndexedDB();
+    renderHorizon();
+    renderLog();
   } else if (!activeNulspaceId) {
     // Auto-select the first space
     activeNulspaceId = spaces[0].id;
