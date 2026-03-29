@@ -70,42 +70,47 @@ export function Layout({ session, onLogout }: LayoutProps) {
 
       await init(store);
 
-      // Start Matrix client and sync data from the room
-      matrixClient = createMatrixClient(session);
-      await matrixClient.startClient({ initialSyncLimit: 0 });
+      // Start Matrix sync — skip gracefully when offline
+      if (!navigator.onLine) return;
+      try {
+        matrixClient = createMatrixClient(session);
+        await matrixClient.startClient({ initialSyncLimit: 0 });
 
-      // Wait for initial sync to complete so rooms are available
-      await new Promise<void>((resolve) => {
-        if (matrixClient!.isInitialSyncComplete()) {
-          resolve();
-        } else {
-          matrixClient!.once('sync' as any, (state: string) => {
-            if (state === 'PREPARED') resolve();
-          });
-        }
-      });
+        // Wait for initial sync to complete so rooms are available
+        await new Promise<void>((resolve) => {
+          if (matrixClient!.isInitialSyncComplete()) {
+            resolve();
+          } else {
+            matrixClient!.once('sync' as any, (state: string) => {
+              if (state === 'PREPARED') resolve();
+            });
+          }
+        });
 
-      if (!mounted) { matrixClient.stopClient(); return; }
+        if (!mounted) { matrixClient.stopClient(); return; }
 
-      const roomId = await resolveDataRoom(matrixClient);
-      const syncManager = new SyncManager(matrixClient, roomId, store, (event) => {
-        // Update the Zustand store as events are replayed
-        useEoStore.setState((st) => ({
-          recentEvents: [...st.recentEvents.slice(-99), event],
-          lastSeq: event.seq,
-        }));
-      });
-      await syncManager.initialize();
+        const roomId = await resolveDataRoom(matrixClient);
+        const syncManager = new SyncManager(matrixClient, roomId, store, (event) => {
+          // Update the Zustand store as events are replayed
+          useEoStore.setState((st) => ({
+            recentEvents: [...st.recentEvents.slice(-99), event],
+            lastSeq: event.seq,
+          }));
+        });
+        await syncManager.initialize();
 
-      // Make sync manager available for dispatching events to Matrix
-      useEoStore.getState().setSyncManager(syncManager);
+        // Make sync manager available for dispatching events to Matrix
+        useEoStore.getState().setSyncManager(syncManager);
 
-      // Save a snapshot to Matrix media before the page unloads
-      const handleBeforeUnload = () => {
-        syncManager.saveSnapshot().catch(() => {});
-      };
-      window.addEventListener('beforeunload', handleBeforeUnload);
-      cleanupBeforeUnload = () => window.removeEventListener('beforeunload', handleBeforeUnload);
+        // Save a snapshot to Matrix media before the page unloads
+        const handleBeforeUnload = () => {
+          syncManager.saveSnapshot().catch(() => {});
+        };
+        window.addEventListener('beforeunload', handleBeforeUnload);
+        cleanupBeforeUnload = () => window.removeEventListener('beforeunload', handleBeforeUnload);
+      } catch {
+        // Offline or network error — local store is still available
+      }
     }
 
     let cleanupBeforeUnload: (() => void) | undefined;

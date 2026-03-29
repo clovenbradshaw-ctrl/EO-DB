@@ -4,8 +4,11 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta http-equiv="Content-Security-Policy"
-          content="default-src 'self'; connect-src 'self' https://app.aminoimmigration.com; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com;" />
+          content="default-src 'self'; connect-src 'self' https://app.aminoimmigration.com; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; worker-src 'self';" />
     <title>Amino Immigration — Case Management</title>
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+    <link rel="apple-touch-icon" href="./pwa-192.png" />
+    <meta name="theme-color" content="#1a1a2e" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600&family=Source+Serif+4:opsz,wght@8..60,300;8..60,400;8..60,600&family=Outfit:wght@200;300;400;500;600;700&display=swap" rel="stylesheet" />
@@ -19,10 +22,10 @@
       [data-theme="dark"] ::-webkit-scrollbar-thumb { background: #30363d; }
       [data-theme="dark"] ::-webkit-scrollbar-thumb:hover { background: #484f58; }
     </style>
-    <script type="module" crossorigin src="./assets/index-CpJzouZV.js"></script>
+    <script type="module" crossorigin src="./assets/index-Ce0MS2uc.js"></script>
     <link rel="modulepreload" crossorigin href="./assets/matrix-sdk-DMycPPMn.js">
     <link rel="modulepreload" crossorigin href="./assets/react-vendor-BkDl4CDk.js">
-  </head>
+  <link rel="manifest" href="./manifest.webmanifest"><script id="vite-plugin-pwa:register-sw" src="./registerSW.js"></script></head>
   <body>
     <div id="root"></div>
   </body>

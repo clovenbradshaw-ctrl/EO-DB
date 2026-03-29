@@ -13,12 +13,23 @@ export interface MatrixSession {
  * Normalize a homeserver input into a full base URL.
  * Accepts "matrix.org", "https://matrix.org", "matrix.org:8448", etc.
  */
-function normalizeHomeserver(input: string): string {
+export function normalizeHomeserver(input: string): string {
   let url = input.trim();
   if (!/^https?:\/\//i.test(url)) {
     url = `https://${url}`;
   }
   return url.replace(/\/+$/, '');
+}
+
+/**
+ * Convert a username input to a fully qualified Matrix user ID.
+ * e.g. "alice" + "matrix.org" → "@alice:matrix.org"
+ */
+export function toMatrixUserId(username: string, homeserver: string): string {
+  const user = username.trim();
+  if (user.startsWith('@')) return user;
+  const host = homeserver.trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '').replace(/:\d+$/, '');
+  return `@${user}:${host}`;
 }
 
 /**
