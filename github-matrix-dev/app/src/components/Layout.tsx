@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { logout, createMatrixClient, type MatrixSession } from '../matrix/client';
 import { useEoStore } from '../store/eo-store';
 import { createIdb } from '../db/idb';
@@ -19,7 +19,7 @@ import { LogView } from './LogView';
 import { ComposeView } from './ComposeView';
 import { GraphView } from './GraphView';
 import { SettingsView } from './SettingsView';
-import { useTheme, type Theme } from '../theme';
+import { useTheme, spaceBackgroundTint, type Theme } from '../theme';
 import type { EoState } from '../db/types';
 
 type View = 'horizon' | 'log' | 'graph' | 'import' | 'compose' | 'settings';
@@ -52,26 +52,11 @@ export function Layout({ session, onLogout }: LayoutProps) {
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
   const connectionState = useConnectionState();
   const { theme, toggleTheme } = useTheme();
-  const s = makeStyles(theme);
+  const spaceTint = spaceBackgroundTint(selectedSpace, theme.mode);
+  const themedBg = spaceTint ? { ...theme, bg: spaceTint.bg, bgCard: spaceTint.bgCard, bgMuted: spaceTint.bgMuted } : theme;
+  const s = makeStyles(themedBg);
 
-  // Load available spaces
-  useEffect(() => {
-    if (!ready) return;
-    getStateByPrefix('space.').then((states) => {
-      // Spaces are depth-1 under "space." (e.g. space.demo_space)
-      const spaceRoots = states.filter((st) => {
-        const parts = st.target.split('.');
-        return parts.length === 2 && !st.value?._alias;
-      });
-      setSpaces(spaceRoots);
-      // Auto-select first space if none selected
-      if (spaceRoots.length > 0 && selectedSpace === null) {
-        setSelectedSpace(spaceRoots[0].target);
-      }
-    });
-  }, [ready, lastSeq, getStateByPrefix]);
-
-  // The prefix to query — scoped to selected space, or everything if none
+  // The prefix to query — scoped to selected space
   const statePrefix = selectedSpace ? `${selectedSpace}.` : '';
 
   // Load states scoped to selected space for query bar autofill
@@ -80,84 +65,173 @@ export function Layout({ session, onLogout }: LayoutProps) {
     getStateByPrefix(statePrefix).then(setAllStates);
   }, [ready, lastSeq, getStateByPrefix, statePrefix]);
 
-  // Compute target count from recent events — scoped to selected space
-  const spaceEvents = statePrefix
-    ? recentEvents.filter((e) => e.target.startsWith(statePrefix))
-    : recentEvents;
-  const targetCount = new Set(spaceEvents.map((e) => e.target)).size;
-  // Compute edge count (CON events)
-  const edgeCount = spaceEvents.filter((e) => e.op === 'CON').length;
+  // Compute target count from recent events — all events belong to this space now
+  const targetCount = new Set(recentEvents.map((e) => e.target)).size;
+  const edgeCount = recentEvents.filter((e) => e.op === 'CON').length;
 
-  // Initialize encrypted store and sync from Matrix on mount
+  // --- Matrix client (lives for the entire session, not per-space) ---
+  const matrixClientRef = useRef<ReturnType<typeof createMatrixClient> | null>(null);
+  const roomIdRef = useRef<string | null>(null);
+  const matrixReadyRef = useRef(false);
+
   useEffect(() => {
     let mounted = true;
-    let matrixClient: ReturnType<typeof createMatrixClient> | null = null;
 
-    async function setup() {
-      const idb = await createIdb();
-      const key = await deriveKey(session.userId, session.deviceId, session.accessToken);
-      const store = createStore(idb, key);
-      if (!mounted) return;
+    // Configure Matrix domain from the session homeserver
+    const domain = session.homeserver.replace(/^https?:\/\//, '').replace(/\/+$/, '');
+    configureMatrixDomain({ dataRoomAlias: `#amino-data:${domain}` });
 
-      await init(store);
-
-      // Configure Matrix domain from the session homeserver so room
-      // alias resolution and event types work correctly.
-      const domain = session.homeserver.replace(/^https?:\/\//, '').replace(/\/+$/, '');
-      configureMatrixDomain({ dataRoomAlias: `#amino-data:${domain}` });
-
-      // Start Matrix sync — skip gracefully when offline
+    async function startMatrix() {
       if (!navigator.onLine) return;
       try {
-        matrixClient = createMatrixClient(session);
-        await matrixClient.startClient({ initialSyncLimit: 0 });
+        const client = createMatrixClient(session);
+        matrixClientRef.current = client;
+        await client.startClient({ initialSyncLimit: 0 });
 
-        // Wait for initial sync to complete so rooms are available
         await new Promise<void>((resolve) => {
-          if (matrixClient!.isInitialSyncComplete()) {
+          if (client.isInitialSyncComplete()) {
             resolve();
           } else {
-            matrixClient!.once('sync' as any, (state: string) => {
+            client.once('sync' as any, (state: string) => {
               if (state === 'PREPARED') resolve();
             });
           }
         });
 
-        if (!mounted) { matrixClient.stopClient(); return; }
+        if (!mounted) { client.stopClient(); return; }
 
-        const roomId = await resolveDataRoom(matrixClient);
-        const syncManager = new SyncManager(matrixClient, roomId, store, (event) => {
-          // Update the Zustand store as events are replayed
-          useEoStore.setState((st) => ({
-            recentEvents: [...st.recentEvents.slice(-99), event],
-            lastSeq: event.seq,
-          }));
-        });
-        await syncManager.initialize();
-
-        // Make sync manager available for dispatching events to Matrix
-        useEoStore.getState().setSyncManager(syncManager);
-
-        // Save a snapshot to Matrix media before the page unloads
-        const handleBeforeUnload = () => {
-          syncManager.saveSnapshot().catch(() => {});
-        };
-        window.addEventListener('beforeunload', handleBeforeUnload);
-        cleanupBeforeUnload = () => window.removeEventListener('beforeunload', handleBeforeUnload);
+        roomIdRef.current = await resolveDataRoom(client);
+        matrixReadyRef.current = true;
       } catch {
-        // Offline or network error — local store is still available
+        // Offline — local store is still available
       }
     }
 
+    startMatrix();
+
+    return () => {
+      mounted = false;
+      if (matrixClientRef.current) matrixClientRef.current.stopClient();
+      matrixClientRef.current = null;
+      roomIdRef.current = null;
+      matrixReadyRef.current = false;
+    };
+  }, [session]);
+
+  // --- Space discovery (one-time, uses root IDB) ---
+  useEffect(() => {
+    let mounted = true;
+
+    async function discoverSpaces() {
+      // Check localStorage cache first
+      const cached = localStorage.getItem('eo-spaces');
+      if (cached) {
+        try {
+          const parsed = JSON.parse(cached) as EoState[];
+          if (parsed.length > 0) {
+            setSpaces(parsed);
+            if (selectedSpace === null) setSelectedSpace(parsed[0].target);
+          }
+        } catch { /* ignore bad cache */ }
+      }
+
+      // Open root IDB to discover spaces from store data
+      const idb = await createIdb();
+      const key = await deriveKey(session.userId, session.deviceId, session.accessToken);
+      const rootStore = createStore(idb, key);
+
+      // If root store is empty, try hydrating from Matrix snapshot
+      const rootSeq = await rootStore.getCurrentSeq();
+      if (rootSeq === 0 && matrixReadyRef.current && matrixClientRef.current && roomIdRef.current) {
+        try {
+          const { findLatestSnapshot, restoreFromDeltaChain } = await import('../matrix/snapshot');
+          const snap = await findLatestSnapshot(matrixClientRef.current, roomIdRef.current);
+          if (snap) {
+            await restoreFromDeltaChain(matrixClientRef.current, rootStore, snap.mxc);
+          }
+        } catch { /* best effort */ }
+      }
+
+      // Query for space roots
+      const { getStateByPrefix: getPrefix } = await import('../db/state');
+      const states = await getPrefix(rootStore, 'space.');
+      const spaceRoots = states.filter((st) => {
+        const parts = st.target.split('.');
+        return parts.length === 2 && !st.value?._alias;
+      });
+
+      if (!mounted) { rootStore.close(); return; }
+
+      if (spaceRoots.length > 0) {
+        setSpaces(spaceRoots);
+        localStorage.setItem('eo-spaces', JSON.stringify(spaceRoots));
+        if (selectedSpace === null) setSelectedSpace(spaceRoots[0].target);
+      }
+
+      rootStore.close();
+    }
+
+    // Small delay to let Matrix client connect first
+    const timer = setTimeout(discoverSpaces, 100);
+    return () => { mounted = false; clearTimeout(timer); };
+  }, [session]);
+
+  // --- Per-space store init (re-runs when selectedSpace changes) ---
+  useEffect(() => {
+    if (!selectedSpace) return;
+
+    let mounted = true;
     let cleanupBeforeUnload: (() => void) | undefined;
-    setup();
+
+    async function setupSpaceStore() {
+      // Teardown previous space's store
+      teardown();
+
+      // Open space-scoped IDB
+      const idb = await createIdb(selectedSpace!);
+      const key = await deriveKey(session.userId, session.deviceId, session.accessToken);
+      const store = createStore(idb, key);
+      if (!mounted) { store.close(); return; }
+
+      await init(store);
+
+      // Set up sync manager scoped to this space
+      if (matrixReadyRef.current && matrixClientRef.current && roomIdRef.current) {
+        try {
+          const spacePrefix = `${selectedSpace}.`;
+          const syncManager = new SyncManager(
+            matrixClientRef.current, roomIdRef.current, store,
+            (event) => {
+              useEoStore.setState((st) => ({
+                recentEvents: [...st.recentEvents.slice(-99), event],
+                lastSeq: event.seq,
+              }));
+            },
+            spacePrefix,
+          );
+          await syncManager.initialize();
+          if (!mounted) return;
+
+          useEoStore.getState().setSyncManager(syncManager);
+
+          const handleBeforeUnload = () => {
+            syncManager.saveSnapshot().catch(() => {});
+          };
+          window.addEventListener('beforeunload', handleBeforeUnload);
+          cleanupBeforeUnload = () => window.removeEventListener('beforeunload', handleBeforeUnload);
+        } catch {
+          // Offline — local store is still available
+        }
+      }
+    }
+
+    setupSpaceStore();
 
     return () => {
       mounted = false;
       cleanupBeforeUnload?.();
-      if (matrixClient) matrixClient.stopClient();
     };
-  }, [session, init]);
+  }, [selectedSpace, session, init, teardown]);
 
   async function handleLogout() {
     // Save snapshot to Matrix media before clearing local state
@@ -201,16 +275,6 @@ export function Layout({ session, onLogout }: LayoutProps) {
 
             {spaceOpen && (
               <div style={s.nulspaceDropdown}>
-                {/* "All" option — no space filter */}
-                <button
-                  onClick={() => { setSelectedSpace(null); setSpaceOpen(false); setSelectedScope(null); setSelectedRecord(null); }}
-                  style={{ ...s.nulspaceItem, ...(selectedSpace === null ? { background: theme.bgHover } : {}) }}
-                >
-                  <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12 }}>All</span>
-                  <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: theme.textMuted }}>
-                    no filter
-                  </span>
-                </button>
                 {spaces.map((sp) => {
                   const name = sp.target.split('.').pop() || sp.target;
                   const displayName = sp.value?.name || formatSpaceName(name);
@@ -218,7 +282,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
                   return (
                     <button
                       key={sp.target}
-                      onClick={() => { setSelectedSpace(sp.target); setSpaceOpen(false); setSelectedScope(null); setSelectedRecord(null); }}
+                      onClick={() => { setSelectedSpace(sp.target); setSpaceOpen(false); setSelectedScope(null); setSelectedRecord(null); setActiveView('horizon'); }}
                       style={{ ...s.nulspaceItem, ...(isActive ? { background: theme.bgHover } : {}) }}
                     >
                       <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12 }}>{displayName}</span>
@@ -278,7 +342,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
           )}
         </aside>
 
-        <main style={s.main}>
+        <main style={s.main} key={selectedSpace ?? '__all__'}>
           <ErrorBoundary>
             {activeView === 'horizon' ? (
               <>
@@ -339,6 +403,7 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       background: t.bg,
       color: t.text,
       fontFamily: "'Outfit', system-ui, -apple-system, sans-serif",
+      transition: 'background 0.3s ease',
     },
 
     // Top bar
@@ -351,6 +416,7 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       borderBottom: `0.5px solid ${t.border}`,
       background: t.bgCard,
       flexShrink: 0,
+      transition: 'background 0.3s ease',
     },
     topBarLeft: { display: 'flex', alignItems: 'center', gap: 12 },
     topBarRight: { display: 'flex', alignItems: 'center', gap: 16 },
@@ -450,8 +516,9 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       background: t.bgCard,
       display: 'flex',
       flexDirection: 'column' as const,
+      transition: 'background 0.3s ease',
     },
-    main: { flex: 1, overflowY: 'auto' as const, overflow: 'hidden', display: 'flex', flexDirection: 'column' as const, background: t.bg },
+    main: { flex: 1, overflowY: 'auto' as const, overflow: 'hidden', display: 'flex', flexDirection: 'column' as const, background: t.bg, transition: 'background 0.3s ease' },
 
     // Import page
     importPage: {

@@ -16,8 +16,17 @@ const STORE_NAME = 'kv';
 
 export type EoIdb = IDBPDatabase;
 
-export async function createIdb(): Promise<EoIdb> {
-  return openDB(DB_NAME, DB_VERSION, {
+/**
+ * Create (or open) an IndexedDB database.
+ *
+ * When `spaceId` is provided, a space-scoped database is opened
+ * (`eo-db::space.foo`), giving each space its own isolated storage.
+ * When omitted, the root `eo-db` database is used for initial space
+ * discovery.
+ */
+export async function createIdb(spaceId?: string): Promise<EoIdb> {
+  const dbName = spaceId ? `${DB_NAME}::${spaceId}` : DB_NAME;
+  return openDB(dbName, DB_VERSION, {
     upgrade(db) {
       // kv store used by the modern encrypted-store layer
       if (!db.objectStoreNames.contains(STORE_NAME)) {
