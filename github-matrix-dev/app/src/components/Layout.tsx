@@ -10,7 +10,6 @@ import { configureMatrixDomain } from '../lib/matrix-domain';
 import { HolonNav } from './HolonNav';
 import { TableView } from './TableView';
 import { RecordDetailDrawer } from './RecordDetailDrawer';
-import { HorizonQueryBar } from './HorizonQueryBar';
 import { ConnectionStatus, useConnectionState } from './ConnectionStatus';
 import { ErrorBoundary } from './ErrorBoundary';
 import { SyncProgress } from './SyncProgress';
@@ -22,7 +21,6 @@ import { GraphView } from './GraphView';
 import { SettingsView } from './SettingsView';
 import { useTheme, type Theme } from '../theme';
 import type { EoState } from '../db/types';
-import type { QueryResult } from './query-engine';
 
 type View = 'horizon' | 'log' | 'graph' | 'import' | 'compose' | 'settings';
 
@@ -51,7 +49,6 @@ export function Layout({ session, onLogout }: LayoutProps) {
   const [selectedSpace, setSelectedSpace] = useState<string | null>(null);
   const [spaces, setSpaces] = useState<EoState[]>([]);
   const [allStates, setAllStates] = useState<EoState[]>([]);
-  const [queryResults, setQueryResults] = useState<QueryResult | null>(null);
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
   const connectionState = useConnectionState();
   const { theme, toggleTheme } = useTheme();
@@ -235,38 +232,14 @@ export function Layout({ session, onLogout }: LayoutProps) {
 
         <div style={s.topBarRight}>
           <div style={s.stats}>
-            <span>seq <span style={{ color: theme.textSecondary }}>{lastSeq}</span></span>
-            <span>evt <span style={{ color: theme.textSecondary }}>{recentEvents.length}</span></span>
-            <span>tgt <span style={{ color: theme.textSecondary }}>{targetCount}</span></span>
-            <span>edg <span style={{ color: theme.textSecondary }}>{edgeCount}</span></span>
+            <span>seq <b style={{ color: theme.text, fontWeight: 500 }}>{lastSeq}</b></span>
+            <span>evt <b style={{ color: theme.text, fontWeight: 500 }}>{recentEvents.length}</b></span>
+            <span>tgt <b style={{ color: theme.text, fontWeight: 500 }}>{targetCount}</b></span>
+            <span>edg <b style={{ color: theme.text, fontWeight: 500 }}>{edgeCount}</b></span>
           </div>
-          <div style={s.divider} />
-          <ConnectionStatus state={connectionState} />
-          <div style={s.divider} />
-          {/* Theme toggle */}
-          <button
-            onClick={toggleTheme}
-            style={s.settingsBtn}
-            title={theme.mode === 'light' ? 'Switch to dark mode' : 'Switch to light mode'}
-          >
-            {theme.mode === 'light' ? (
-              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M13.5 8.5a5.5 5.5 0 0 1-7-7 5.5 5.5 0 1 0 7 7z" />
-              </svg>
-            ) : (
-              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                <circle cx="8" cy="8" r="3" />
-                <path d="M8 1v1.5M8 13.5V15M1 8h1.5M13.5 8H15M3.05 3.05l1.06 1.06M11.89 11.89l1.06 1.06M3.05 12.95l1.06-1.06M11.89 4.11l1.06-1.06" />
-              </svg>
-            )}
-          </button>
-          <div style={s.userArea}>
-            <div style={s.userAvatar}>
-              {displayName.charAt(0).toUpperCase()}
-            </div>
-            <span style={{ fontSize: 11, color: theme.textSecondary }}>{displayName}</span>
+          <div style={s.statusDot}>
+            <ConnectionStatus state={connectionState} />
           </div>
-          <button onClick={handleLogout} style={s.logoutBtn}>Sign out</button>
         </div>
       </header>
 
@@ -306,19 +279,12 @@ export function Layout({ session, onLogout }: LayoutProps) {
           <ErrorBoundary>
             {activeView === 'horizon' ? (
               <>
-                <HorizonQueryBar
-                  allStates={allStates}
-                  onSelectScope={(scope) => { setSelectedScope(scope); setSelectedRecord(null); setQueryResults(null); }}
-                  onSelectRecord={(target) => { setSelectedRecord(target); setQueryResults(null); }}
-                  onQueryResults={setQueryResults}
-                />
                 {selectedScope ? (
                   <TableView
                     scope={selectedScope}
                     onSelectRecord={setSelectedRecord}
                     activeRecord={selectedRecord}
                     session={{ userId: session.userId }}
-                    queryResults={queryResults?.records}
                   />
                 ) : (
                   <div style={s.empty}>
@@ -378,18 +344,18 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       alignItems: 'center',
       justifyContent: 'space-between',
       padding: '0 16px',
-      height: 42,
-      borderBottom: `1px solid ${t.border}`,
+      height: 40,
+      borderBottom: `0.5px solid ${t.border}`,
       background: t.bgCard,
       flexShrink: 0,
     },
-    topBarLeft: { display: 'flex', alignItems: 'center', gap: 14 },
-    topBarRight: { display: 'flex', alignItems: 'center', gap: 12 },
+    topBarLeft: { display: 'flex', alignItems: 'center', gap: 12 },
+    topBarRight: { display: 'flex', alignItems: 'center', gap: 16 },
     logo: {
       fontFamily: "'JetBrains Mono', monospace",
-      fontWeight: 700,
-      fontSize: 13.5,
-      letterSpacing: '-0.03em',
+      fontWeight: 500,
+      fontSize: 15,
+      letterSpacing: '-0.5px',
     },
     divider: { width: 1, height: 18, background: t.borderDivider },
 
@@ -399,14 +365,12 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       alignItems: 'center',
       background: t.accentBg,
       color: t.accent,
-      border: `1px solid ${t.accentBorder}`,
-      borderRadius: 12,
-      padding: '3px 12px',
-      fontSize: 12,
-      fontWeight: 600,
-      fontFamily: "'JetBrains Mono', monospace",
+      border: 'none',
+      borderRadius: 4,
+      padding: '2px 8px',
+      fontSize: 11,
+      fontWeight: 500,
       cursor: 'pointer',
-      letterSpacing: '-0.01em',
     },
     nulspaceDropdown: {
       position: 'absolute',
@@ -438,70 +402,32 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
     stats: {
       display: 'flex',
       gap: 12,
-      fontSize: 10,
-      color: t.textMuted,
+      fontSize: 11,
+      color: t.textSecondary,
       fontFamily: "'JetBrains Mono', monospace",
     },
-
-    // User area
-    userArea: {
+    statusDot: {
       display: 'flex',
       alignItems: 'center',
-      gap: 6,
-    },
-    userAvatar: {
-      width: 22,
-      height: 22,
-      borderRadius: '50%',
-      background: t.bgMuted,
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      fontSize: 10,
-      fontWeight: 600,
-      color: t.textSecondary,
-    },
-
-    // Buttons
-    settingsBtn: {
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      width: 32,
-      height: 32,
-      border: `1px solid ${t.border}`,
-      borderRadius: 6,
-      background: 'transparent',
-      color: t.textSecondary,
-      cursor: 'pointer',
-    },
-    logoutBtn: {
-      padding: '4px 10px',
-      fontSize: 10,
-      border: `1px solid ${t.border}`,
-      borderRadius: 4,
-      background: 'transparent',
-      color: t.textSecondary,
-      cursor: 'pointer',
-      fontFamily: "'JetBrains Mono', monospace",
     },
 
     // Sidebar navigation
     sidebarNav: {
       display: 'flex',
       flexDirection: 'column' as const,
-      padding: '8px 0',
+      padding: '12px 0',
+      borderBottom: `0.5px solid ${t.border}`,
     },
     navItem: {
       display: 'block',
       width: '100%',
-      padding: '10px 18px',
+      padding: '6px 16px',
       background: 'transparent',
       border: 'none',
-      borderLeft: '3px solid transparent',
+      borderLeft: '2px solid transparent',
       cursor: 'pointer',
-      fontSize: 14,
-      fontWeight: 500,
+      fontSize: 12,
+      fontWeight: 400,
       color: t.textSecondary,
       textAlign: 'left' as const,
       transition: 'background 0.1s, color 0.1s',
@@ -509,16 +435,18 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
     navItemActive: {
       color: t.accent,
       background: t.accentBg,
-      borderLeft: `3px solid ${t.accent}`,
-      fontWeight: 600,
+      borderLeft: `2px solid ${t.accent}`,
+      fontWeight: 500,
     },
 
     // Body
     body: { display: 'flex', flex: 1, overflow: 'hidden' },
     sidebar: {
-      width: 280,
-      borderRight: `1px solid ${t.border}`,
+      width: 200,
+      borderRight: `0.5px solid ${t.border}`,
       background: t.bgCard,
+      display: 'flex',
+      flexDirection: 'column' as const,
     },
     main: { flex: 1, overflowY: 'auto' as const, overflow: 'hidden', display: 'flex', flexDirection: 'column' as const, background: t.bg },
 
