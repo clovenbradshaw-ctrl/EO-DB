@@ -6,12 +6,10 @@ import { resolveAlias } from './helpers.js';
 import { readLogForTarget } from './log.js';
 import type {
   EoState, EvaRegistration, HorizonResponse, GroundEntry, SignalEntry,
-  NearbyEntry, GovernanceEntry, LoggableOperator, AncestryEntry, TrajectoryEntry,
-  TrajectoryFingerprint, CadenceInfo, CadenceClass, GraphMetrics, GraphRole,
+  NearbyEntry, GovernanceEntry, AncestryEntry,
+  GraphMetrics, GraphRole,
   RecResult, RecCycleInfo,
 } from './types.js';
-import { seedHash, chainHash } from './hash.js';
-import { createHash } from 'crypto';
 import { isEncryptedOperand } from './crypto-types.js';
 import type { LocalKeyring } from './crypto-types.js';
 import { decryptOperand, getKeyById } from '../crypto/segment-keys.js';
@@ -23,21 +21,19 @@ export interface HorizonOpts {
   grounds?: boolean;    // default true
   nearby?: boolean;     // default true
   governance?: boolean; // default true
-  trajectory?: boolean; // default true
 }
 
 /**
- * Horizon read — the file cabinet.
+ * Horizon read — current state of records.
  *
- * Five cheap layers (microseconds of additional read time):
- *   1. Figure  — what this target IS (projected state, alias resolution, Horizon-computed EVA)
+ * Four cheap layers:
+ *   1. Figure  — what this target IS (projected state with fields as columns, alias resolution, Horizon-computed EVA)
  *   2. Ground  — what this target is IN (ambient conditions from ancestor prefixes)
  *   3. Nearby  — what's next to it (records sharing structural traits in the same collection)
  *   4. Governance — what rules apply (EVA policies governing this target and its region)
- *   5. Trajectory — where it's been (compact operator history shape)
  *
  * One expensive layer (on-demand only):
- *   6. Signals — statistical patterns across populations
+ *   5. Signals — statistical patterns across populations
  */
 export async function horizonGet(
   db: EoDb,
@@ -66,10 +62,7 @@ export async function horizonGet(
   // Layer 4: Governance (default on) — scan eva: keyspace for applicable policies
   const governance = opts?.governance !== false ? await getGovernance(db, resolved) : undefined;
 
-  // Layer 5: Trajectory (default on) — compact operator history from log
-  const trajectory = opts?.trajectory !== false ? await getTrajectory(db, resolved) : undefined;
-
-  // Layer 6: Signals (expensive, on-demand only)
+  // Layer 5: Signals (expensive, on-demand only)
   const signals = opts?.signals ? await detectSignals(db, resolved) : undefined;
 
   // ─── Pattern Surfacing (cheap, auto-computed alongside existing layers) ───
@@ -79,14 +72,6 @@ export async function horizonGet(
     ? (await getHashCohort(db, figure.hash)).filter(t => t !== resolved)
     : undefined;
 
-  // Trajectory fingerprint + cadence (derived from trajectory data, nearly free)
-  const trajectoryFingerprint = trajectory && trajectory.length > 0
-    ? computeTrajectoryFingerprint(trajectory)
-    : undefined;
-  const cadence = trajectory && trajectory.length > 0
-    ? await computeCadence(db, resolved)
-    : undefined;
-
   // Graph metrics: CON graph role and degree
   const graphMetrics = await computeGraphMetrics(db, resolved);
 
@@ -94,10 +79,8 @@ export async function horizonGet(
   const recCycle = await getRecCycleInfo(db, resolved);
 
   return {
-    target: resolved, figure, ancestry, grounds, nearby, governance, trajectory, signals,
+    target: resolved, figure, ancestry, grounds, nearby, governance, signals,
     hashCohort: hashCohort && hashCohort.length > 0 ? hashCohort : undefined,
-    trajectoryFingerprint,
-    cadence,
     graphMetrics,
     recCycle,
   };
@@ -116,10 +99,9 @@ async function horizonGetByPrefix(db: EoDb, prefix: string, opts?: HorizonOpts):
     // For prefix queries, skip expensive per-record layers unless explicitly requested
     const nearby = opts?.nearby === true ? await getNearby(db, state.target) : undefined;
     const governance = opts?.governance === true ? await getGovernance(db, state.target) : undefined;
-    const trajectory = opts?.trajectory === true ? await getTrajectory(db, state.target) : undefined;
     const signals = opts?.signals ? await detectSignals(db, state.target) : undefined;
 
-    results.push({ target: state.target, figure, grounds, nearby, governance, trajectory, signals });
+    results.push({ target: state.target, figure, grounds, nearby, governance, signals });
   }
 
   return results;
@@ -134,6 +116,9 @@ async function getFigureState(db: EoDb, target: string): Promise<EoState | null>
   if (state.value?._alias) {
     return getFigureState(db, state.value._alias);
   }
+
+  // Aggregate child field targets as columns into the figure value
+  const withColumns = await aggregateFieldColumns(db, target, state);
 
   let registration: EvaRegistration | null = null;
   try {
@@ -154,9 +139,9 @@ async function getFigureState(db: EoDb, target: string): Promise<EoState | null>
       inputs[dep] = depState?.value;
     }
     return {
-      ...state,
+      ...withColumns,
       value: {
-        ...state.value,
+        ...withColumns.value,
         _computed: {
           formula: registration.formula.formula || registration.formula,
           inputs,
@@ -166,7 +151,39 @@ async function getFigureState(db: EoDb, target: string): Promise<EoState | null>
     };
   }
 
-  return state;
+  return withColumns;
+}
+
+/**
+ * Aggregate child field targets into the figure value as columns.
+ * e.g. if target is app.tbl.rec001 and state:app.tbl.rec001.score exists with value 100,
+ * the returned figure value will include { ..., score: 100 }.
+ */
+async function aggregateFieldColumns(db: EoDb, target: string, state: EoState): Promise<EoState> {
+  const children = await getStateByPrefix(db, target + '.');
+  if (children.length === 0) return state;
+
+  // Only aggregate direct children (one level deeper)
+  const targetDepth = target.split('.').length;
+  const columns: Record<string, any> = {};
+
+  for (const child of children) {
+    const childParts = child.target.split('.');
+    if (childParts.length !== targetDepth + 1) continue;
+    if (child.value?._alias) continue;
+
+    const fieldName = childParts[targetDepth];
+    columns[fieldName] = child.value;
+  }
+
+  if (Object.keys(columns).length === 0) return state;
+
+  // Merge columns into the figure value (existing record value takes precedence)
+  const baseValue = state.value && typeof state.value === 'object' ? state.value : {};
+  return {
+    ...state,
+    value: { ...columns, ...baseValue },
+  };
 }
 
 // ─── Layer 2: Grounds ──────────────────────────────────────────────
@@ -401,41 +418,7 @@ async function getGovernance(db: EoDb, target: string): Promise<GovernanceEntry[
   return governance;
 }
 
-// ─── Layer 5: Trajectory ───────────────────────────────────────────
-// Compact operator history: the shape of this record's journey.
-// Cheap: filter log for this target, extract op sequence, collapse consecutive same-ops.
-
-async function getTrajectory(db: EoDb, target: string): Promise<TrajectoryEntry[]> {
-  const events = await readLogForTarget(db, target);
-  if (events.length === 0) return [];
-
-  // Extract operator sequence with running hashes, collapse consecutive duplicates
-  const trajectory: TrajectoryEntry[] = [];
-  let lastOp: LoggableOperator | null = null;
-  let runningHash = '';
-
-  for (const event of events) {
-    // NUL is observation-only — exclude from horizon trajectory
-    if (event.op === 'NUL') continue;
-
-    // Compute running hash — seed on first event, chain thereafter
-    runningHash = runningHash === ''
-      ? seedHash(event)
-      : chainHash(runningHash, event);
-
-    if (event.op !== lastOp) {
-      trajectory.push({ op: event.op, hash: runningHash });
-      lastOp = event.op;
-    } else {
-      // Update the hash on the compressed entry to reflect the latest event
-      trajectory[trajectory.length - 1].hash = runningHash;
-    }
-  }
-
-  return trajectory;
-}
-
-// ─── Layer 6: Signals (expensive, on-demand) ───────────────────────
+// ─── Layer 5: Signals (expensive, on-demand) ───────────────────────
 
 async function detectSignals(db: EoDb, target: string): Promise<SignalEntry[]> {
   const signals: SignalEntry[] = [];
@@ -495,84 +478,6 @@ async function detectSignals(db: EoDb, target: string): Promise<SignalEntry[]> {
   });
 
   return signals;
-}
-
-// ─── Pattern Surfacing: Trajectory Fingerprint ───────────────────
-
-const ALL_LOGGABLE_OPS: LoggableOperator[] = ['NUL', 'INS', 'SEG', 'CON', 'SYN', 'DEF', 'EVA', 'REC'];
-
-function computeTrajectoryFingerprint(trajectory: TrajectoryEntry[]): TrajectoryFingerprint {
-  const sequence = trajectory.map(t => t.op).join('.');
-  const fingerprint = createHash('sha256').update(sequence).digest('hex').slice(0, 16);
-
-  const opCounts = {} as Record<LoggableOperator, number>;
-  for (const op of ALL_LOGGABLE_OPS) opCounts[op] = 0;
-  for (const t of trajectory) opCounts[t.op] = (opCounts[t.op] || 0) + 1;
-
-  return { sequence, fingerprint, opCounts };
-}
-
-// ─── Pattern Surfacing: Temporal Cadence ─────────────────────────
-
-async function computeCadence(db: EoDb, target: string): Promise<CadenceInfo> {
-  const events = await readLogForTarget(db, target);
-  if (events.length === 0) {
-    return { classification: 'sparse', lastEventTs: '', eventCount: 0, description: 'No events' };
-  }
-
-  const timestamps = events.map(e => new Date(e.ts).getTime()).sort((a, b) => a - b);
-  const lastTs = events[events.length - 1].ts;
-  const now = Date.now();
-  const daysSinceLast = (now - timestamps[timestamps.length - 1]) / (1000 * 60 * 60 * 24);
-
-  if (events.length < 2) {
-    return { classification: 'sparse', lastEventTs: lastTs, eventCount: 1, description: 'Single event' };
-  }
-
-  // Compute inter-event intervals
-  const intervals: number[] = [];
-  for (let i = 1; i < timestamps.length; i++) {
-    intervals.push(timestamps[i] - timestamps[i - 1]);
-  }
-
-  // Check for burst: >3 events within 1 hour window
-  let maxInHour = 0;
-  for (let i = 0; i < timestamps.length; i++) {
-    let count = 1;
-    for (let j = i + 1; j < timestamps.length && timestamps[j] - timestamps[i] <= 3600000; j++) {
-      count++;
-    }
-    maxInHour = Math.max(maxInHour, count);
-  }
-
-  let classification: CadenceClass;
-  let description: string;
-
-  if (daysSinceLast > 30) {
-    classification = 'dormant';
-    description = `Dormant — no activity for ${Math.round(daysSinceLast)} days`;
-  } else if (maxInHour > 3) {
-    classification = 'burst';
-    description = `Burst activity — ${maxInHour} events within one hour`;
-  } else if (intervals.length >= 3) {
-    // Check for periodicity: intervals within 20% tolerance of median
-    const sorted = [...intervals].sort((a, b) => a - b);
-    const median = sorted[Math.floor(sorted.length / 2)];
-    const periodic = intervals.filter(i => Math.abs(i - median) / median < 0.2).length;
-    if (periodic / intervals.length > 0.6) {
-      classification = 'periodic';
-      const periodHours = Math.round(median / 3600000);
-      description = `Periodic — roughly every ${periodHours > 24 ? Math.round(periodHours / 24) + ' days' : periodHours + ' hours'}`;
-    } else {
-      classification = 'steady';
-      description = `Steady — ${events.length} events over ${Math.round((timestamps[timestamps.length - 1] - timestamps[0]) / 86400000)} days`;
-    }
-  } else {
-    classification = 'sparse';
-    description = `Sparse — ${events.length} events total`;
-  }
-
-  return { classification, lastEventTs: lastTs, eventCount: events.length, description };
 }
 
 // ─── Pattern Surfacing: Graph Metrics ────────────────────────────

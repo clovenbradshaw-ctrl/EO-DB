@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { createDb, type EoDb } from '../src/db/level.js';
 import { processEvent } from '../src/db/fold.js';
 import { horizonGet } from '../src/db/horizon.js';
+import { getState } from '../src/db/state.js';
 import type { EoEventInput, HorizonResponse } from '../src/db/types.js';
 import { rmSync, mkdtempSync } from 'fs';
 import { tmpdir } from 'os';
@@ -288,57 +289,63 @@ describe('Layer 4: Governance', () => {
   });
 });
 
-// --- Layer 5: Trajectory (the journey) ---
+// --- Fields as Columns ---
 
-describe('Layer 5: Trajectory', () => {
-  it('returns compact operator sequence', async () => {
-    await processEvent(db, ev({ target: 'traj.rec001', operand: { name: 'Maria' } }));
-    await processEvent(db, ev({ op: 'DEF', target: 'traj.rec001', operand: { status: 'pending' } }));
-    await processEvent(db, ev({ op: 'DEF', target: 'traj.rec001', operand: { status: 'approved' } }));
+describe('Fields as Columns', () => {
+  it('aggregates child field targets as columns in figure value', async () => {
+    await processEvent(db, ev({ target: 'app.tbl.rec001', operand: { name: 'Maria' } }));
+    await processEvent(db, ev({ op: 'DEF', target: 'app.tbl.rec001.score', operand: 100 }));
+    await processEvent(db, ev({ op: 'DEF', target: 'app.tbl.rec001.email', operand: 'maria@test.com' }));
 
-    const result = await horizonGet(db, 'traj.rec001') as HorizonResponse;
-    expect(result.trajectory).toBeDefined();
-    // INS → DEF → DEF collapses consecutive DEFs to: INS, DEF
-    expect(result.trajectory).toHaveLength(2);
-    expect(result.trajectory![0].op).toBe('INS');
-    expect(result.trajectory![1].op).toBe('DEF');
-    // Each entry carries a 64-char hex hash
-    expect(result.trajectory![0].hash).toMatch(/^[0-9a-f]{64}$/);
-    expect(result.trajectory![1].hash).toMatch(/^[0-9a-f]{64}$/);
-    // Hashes should differ
-    expect(result.trajectory![0].hash).not.toBe(result.trajectory![1].hash);
+    const result = await horizonGet(db, 'app.tbl.rec001') as HorizonResponse;
+    expect(result.figure?.value).toEqual({ name: 'Maria', score: 100, email: 'maria@test.com' });
   });
 
-  it('preserves operator variety in trajectory', async () => {
-    await processEvent(db, ev({ target: 'traj2.rec001', operand: { name: 'Maria' } }));
-    await processEvent(db, ev({ target: 'traj2.link' }));
-    await processEvent(db, ev({ op: 'DEF', target: 'traj2.rec001', operand: { status: 'active' } }));
-    await processEvent(db, ev({ op: 'CON', target: 'traj2.rec001', operand: { added: ['traj2.link'] } }));
-    await processEvent(db, ev({ op: 'DEF', target: 'traj2.rec001', operand: { email: 'a@b.com' } }));
-    await processEvent(db, ev({ op: 'SEG', target: 'traj2.rec001', operand: { boundary: 'exclude' } }));
+  it('record-level value takes precedence over field target value', async () => {
+    await processEvent(db, ev({ target: 'prec.tbl.rec001', operand: { score: 'override' } }));
+    await processEvent(db, ev({ op: 'DEF', target: 'prec.tbl.rec001.score', operand: 100 }));
 
-    const result = await horizonGet(db, 'traj2.rec001') as HorizonResponse;
-    // INS, DEF, CON, DEF, SEG
-    const ops = result.trajectory!.map(e => e.op);
-    expect(ops).toEqual(['INS', 'DEF', 'CON', 'DEF', 'SEG']);
-    // All entries have valid hashes
-    for (const entry of result.trajectory!) {
-      expect(entry.hash).toMatch(/^[0-9a-f]{64}$/);
-    }
+    const result = await horizonGet(db, 'prec.tbl.rec001') as HorizonResponse;
+    // Record-level value takes precedence
+    expect(result.figure?.value.score).toBe('override');
   });
 
-  it('empty trajectory for unknown target', async () => {
-    await processEvent(db, ev({ op: 'DEF', target: 'traj3.auto', operand: 'x' }));
-    // DEF auto-instantiated this target, so there IS a log entry for the DEF
-    const result = await horizonGet(db, 'traj3.auto') as HorizonResponse;
-    expect(result.trajectory).toBeDefined();
-    expect(result.trajectory!.length).toBeGreaterThanOrEqual(1);
+  it('only aggregates direct children, not deeper targets', async () => {
+    await processEvent(db, ev({ target: 'deep.tbl.rec001', operand: { name: 'Maria' } }));
+    await processEvent(db, ev({ op: 'DEF', target: 'deep.tbl.rec001.field', operand: 'direct' }));
+    await processEvent(db, ev({ op: 'DEF', target: 'deep.tbl.rec001.field.sub', operand: 'nested' }));
+
+    const result = await horizonGet(db, 'deep.tbl.rec001') as HorizonResponse;
+    expect(result.figure?.value.field).toBe('direct');
+    expect(result.figure?.value.sub).toBeUndefined();
   });
 
-  it('disabled with trajectory=false', async () => {
-    await processEvent(db, ev({ target: 'notraj.rec' }));
-    const result = await horizonGet(db, 'notraj.rec', { trajectory: false }) as HorizonResponse;
-    expect(result.trajectory).toBeUndefined();
+  it('horizon response has no trajectory field', async () => {
+    await processEvent(db, ev({ target: 'notraj.rec', operand: { x: 1 } }));
+    const result = await horizonGet(db, 'notraj.rec') as HorizonResponse;
+    expect((result as any).trajectory).toBeUndefined();
+    expect((result as any).cadence).toBeUndefined();
+    expect((result as any).trajectoryFingerprint).toBeUndefined();
+  });
+
+  it('works with no child fields', async () => {
+    await processEvent(db, ev({ target: 'nocol.tbl.rec001', operand: { name: 'Maria' } }));
+    const result = await horizonGet(db, 'nocol.tbl.rec001') as HorizonResponse;
+    expect(result.figure?.value).toEqual({ name: 'Maria' });
+  });
+
+  it('skips alias children', async () => {
+    await processEvent(db, ev({ target: 'alias.tbl.rec001', operand: { name: 'Maria' } }));
+    await processEvent(db, ev({ target: 'alias.tbl.rec001.real', operand: 'value' }));
+    await processEvent(db, ev({ target: 'alias.tbl.rec002', operand: {} }));
+    await processEvent(db, ev({
+      op: 'SYN', target: 'alias.tbl.merged',
+      operand: { merge: ['alias.tbl.rec001.real', 'alias.tbl.rec002'], into: 'alias.tbl.merged' },
+    }));
+
+    // After SYN, alias.tbl.rec001.real is an alias — should not appear as column
+    const result = await horizonGet(db, 'alias.tbl.rec001') as HorizonResponse;
+    expect(result.figure?.value.real).toBeUndefined();
   });
 });
 

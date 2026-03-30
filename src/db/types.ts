@@ -80,31 +80,20 @@ export interface Subscription {
 // Input event (before seq assignment — acquired_ts is system-assigned, not caller-provided)
 export type EoEventInput = Omit<EoEvent, 'seq'>;
 
-// --- Horizon: The File Cabinet ---
-// Six layers: Figure, Ground, Nearby, Governance, Trajectory (cheap), Signals (expensive/on-demand)
-
-// A single entry in the trajectory timeline, pairing an operator with its running hash
-export interface TrajectoryEntry {
-  op: LoggableOperator;
-  hash: string;                              // running transformation hash after this event
-}
+// --- Horizon: The Current State ---
+// Layers: Figure, Ground, Nearby, Governance (cheap), Signals (expensive/on-demand)
 
 export interface HorizonResponse {
   target: string;
-  figure: EoState | null;                   // what this target IS
+  figure: EoState | null;                   // what this target IS (with fields as columns)
   ancestry?: AncestryEntry[];                // the ontology chain — parent figures up to root
   grounds: GroundEntry[];                    // ambient conditions pervading this region
   nearby?: NearbyEntry[];                    // similar records in the same collection
   governance?: GovernanceEntry[];            // EVA policies that govern this target
-  trajectory?: TrajectoryEntry[];            // compact operator history with running hashes
   signals?: SignalEntry[];                   // statistical patterns (on-demand, expensive)
   // ─── Pattern Surfacing (cheap, auto-computed) ───
   /** Structural twins — targets with the exact same transformation hash */
   hashCohort?: string[];
-  /** Trajectory fingerprint — operator sequence archetype */
-  trajectoryFingerprint?: TrajectoryFingerprint;
-  /** Temporal cadence — event rhythm classification */
-  cadence?: CadenceInfo;
   /** Graph metrics — CON graph role and degree */
   graphMetrics?: GraphMetrics;
   /** REC cycle info — if this target is part of a dependency cycle */
@@ -157,29 +146,6 @@ export interface SignalEntry {
 }
 
 // ─── Pattern Surfacing ────────────────────────────────────────────────────
-
-/** Trajectory fingerprint — the operator sequence shape of a target's history. */
-export interface TrajectoryFingerprint {
-  /** The operator sequence as a dot-joined string, e.g. "INS.DEF.DEF.CON.DEF" */
-  sequence: string;
-  /** Hash of the sequence string for indexing */
-  fingerprint: string;
-  /** Count of each operator type (7-dimensional vector) */
-  opCounts: Record<LoggableOperator, number>;
-}
-
-/** Temporal cadence classification for a target's event rhythm. */
-export type CadenceClass = 'burst' | 'periodic' | 'dormant' | 'steady' | 'sparse';
-
-export interface CadenceInfo {
-  classification: CadenceClass;
-  /** Timestamp of last event */
-  lastEventTs: string;
-  /** Number of events in trajectory */
-  eventCount: number;
-  /** Description of the rhythm pattern */
-  description: string;
-}
 
 /** Graph role classification for a node in the CON graph. */
 export type GraphRole = 'hub' | 'bridge' | 'leaf' | 'isolated';
