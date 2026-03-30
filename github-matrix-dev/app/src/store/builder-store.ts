@@ -1,0 +1,267 @@
+import { create } from 'zustand';
+import type { BlockNode, BlockId, BlockType, ViewDefinition } from '../blocks/types';
+import { createBlock } from '../blocks/registry';
+
+// ---------------------------------------------------------------------------
+// Tree helpers — immutable operations on the block tree
+// ---------------------------------------------------------------------------
+
+type BlockTree = BlockNode[];
+
+/** Deep-find a block by ID, returns [block, parent array, index] */
+function findBlock(
+  tree: BlockTree,
+  id: BlockId,
+): [BlockNode, BlockTree, number] | null {
+  for (let i = 0; i < tree.length; i++) {
+    if (tree[i].id === id) return [tree[i], tree, i];
+
+    // Search children
+    if (tree[i].children) {
+      const found = findBlock(tree[i].children!, id);
+      if (found) return found;
+    }
+
+    // Search slots
+    if (tree[i].slots) {
+      for (const slotKey of Object.keys(tree[i].slots!)) {
+        const found = findBlock(tree[i].slots![slotKey], id);
+        if (found) return found;
+      }
+    }
+  }
+  return null;
+}
+
+/** Deep-clone tree, replacing a specific node's parent array */
+function deepCloneTree(tree: BlockTree): BlockTree {
+  return tree.map((node) => ({
+    ...node,
+    props: { ...node.props },
+    children: node.children ? deepCloneTree(node.children) : undefined,
+    slots: node.slots
+      ? Object.fromEntries(
+          Object.entries(node.slots).map(([k, v]) => [k, deepCloneTree(v)]),
+        )
+      : undefined,
+  }));
+}
+
+/** Remove a block by ID from the tree, returns new tree */
+function removeFromTree(tree: BlockTree, id: BlockId): BlockTree {
+  const result: BlockTree = [];
+  for (const node of tree) {
+    if (node.id === id) continue;
+    const cloned = { ...node, props: { ...node.props } };
+    if (cloned.children) {
+      cloned.children = removeFromTree(cloned.children, id);
+    }
+    if (cloned.slots) {
+      cloned.slots = Object.fromEntries(
+        Object.entries(cloned.slots).map(([k, v]) => [k, removeFromTree(v, id)]),
+      );
+    }
+    result.push(cloned);
+  }
+  return result;
+}
+
+/** Insert a block into a target array at a given index */
+function insertIntoTree(
+  tree: BlockTree,
+  block: BlockNode,
+  parentId: BlockId | null,
+  slotKey: string | null,
+  index: number,
+): BlockTree {
+  // Insert at top level
+  if (!parentId) {
+    const newTree = [...tree];
+    newTree.splice(index, 0, block);
+    return newTree;
+  }
+
+  return tree.map((node) => {
+    const cloned = { ...node, props: { ...node.props } };
+
+    if (node.id === parentId) {
+      if (slotKey && cloned.slots) {
+        cloned.slots = { ...cloned.slots };
+        const slot = [...(cloned.slots[slotKey] || [])];
+        slot.splice(index, 0, block);
+        cloned.slots[slotKey] = slot;
+      } else if (cloned.children) {
+        cloned.children = [...cloned.children];
+        cloned.children.splice(index, 0, block);
+      }
+      return cloned;
+    }
+
+    if (cloned.children) {
+      cloned.children = insertIntoTree(cloned.children, block, parentId, slotKey, index);
+    }
+    if (cloned.slots) {
+      cloned.slots = Object.fromEntries(
+        Object.entries(cloned.slots).map(([k, v]) => [
+          k,
+          insertIntoTree(v, block, parentId, slotKey, index),
+        ]),
+      );
+    }
+    return cloned;
+  });
+}
+
+/** Update props on a specific block */
+function updatePropsInTree(
+  tree: BlockTree,
+  id: BlockId,
+  props: Record<string, any>,
+): BlockTree {
+  return tree.map((node) => {
+    if (node.id === id) {
+      return { ...node, props: { ...node.props, ...props } };
+    }
+    const cloned = { ...node };
+    if (cloned.children) {
+      cloned.children = updatePropsInTree(cloned.children, id, props);
+    }
+    if (cloned.slots) {
+      cloned.slots = Object.fromEntries(
+        Object.entries(cloned.slots).map(([k, v]) => [k, updatePropsInTree(v, id, props)]),
+      );
+    }
+    return cloned;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Store
+// ---------------------------------------------------------------------------
+
+export type BuilderMode = 'build' | 'live';
+
+interface BuilderState {
+  viewId: string | null;
+  viewName: string;
+  blocks: BlockNode[];
+  selectedBlockId: BlockId | null;
+  mode: BuilderMode;
+  isDirty: boolean;
+
+  // Actions
+  newView: (name: string) => string;
+  loadView: (viewId: string, definition: ViewDefinition) => void;
+  setMode: (mode: BuilderMode) => void;
+  selectBlock: (id: BlockId | null) => void;
+
+  addBlock: (type: BlockType, parentId?: BlockId | null, slotKey?: string | null, index?: number) => BlockId;
+  moveBlock: (blockId: BlockId, newParentId: BlockId | null, newSlotKey: string | null, newIndex: number) => void;
+  removeBlock: (id: BlockId) => void;
+  updateBlockProps: (id: BlockId, props: Record<string, any>) => void;
+
+  getViewDefinition: () => ViewDefinition;
+  markClean: () => void;
+  reset: () => void;
+}
+
+export const useBuilderStore = create<BuilderState>((set, get) => ({
+  viewId: null,
+  viewName: 'Untitled View',
+  blocks: [],
+  selectedBlockId: null,
+  mode: 'build',
+  isDirty: false,
+
+  newView(name: string) {
+    const viewId = crypto.randomUUID();
+    set({
+      viewId,
+      viewName: name,
+      blocks: [],
+      selectedBlockId: null,
+      mode: 'build',
+      isDirty: true,
+    });
+    return viewId;
+  },
+
+  loadView(viewId: string, definition: ViewDefinition) {
+    set({
+      viewId,
+      viewName: definition.name,
+      blocks: deepCloneTree(definition.blocks),
+      selectedBlockId: null,
+      mode: 'build',
+      isDirty: false,
+    });
+  },
+
+  setMode(mode: BuilderMode) {
+    set({ mode, selectedBlockId: mode === 'live' ? null : get().selectedBlockId });
+  },
+
+  selectBlock(id: BlockId | null) {
+    set({ selectedBlockId: id });
+  },
+
+  addBlock(type: BlockType, parentId = null, slotKey = null, index?: number) {
+    const block = createBlock(type);
+    const { blocks } = get();
+    const idx = index ?? (parentId ? 0 : blocks.length);
+    const newBlocks = insertIntoTree(blocks, block, parentId, slotKey, idx);
+    set({ blocks: newBlocks, isDirty: true, selectedBlockId: block.id });
+    return block.id;
+  },
+
+  moveBlock(blockId: BlockId, newParentId: BlockId | null, newSlotKey: string | null, newIndex: number) {
+    const { blocks } = get();
+    const found = findBlock(blocks, blockId);
+    if (!found) return;
+    const [block] = found;
+    // Remove then insert
+    const removed = removeFromTree(blocks, blockId);
+    const inserted = insertIntoTree(removed, block, newParentId, newSlotKey, newIndex);
+    set({ blocks: inserted, isDirty: true });
+  },
+
+  removeBlock(id: BlockId) {
+    const { blocks, selectedBlockId } = get();
+    const newBlocks = removeFromTree(blocks, id);
+    set({
+      blocks: newBlocks,
+      isDirty: true,
+      selectedBlockId: selectedBlockId === id ? null : selectedBlockId,
+    });
+  },
+
+  updateBlockProps(id: BlockId, props: Record<string, any>) {
+    const { blocks } = get();
+    set({ blocks: updatePropsInTree(blocks, id, props), isDirty: true });
+  },
+
+  getViewDefinition(): ViewDefinition {
+    const { viewName, blocks } = get();
+    return {
+      name: viewName,
+      blocks,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+  },
+
+  markClean() {
+    set({ isDirty: false });
+  },
+
+  reset() {
+    set({
+      viewId: null,
+      viewName: 'Untitled View',
+      blocks: [],
+      selectedBlockId: null,
+      mode: 'build',
+      isDirty: false,
+    });
+  },
+}));
