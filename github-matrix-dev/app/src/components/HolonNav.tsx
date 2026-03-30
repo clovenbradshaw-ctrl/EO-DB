@@ -24,6 +24,7 @@ interface TreeNode {
   recCount: number;      // children whose last_op is REC
   derivedCount: number;  // children at INS level 2+ (system-discovered)
   segments?: Record<string, FilterDefinition>;
+  state?: EoState;       // the EoState for this node (if any)
 }
 
 function formatName(segment: string): string {
@@ -95,6 +96,7 @@ function buildTree(states: EoState[], statePrefix: string): TreeNode[] {
       recCount,
       derivedCount,
       segments,
+      state: entry.state,
     };
   }
 
@@ -125,6 +127,7 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; target: string } | null>(null);
   const [typeSelector, setTypeSelector] = useState<{ x: number; y: number; target: string; currentType?: string } | null>(null);
+  const [renaming, setRenaming] = useState<{ target: string; currentName: string } | null>(null);
   const { theme } = useTheme();
   const s = makeStyles(theme);
 
@@ -168,6 +171,20 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
     setContextMenu(null);
   }
 
+  async function handleRename(target: string, newName: string) {
+    try {
+      await dispatch({
+        op: 'DEF',
+        target,
+        operand: { name: newName || undefined },
+        agent: 'user',
+        ts: new Date().toISOString(),
+        acquired_ts: new Date().toISOString(),
+      });
+    } catch { /* ignore */ }
+    setRenaming(null);
+  }
+
   async function handleTypeChange(target: string, type: string) {
     try {
       await dispatch({
@@ -184,7 +201,15 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
 
   function getContextMenuItems(target: string): ContextMenuItem[] {
     const state = allStates.find((s) => s.target === target);
+    const currentName = state?.value?.name || '';
     return [
+      {
+        label: currentName ? `Rename (${currentName})` : 'Set display name...',
+        onClick: () => {
+          setRenaming({ target, currentName });
+          setContextMenu(null);
+        },
+      },
       {
         label: state?.value?._type ? `Change type (${state.value._type})` : 'Set page type...',
         onClick: () => openTypeSelector(target, contextMenu!.x, contextMenu!.y),
@@ -224,12 +249,13 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
             {hasChildren ? (isExpanded ? '\u25BE' : '\u25B8') : '\u00A0\u00A0'}
           </span>
 
-          <span style={s.name}>{formatName(node.segment)}</span>
+          <span style={s.name}>
+            {node.state?.value?.name || formatName(node.segment)}
+          </span>
 
           {/* Type badge */}
           {(() => {
-            const state = allStates.find((st) => st.target === node.fullPath);
-            const type = state?.value?._type;
+            const type = node.state?.value?._type;
             return type ? <TypeBadge type={type} /> : null;
           })()}
 
@@ -319,6 +345,87 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
               onSelect={(type) => handleTypeChange(typeSelector.target, type)}
               onClose={() => setTypeSelector(null)}
             />
+          </div>
+        </>
+      )}
+
+      {/* Rename popover */}
+      {renaming && (
+        <>
+          <div
+            style={{ position: 'fixed', inset: 0, zIndex: 9998 }}
+            onClick={() => setRenaming(null)}
+          />
+          <div style={{
+            position: 'fixed',
+            left: '50%',
+            top: '30%',
+            transform: 'translateX(-50%)',
+            zIndex: 9999,
+            background: theme.bgCard,
+            border: `1px solid ${theme.border}`,
+            borderRadius: 8,
+            boxShadow: `0 8px 30px ${theme.shadow}`,
+            padding: 16,
+            minWidth: 280,
+          }}>
+            <div style={{ fontSize: 12, color: theme.textMuted, marginBottom: 4 }}>Display name</div>
+            <div style={{ fontSize: 10, color: theme.textMuted, marginBottom: 8, fontFamily: "'JetBrains Mono', monospace" }}>
+              {renaming.target}
+            </div>
+            <form onSubmit={(e) => {
+              e.preventDefault();
+              const input = (e.target as HTMLFormElement).elements.namedItem('displayName') as HTMLInputElement;
+              handleRename(renaming.target, input.value.trim());
+            }}>
+              <input
+                name="displayName"
+                autoFocus
+                defaultValue={renaming.currentName}
+                placeholder="Enter display name..."
+                style={{
+                  width: '100%',
+                  padding: '6px 8px',
+                  fontSize: 13,
+                  border: `1px solid ${theme.border}`,
+                  borderRadius: 4,
+                  background: theme.bg,
+                  color: theme.text,
+                  outline: 'none',
+                  boxSizing: 'border-box',
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') setRenaming(null);
+                }}
+              />
+              <div style={{ display: 'flex', gap: 8, marginTop: 8, justifyContent: 'flex-end' }}>
+                <button
+                  type="button"
+                  onClick={() => setRenaming(null)}
+                  style={{
+                    padding: '4px 12px',
+                    fontSize: 12,
+                    border: `1px solid ${theme.border}`,
+                    borderRadius: 4,
+                    background: 'transparent',
+                    color: theme.text,
+                    cursor: 'pointer',
+                  }}
+                >Cancel</button>
+                <button
+                  type="submit"
+                  style={{
+                    padding: '4px 12px',
+                    fontSize: 12,
+                    border: 'none',
+                    borderRadius: 4,
+                    background: theme.accent,
+                    color: '#fff',
+                    cursor: 'pointer',
+                  }}
+                >Save</button>
+              </div>
+            </form>
           </div>
         </>
       )}
