@@ -62,6 +62,8 @@ export type BlockType =
   // Data
   | 'table' | 'list' | 'cards-grid' | 'detail' | 'kanban' | 'calendar'
   | 'chart' | 'summary-kpi' | 'timeline' | 'map' | 'gallery'
+  // Record context
+  | 'record'
   // Form / Input
   | 'form' | 'filter-bar' | 'search' | 'button'
   // Interaction
@@ -186,6 +188,17 @@ export interface TableBlockProps {
   rowClickTarget?: string;
   emptyText?: string;
   /** Data binding — replaces scope when present */
+  binding?: DataBinding;
+}
+
+export interface RecordBlockProps {
+  /** Target path of the specific record, e.g. "app.tblClients.rec_001" */
+  recordTarget: string;
+  /** Display the record header card */
+  showHeader?: boolean;
+  /** Which fields to display in the header */
+  headerFields?: string[];
+  /** Data binding — allows picking a record via any selection mode */
   binding?: DataBinding;
 }
 

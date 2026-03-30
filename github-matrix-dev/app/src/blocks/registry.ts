@@ -109,6 +109,22 @@ register({
   acceptsSlots: null,
 });
 
+// --- Record ---
+
+register({
+  type: 'record',
+  category: 'data',
+  label: 'Record',
+  icon: '◉',
+  defaultProps: () => ({
+    recordTarget: '',
+    showHeader: true,
+    headerFields: [],
+  }),
+  acceptsChildren: true,
+  acceptsSlots: null,
+});
+
 // --- Form / Input ---
 
 register({

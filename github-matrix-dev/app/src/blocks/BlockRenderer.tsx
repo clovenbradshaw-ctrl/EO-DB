@@ -12,6 +12,7 @@ import { SpacerBlock } from './layout/SpacerBlock';
 import { HeadingBlock } from './text/HeadingBlock';
 import { ParagraphBlock } from './text/ParagraphBlock';
 import { TableBlock } from './data/TableBlock';
+import { RecordBlock } from './data/RecordBlock';
 import { ButtonBlock } from './form/ButtonBlock';
 
 // ---------------------------------------------------------------------------
@@ -26,6 +27,7 @@ const BLOCK_COMPONENTS: Record<string, React.ComponentType<{ block: BlockNode; m
   heading: HeadingBlock,
   paragraph: ParagraphBlock,
   table: TableBlock,
+  record: RecordBlock,
   button: ButtonBlock,
 };
 
