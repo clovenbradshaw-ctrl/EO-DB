@@ -1747,8 +1747,7 @@ body {
 .iface-column { display:flex; flex-direction:column; gap:8px; }
 .iface-block { background:var(--bg1); border-radius:8px; border:1px solid var(--border); position:relative; overflow:hidden; transition:border-color 0.15s; }
 .iface-block:hover { border-color:var(--border2); }
-.iface-block-edit { position:absolute; top:6px; right:6px; z-index:10; background:var(--bg3); border:1px solid var(--border2); border-radius:4px; color:var(--text-dim); cursor:pointer; padding:2px 8px; font-size:9px; font-family:'JetBrains Mono',monospace; font-weight:600; display:none; }
-.iface-block:hover .iface-block-edit { display:block; }
+.iface-block-edit { display:none; }
 .iface-add-block { background:transparent; border:1px dashed var(--border); border-radius:8px; padding:14px 0; cursor:pointer; color:var(--text-faint); font-size:11px; font-family:'JetBrains Mono',monospace; width:100%; transition:border-color 0.15s,color 0.15s; }
 .iface-add-block:hover { border-color:var(--border2); color:var(--text-dim); }
 .iface-add-section { display:flex; align-items:center; gap:8px; margin-top:10px; }
@@ -1791,6 +1790,35 @@ body {
 .iface-col-toggle.on { background:rgba(74,222,128,0.1); color:var(--ins); border-color:rgba(74,222,128,0.3); }
 .iface-modal-footer { display:flex; justify-content:space-between; margin-top:16px; padding-top:12px; border-top:1px solid var(--border); }
 .iface-btn-danger { background:var(--danger); color:#fff; border:none; border-radius:4px; padding:5px 12px; cursor:pointer; font-size:10px; font-family:'JetBrains Mono',monospace; font-weight:600; }
+
+/* ── Softr-style Right Slide Panel ── */
+.iface-panel-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.35); z-index:300; transition:opacity 0.2s; }
+.iface-panel { position:fixed; top:0; right:-480px; width:480px; height:100vh; background:var(--bg1); border-left:1px solid var(--border); z-index:301; display:flex; flex-direction:column; transition:right 0.25s cubic-bezier(0.4,0,0.2,1); box-shadow:-8px 0 32px rgba(0,0,0,0.3); }
+.iface-panel.open { right:0; }
+.iface-panel-header { display:flex; align-items:center; padding:14px 16px; border-bottom:1px solid var(--border); gap:10px; flex-shrink:0; }
+.iface-panel-title { font-size:13px; font-weight:600; color:var(--white); flex:1; font-family:'JetBrains Mono',monospace; }
+.iface-panel-close { background:none; border:1px solid var(--border); border-radius:4px; color:var(--text-dim); cursor:pointer; width:26px; height:26px; display:flex; align-items:center; justify-content:center; font-size:14px; }
+.iface-panel-close:hover { border-color:var(--border2); color:var(--text); }
+.iface-panel-body { flex:1; overflow-y:auto; display:flex; flex-direction:column; }
+.iface-panel-section { padding:16px; border-bottom:1px solid var(--border); }
+.iface-panel-section-title { font-size:9px; font-weight:700; color:var(--text-faint); text-transform:uppercase; letter-spacing:0.08em; margin-bottom:10px; font-family:'JetBrains Mono',monospace; }
+.iface-panel-footer { display:flex; justify-content:space-between; padding:12px 16px; border-top:1px solid var(--border); flex-shrink:0; }
+
+/* ── Block Hover Actions ── */
+.iface-block-actions { position:absolute; top:6px; right:6px; z-index:10; display:flex; gap:3px; opacity:0; transition:opacity 0.15s; }
+.iface-block:hover .iface-block-actions { opacity:1; }
+.iface-block-action { background:var(--bg2); border:1px solid var(--border2); border-radius:4px; color:var(--text-dim); cursor:pointer; padding:2px 6px; font-size:9px; font-family:'JetBrains Mono',monospace; font-weight:600; display:flex; align-items:center; gap:3px; line-height:1.4; }
+.iface-block-action:hover { background:var(--bg3); color:var(--text); border-color:var(--accent); }
+.iface-block-action.danger:hover { border-color:var(--danger); color:var(--danger); }
+.iface-block.selected { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent); }
+
+/* ── Block Type Picker (Softr-style) ── */
+.iface-picker-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; padding:4px 0; }
+.iface-picker-card { background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:14px 12px; cursor:pointer; transition:all 0.15s; display:flex; flex-direction:column; align-items:center; gap:8px; text-align:center; }
+.iface-picker-card:hover { border-color:var(--accent); background:var(--bg2); }
+.iface-picker-icon { width:36px; height:36px; border-radius:8px; display:flex; align-items:center; justify-content:center; font-size:16px; }
+.iface-picker-label { font-size:11px; font-weight:600; color:var(--text); font-family:'JetBrains Mono',monospace; }
+.iface-picker-desc { font-size:9px; color:var(--text-faint); font-family:'JetBrains Mono',monospace; line-height:1.3; }
 
 /* ── Record Selector (Softr-style) ── */
 .iface-modal.wide { width:680px; max-height:85vh; }
@@ -10155,8 +10183,100 @@ const BLOCK_TYPES = {
       });
       return d;
     }
+  },
+
+  header: {
+    render(config, items, el) {
+      const align = config.align || 'left';
+      const size = config.size || 'large';
+      const fontSize = size === 'large' ? '24px' : size === 'medium' ? '18px' : '14px';
+      el.innerHTML = `<div style="padding:${size === 'large' ? '28px 24px' : '18px 20px'};text-align:${align};">
+        <div style="font-size:${fontSize};font-weight:700;color:var(--white);line-height:1.3;font-family:'JetBrains Mono',monospace;">${escapeHtml(config.title || 'Heading')}</div>
+        ${config.subtitle ? `<div style="font-size:13px;color:var(--text-dim);margin-top:6px;line-height:1.5;">${escapeHtml(config.subtitle)}</div>` : ''}
+      </div>`;
+    },
+    editor(config, fields, types, onUpdate) {
+      const d = document.createElement('div');
+      d.innerHTML = `
+        <div class="iface-field"><div class="iface-field-label">TITLE</div>
+          <input class="iface-input" value="${escapeHtml(config.title || '')}" data-key="title"></div>
+        <div class="iface-field"><div class="iface-field-label">SUBTITLE</div>
+          <input class="iface-input" value="${escapeHtml(config.subtitle || '')}" data-key="subtitle"></div>
+        <div style="display:flex;gap:6px;">
+          <div class="iface-field" style="flex:1;"><div class="iface-field-label">SIZE</div>
+            <select class="iface-select" data-key="size">
+              <option value="large" ${config.size === 'large' || !config.size ? 'selected' : ''}>Large</option>
+              <option value="medium" ${config.size === 'medium' ? 'selected' : ''}>Medium</option>
+              <option value="small" ${config.size === 'small' ? 'selected' : ''}>Small</option>
+            </select></div>
+          <div class="iface-field" style="flex:1;"><div class="iface-field-label">ALIGN</div>
+            <select class="iface-select" data-key="align">
+              <option value="left" ${config.align === 'left' || !config.align ? 'selected' : ''}>Left</option>
+              <option value="center" ${config.align === 'center' ? 'selected' : ''}>Center</option>
+              <option value="right" ${config.align === 'right' ? 'selected' : ''}>Right</option>
+            </select></div>
+        </div>`;
+      d.querySelectorAll('[data-key]').forEach(el => {
+        const handler = () => { config[el.dataset.key] = el.value; onUpdate(config); };
+        el.addEventListener('input', handler);
+        el.addEventListener('change', handler);
+      });
+      return d;
+    }
+  },
+
+  divider: {
+    render(config, items, el) {
+      const style = config.style || 'solid';
+      const color = config.color || 'var(--border)';
+      const label = config.label || '';
+      if (label) {
+        el.innerHTML = `<div style="padding:12px 20px;display:flex;align-items:center;gap:12px;">
+          <div style="flex:1;height:1px;background:${color};"></div>
+          <span style="font-size:10px;color:var(--text-faint);font-family:'JetBrains Mono',monospace;font-weight:600;white-space:nowrap;">${escapeHtml(label)}</span>
+          <div style="flex:1;height:1px;background:${color};"></div>
+        </div>`;
+      } else {
+        el.innerHTML = `<div style="padding:12px 20px;">
+          <div style="height:1px;border-top:1px ${style} ${color};"></div>
+        </div>`;
+      }
+    },
+    editor(config, fields, types, onUpdate) {
+      const d = document.createElement('div');
+      d.innerHTML = `
+        <div class="iface-field"><div class="iface-field-label">LABEL (optional)</div>
+          <input class="iface-input" value="${escapeHtml(config.label || '')}" data-key="label" placeholder="e.g. Section Title"></div>
+        <div style="display:flex;gap:6px;">
+          <div class="iface-field" style="flex:1;"><div class="iface-field-label">LINE STYLE</div>
+            <select class="iface-select" data-key="style">
+              <option value="solid" ${config.style === 'solid' || !config.style ? 'selected' : ''}>Solid</option>
+              <option value="dashed" ${config.style === 'dashed' ? 'selected' : ''}>Dashed</option>
+              <option value="dotted" ${config.style === 'dotted' ? 'selected' : ''}>Dotted</option>
+            </select></div>
+          <div class="iface-field"><div class="iface-field-label">COLOR</div>
+            <input type="color" value="${config.color && config.color.startsWith('#') ? config.color : '#333333'}" data-key="color" style="width:36px;height:30px;border:1px solid var(--border);border-radius:4px;background:var(--bg);cursor:pointer;"></div>
+        </div>`;
+      d.querySelectorAll('[data-key]').forEach(el => {
+        const handler = () => { config[el.dataset.key] = el.value; onUpdate(config); };
+        el.addEventListener('input', handler);
+        el.addEventListener('change', handler);
+      });
+      return d;
+    }
   }
 };
+
+// ── Block Type Picker Definitions ───────────────────────────────
+
+const BLOCK_PICKER_ITEMS = [
+  { type: 'table', label: 'Table', desc: 'Display records in rows and columns', icon: '&#9638;', color: 'rgba(96,165,250,0.15)', fg: '#60a5fa' },
+  { type: 'list', label: 'List', desc: 'Show records as a compact list', icon: '&#9776;', color: 'rgba(74,222,128,0.15)', fg: '#4ade80' },
+  { type: 'metric', label: 'Metric', desc: 'Count or sum with a big number', icon: '#', color: 'rgba(244,114,182,0.15)', fg: '#f472b6' },
+  { type: 'text', label: 'Text', desc: 'Free-form rich text content', icon: 'T', color: 'rgba(167,139,250,0.15)', fg: '#a78bfa' },
+  { type: 'header', label: 'Header', desc: 'Section heading with subtitle', icon: 'H', color: 'rgba(251,191,36,0.15)', fg: '#fbbf24' },
+  { type: 'divider', label: 'Divider', desc: 'Visual separator between blocks', icon: '—', color: 'rgba(148,163,184,0.15)', fg: '#94a3b8' },
+];
 
 // ── Data Queries ─────────────────────────────────────────────────
 
@@ -10364,23 +10484,45 @@ function ifaceRenderSections(container, sections) {
 
       blocks.forEach(block => {
         const blockEl = document.createElement('div');
-        blockEl.className = 'iface-block';
+        blockEl.className = 'iface-block' + (ifaceSelectedBlock === block.id ? ' selected' : '');
+        blockEl.style.cursor = 'pointer';
+
+        // Always show actions toolbar on hover
+        const actions = document.createElement('div');
+        actions.className = 'iface-block-actions';
+
+        const editAction = document.createElement('button');
+        editAction.className = 'iface-block-action';
+        editAction.innerHTML = '&#9998; edit';
+        editAction.onclick = (e) => { e.stopPropagation(); ifaceOpenBlockPanel(block, section.id); };
+        actions.appendChild(editAction);
 
         if (ifaceEditMode) {
-          const editBtnEl = document.createElement('button');
-          editBtnEl.className = 'iface-block-edit';
-          editBtnEl.style.display = 'block';
-          editBtnEl.textContent = 'edit';
-          editBtnEl.onclick = () => ifaceOpenBlockEditor(block);
-          blockEl.appendChild(editBtnEl);
+          const dupAction = document.createElement('button');
+          dupAction.className = 'iface-block-action';
+          dupAction.innerHTML = '&#10697; copy';
+          dupAction.onclick = (e) => { e.stopPropagation(); ifaceDuplicateBlock(section.id, block); };
+          actions.appendChild(dupAction);
+
+          const delAction = document.createElement('button');
+          delAction.className = 'iface-block-action danger';
+          delAction.innerHTML = '&#10005;';
+          delAction.onclick = (e) => { e.stopPropagation(); ifaceRemoveBlock(block.id); };
+          actions.appendChild(delAction);
         }
+
+        blockEl.appendChild(actions);
+
+        // Click block to edit
+        blockEl.onclick = () => ifaceOpenBlockPanel(block, section.id);
 
         const type = BLOCK_TYPES[block.type];
         if (type) {
-          const items = block.type !== 'text' ? ifaceQueryData(block.config?.seg || {}, block.config?.filters, block.config?.sort, block.config?.limit) : [];
+          const isDataType = ['metric', 'table', 'list'].includes(block.type);
+          const items = isDataType ? ifaceQueryData(block.config?.seg || {}, block.config?.filters, block.config?.sort, block.config?.limit) : [];
           type.render(block.config || {}, items, blockEl);
         } else {
-          blockEl.innerHTML = '<div class="iface-no-data">empty block</div>';
+          blockEl.innerHTML += '<div class="iface-no-data">empty block</div>';
         }
         colEl.appendChild(blockEl);
       });
@@ -10475,14 +10617,43 @@ async function ifaceSetColumns(sid, n) {
 
 // ── Block Mutations ──────────────────────────────────────────────
 
-async function ifaceAddBlock(sid, col) {
-  const block = { id: ifaceNextId('b'), col, type: 'text', config: { heading: '', body: 'New block' } };
+let ifaceSelectedBlock = null;
+
+function ifaceAddBlock(sid, col) {
+  // Show the Softr-style block type picker
+  ifaceShowBlockPicker(sid, col);
+}
+
+async function ifaceInsertBlock(sid, col, type) {
+  const defaults = {
+    metric: { title: '', formula: 'COUNT', seg: {}, color: '#4ade80', filters: [], sort: {}, limit: 0 },
+    table: { title: '', seg: {}, columns: [], filters: [], sort: {}, limit: 0 },
+    list: { title: '', seg: {}, primary: 'name', secondary: '', filters: [], sort: {}, limit: 0 },
+    text: { heading: '', body: '' },
+    header: { title: 'Heading', subtitle: '', size: 'large', align: 'left' },
+    divider: { label: '', style: 'solid', color: '' },
+  };
+  const block = { id: ifaceNextId('b'), col, type, config: defaults[type] || {} };
   const sections = ifaceGetViewSections().map(s =>
     s.id === sid ? { ...s, blocks: [...s.blocks, block] } : s
   );
   await ifaceSaveView(ifaceCurrentView, { sections });
   renderInterface();
-  ifaceOpenBlockEditor(block);
+  ifaceOpenBlockPanel(block, sid);
+}
+
+async function ifaceDuplicateBlock(sid, block) {
+  const dup = JSON.parse(JSON.stringify(block));
+  dup.id = ifaceNextId('b');
+  const sections = ifaceGetViewSections().map(s => {
+    if (s.id !== sid) return s;
+    const idx = s.blocks.findIndex(b => b.id === block.id);
+    const newBlocks = [...s.blocks];
+    newBlocks.splice(idx + 1, 0, dup);
+    return { ...s, blocks: newBlocks };
+  });
+  await ifaceSaveView(ifaceCurrentView, { sections });
+  renderInterface();
 }
 
 async function ifaceSaveBlock(updated) {
@@ -10557,7 +10728,463 @@ const FILTER_OPS = [
 ];
 const NO_VALUE_OPS = ['empty', 'not_empty'];
 
-// ── Block Editor Modal ───────────────────────────────────────────
+// ── Block Type Picker (Softr-style) ─────────────────────────────
+
+function ifaceShowBlockPicker(sid, col) {
+  const existing = document.getElementById('ifacePickerOverlay');
+  if (existing) existing.remove();
+
+  const overlay = document.createElement('div');
+  overlay.className = 'iface-modal-overlay';
+  overlay.id = 'ifacePickerOverlay';
+  overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+
+  const modal = document.createElement('div');
+  modal.className = 'iface-modal';
+  modal.style.width = '380px';
+  modal.onclick = e => e.stopPropagation();
+
+  const header = document.createElement('div');
+  header.className = 'iface-modal-header';
+  header.innerHTML = `<span class="iface-modal-title">Add Block</span>`;
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'iface-panel-close';
+  closeBtn.textContent = '\u00d7';
+  closeBtn.onclick = () => overlay.remove();
+  header.appendChild(closeBtn);
+  modal.appendChild(header);
+
+  const body = document.createElement('div');
+  body.style.padding = '16px';
+  const grid = document.createElement('div');
+  grid.className = 'iface-picker-grid';
+
+  BLOCK_PICKER_ITEMS.forEach(item => {
+    const card = document.createElement('div');
+    card.className = 'iface-picker-card';
+    card.innerHTML = `
+      <div class="iface-picker-icon" style="background:${item.color};color:${item.fg};font-weight:700;font-family:'JetBrains Mono',monospace;">${item.icon}</div>
+      <div class="iface-picker-label">${item.label}</div>
+      <div class="iface-picker-desc">${item.desc}</div>`;
+    card.onclick = () => {
+      overlay.remove();
+      ifaceInsertBlock(sid, col, item.type);
+    };
+    grid.appendChild(card);
+  });
+
+  body.appendChild(grid);
+  modal.appendChild(body);
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+
+  const escHandler = e => { if (e.key === 'Escape') { overlay.remove(); document.removeEventListener('keydown', escHandler); } };
+  document.addEventListener('keydown', escHandler);
+}
+
+// ── Softr-style Slide-in Panel Editor ───────────────────────────
+
+function ifaceOpenBlockPanel(block, sectionId) {
+  // Close any existing panel
+  const existingOverlay = document.getElementById('ifacePanelOverlay');
+  const existingPanel = document.getElementById('ifacePanel');
+  if (existingOverlay) existingOverlay.remove();
+  if (existingPanel) existingPanel.remove();
+
+  ifaceSelectedBlock = block.id;
+  renderInterface(); // re-render to highlight selected block
+
+  const cfg = JSON.parse(JSON.stringify(block));
+  if (!cfg.config) cfg.config = {};
+  if (!cfg.config.filters) cfg.config.filters = [];
+  if (!cfg.config.sort) cfg.config.sort = {};
+  if (!cfg.config.limit) cfg.config.limit = 0;
+
+  const { types: recTypes, allCount } = ifaceRecordTypeMeta();
+  const allTypes = ifaceAllTypes();
+
+  // Overlay
+  const overlay = document.createElement('div');
+  overlay.className = 'iface-panel-overlay';
+  overlay.id = 'ifacePanelOverlay';
+  overlay.onclick = () => closePanel();
+
+  // Panel
+  const panel = document.createElement('div');
+  panel.className = 'iface-panel';
+  panel.id = 'ifacePanel';
+  panel.onclick = e => e.stopPropagation();
+
+  // Header
+  const header = document.createElement('div');
+  header.className = 'iface-panel-header';
+  const blockLabel = BLOCK_PICKER_ITEMS.find(b => b.type === cfg.type)?.label || cfg.type;
+  header.innerHTML = `<span class="iface-panel-title">Edit ${blockLabel}</span>`;
+
+  // Type switch buttons in header
+  const typeBtns = document.createElement('div');
+  typeBtns.style.cssText = 'display:flex;gap:3px;';
+  typeBtns.id = 'panel-type-btns';
+  header.appendChild(typeBtns);
+
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'iface-panel-close';
+  closeBtn.textContent = '\u00d7';
+  closeBtn.onclick = () => closePanel();
+  header.appendChild(closeBtn);
+  panel.appendChild(header);
+
+  // Body
+  const body = document.createElement('div');
+  body.className = 'iface-panel-body';
+  panel.appendChild(body);
+
+  // Footer
+  const footer = document.createElement('div');
+  footer.className = 'iface-panel-footer';
+  footer.innerHTML = `<button class="iface-btn-danger" id="panel-delete-block">Delete Block</button>
+    <div style="display:flex;gap:6px;">
+      <button class="iface-btn" id="panel-cancel">Cancel</button>
+      <button class="iface-btn iface-btn-primary" id="panel-save">Save</button>
+    </div>`;
+  panel.appendChild(footer);
+
+  // State
+  let activeTab = 'config';
+
+  function closePanel() {
+    ifaceSelectedBlock = null;
+    panel.classList.remove('open');
+    overlay.remove();
+    setTimeout(() => panel.remove(), 250);
+    renderInterface();
+  }
+
+  function renderTypeButtons() {
+    const btns = panel.querySelector('#panel-type-btns');
+    btns.innerHTML = BLOCK_PICKER_ITEMS.map(item =>
+      `<button class="iface-type-btn ${cfg.type === item.type ? 'active' : ''}" data-type="${item.type}" title="${item.label}">${item.icon}</button>`
+    ).join('');
+    btns.querySelectorAll('[data-type]').forEach(btn => {
+      btn.onclick = () => {
+        const newType = btn.dataset.type;
+        const wasDataType = ['metric', 'table', 'list'].includes(cfg.type);
+        const isDataType = ['metric', 'table', 'list'].includes(newType);
+        cfg.type = newType;
+        // Reset config based on type
+        const defaults = {
+          metric: { title: cfg.config.title || '', formula: 'COUNT', seg: cfg.config.seg || {}, color: '#4ade80', filters: [], sort: {}, limit: 0 },
+          table: { title: cfg.config.title || '', seg: cfg.config.seg || {}, columns: [], filters: [], sort: {}, limit: 0 },
+          list: { title: cfg.config.title || '', seg: cfg.config.seg || {}, primary: 'name', secondary: '', filters: [], sort: {}, limit: 0 },
+          text: { heading: cfg.config.title || cfg.config.heading || '', body: cfg.config.body || '' },
+          header: { title: cfg.config.title || cfg.config.heading || 'Heading', subtitle: '', size: 'large', align: 'left' },
+          divider: { label: '', style: 'solid', color: '' },
+        };
+        if (!wasDataType || !isDataType) {
+          cfg.config = defaults[newType] || {};
+        }
+        // Update header title
+        const label = BLOCK_PICKER_ITEMS.find(b => b.type === cfg.type)?.label || cfg.type;
+        header.querySelector('.iface-panel-title').textContent = 'Edit ' + label;
+        renderTypeButtons();
+        renderBody();
+      };
+    });
+  }
+
+  function renderBody() {
+    body.innerHTML = '';
+    const isDataType = ['metric', 'table', 'list'].includes(cfg.type);
+
+    if (isDataType) {
+      // Data source section
+      const dsSection = document.createElement('div');
+      dsSection.className = 'iface-panel-section';
+      dsSection.innerHTML = `<div class="iface-panel-section-title">Data Source</div>`;
+
+      const selectedType = cfg.config?.seg?._type || '';
+      const typeRow = document.createElement('div');
+      typeRow.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;';
+
+      // All records chip
+      const allChip = document.createElement('button');
+      allChip.className = 'rec-field-chip' + (!selectedType ? ' on' : '');
+      allChip.textContent = 'All (' + allCount + ')';
+      allChip.onclick = () => {
+        if (!cfg.config.seg) cfg.config.seg = {};
+        cfg.config.seg._type = undefined;
+        if (cfg.type === 'table') cfg.config.columns = [];
+        renderBody();
+      };
+      typeRow.appendChild(allChip);
+
+      recTypes.forEach(rt => {
+        if (rt.name === '(untyped)') return;
+        const chip = document.createElement('button');
+        chip.className = 'rec-field-chip' + (selectedType === rt.name ? ' on' : '');
+        chip.textContent = rt.name + ' (' + rt.count + ')';
+        chip.onclick = () => {
+          if (!cfg.config.seg) cfg.config.seg = {};
+          cfg.config.seg._type = rt.name;
+          if (cfg.type === 'table') cfg.config.columns = [];
+          renderBody();
+        };
+        typeRow.appendChild(chip);
+      });
+      dsSection.appendChild(typeRow);
+      body.appendChild(dsSection);
+
+      // Tabs: Config | Filters | Preview
+      const tabSection = document.createElement('div');
+      tabSection.style.cssText = 'flex:1;display:flex;flex-direction:column;';
+
+      const tabs = document.createElement('div');
+      tabs.className = 'rec-tabs';
+      tabs.style.padding = '0 16px';
+      tabs.innerHTML = `
+        <button class="rec-tab ${activeTab === 'config' ? 'active' : ''}" data-tab="config">Configure</button>
+        <button class="rec-tab ${activeTab === 'filters' ? 'active' : ''}" data-tab="filters">Filters${cfg.config.filters?.length ? ' (' + cfg.config.filters.length + ')' : ''}</button>
+        <button class="rec-tab ${activeTab === 'preview' ? 'active' : ''}" data-tab="preview">Preview</button>`;
+      tabs.querySelectorAll('.rec-tab').forEach(t => {
+        t.onclick = () => { activeTab = t.dataset.tab; renderBody(); };
+      });
+      tabSection.appendChild(tabs);
+
+      const tabPanel = document.createElement('div');
+      tabPanel.style.cssText = 'padding:16px;flex:1;overflow-y:auto;';
+
+      if (activeTab === 'config') {
+        renderPanelConfigTab(tabPanel);
+      } else if (activeTab === 'filters') {
+        renderPanelFiltersTab(tabPanel);
+      } else if (activeTab === 'preview') {
+        renderPanelPreviewTab(tabPanel);
+      }
+      tabSection.appendChild(tabPanel);
+      body.appendChild(tabSection);
+    } else {
+      // Non-data types: text, header, divider — simple config
+      const cfgSection = document.createElement('div');
+      cfgSection.className = 'iface-panel-section';
+      cfgSection.style.flex = '1';
+      cfgSection.innerHTML = `<div class="iface-panel-section-title">Settings</div>`;
+
+      const reg = BLOCK_TYPES[cfg.type];
+      if (reg) {
+        const edEl = reg.editor(cfg.config, [], allTypes, c => { cfg.config = c; });
+        cfgSection.appendChild(edEl);
+      }
+      body.appendChild(cfgSection);
+    }
+  }
+
+  function renderPanelConfigTab(panel) {
+    const fields = ifaceFieldsForType(cfg.config?.seg?._type);
+
+    if (cfg.type === 'metric') {
+      panel.innerHTML = `
+        <div class="iface-field"><div class="iface-field-label">TITLE</div>
+          <input class="iface-input" value="${escapeHtml(cfg.config.title || '')}" data-key="title"></div>
+        <div style="display:flex;gap:6px;">
+          <div class="iface-field" style="flex:1;"><div class="iface-field-label">FORMULA</div>
+            <select class="iface-select" data-key="formula">
+              <option value="COUNT" ${cfg.config.formula === 'COUNT' ? 'selected' : ''}>COUNT</option>
+              <option value="SUM" ${cfg.config.formula === 'SUM' ? 'selected' : ''}>SUM</option>
+            </select></div>
+          <div class="iface-field" style="flex:1;"><div class="iface-field-label">SUM FIELD</div>
+            <select class="iface-select" data-key="field">
+              <option value="">Pick\u2026</option>
+              ${fields.map(f => `<option value="${f}" ${cfg.config.field === f ? 'selected' : ''}>${f}</option>`).join('')}
+            </select></div>
+          <div class="iface-field"><div class="iface-field-label">COLOR</div>
+            <input type="color" value="${cfg.config.color || '#4ade80'}" data-key="color" style="width:36px;height:30px;border:1px solid var(--border);border-radius:4px;background:var(--bg);cursor:pointer;"></div>
+        </div>
+        <div class="iface-field"><div class="iface-field-label">PREFIX</div>
+          <input class="iface-input" value="${escapeHtml(cfg.config.prefix || '')}" data-key="prefix" placeholder="e.g. $"></div>`;
+      panel.querySelectorAll('[data-key]').forEach(el => {
+        const handler = () => { cfg.config[el.dataset.key] = el.value; };
+        el.addEventListener('input', handler);
+        el.addEventListener('change', handler);
+      });
+
+    } else if (cfg.type === 'table') {
+      panel.innerHTML = `
+        <div class="iface-field"><div class="iface-field-label">TITLE</div>
+          <input class="iface-input" value="${escapeHtml(cfg.config.title || '')}" data-key="title"></div>
+        <div class="iface-field"><div class="iface-field-label">COLUMNS</div>
+          <div class="rec-field-chips" id="panel-col-chips"></div></div>
+        <div class="iface-field"><div class="iface-field-label">MAX ROWS (0 = all)</div>
+          <input class="iface-input" type="number" min="0" value="${cfg.config.limit || 0}" data-key="limit" style="width:80px;"></div>`;
+      panel.querySelector('[data-key="title"]').addEventListener('input', e => { cfg.config.title = e.target.value; });
+      panel.querySelector('[data-key="limit"]').addEventListener('input', e => { cfg.config.limit = parseInt(e.target.value) || 0; });
+      const chipsEl = panel.querySelector('#panel-col-chips');
+      fields.forEach(f => {
+        const chip = document.createElement('button');
+        chip.className = 'rec-field-chip' + ((cfg.config.columns || []).includes(f) ? ' on' : '');
+        chip.textContent = f;
+        chip.onclick = () => {
+          const cols = cfg.config.columns || [];
+          cfg.config.columns = cols.includes(f) ? cols.filter(x => x !== f) : [...cols, f];
+          chip.classList.toggle('on');
+        };
+        chipsEl.appendChild(chip);
+      });
+
+    } else if (cfg.type === 'list') {
+      panel.innerHTML = `
+        <div class="iface-field"><div class="iface-field-label">TITLE</div>
+          <input class="iface-input" value="${escapeHtml(cfg.config.title || '')}" data-key="title"></div>
+        <div style="display:flex;gap:6px;">
+          <div class="iface-field" style="flex:1;"><div class="iface-field-label">PRIMARY FIELD</div>
+            <select class="iface-select" data-key="primary">
+              ${fields.map(f => `<option value="${f}" ${cfg.config.primary === f ? 'selected' : ''}>${f}</option>`).join('')}
+            </select></div>
+          <div class="iface-field" style="flex:1;"><div class="iface-field-label">SECONDARY FIELD</div>
+            <select class="iface-select" data-key="secondary">
+              <option value="">None</option>
+              ${fields.map(f => `<option value="${f}" ${cfg.config.secondary === f ? 'selected' : ''}>${f}</option>`).join('')}
+            </select></div>
+        </div>
+        <div class="iface-field"><div class="iface-field-label">MAX ITEMS (0 = all)</div>
+          <input class="iface-input" type="number" min="0" value="${cfg.config.limit || 0}" data-key="limit" style="width:80px;"></div>`;
+      panel.querySelectorAll('[data-key]').forEach(el => {
+        const handler = () => { cfg.config[el.dataset.key] = el.value; };
+        el.addEventListener('input', handler);
+        el.addEventListener('change', handler);
+      });
+    }
+
+    // Sort controls (shared)
+    const sortSection = document.createElement('div');
+    sortSection.style.cssText = 'margin-top:12px;';
+    sortSection.innerHTML = `
+      <div class="iface-field-label">SORT BY</div>
+      <div class="rec-sort-row">
+        <select class="iface-select" id="panel-sort-field" style="flex:1;">
+          <option value="">None</option>
+          ${fields.map(f => `<option value="${f}" ${cfg.config.sort?.field === f ? 'selected' : ''}>${f}</option>`).join('')}
+        </select>
+        <button class="rec-sort-dir" id="panel-sort-dir">${cfg.config.sort?.dir === 'desc' ? '\u2193 DESC' : '\u2191 ASC'}</button>
+      </div>`;
+    sortSection.querySelector('#panel-sort-field').addEventListener('change', e => {
+      if (!cfg.config.sort) cfg.config.sort = {};
+      cfg.config.sort.field = e.target.value || undefined;
+    });
+    sortSection.querySelector('#panel-sort-dir').addEventListener('click', e => {
+      if (!cfg.config.sort) cfg.config.sort = {};
+      cfg.config.sort.dir = cfg.config.sort.dir === 'desc' ? 'asc' : 'desc';
+      e.target.textContent = cfg.config.sort.dir === 'desc' ? '\u2193 DESC' : '\u2191 ASC';
+    });
+    panel.appendChild(sortSection);
+  }
+
+  function renderPanelFiltersTab(panel) {
+    const fields = ifaceFieldsForType(cfg.config?.seg?._type);
+    if (!cfg.config.filters) cfg.config.filters = [];
+    const container = document.createElement('div');
+
+    cfg.config.filters.forEach((f, idx) => {
+      const row = document.createElement('div');
+      row.className = 'rec-filter-row';
+      row.innerHTML = `
+        <select data-role="field">
+          <option value="">Field\u2026</option>
+          ${fields.map(fld => `<option value="${fld}" ${f.field === fld ? 'selected' : ''}>${fld}</option>`).join('')}
+        </select>
+        <select data-role="op">
+          ${FILTER_OPS.map(o => `<option value="${o.value}" ${f.op === o.value ? 'selected' : ''}>${o.label}</option>`).join('')}
+        </select>
+        <input data-role="value" value="${escapeHtml(f.value || '')}" placeholder="value\u2026"
+          style="${NO_VALUE_OPS.includes(f.op) ? 'display:none;' : ''}">
+        <button class="rec-filter-remove" data-idx="${idx}">\u00d7</button>`;
+      row.querySelector('[data-role="field"]').onchange = e => { cfg.config.filters[idx].field = e.target.value; };
+      row.querySelector('[data-role="op"]').onchange = e => {
+        cfg.config.filters[idx].op = e.target.value;
+        row.querySelector('[data-role="value"]').style.display = NO_VALUE_OPS.includes(e.target.value) ? 'none' : '';
+      };
+      row.querySelector('[data-role="value"]').oninput = e => { cfg.config.filters[idx].value = e.target.value; };
+      row.querySelector('.rec-filter-remove').onclick = () => {
+        cfg.config.filters.splice(idx, 1);
+        renderPanelFiltersTab(panel);
+      };
+      container.appendChild(row);
+    });
+
+    const addBtn = document.createElement('button');
+    addBtn.className = 'rec-add-filter';
+    addBtn.textContent = '+ Add filter';
+    addBtn.onclick = () => {
+      cfg.config.filters.push({ field: '', op: 'eq', value: '' });
+      renderPanelFiltersTab(panel);
+    };
+    container.appendChild(addBtn);
+
+    if (!cfg.config.filters.length) {
+      const hint = document.createElement('div');
+      hint.style.cssText = 'margin-top:12px;font-size:11px;color:var(--text-faint);font-family:"JetBrains Mono",monospace;';
+      hint.textContent = 'No filters applied. Add filters to narrow which records appear.';
+      container.appendChild(hint);
+    }
+
+    panel.innerHTML = '';
+    panel.appendChild(container);
+  }
+
+  function renderPanelPreviewTab(panel) {
+    const items = ifaceQueryData(cfg.config?.seg || {}, cfg.config.filters, cfg.config.sort, cfg.config.limit);
+    const fields = ifaceFieldsForType(cfg.config?.seg?._type);
+    const displayFields = fields.slice(0, 5);
+
+    let html = `<div class="rec-preview">
+      <div class="rec-preview-header">
+        <span class="rec-preview-title">Matching Records</span>
+        <span class="rec-preview-count">${items.length} record${items.length !== 1 ? 's' : ''}</span>
+      </div>
+      <div class="rec-preview-rows">`;
+
+    if (items.length === 0) {
+      html += '<div class="rec-preview-empty">No records match the current selection and filters.</div>';
+    } else {
+      items.slice(0, 25).forEach(item => {
+        const target = item.target.split('.').pop() || item.target;
+        html += `<div class="rec-preview-row">
+          <span class="rec-preview-target" title="${escapeHtml(item.target)}">${escapeHtml(target)}</span>
+          <span class="rec-preview-fields">`;
+        displayFields.forEach(f => {
+          const v = item.value?.[f];
+          if (v !== undefined && v !== null && v !== '') {
+            html += `<span class="rec-preview-chip" title="${escapeHtml(f)}: ${escapeHtml(String(v))}">${escapeHtml(f)}: ${escapeHtml(String(v).slice(0, 30))}</span>`;
+          }
+        });
+        html += '</span></div>';
+      });
+      if (items.length > 25) html += `<div class="rec-preview-empty">+ ${items.length - 25} more records</div>`;
+    }
+    html += '</div></div>';
+    panel.innerHTML = html;
+  }
+
+  // Initial render
+  renderTypeButtons();
+  renderBody();
+
+  // Footer handlers
+  footer.querySelector('#panel-delete-block').onclick = () => { ifaceRemoveBlock(cfg.id); closePanel(); };
+  footer.querySelector('#panel-cancel').onclick = () => closePanel();
+  footer.querySelector('#panel-save').onclick = () => { ifaceSaveBlock(cfg); closePanel(); };
+
+  document.body.appendChild(overlay);
+  document.body.appendChild(panel);
+
+  // Animate open
+  requestAnimationFrame(() => { requestAnimationFrame(() => { panel.classList.add('open'); }); });
+
+  // ESC to close
+  const escHandler = e => { if (e.key === 'Escape') { closePanel(); document.removeEventListener('keydown', escHandler); } };
+  document.addEventListener('keydown', escHandler);
+}
+
+// ── Block Editor Modal (legacy, kept for fallback) ──────────────
 
 function ifaceOpenBlockEditor(block) {
   const existing = document.getElementById('ifaceModalOverlay');
