@@ -584,7 +584,7 @@ function styles(t: Theme): Record<string, React.CSSProperties> {
     },
     inner: {
       width: '100%',
-      maxWidth: 840,
+      maxWidth: 1120,
     },
     backBtn: {
       display: 'flex',
