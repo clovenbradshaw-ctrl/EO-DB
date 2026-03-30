@@ -88,12 +88,61 @@ export function inferColumnType(values: any[]): ColumnDef['type'] {
   return 'text';
 }
 
-export function deriveColumns(records: EoState[]): ColumnDef[] {
+/**
+ * Build a map from field ID → display name using field metadata stored on the
+ * table (scope) state.  The table DEF stores `fields` as an array of
+ * `{ id, name, type }` objects from the Airtable schema.
+ */
+export function buildFieldNameMap(
+  fieldMeta: Array<{ id: string; name: string }> | undefined,
+): Map<string, string> {
+  const map = new Map<string, string>();
+  if (fieldMeta) {
+    for (const f of fieldMeta) map.set(f.id, f.name);
+  }
+  return map;
+}
+
+/**
+ * Check whether the records use the Airtable-style `fields` sub-object
+ * (i.e. `value.fields` is a plain object whose keys are field IDs).
+ */
+export function hasFieldsSubObject(records: EoState[]): boolean {
+  for (const rec of records) {
+    const f = rec.value?.fields;
+    if (f && typeof f === 'object' && !Array.isArray(f)) return true;
+  }
+  return false;
+}
+
+/**
+ * Return the "flat" field value for a column key.
+ * For records that use the `fields` sub-object, reads from `value.fields[key]`.
+ * Otherwise reads from `value[key]`.
+ */
+export function getFieldValue(rec: EoState, key: string, useFieldsSub: boolean): any {
+  if (useFieldsSub) return rec.value?.fields?.[key];
+  return rec.value?.[key];
+}
+
+export function deriveColumns(
+  records: EoState[],
+  fieldNameMap?: Map<string, string>,
+): ColumnDef[] {
   const keyValues = new Map<string, any[]>();
+  const useFieldsSub = hasFieldsSubObject(records);
 
   for (const rec of records) {
     if (!rec.value || typeof rec.value !== 'object') continue;
-    for (const [key, val] of Object.entries(rec.value)) {
+
+    // If records use the Airtable-style `fields` sub-object, iterate its keys
+    const source = useFieldsSub
+      ? (rec.value.fields && typeof rec.value.fields === 'object' && !Array.isArray(rec.value.fields)
+          ? rec.value.fields as Record<string, any>
+          : {})
+      : rec.value;
+
+    for (const [key, val] of Object.entries(source)) {
       if (key.startsWith('_')) continue;
       const arr = keyValues.get(key) || [];
       arr.push(val);
@@ -104,9 +153,10 @@ export function deriveColumns(records: EoState[]): ColumnDef[] {
   const columns: ColumnDef[] = [];
   for (const [key, values] of keyValues) {
     const type = inferColumnType(values);
+    const prettyName = fieldNameMap?.get(key) ?? key;
     const col: ColumnDef = {
       key,
-      label: key,
+      label: prettyName,
       type,
     };
     if (type === 'select') {

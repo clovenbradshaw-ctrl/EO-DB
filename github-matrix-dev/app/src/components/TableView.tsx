@@ -1,7 +1,7 @@
 import { useEffect, useState, useMemo } from 'react';
 import type { EoState } from '../db/types';
 import { useEoStore } from '../store/eo-store';
-import { deriveColumns, type ColumnDef } from './filter-types';
+import { deriveColumns, buildFieldNameMap, hasFieldsSubObject, getFieldValue, type ColumnDef } from './filter-types';
 import { useTheme, type Theme } from '../theme';
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 import { TypeSelector, TypeBadge } from './TypeSelector';
@@ -87,11 +87,13 @@ function renderCell(value: any, key: string, onNavigate: (t: string) => void, t:
 
 export function TableView({ scope, onSelectRecord, onViewHistory, activeRecord, session }: TableViewProps) {
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
+  const getState = useEoStore((s) => s.getState);
   const dispatch = useEoStore((s) => s.dispatch);
   const ready = useEoStore((s) => s.ready);
   const lastSeq = useEoStore((s) => s.lastSeq);
 
   const [records, setRecords] = useState<EoState[]>([]);
+  const [fieldNameMap, setFieldNameMap] = useState<Map<string, string>>(new Map());
   const [filterText, setFilterText] = useState('');
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; target: string } | null>(null);
   const [typeSelector, setTypeSelector] = useState<{ x: number; y: number; target: string; currentType?: string } | null>(null);
@@ -100,7 +102,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, activeRecord, 
 
   const scopeDepth = scope.split('.').length;
 
-  // Load records
+  // Load records and field metadata
   useEffect(() => {
     if (!ready) return;
     getStateByPrefix(scope + '.').then((states) => {
@@ -110,17 +112,29 @@ export function TableView({ scope, onSelectRecord, onViewHistory, activeRecord, 
       });
       setRecords(direct);
     });
-  }, [ready, lastSeq, getStateByPrefix, scope, scopeDepth]);
+    // Fetch the scope (table) state itself to get field metadata
+    getState(scope).then((scopeState) => {
+      const fields = scopeState?.value?.fields;
+      if (Array.isArray(fields)) {
+        setFieldNameMap(buildFieldNameMap(fields));
+      } else {
+        setFieldNameMap(new Map());
+      }
+    });
+  }, [ready, lastSeq, getStateByPrefix, getState, scope, scopeDepth]);
 
   // Reset filter when scope changes
   useEffect(() => {
     setFilterText('');
   }, [scope]);
 
-  const entityColumns = useMemo(() => deriveColumns(records), [records]);
+  // Detect if records use the Airtable-style fields sub-object
+  const useFieldsSub = useMemo(() => hasFieldsSubObject(records), [records]);
+
+  const entityColumns = useMemo(() => deriveColumns(records, fieldNameMap), [records, fieldNameMap]);
   const columns = useMemo<ColumnDef[]>(() => [
     { key: '_record', label: 'record', type: 'text' as const },
-    ...entityColumns.map(c => ({ ...c, label: c.label.toLowerCase() })),
+    ...entityColumns,
   ], [entityColumns]);
 
   const filtered = useMemo(() => {
@@ -130,13 +144,17 @@ export function TableView({ scope, onSelectRecord, onViewHistory, activeRecord, 
       const target = rec.target.toLowerCase();
       if (target.includes(q)) return true;
       if (rec.value) {
-        return Object.values(rec.value).some(v =>
+        // Search within flattened fields if using Airtable-style sub-object
+        const source = useFieldsSub && rec.value.fields && typeof rec.value.fields === 'object'
+          ? rec.value.fields
+          : rec.value;
+        return Object.values(source).some(v =>
           v != null && String(v).toLowerCase().includes(q)
         );
       }
       return false;
     });
-  }, [records, filterText]);
+  }, [records, filterText, useFieldsSub]);
 
   function handleContextMenu(e: React.MouseEvent, target: string) {
     e.preventDefault();
@@ -252,7 +270,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, activeRecord, 
                             }}>{rec.target.split('.').pop()}</span>
                             {rec.value?._type && <TypeBadge type={rec.value._type} />}
                           </span>
-                        : renderCell(rec.value?.[col.key], col.key, onSelectRecord, theme)
+                        : renderCell(getFieldValue(rec, col.key, useFieldsSub), col.key, onSelectRecord, theme)
                       }
                     </td>
                   ))}
