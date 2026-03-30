@@ -4666,6 +4666,11 @@ function hideRoomDataViewer() {
   document.getElementById('roomDataOverlay').classList.add('hidden');
 }
 
+// Room data filter state
+let _roomDataFilter = '';
+let _roomDataTimeline = [];
+let _roomDataStateEvents = [];
+
 async function loadRoomData() {
   const container = document.getElementById('roomDataContent');
   if (!matrixToken || !matrixUserId) {
@@ -4684,12 +4689,11 @@ async function loadRoomData() {
   container.innerHTML = `<div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);">Fetching room data...</div>`;
 
   try {
-    // Fetch room state and messages in parallel
     const [stateRes, msgsRes, membersRes] = await Promise.all([
       fetch(`${matrixHomeserver}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state`, {
         headers: { 'Authorization': `Bearer ${matrixToken}` },
       }),
-      fetch(`${matrixHomeserver}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/messages?dir=b&limit=50`, {
+      fetch(`${matrixHomeserver}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/messages?dir=b&limit=100`, {
         headers: { 'Authorization': `Bearer ${matrixToken}` },
       }),
       fetch(`${matrixHomeserver}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/joined_members`, {
@@ -4704,7 +4708,6 @@ async function loadRoomData() {
     const msgsData = await msgsRes.json();
     const membersData = membersRes.ok ? await membersRes.json() : { joined: {} };
 
-    // Extract key room properties from state
     const nameEv = stateEvents.find(e => e.type === 'm.room.name');
     const topicEv = stateEvents.find(e => e.type === 'm.room.topic');
     const encEv = stateEvents.find(e => e.type === 'm.room.encryption');
@@ -4717,6 +4720,13 @@ async function loadRoomData() {
     const alias = `#eo-db-${space.id}:${domain}`;
 
     const timeline = (msgsData.chunk || []).reverse();
+    _roomDataTimeline = timeline;
+    _roomDataStateEvents = stateEvents;
+    _roomDataFilter = '';
+
+    // Split timeline into EO events and Matrix system events
+    const eoEvents = timeline.filter(ev => ev.type === 'com.eo-db.event');
+    const systemEvents = timeline.filter(ev => ev.type !== 'com.eo-db.event');
 
     container.innerHTML = `
       ${renderRoomSection('Overview', `
@@ -4729,7 +4739,9 @@ async function loadRoomData() {
         ${roomField('History Visibility', histEv?.content?.history_visibility || 'unknown')}
         ${roomField('Encryption', encEv ? `Enabled (${encEv.content.algorithm})` : 'Disabled')}
         ${roomField('Members', String(members.length))}
-        ${roomField('Timeline Events', String(timeline.length) + ' (last 50)')}
+        ${roomField('Timeline Events', String(timeline.length) + ' (last 100)')}
+        ${roomField('EO Events', String(eoEvents.length))}
+        ${roomField('System Events', String(systemEvents.length))}
       `, true)}
 
       ${renderRoomSection(`Members (${members.length})`, `
@@ -4742,11 +4754,21 @@ async function loadRoomData() {
           `).join('')}
       `)}
 
-      ${renderRoomSection(`Timeline (${timeline.length} events)`, `
-        ${timeline.length === 0 ? '<div style="font-family:\'JetBrains Mono\',monospace;font-size:10px;color:var(--text-faint);font-style:italic;">No events</div>' :
-          timeline.map((ev, i) => `
+      ${renderRoomSection(`EO Events (${eoEvents.length})`, `
+        <div style="margin-bottom:8px;">
+          <input type="text" id="rdvEoFilter" placeholder="Filter by target, op, status..." oninput="filterRoomDataEoEvents()"
+            style="width:100%;padding:6px 10px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);font-family:'JetBrains Mono',monospace;font-size:10px;outline:none;" />
+        </div>
+        <div id="rdvEoList">
+          ${renderEoEventList(eoEvents)}
+        </div>
+      `, true)}
+
+      ${renderRoomSection(`System Events (${systemEvents.length})`, `
+        ${systemEvents.length === 0 ? '<div style="font-family:\'JetBrains Mono\',monospace;font-size:10px;color:var(--text-faint);font-style:italic;">No system events</div>' :
+          systemEvents.map((ev) => `
             <div style="padding:6px 0;border-bottom:1px solid var(--border);">
-              <div class="room-data-ev-header" onclick="this.nextElementSibling.classList.toggle('hidden')" style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+              <div onclick="this.nextElementSibling.classList.toggle('hidden')" style="display:flex;align-items:center;gap:8px;cursor:pointer;">
                 <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--accent);flex-shrink:0;">${escapeHtml(ev.type)}</span>
                 <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(ev.sender || '')}</span>
                 <span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:var(--text-faint);margin-left:auto;flex-shrink:0;">${ev.origin_server_ts ? new Date(ev.origin_server_ts).toISOString().slice(11,19) : ''}</span>
@@ -4757,7 +4779,7 @@ async function loadRoomData() {
       `)}
 
       ${renderRoomSection(`State Events (${stateEvents.length})`, `
-        ${stateEvents.map((ev, i) => `
+        ${stateEvents.map((ev) => `
           <div style="padding:6px 0;border-bottom:1px solid var(--border);">
             <div onclick="this.nextElementSibling.classList.toggle('hidden')" style="display:flex;align-items:center;gap:8px;cursor:pointer;">
               <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--text);flex-shrink:0;">${escapeHtml(ev.type)}</span>
@@ -4776,6 +4798,84 @@ async function loadRoomData() {
   } catch (err) {
     container.innerHTML = `<div style="color:var(--danger);font-family:'JetBrains Mono',monospace;font-size:11px;">Error: ${escapeHtml(err.message)}</div>`;
   }
+}
+
+function renderEoEventList(eoEvents) {
+  if (eoEvents.length === 0) {
+    return '<div style="font-family:\'JetBrains Mono\',monospace;font-size:10px;color:var(--text-faint);font-style:italic;padding:8px 0;">No EO events</div>';
+  }
+
+  const opColors = { INS: '#22c55e', UPD: '#f59e0b', DEL: '#ef4444', CON: '#8b5cf6', EVA: '#06b6d4' };
+
+  return eoEvents.map((ev) => {
+    const c = ev.content || {};
+    const op = c.op || '?';
+    const target = c.target || '';
+    const operand = c.operand || {};
+    const seq = c.seq != null ? c.seq : '';
+    const ts = ev.origin_server_ts ? new Date(ev.origin_server_ts).toISOString() : '';
+    const sender = (ev.sender || '').replace(/@([^:]+):.*/, '$1');
+    const opColor = opColors[op] || 'var(--text-dim)';
+
+    // Extract key fields from operand for display
+    const fieldPairs = Object.entries(operand).slice(0, 4).map(([k, v]) => {
+      const display = typeof v === 'string' ? v : JSON.stringify(v);
+      return `<span style="color:var(--text-faint);">${escapeHtml(k)}:</span><span style="color:var(--text);">${escapeHtml(String(display).slice(0, 40))}</span>`;
+    }).join('<span style="color:var(--border2);margin:0 4px;">|</span>');
+
+    return `
+      <div style="padding:5px 0;border-bottom:1px solid var(--border);" data-eo-searchable="${escapeHtml((op + ' ' + target + ' ' + JSON.stringify(operand)).toLowerCase())}">
+        <div onclick="this.nextElementSibling.classList.toggle('hidden')" style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+          <span style="font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:700;color:${opColor};width:26px;flex-shrink:0;">${escapeHtml(op)}</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--accent);flex-shrink:0;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(target)}">${escapeHtml(target)}</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:var(--text-dim);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${fieldPairs}</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:var(--text-faint);flex-shrink:0;">${seq ? '#' + seq : ''}</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:var(--text-faint);flex-shrink:0;">${ts.slice(11, 19)}</span>
+        </div>
+        <div class="hidden" style="margin-top:4px;padding:8px;background:var(--bg);border-radius:4px;border:1px solid var(--border);font-family:'JetBrains Mono',monospace;font-size:9px;overflow:auto;max-height:200px;">
+          <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:6px;">
+            <span><span style="color:var(--text-faint);">op</span> <span style="color:${opColor};font-weight:600;">${escapeHtml(op)}</span></span>
+            <span><span style="color:var(--text-faint);">target</span> <span style="color:var(--accent);">${escapeHtml(target)}</span></span>
+            <span><span style="color:var(--text-faint);">seq</span> <span style="color:var(--text);">${seq}</span></span>
+            <span><span style="color:var(--text-faint);">sender</span> <span style="color:var(--text-dim);">${escapeHtml(sender)}</span></span>
+            <span><span style="color:var(--text-faint);">ts</span> <span style="color:var(--text-dim);">${escapeHtml(ts)}</span></span>
+          </div>
+          <div style="border-top:1px solid var(--border);padding-top:6px;margin-top:2px;">
+            <div style="color:var(--text-faint);font-size:8px;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">Operand</div>
+            ${Object.keys(operand).length > 0 ? Object.entries(operand).map(([k, v]) => `
+              <div style="display:flex;gap:8px;padding:2px 0;">
+                <span style="color:var(--text-dim);flex-shrink:0;">${escapeHtml(k)}</span>
+                <span style="color:var(--text);word-break:break-all;">${escapeHtml(typeof v === 'string' ? v : JSON.stringify(v))}</span>
+              </div>
+            `).join('') : '<span style="color:var(--text-faint);font-style:italic;">empty</span>'}
+          </div>
+          ${c.client_event_id ? `<div style="border-top:1px solid var(--border);padding-top:4px;margin-top:4px;color:var(--text-faint);font-size:8px;">event_id: ${escapeHtml(c.client_event_id)}</div>` : ''}
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function filterRoomDataEoEvents() {
+  const input = document.getElementById('rdvEoFilter');
+  const filter = (input?.value || '').toLowerCase().trim();
+  const listEl = document.getElementById('rdvEoList');
+  if (!listEl) return;
+
+  if (!filter) {
+    // Show all
+    const eoEvents = _roomDataTimeline.filter(ev => ev.type === 'com.eo-db.event');
+    listEl.innerHTML = renderEoEventList(eoEvents);
+    return;
+  }
+
+  const eoEvents = _roomDataTimeline.filter(ev => {
+    if (ev.type !== 'com.eo-db.event') return false;
+    const c = ev.content || {};
+    const searchable = [c.op, c.target, JSON.stringify(c.operand || {}), c.client_event_id || ''].join(' ').toLowerCase();
+    return searchable.includes(filter);
+  });
+  listEl.innerHTML = renderEoEventList(eoEvents);
 }
 
 function renderRoomSection(title, content, startOpen = false) {
@@ -5034,6 +5134,15 @@ async function filenFindFileByName(parentUuid, fileName) {
  * Returns the folder UUID.
  */
 async function filenEnsureBackupFolder() {
+  // Re-fetch base folder UUID if missing or stale
+  if (!backupBaseFolderUuid) {
+    if (!backupAuth?.apiKey) throw new Error('Filen not connected');
+    const base = await filenApi('/v3/user/baseFolder', {});
+    if (!base.status || !base.data?.uuid) throw new Error('Could not resolve Filen base folder');
+    backupBaseFolderUuid = base.data.uuid;
+    backupCurrentFolderUuid = backupBaseFolderUuid;
+  }
+
   const folderName = 'eo-db-backups';
   const res = await filenApi('/v3/dir/content', { uuid: backupBaseFolderUuid });
   if (res.status) {
@@ -5047,9 +5156,29 @@ async function filenEnsureBackupFolder() {
         if (dec === folderName) return f.uuid;
       }
     }
+  } else {
+    // Base folder UUID may be stale — re-fetch and retry once
+    const base = await filenApi('/v3/user/baseFolder', {});
+    if (!base.status || !base.data?.uuid) throw new Error('Could not resolve Filen base folder');
+    backupBaseFolderUuid = base.data.uuid;
+    backupCurrentFolderUuid = backupBaseFolderUuid;
+    const retry = await filenApi('/v3/dir/content', { uuid: backupBaseFolderUuid });
+    if (retry.status) {
+      for (const f of (retry.data.folders || [])) {
+        const dec = await filenTryDecrypt(f.name);
+        if (!dec) continue;
+        try {
+          const parsed = JSON.parse(dec);
+          if (parsed.name === folderName) return f.uuid;
+        } catch {
+          if (dec === folderName) return f.uuid;
+        }
+      }
+    }
   }
   // Create the folder
   const masterKey = backupMasterKeys[0];
+  if (!masterKey) throw new Error('No Filen master key available');
   const uuid = crypto.randomUUID();
   const nameHashed = await filenSha512(folderName.toLowerCase());
   const createRes = await filenApi('/v3/dir/create', {
