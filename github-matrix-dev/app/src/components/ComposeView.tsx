@@ -12,7 +12,7 @@ const OP_COLORS: Record<string, string> = {
 
 interface KvRow { key: string; value: string }
 
-export function ComposeView() {
+export function ComposeView({ spacePrefix }: { spacePrefix?: string }) {
   const { theme } = useTheme();
   const dispatch = useEoStore((s) => s.dispatch);
   const ready = useEoStore((s) => s.ready);
@@ -55,10 +55,11 @@ export function ComposeView() {
 
   useEffect(() => {
     if (!ready) return;
-    getStateByPrefix('app.').then((states: EoState[]) => {
+    const prefix = spacePrefix || '';
+    getStateByPrefix(prefix).then((states: EoState[]) => {
       setAllTargets(states.map((s) => s.target));
     });
-  }, [ready, getStateByPrefix]);
+  }, [ready, getStateByPrefix, spacePrefix]);
 
   function onTargetChange(val: string) {
     setTarget(val);
