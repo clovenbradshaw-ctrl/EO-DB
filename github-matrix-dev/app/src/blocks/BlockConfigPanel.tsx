@@ -235,6 +235,29 @@ function ConfigForm({ block, update, theme }: ConfigFormProps) {
         </>
       );
 
+    case 'record':
+      return (
+        <>
+          <Field label="Record Target" s={s}>
+            <input
+              style={s.input}
+              placeholder="e.g. app.tblClients.rec_001"
+              value={block.props.recordTarget || ''}
+              onChange={(e) => update('recordTarget', e.target.value)}
+            />
+          </Field>
+          <DataSourceField
+            label="Or select via binding"
+            binding={block.props.binding}
+            onChange={(binding: DataBinding) => update('binding', binding)}
+            theme={theme}
+          />
+          <Field label="Show Header" s={s}>
+            <Checkbox checked={block.props.showHeader !== false} onChange={(v) => update('showHeader', v)} theme={theme} />
+          </Field>
+        </>
+      );
+
     case 'button':
       return (
         <>
