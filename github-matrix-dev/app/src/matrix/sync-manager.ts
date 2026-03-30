@@ -59,6 +59,9 @@ export class SyncManager {
   /** When set, only events whose target starts with this prefix are folded. */
   private spacePrefix?: string;
 
+  /** Additional room IDs to listen to (restricted, governance). */
+  private additionalRoomIds: string[] = [];
+
   constructor(
     client: MatrixClient,
     roomId: string,
@@ -71,6 +74,31 @@ export class SyncManager {
     this.store = store;
     this.onEvent = onEvent;
     this.spacePrefix = spacePrefix;
+  }
+
+  /**
+   * Add additional rooms to listen to (restricted, governance).
+   * Events from these rooms are merged into the same fold.
+   */
+  addRooms(roomIds: string[]): void {
+    for (const id of roomIds) {
+      if (id && !this.additionalRoomIds.includes(id) && id !== this.roomId) {
+        this.additionalRoomIds.push(id);
+      }
+    }
+  }
+
+  /**
+   * Remove a room from the multi-room topology.
+   * Typically called when a user is kicked from a restricted room.
+   */
+  removeRoom(roomId: string): void {
+    this.additionalRoomIds = this.additionalRoomIds.filter(id => id !== roomId);
+  }
+
+  /** Get all room IDs this sync manager is listening to. */
+  getRoomIds(): string[] {
+    return [this.roomId, ...this.additionalRoomIds];
   }
 
   /**
@@ -87,9 +115,10 @@ export class SyncManager {
       await this.hydrateFromSnapshot();
     }
 
-    // Listen for new room events in real-time
+    // Listen for new room events in real-time (main + additional rooms)
     this.client.on('Room.timeline' as any, (event: MatrixEvent) => {
-      if (event.getRoomId() !== this.roomId) return;
+      const eventRoomId = event.getRoomId();
+      if (eventRoomId !== this.roomId && !this.additionalRoomIds.includes(eventRoomId!)) return;
       if (event.getType() !== EO_EVENT_TYPE) return;
       this.processIncomingEvent(event);
     });

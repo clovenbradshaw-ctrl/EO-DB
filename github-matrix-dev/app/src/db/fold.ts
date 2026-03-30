@@ -133,15 +133,21 @@ function stateFromEvent(event: EoEvent, op: EoEvent['op']) {
 
 // --- INS: Instantiate ---
 // External INS is always level 1. System-generated INS carries level 2+.
+// Stores `_created_by` on the record for Creator ownership enforcement.
 async function handleINS(store: EoStore, event: EoEvent): Promise<void> {
   const existing = await checkExists(store, event.target);
   if (existing) {
     throw new Error(`Target already instantiated: ${event.target}`);
   }
 
+  const operand = event.operand ?? {};
+  const value = typeof operand === 'object' && !Array.isArray(operand)
+    ? { ...operand, _created_by: event.agent }
+    : operand;
+
   await setState(store, {
     target: event.target,
-    value: event.operand ?? {},
+    value,
     level: event.level ?? 1,
     ...stateFromEvent(event, 'INS'),
   });
@@ -259,6 +265,8 @@ async function handleSYN(store: EoStore, event: EoEvent): Promise<void> {
 }
 
 // --- DEF: Define Value or Register Computation ---
+// Includes Creator ownership check: agents with PL 10-24 can only DEF
+// records they created (identified by _created_by field).
 async function handleDEF(store: EoStore, event: EoEvent): Promise<void> {
   const target = await resolveAlias(store, event.target);
 
@@ -278,6 +286,19 @@ async function handleDEF(store: EoStore, event: EoEvent): Promise<void> {
     throw new Error(
       `Cannot DEF core content of derived entity at level ${existing.level}: ${target}`
     );
+  }
+
+  // Creator ownership check: if meta._power_level is 10-24 (Creator),
+  // only allow DEF on records they created. This is the only fold-level
+  // permission check — everything else is Matrix-native.
+  const agentPL = event.meta?._power_level;
+  if (typeof agentPL === 'number' && agentPL >= 10 && agentPL < 25) {
+    const createdBy = existing.value?._created_by;
+    if (createdBy && createdBy !== event.agent) {
+      throw new Error(
+        `Creator-level agent cannot edit records created by others: ${target} (created by ${createdBy})`
+      );
+    }
   }
 
   const merged = mergeOperand(existing.value, event.operand);
