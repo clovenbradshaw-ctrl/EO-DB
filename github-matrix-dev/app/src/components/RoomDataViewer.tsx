@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useEoStore } from '../store/eo-store';
 import { useTheme, type Theme } from '../theme';
 import type { RoomDataSnapshot } from '../matrix/sync-manager';
@@ -7,16 +7,29 @@ interface RoomDataViewerProps {
   onBack: () => void;
 }
 
+const EO_EVENT_TYPE = 'com.eo-db.event';
+
+const OP_COLORS: Record<string, string> = {
+  INS: '#22c55e',
+  UPD: '#f59e0b',
+  DEL: '#ef4444',
+  CON: '#8b5cf6',
+  EVA: '#06b6d4',
+};
+
 export function RoomDataViewer({ onBack }: RoomDataViewerProps) {
   const { theme } = useTheme();
   const syncManager = useEoStore((s) => s.syncManager);
   const [data, setData] = useState<RoomDataSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [filter, setFilter] = useState('');
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({
     overview: true,
     members: false,
-    timeline: false,
+    eoEvents: true,
+    systemEvents: false,
     state: false,
+    raw: false,
   });
 
   useEffect(() => {
@@ -36,6 +49,26 @@ export function RoomDataViewer({ onBack }: RoomDataViewerProps) {
     }
   }, [syncManager]);
 
+  const { eoEvents, systemEvents } = useMemo(() => {
+    if (!data) return { eoEvents: [], systemEvents: [] };
+    return {
+      eoEvents: data.timeline.filter((ev) => ev.type === EO_EVENT_TYPE),
+      systemEvents: data.timeline.filter((ev) => ev.type !== EO_EVENT_TYPE),
+    };
+  }, [data]);
+
+  const filteredEoEvents = useMemo(() => {
+    if (!filter.trim()) return eoEvents;
+    const q = filter.toLowerCase();
+    return eoEvents.filter((ev) => {
+      const c = ev.content || {};
+      const searchable = [c.op, c.target, JSON.stringify(c.operand || {}), c.client_event_id || '']
+        .join(' ')
+        .toLowerCase();
+      return searchable.includes(q);
+    });
+  }, [eoEvents, filter]);
+
   function toggleSection(key: string) {
     setExpandedSections((prev) => ({ ...prev, [key]: !prev[key] }));
   }
@@ -45,7 +78,6 @@ export function RoomDataViewer({ onBack }: RoomDataViewerProps) {
   return (
     <div style={s.container}>
       <div style={s.inner}>
-        {/* Back button */}
         <button onClick={onBack} style={s.backBtn}>
           <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
             <path d="M8.5 3L4.5 7L8.5 11" />
@@ -56,9 +88,7 @@ export function RoomDataViewer({ onBack }: RoomDataViewerProps) {
         <div style={s.title}>Room Data</div>
         <div style={s.subtitle}>Raw Matrix room state and timeline</div>
 
-        {error && (
-          <div style={s.errorBox}>{error}</div>
-        )}
+        {error && <div style={s.errorBox}>{error}</div>}
 
         {data && (
           <>
@@ -79,6 +109,8 @@ export function RoomDataViewer({ onBack }: RoomDataViewerProps) {
               <RawField label="Encryption" value={data.encryptionEnabled ? `Enabled (${data.encryptionAlgorithm})` : 'Disabled'} theme={theme} />
               <RawField label="Members" value={String(data.memberCount)} theme={theme} />
               <RawField label="Timeline Events" value={String(data.timelineLength)} theme={theme} />
+              <RawField label="EO Events" value={String(eoEvents.length)} theme={theme} />
+              <RawField label="System Events" value={String(systemEvents.length)} theme={theme} />
             </CollapsibleSection>
 
             {/* Members */}
@@ -103,17 +135,42 @@ export function RoomDataViewer({ onBack }: RoomDataViewerProps) {
               )}
             </CollapsibleSection>
 
-            {/* Timeline */}
+            {/* EO Events */}
             <CollapsibleSection
-              title={`Timeline (last ${data.timeline.length})`}
-              expanded={expandedSections.timeline}
-              onToggle={() => toggleSection('timeline')}
+              title={`EO Events (${eoEvents.length})`}
+              expanded={expandedSections.eoEvents}
+              onToggle={() => toggleSection('eoEvents')}
               theme={theme}
             >
-              {data.timeline.length === 0 ? (
-                <div style={s.emptyNote}>No timeline events</div>
+              <input
+                type="text"
+                value={filter}
+                onChange={(e) => setFilter(e.target.value)}
+                placeholder="Filter by target, op, status..."
+                style={s.filterInput}
+              />
+              {filteredEoEvents.length === 0 ? (
+                <div style={s.emptyNote}>
+                  {filter ? 'No matching events' : 'No EO events'}
+                </div>
               ) : (
-                data.timeline.map((ev, i) => (
+                filteredEoEvents.map((ev, i) => (
+                  <EoEvent key={i} event={ev} theme={theme} />
+                ))
+              )}
+            </CollapsibleSection>
+
+            {/* System Events */}
+            <CollapsibleSection
+              title={`System Events (${systemEvents.length})`}
+              expanded={expandedSections.systemEvents}
+              onToggle={() => toggleSection('systemEvents')}
+              theme={theme}
+            >
+              {systemEvents.length === 0 ? (
+                <div style={s.emptyNote}>No system events</div>
+              ) : (
+                systemEvents.map((ev, i) => (
                   <TimelineEvent key={i} event={ev} theme={theme} />
                 ))
               )}
@@ -138,7 +195,7 @@ export function RoomDataViewer({ onBack }: RoomDataViewerProps) {
             {/* Raw JSON dump */}
             <CollapsibleSection
               title="Raw JSON"
-              expanded={false}
+              expanded={expandedSections.raw}
               onToggle={() => toggleSection('raw')}
               theme={theme}
             >
@@ -219,6 +276,139 @@ function RawField({ label, value, theme }: { label: string; value: string; theme
       }}>
         {value}
       </span>
+    </div>
+  );
+}
+
+function EoEvent({ event, theme }: {
+  event: { eventId: string; type: string; sender: string; ts: number; content: any };
+  theme: Theme;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const c = event.content || {};
+  const op = c.op || '?';
+  const target = c.target || '';
+  const operand = c.operand || {};
+  const seq = c.seq != null ? c.seq : '';
+  const ts = new Date(event.ts).toISOString();
+  const sender = event.sender.replace(/@([^:]+):.*/, '$1');
+  const opColor = OP_COLORS[op] || theme.textMuted;
+
+  const fieldPairs = Object.entries(operand).slice(0, 4);
+
+  return (
+    <div style={{
+      padding: '5px 0',
+      borderBottom: `1px solid ${theme.borderLight}`,
+    }}>
+      <div
+        onClick={() => setExpanded(!expanded)}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          cursor: 'pointer',
+        }}
+      >
+        <span style={{
+          fontFamily: "'JetBrains Mono', monospace",
+          fontSize: 9,
+          fontWeight: 700,
+          color: opColor,
+          width: 26,
+          flexShrink: 0,
+        }}>
+          {op}
+        </span>
+        <span style={{
+          fontFamily: "'JetBrains Mono', monospace",
+          fontSize: 9,
+          color: theme.accent,
+          flexShrink: 0,
+          maxWidth: 180,
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap' as const,
+        }} title={target}>
+          {target}
+        </span>
+        <span style={{
+          fontFamily: "'JetBrains Mono', monospace",
+          fontSize: 8,
+          color: theme.textMuted,
+          flex: 1,
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap' as const,
+        }}>
+          {fieldPairs.map(([k, v], i) => (
+            <span key={k}>
+              {i > 0 && <span style={{ color: theme.border, margin: '0 4px' }}>|</span>}
+              <span style={{ color: theme.textMuted }}>{k}:</span>
+              <span style={{ color: theme.text }}>{String(typeof v === 'string' ? v : JSON.stringify(v)).slice(0, 40)}</span>
+            </span>
+          ))}
+        </span>
+        <span style={{
+          fontFamily: "'JetBrains Mono', monospace",
+          fontSize: 8,
+          color: theme.textMuted,
+          flexShrink: 0,
+        }}>
+          {seq ? `#${seq}` : ''}
+        </span>
+        <span style={{
+          fontFamily: "'JetBrains Mono', monospace",
+          fontSize: 8,
+          color: theme.textMuted,
+          flexShrink: 0,
+        }}>
+          {ts.slice(11, 19)}
+        </span>
+      </div>
+      {expanded && (
+        <div style={{
+          marginTop: 4,
+          padding: 8,
+          background: theme.bgMuted,
+          borderRadius: 4,
+          border: `1px solid ${theme.border}`,
+          fontFamily: "'JetBrains Mono', monospace",
+          fontSize: 9,
+          overflow: 'auto',
+          maxHeight: 200,
+        }}>
+          <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' as const, marginBottom: 6 }}>
+            <span><span style={{ color: theme.textMuted }}>op</span> <span style={{ color: opColor, fontWeight: 600 }}>{op}</span></span>
+            <span><span style={{ color: theme.textMuted }}>target</span> <span style={{ color: theme.accent }}>{target}</span></span>
+            <span><span style={{ color: theme.textMuted }}>seq</span> <span style={{ color: theme.text }}>{seq}</span></span>
+            <span><span style={{ color: theme.textMuted }}>sender</span> <span style={{ color: theme.textMuted }}>{sender}</span></span>
+            <span><span style={{ color: theme.textMuted }}>ts</span> <span style={{ color: theme.textMuted }}>{ts}</span></span>
+          </div>
+          <div style={{ borderTop: `1px solid ${theme.border}`, paddingTop: 6, marginTop: 2 }}>
+            <div style={{ color: theme.textMuted, fontSize: 8, textTransform: 'uppercase' as const, letterSpacing: '0.5px', marginBottom: 4 }}>
+              Operand
+            </div>
+            {Object.keys(operand).length > 0 ? (
+              Object.entries(operand).map(([k, v]) => (
+                <div key={k} style={{ display: 'flex', gap: 8, padding: '2px 0' }}>
+                  <span style={{ color: theme.textMuted, flexShrink: 0 }}>{k}</span>
+                  <span style={{ color: theme.text, wordBreak: 'break-all' as const }}>
+                    {typeof v === 'string' ? v : JSON.stringify(v)}
+                  </span>
+                </div>
+              ))
+            ) : (
+              <span style={{ color: theme.textMuted, fontStyle: 'italic' }}>empty</span>
+            )}
+          </div>
+          {c.client_event_id && (
+            <div style={{ borderTop: `1px solid ${theme.border}`, paddingTop: 4, marginTop: 4, color: theme.textMuted, fontSize: 8 }}>
+              event_id: {c.client_event_id}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -428,6 +618,18 @@ function styles(t: Theme): Record<string, React.CSSProperties> {
       fontFamily: "'JetBrains Mono', monospace",
       fontSize: 10,
       color: t.dangerText,
+    },
+    filterInput: {
+      width: '100%',
+      padding: '6px 10px',
+      background: t.bgMuted,
+      border: `1px solid ${t.border}`,
+      borderRadius: 4,
+      color: t.text,
+      fontFamily: "'JetBrains Mono', monospace",
+      fontSize: 10,
+      outline: 'none',
+      marginBottom: 8,
     },
     emptyNote: {
       fontFamily: "'JetBrains Mono', monospace",
