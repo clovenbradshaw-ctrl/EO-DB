@@ -20,10 +20,11 @@ import { ComposeView } from './ComposeView';
 import { GraphView } from './GraphView';
 import { SettingsView } from './SettingsView';
 import { SpaceMembers } from './SpaceMembers';
+import { BuilderView } from './builder/BuilderView';
 import { useTheme, spaceBackgroundTint, type Theme } from '../theme';
 import type { EoState } from '../db/types';
 
-type View = 'horizon' | 'log' | 'graph' | 'import' | 'compose' | 'settings';
+type View = 'horizon' | 'log' | 'graph' | 'import' | 'compose' | 'settings' | 'builder';
 
 function formatSpaceName(segment: string): string {
   // Strip common prefixes, replace underscores with spaces, capitalize
@@ -362,6 +363,17 @@ export function Layout({ session, onLogout }: LayoutProps) {
               </button>
             ))}
             <div style={s.navDivider} />
+            {/* Builder */}
+            <button
+              onClick={() => setActiveView('builder')}
+              style={{
+                ...s.navItem,
+                ...(activeView === 'builder' ? s.navItemActive : {}),
+              }}
+            >
+              Builder
+            </button>
+            <div style={s.navDivider} />
             {/* System config */}
             <button
               onClick={() => setActiveView('settings')}
@@ -432,6 +444,8 @@ export function Layout({ session, onLogout }: LayoutProps) {
               </div>
             ) : activeView === 'compose' ? (
               <ComposeView spacePrefix={statePrefix || undefined} />
+            ) : activeView === 'builder' ? (
+              <BuilderView />
             ) : activeView === 'settings' ? (
               <SettingsView session={session} />
             ) : null}
