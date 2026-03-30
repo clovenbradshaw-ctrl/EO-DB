@@ -487,7 +487,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
             ) : activeView === 'log' ? (
               <LogView targetFilter={selectedScope} spacePrefix={statePrefix || undefined} />
             ) : activeView === 'graph' ? (
-              <GraphView spacePrefix={statePrefix || undefined} />
+              <GraphView spacePrefix={statePrefix || undefined} allStates={allStates} />
             ) : activeView === 'import' ? (
               <div style={s.importPage}>
                 <div style={s.importHeader}>
