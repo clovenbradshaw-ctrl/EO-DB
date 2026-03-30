@@ -106,10 +106,24 @@ export function TableView({ scope, onSelectRecord, onViewHistory, activeRecord, 
   useEffect(() => {
     if (!ready) return;
     getStateByPrefix(scope + '.').then((states) => {
-      const direct = states.filter((st) => {
-        const parts = st.target.split('.');
-        return parts.length === scopeDepth + 1 && !st.value?._alias;
-      });
+      const direct = states
+        .filter((st) => {
+          const parts = st.target.split('.');
+          return parts.length === scopeDepth + 1 && !st.value?._alias;
+        })
+        .map((st) => {
+          // When fields is an array of DEFs ({id,name,type}), flatten into
+          // a fields object keyed by name so each field renders as a column.
+          const f = st.value?.fields;
+          if (Array.isArray(f) && f.length > 0 && f[0]?.name) {
+            const expanded: Record<string, any> = {};
+            for (const field of f) {
+              expanded[field.name] = field.type ?? '';
+            }
+            return { ...st, value: { ...st.value, fields: expanded } };
+          }
+          return st;
+        });
       setRecords(direct);
     });
     // Fetch the scope (table) state itself to get field metadata
