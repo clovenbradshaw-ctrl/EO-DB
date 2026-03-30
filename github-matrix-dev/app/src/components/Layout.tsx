@@ -24,8 +24,7 @@ import { useTheme, type Theme } from '../theme';
 import type { EoState } from '../db/types';
 import type { QueryResult } from './query-engine';
 
-type View = 'horizon' | 'log' | 'import' | 'graph' | 'compose' | 'settings';
-const TABS: View[] = ['horizon', 'log', 'import', 'graph', 'compose', 'settings'];
+type View = 'horizon' | 'log' | 'graph' | 'import' | 'compose' | 'settings';
 
 function formatSpaceName(segment: string): string {
   // Strip common prefixes, replace underscores with spaces, capitalize
@@ -189,21 +188,15 @@ export function Layout({ session, onLogout }: LayoutProps) {
 
           <div style={s.divider} />
 
-          {/* Space selector */}
+          {/* Space badge */}
           <div style={{ position: 'relative' as const }}>
             <button
               onClick={() => setSpaceOpen(!spaceOpen)}
-              style={s.nulspaceBtn}
+              style={s.spaceBadge}
             >
-              <span style={s.nulTag}>SPACE</span>
-              <span style={s.nulspaceName}>
-                {selectedSpace
-                  ? formatSpaceName(selectedSpace.split('.').pop() || '')
-                  : 'All'}
-              </span>
-              <svg width="10" height="10" viewBox="0 0 10 10" fill="none" style={{ marginLeft: 2 }}>
-                <path d="M2.5 4L5 6.5L7.5 4" stroke={theme.textMuted} strokeWidth="1.2" strokeLinecap="round" />
-              </svg>
+              {selectedSpace
+                ? formatSpaceName(selectedSpace.split('.').pop() || '')
+                : 'All'}
             </button>
 
             {spaceOpen && (
@@ -243,9 +236,9 @@ export function Layout({ session, onLogout }: LayoutProps) {
         <div style={s.topBarRight}>
           <div style={s.stats}>
             <span>seq <span style={{ color: theme.textSecondary }}>{lastSeq}</span></span>
-            <span>events <span style={{ color: theme.textSecondary }}>{recentEvents.length}</span></span>
-            <span>targets <span style={{ color: theme.textSecondary }}>{targetCount}</span></span>
-            <span>edges <span style={{ color: theme.textSecondary }}>{edgeCount}</span></span>
+            <span>evt <span style={{ color: theme.textSecondary }}>{recentEvents.length}</span></span>
+            <span>tgt <span style={{ color: theme.textSecondary }}>{targetCount}</span></span>
+            <span>edg <span style={{ color: theme.textSecondary }}>{edgeCount}</span></span>
           </div>
           <div style={s.divider} />
           <ConnectionStatus state={connectionState} />
@@ -277,109 +270,93 @@ export function Layout({ session, onLogout }: LayoutProps) {
         </div>
       </header>
 
-      {/* Tab bar */}
-      <div style={s.tabBar}>
-        {TABS.map((tab) => (
-          <button
-            key={tab}
-            onClick={() => setActiveView(tab)}
-            style={{
-              ...s.tab,
-              color: activeView === tab ? theme.textHeading : theme.textMuted,
-              borderBottom: activeView === tab ? `1.5px solid ${theme.success}` : '1.5px solid transparent',
-            }}
-          >
-            {tab === 'compose' ? '+ COMPOSE' : tab === 'import' ? 'IMPORT' : tab.toUpperCase()}
-          </button>
-        ))}
-      </div>
+      {/* Body — sidebar always visible */}
+      <div style={s.body}>
+        <aside style={s.sidebar}>
+          {/* View navigation */}
+          <nav style={s.sidebarNav}>
+            {(['horizon', 'log', 'graph'] as View[]).map((view) => (
+              <button
+                key={view}
+                onClick={() => setActiveView(view)}
+                style={{
+                  ...s.navItem,
+                  ...(activeView === view ? s.navItemActive : {}),
+                }}
+              >
+                {view.charAt(0).toUpperCase() + view.slice(1)}
+              </button>
+            ))}
+          </nav>
 
-      {/* Body */}
-      {activeView === 'log' ? (
-        <div style={s.body}>
-          <ErrorBoundary>
-            <LogView />
-          </ErrorBoundary>
-        </div>
-      ) : activeView === 'horizon' ? (
-        <>
-        <HorizonQueryBar
-          allStates={allStates}
-          onSelectScope={(scope) => { setSelectedScope(scope); setSelectedRecord(null); setQueryResults(null); }}
-          onSelectRecord={(target) => { setSelectedRecord(target); setQueryResults(null); }}
-          onQueryResults={setQueryResults}
-        />
-        <div style={s.body}>
-          <aside style={s.sidebar}>
-            {ready ? (
-              <HolonNav
-                selectedScope={selectedScope}
-                onSelectScope={(scope) => { setSelectedScope(scope); setSelectedRecord(null); }}
-                onSelectSegment={(_scope, _seg) => { setSelectedScope(_scope); }}
-                statePrefix={statePrefix}
-              />
-            ) : (
-              <SyncProgress message="Initializing store..." detail="Deriving encryption key" />
-            )}
-          </aside>
-          <main style={s.main}>
-            <ErrorBoundary>
-              {selectedScope ? (
-                <TableView
-                  scope={selectedScope}
-                  onSelectRecord={setSelectedRecord}
-                  activeRecord={selectedRecord}
-                  session={{ userId: session.userId }}
-                  queryResults={queryResults?.records}
-                />
-              ) : (
-                <div style={s.empty}>
-                  <div style={s.emptyText}>Select an object type to view its records</div>
-                  <div style={s.emptySub}>
-                    Choose from the hierarchy on the left to see records as a table
-                  </div>
-                </div>
-              )}
-            </ErrorBoundary>
-          </main>
-          {selectedRecord && (
-            <RecordDetailDrawer
-              target={selectedRecord}
-              onClose={() => setSelectedRecord(null)}
-              onNavigate={(t) => setSelectedRecord(t)}
+          {/* Objects tree */}
+          {ready ? (
+            <HolonNav
+              selectedScope={selectedScope}
+              onSelectScope={(scope) => { setSelectedScope(scope); setSelectedRecord(null); }}
+              onSelectSegment={(_scope, _seg) => { setSelectedScope(_scope); }}
+              statePrefix={statePrefix}
             />
+          ) : (
+            <SyncProgress message="Initializing store..." detail="Deriving encryption key" />
           )}
-        </div>
-        </>
-      ) : activeView === 'import' ? (
-        <div style={s.body}>
-          <div style={s.importPage}>
-            <div style={s.importHeader}>
-              <div style={s.importTitle}>Import Data</div>
-              <div style={s.importSubtitle}>Connect external data sources and sync records into EO-DB</div>
-            </div>
-            <AirtableSettingsSection session={session} />
-          </div>
-        </div>
-      ) : activeView === 'compose' ? (
-        <div style={s.body}>
+        </aside>
+
+        <main style={s.main}>
           <ErrorBoundary>
-            <ComposeView />
+            {activeView === 'horizon' ? (
+              <>
+                <HorizonQueryBar
+                  allStates={allStates}
+                  onSelectScope={(scope) => { setSelectedScope(scope); setSelectedRecord(null); setQueryResults(null); }}
+                  onSelectRecord={(target) => { setSelectedRecord(target); setQueryResults(null); }}
+                  onQueryResults={setQueryResults}
+                />
+                {selectedScope ? (
+                  <TableView
+                    scope={selectedScope}
+                    onSelectRecord={setSelectedRecord}
+                    activeRecord={selectedRecord}
+                    session={{ userId: session.userId }}
+                    queryResults={queryResults?.records}
+                  />
+                ) : (
+                  <div style={s.empty}>
+                    <div style={s.emptyText}>Select an object type to view its records</div>
+                    <div style={s.emptySub}>
+                      Choose from the hierarchy on the left to see records as a table
+                    </div>
+                  </div>
+                )}
+              </>
+            ) : activeView === 'log' ? (
+              <LogView targetFilter={selectedScope} />
+            ) : activeView === 'graph' ? (
+              <GraphView />
+            ) : activeView === 'import' ? (
+              <div style={s.importPage}>
+                <div style={s.importHeader}>
+                  <div style={s.importTitle}>Import Data</div>
+                  <div style={s.importSubtitle}>Connect external data sources and sync records into EO-DB</div>
+                </div>
+                <AirtableSettingsSection session={session} />
+              </div>
+            ) : activeView === 'compose' ? (
+              <ComposeView />
+            ) : activeView === 'settings' ? (
+              <SettingsView session={session} />
+            ) : null}
           </ErrorBoundary>
-        </div>
-      ) : activeView === 'graph' ? (
-        <div style={s.body}>
-          <ErrorBoundary>
-            <GraphView />
-          </ErrorBoundary>
-        </div>
-      ) : activeView === 'settings' ? (
-        <div style={s.body}>
-          <ErrorBoundary>
-            <SettingsView session={session} />
-          </ErrorBoundary>
-        </div>
-      ) : null}
+        </main>
+
+        {selectedRecord && activeView === 'horizon' && (
+          <RecordDetailDrawer
+            target={selectedRecord}
+            onClose={() => setSelectedRecord(null)}
+            onNavigate={(t) => setSelectedRecord(t)}
+          />
+        )}
+      </div>
     </div>
   );
 }
@@ -416,33 +393,20 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
     },
     divider: { width: 1, height: 18, background: t.borderDivider },
 
-    // NULSpace selector
-    nulspaceBtn: {
-      display: 'flex',
+    // Space badge
+    spaceBadge: {
+      display: 'inline-flex',
       alignItems: 'center',
-      gap: 6,
-      background: t.bgMuted,
-      border: `1px solid ${t.border}`,
-      borderRadius: 4,
-      padding: '4px 10px 4px 8px',
-      cursor: 'pointer',
-      color: t.text,
-    },
-    nulTag: {
-      fontSize: 8,
-      fontWeight: 700,
-      color: t.textMuted,
-      fontFamily: "'JetBrains Mono', monospace",
-      letterSpacing: '0.06em',
-      background: t.bg,
-      borderRadius: 2,
-      padding: '1px 4px',
-      border: `1px solid ${t.border}`,
-    },
-    nulspaceName: {
-      fontFamily: "'JetBrains Mono', monospace",
+      background: t.accentBg,
+      color: t.accent,
+      border: `1px solid ${t.accentBorder}`,
+      borderRadius: 12,
+      padding: '3px 12px',
       fontSize: 12,
-      fontWeight: 500,
+      fontWeight: 600,
+      fontFamily: "'JetBrains Mono', monospace",
+      cursor: 'pointer',
+      letterSpacing: '-0.01em',
     },
     nulspaceDropdown: {
       position: 'absolute',
@@ -522,25 +486,31 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       fontFamily: "'JetBrains Mono', monospace",
     },
 
-    // Tab bar
-    tabBar: {
+    // Sidebar navigation
+    sidebarNav: {
       display: 'flex',
-      padding: '0 16px',
-      borderBottom: `1px solid ${t.border}`,
-      background: t.bgCard,
-      flexShrink: 0,
+      flexDirection: 'column' as const,
+      padding: '8px 0',
     },
-    tab: {
-      padding: '9px 14px',
+    navItem: {
+      display: 'block',
+      width: '100%',
+      padding: '10px 18px',
       background: 'transparent',
       border: 'none',
+      borderLeft: '3px solid transparent',
       cursor: 'pointer',
-      fontSize: 10,
+      fontSize: 14,
+      fontWeight: 500,
+      color: t.textSecondary,
+      textAlign: 'left' as const,
+      transition: 'background 0.1s, color 0.1s',
+    },
+    navItemActive: {
+      color: t.accent,
+      background: t.accentBg,
+      borderLeft: `3px solid ${t.accent}`,
       fontWeight: 600,
-      letterSpacing: '0.06em',
-      fontFamily: "'JetBrains Mono', monospace",
-      color: t.textMuted,
-      borderBottom: '1.5px solid transparent',
     },
 
     // Body
@@ -550,7 +520,7 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       borderRight: `1px solid ${t.border}`,
       background: t.bgCard,
     },
-    main: { flex: 1, overflowY: 'auto', background: t.bg },
+    main: { flex: 1, overflowY: 'auto' as const, overflow: 'hidden', display: 'flex', flexDirection: 'column' as const, background: t.bg },
 
     // Import page
     importPage: {

@@ -135,7 +135,11 @@ export function TableView({ scope, onSelectRecord, activeRecord, session, queryR
     setConjunction('AND');
   }, [scope]);
 
-  const columns = useMemo(() => deriveColumns(records), [records]);
+  const entityColumns = useMemo(() => deriveColumns(records), [records]);
+  const columns = useMemo<ColumnDef[]>(() => [
+    { key: '_record', label: 'RECORD', type: 'text' as const },
+    ...entityColumns,
+  ], [entityColumns]);
   const filtered = useMemo(() => applyFilters(records, filters, conjunction), [records, filters, conjunction]);
 
   // Save segment as SEG operation
@@ -253,7 +257,13 @@ export function TableView({ scope, onSelectRecord, activeRecord, session, queryR
                       ...(i === 0 ? s.stickyCol : {}),
                       ...(isActive && i === 0 ? { background: theme.accentBg } : {}),
                     }}>
-                      {renderCell(rec.value?.[col.key], col.key, onSelectRecord, theme)}
+                      {col.key === '_record'
+                        ? <span style={{
+                            fontFamily: "'JetBrains Mono', monospace", fontSize: 12,
+                            color: theme.accent, cursor: 'pointer',
+                          }}>{rec.target.split('.').pop()}</span>
+                        : renderCell(rec.value?.[col.key], col.key, onSelectRecord, theme)
+                      }
                     </td>
                   ))}
                 </tr>
