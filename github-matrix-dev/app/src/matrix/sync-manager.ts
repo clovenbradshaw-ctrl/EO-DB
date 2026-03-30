@@ -1,9 +1,10 @@
 /**
  * Sync manager — orchestrates snapshot persistence, offline queue, and deduplication.
  *
- * Data is persisted as encrypted binary snapshots in Matrix media.
- * On a fresh device, the latest snapshot is downloaded and applied.
- * Snapshots are auto-saved every 1000 events and on explicit saveSnapshot() calls.
+ * Data is persisted as delta snapshots in Matrix media — each snapshot
+ * contains only the events since the last one, plus up to 25 previous
+ * snapshot URIs for fast chain traversal. Below 500 log entries the
+ * hydration state lives in room data only.
  *
  * Offline queue is append-only via atomic read-modify-write through the
  * queue mutex. Events that fail to send are retried individually on reconnect;
@@ -17,7 +18,7 @@ import { processEvent } from '../db/fold';
 import { eventHash } from '../db/hash';
 import { AsyncMutex } from '../db/mutex';
 import { EO_EVENT_TYPE, getDataRoom, matrixEventToEo, sendEoEvent } from './event-bridge';
-import { findLatestSnapshot, maybeCreateSnapshot, createSnapshot, uploadSnapshot, createDeltaSnapshot, uploadDeltaSnapshot, setSnapshotStateEvent, restoreFromDeltaChain } from './snapshot';
+import { findLatestSnapshot, maybeCreateSnapshot, createDeltaSnapshot, uploadDeltaSnapshot, setSnapshotStateEvent, restoreFromDeltaChain } from './snapshot';
 
 /** Mutex protecting the offline queue from concurrent read-modify-write. */
 const queueMutex = new AsyncMutex();
@@ -101,7 +102,7 @@ export class SyncManager {
    * Hydrate the local store from the latest snapshot in room state.
    *
    * Reads the latest URI from room state (O(1)), downloads the blob,
-   * and applies it. The blob's internal `prev_mxc` breadcrumbs backwards
+   * and applies it. The blob's `prev_mxcs` array allows jumping backwards
    * through history if the client needs to walk further.
    */
   private async hydrateFromSnapshot(): Promise<void> {
@@ -114,24 +115,27 @@ export class SyncManager {
   }
 
   /**
-   * Force-save a snapshot to Matrix media right now.
+   * Force-save a delta snapshot to Matrix media right now.
    * Called on beforeunload / logout so data is always persisted.
    */
   async saveSnapshot(): Promise<void> {
     const seq = await this.store.getCurrentSeq();
-    if (seq === 0) return; // nothing to snapshot
-    const snapshot = await createSnapshot(this.store, this.client.getUserId()!);
-    const mxc = await uploadSnapshot(this.client, this.roomId, snapshot);
+    const lastSnapshotSeq: number = (await this.store.get('meta:snapshot_seq')) || 0;
+    if (seq === 0 || seq === lastSnapshotSeq) return; // nothing new to snapshot
+    const delta = await createDeltaSnapshot(this.store, this.client.getUserId()!);
+    const mxc = await uploadDeltaSnapshot(this.client, this.roomId, delta);
     await this.store.put('meta:snapshot_seq', seq);
     await this.store.put('meta:snapshot_mxc', mxc);
+    const prevMxcs: string[] = (await this.store.get('meta:snapshot_prev_mxcs')) || [];
+    await this.store.put('meta:snapshot_prev_mxcs', [mxc, ...prevMxcs].slice(0, 25));
   }
 
   /**
    * Manual delta snapshot — captures log events since the last snapshot,
    * uploads to Matrix media, and records the mxc URI in a NUL log event.
    *
-   * This creates a reconstructable chain: each NUL snapshot event points
-   * to its delta blob, and each delta references the previous one via prev_mxc.
+   * Each delta carries up to 25 previous snapshot URIs so hydrating
+   * devices can jump back in large strides.
    */
   async manualSnapshot(): Promise<{ mxc: string; seq: number }> {
     const currentSeq = await this.store.getCurrentSeq();
@@ -145,7 +149,7 @@ export class SyncManager {
     const delta = await createDeltaSnapshot(this.store, this.client.getUserId()!);
 
     // 2. Upload to Matrix media
-    const mxc = await uploadDeltaSnapshot(this.client, delta);
+    const mxc = await uploadDeltaSnapshot(this.client, this.roomId, delta);
 
     // 3. Record the mxc URI in a NUL event — this makes the snapshot
     //    discoverable from the event log itself
@@ -157,7 +161,7 @@ export class SyncManager {
         type: 'delta',
         from_seq: delta.from_seq,
         to_seq: delta.to_seq,
-        prev_mxc: delta.prev_mxc,
+        prev_mxcs: delta.prev_mxcs,
         event_count: delta.events.length,
       },
       acquired_ts: new Date().toISOString(),
@@ -166,6 +170,8 @@ export class SyncManager {
     // 4. Update snapshot bookkeeping
     await this.store.put('meta:snapshot_seq', currentSeq);
     await this.store.put('meta:snapshot_mxc', mxc);
+    const prevMxcs: string[] = (await this.store.get('meta:snapshot_prev_mxcs')) || [];
+    await this.store.put('meta:snapshot_prev_mxcs', [mxc, ...prevMxcs].slice(0, 25));
 
     // 5. Update room state for fast hydration on fresh devices
     await setSnapshotStateEvent(this.client, this.roomId, mxc, currentSeq);
@@ -273,7 +279,7 @@ export class SyncManager {
       await this.enqueueOfflineEvent(localEvent);
     }
 
-    // Auto-snapshot to Matrix media every 1000 events
+    // Auto-snapshot to Matrix media every 500 log entries
     await maybeCreateSnapshot(this.client, this.roomId, this.store, this.client.getUserId()!);
 
     return seq;

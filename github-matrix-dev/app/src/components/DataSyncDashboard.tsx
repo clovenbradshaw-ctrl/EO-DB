@@ -107,7 +107,7 @@ export function DataSyncDashboard({ session }: DataSyncDashboardProps) {
       updateSyncPair({
         sourceId: 'matrix-room',
         targetId: 'matrix-snapshots',
-        status: lastSeq - lastSnapshotSeq > 1000 ? 'behind' : 'synced',
+        status: lastSeq - lastSnapshotSeq > 500 ? 'behind' : 'synced',
         sourceSeq: lastSeq,
         targetSeq: lastSnapshotSeq,
         lag: lastSnapshotSeq - lastSeq,
