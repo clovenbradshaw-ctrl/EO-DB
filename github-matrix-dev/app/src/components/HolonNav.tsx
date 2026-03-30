@@ -209,7 +209,7 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
   return (
     <div style={s.container}>
       <div style={s.header}>
-        <span style={s.title}>Objects</span>
+        <span style={s.title}>OBJECTS</span>
       </div>
       <div style={s.scroll}>
         {allStates.length === 0 && (
@@ -235,7 +235,11 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       alignItems: 'center',
       justifyContent: 'space-between',
     },
-    title: { fontWeight: 600, fontSize: 13, color: t.textHeading },
+    title: {
+      fontWeight: 700, fontSize: 10, color: t.textMuted,
+      textTransform: 'uppercase' as const, letterSpacing: '0.08em',
+      fontFamily: "'JetBrains Mono', monospace",
+    },
     scroll: { flex: 1, overflowY: 'auto' },
     empty: { padding: 18, fontSize: 13, color: t.textMuted },
     item: {

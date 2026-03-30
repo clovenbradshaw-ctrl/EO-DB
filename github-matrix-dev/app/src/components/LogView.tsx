@@ -58,16 +58,10 @@ function getAgentName(agent: string): string {
   return agent;
 }
 
-// --- Relative time formatting ---
+// --- Time formatting (HH:MM:SS) ---
 function formatTime(ts: string): string {
   const d = new Date(ts);
-  const now = Date.now();
-  const diffMin = Math.floor((now - d.getTime()) / 60000);
-  const diffHr = Math.floor((now - d.getTime()) / 3600000);
-  if (diffMin < 1) return 'now';
-  if (diffMin < 60) return `${diffMin}m`;
-  if (diffHr < 24) return `${diffHr}h`;
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  return d.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
 // --- OpBadge ---
@@ -315,31 +309,47 @@ function DetailPanel({ event, onClose }: { event: EoEvent; onClose: () => void }
   );
 }
 
+// --- Table cell styles ---
+function thStyle(t: { bg: string; textMuted: string; border: string }): React.CSSProperties {
+  return {
+    position: 'sticky' as const, top: 0, background: t.bg,
+    padding: '10px 16px', textAlign: 'left' as const,
+    fontSize: 10, fontWeight: 600, textTransform: 'uppercase' as const,
+    letterSpacing: '0.04em', color: t.textMuted,
+    fontFamily: "'JetBrains Mono', monospace",
+    borderBottom: `2px solid ${t.border}`, whiteSpace: 'nowrap' as const, zIndex: 2,
+  };
+}
+
+function tdStyle(t: { border: string; bgCard: string; borderLight: string }): React.CSSProperties {
+  return {
+    padding: '10px 16px', borderBottom: `1px solid ${t.borderLight}`,
+    verticalAlign: 'middle' as const, background: t.bgCard,
+  };
+}
+
 // --- Main LogView ---
-export function LogView() {
+export function LogView({ targetFilter }: { targetFilter?: string | null }) {
   const recentEvents = useEoStore((s) => s.recentEvents);
   const { theme: t } = useTheme();
   const [activeFilters, setActiveFilters] = useState<Set<string>>(new Set());
   const [selectedEvent, setSelectedEvent] = useState<EoEvent | null>(null);
   const [filterText, setFilterText] = useState('');
-
-  // Count events by operator
-  const opCounts = useMemo(() => {
-    const m: Record<string, number> = {};
-    for (const op of ALL_OPS) m[op] = 0;
-    for (const e of recentEvents) m[e.op] = (m[e.op] || 0) + 1;
-    return m;
-  }, [recentEvents]);
+  const [opMenuOpen, setOpMenuOpen] = useState(false);
+  const [visibleCount, setVisibleCount] = useState(50);
 
   // Filtered events (newest first)
   const filtered = useMemo(() => {
     const sorted = [...recentEvents].reverse();
     return sorted.filter((e) => {
       if (activeFilters.size > 0 && !activeFilters.has(e.op)) return false;
+      if (targetFilter && !e.target.startsWith(targetFilter)) return false;
       if (filterText && !e.target.toLowerCase().includes(filterText.toLowerCase())) return false;
       return true;
     });
-  }, [recentEvents, activeFilters, filterText]);
+  }, [recentEvents, activeFilters, filterText, targetFilter]);
+
+  const visible = filtered.slice(0, visibleCount);
 
   function toggleFilter(op: string) {
     setActiveFilters((prev) => {
@@ -351,128 +361,164 @@ export function LogView() {
   }
 
   return (
-    <div style={{ display: 'flex', flex: 1, minHeight: 0, background: t.bg }}>
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column' as const, minWidth: 0 }}>
-        {/* Filters */}
+    <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column' as const, minWidth: 0, background: t.bgCard }}>
+        {/* Header */}
         <div style={{
-          display: 'flex', alignItems: 'center', gap: 6,
-          padding: '8px 16px', borderBottom: `1px solid ${t.borderLight}`,
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          padding: '16px 24px', borderBottom: `1px solid ${t.border}`, flexShrink: 0,
         }}>
-          {ALL_OPS.map((op) => {
-            const c = OP_COLORS[op];
-            const active = activeFilters.has(op);
-            const count = opCounts[op];
-            return (
-              <button key={op} onClick={() => toggleFilter(op)} style={{
-                display: 'inline-flex', alignItems: 'center', gap: 3,
-                background: active ? c.bg : 'transparent',
-                border: `1px solid ${active ? c.border : t.borderLight}`,
-                color: active ? c.text : count > 0 ? t.textMuted : t.borderLight,
-                borderRadius: 3, padding: '2px 6px', cursor: 'pointer',
-                fontSize: 9, fontWeight: 600, fontFamily: "'JetBrains Mono', monospace",
-                letterSpacing: '0.03em', transition: 'all 0.1s',
-              }}>
-                {op}
-                <span style={{ fontSize: 8, opacity: 0.5 }}>{count}</span>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 12 }}>
+            <span style={{
+              fontFamily: "'Source Serif 4', Georgia, serif", fontSize: 20,
+              fontWeight: 600, color: t.textHeading,
+            }}>Event log</span>
+            <span style={{
+              fontSize: 12, color: t.textMuted,
+              fontFamily: "'JetBrains Mono', monospace",
+            }}>{filtered.length} events</span>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <input
+              value={filterText}
+              onChange={(e) => setFilterText(e.target.value)}
+              placeholder="Filter by target..."
+              style={{
+                background: t.bgMuted, border: `1px solid ${t.border}`,
+                borderRadius: 4, padding: '6px 10px', color: t.text,
+                fontSize: 12, fontFamily: "'JetBrains Mono', monospace",
+                width: 200, outline: 'none',
+              }}
+            />
+            <div style={{ position: 'relative' as const }}>
+              <button
+                onClick={() => setOpMenuOpen(!opMenuOpen)}
+                style={{
+                  padding: '6px 12px', fontSize: 12, fontWeight: 500,
+                  border: `1px solid ${t.border}`, borderRadius: 4,
+                  background: activeFilters.size > 0 ? t.accentBg : t.bgCard,
+                  color: t.text, cursor: 'pointer',
+                  fontFamily: "'JetBrains Mono', monospace",
+                }}
+              >
+                Op{activeFilters.size > 0 ? ` (${activeFilters.size})` : ''}
               </button>
-            );
-          })}
-          <div style={{ flex: 1 }} />
-          <input
-            value={filterText}
-            onChange={(e) => setFilterText(e.target.value)}
-            placeholder="filter targets..."
-            style={{
-              background: t.bgMuted, border: `1px solid ${t.border}`,
-              borderRadius: 3, padding: '4px 8px', color: t.textSecondary,
-              fontSize: 10, fontFamily: "'JetBrains Mono', monospace", width: 160, outline: 'none',
-            }}
-          />
+              {opMenuOpen && (
+                <>
+                  <div style={{ position: 'fixed' as const, inset: 0, zIndex: 99 }} onClick={() => setOpMenuOpen(false)} />
+                  <div style={{
+                    position: 'absolute' as const, right: 0, top: '100%', marginTop: 4,
+                    background: t.bgCard, border: `1px solid ${t.border}`,
+                    borderRadius: 6, padding: 6, zIndex: 100, minWidth: 100,
+                    boxShadow: `0 4px 16px ${t.shadow}`,
+                  }}>
+                    {ALL_OPS.map((op) => {
+                      const c = OP_COLORS[op];
+                      const active = activeFilters.has(op);
+                      return (
+                        <button key={op} onClick={() => toggleFilter(op)} style={{
+                          display: 'flex', alignItems: 'center', gap: 8, width: '100%',
+                          padding: '5px 8px', border: 'none', borderRadius: 3,
+                          background: active ? c.bg : 'transparent',
+                          color: active ? c.text : t.textSecondary,
+                          cursor: 'pointer', fontSize: 11, fontWeight: 600,
+                          fontFamily: "'JetBrains Mono', monospace",
+                        }}>
+                          <OpBadge op={op} />
+                        </button>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
         </div>
 
-        {/* Event rows */}
-        <div style={{ flex: 1, overflowY: 'auto' as const }}>
-          {filtered.map((event) => {
-            const sel = selectedEvent?.seq === event.seq;
-            const c = OP_COLORS[event.op];
-            const isSystem = event.agent === 'system';
-            const parts = event.target.split('.');
-            const level = event.level ?? 1;
-            const agentType = getAgentType(event.agent);
-            const operandEl = formatOperand(event.op, event.operand, t);
+        {/* Table */}
+        <div style={{ flex: 1, overflowY: 'auto' as const, overflowX: 'auto' as const }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse' as const, fontSize: 13, color: t.textHeading }}>
+            <thead>
+              <tr>
+                <th style={{ ...thStyle(t), minWidth: 50, textAlign: 'right' as const }}>SEQ</th>
+                <th style={{ ...thStyle(t), minWidth: 60 }}>OP</th>
+                <th style={{ ...thStyle(t), minWidth: 200 }}>TARGET</th>
+                <th style={{ ...thStyle(t), minWidth: 140 }}>AGENT</th>
+                <th style={{ ...thStyle(t), minWidth: 80, textAlign: 'right' as const }}>TIME</th>
+              </tr>
+            </thead>
+            <tbody>
+              {visible.length === 0 && (
+                <tr>
+                  <td colSpan={5} style={{
+                    padding: 48, textAlign: 'center' as const, color: t.textMuted,
+                    fontSize: 11, fontFamily: "'JetBrains Mono', monospace",
+                  }}>
+                    {recentEvents.length === 0 ? 'no events yet' : 'no events match'}
+                  </td>
+                </tr>
+              )}
+              {visible.map((event) => {
+                const sel = selectedEvent?.seq === event.seq;
+                const agentName = getAgentName(event.agent);
+                return (
+                  <tr
+                    key={event.seq}
+                    onClick={() => setSelectedEvent(sel ? null : event)}
+                    style={{
+                      cursor: 'pointer',
+                      background: sel ? t.bgHover : 'transparent',
+                    }}
+                    onMouseEnter={(e) => { if (!sel) (e.currentTarget as HTMLElement).style.background = t.bgHover; }}
+                    onMouseLeave={(e) => { if (!sel) (e.currentTarget as HTMLElement).style.background = sel ? t.bgHover : 'transparent'; }}
+                  >
+                    <td style={{
+                      ...tdStyle(t), textAlign: 'right' as const,
+                      fontFamily: "'JetBrains Mono', monospace", fontSize: 12,
+                      color: t.textMuted, fontWeight: 500,
+                    }}>{event.seq}</td>
+                    <td style={tdStyle(t)}><OpBadge op={event.op} /></td>
+                    <td style={{
+                      ...tdStyle(t), fontFamily: "'JetBrains Mono', monospace",
+                      fontSize: 12, color: t.accent,
+                    }}>{event.target}</td>
+                    <td style={{
+                      ...tdStyle(t), fontSize: 12, color: t.textSecondary,
+                      maxWidth: 180, overflow: 'hidden' as const,
+                      textOverflow: 'ellipsis' as const, whiteSpace: 'nowrap' as const,
+                    }}>{agentName}</td>
+                    <td style={{
+                      ...tdStyle(t), textAlign: 'right' as const,
+                      fontFamily: "'JetBrains Mono', monospace", fontSize: 12,
+                      color: t.textMuted, whiteSpace: 'nowrap' as const,
+                    }}>{formatTime(event.ts)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
 
-            return (
-              <div
-                key={event.seq}
-                onClick={() => setSelectedEvent(sel ? null : event)}
-                style={{
-                  display: 'flex', alignItems: 'flex-start', gap: 10,
-                  padding: '9px 16px', cursor: 'pointer',
-                  background: sel ? t.bgHover : 'transparent',
-                  borderBottom: `1px solid ${t.borderLight}`,
-                  borderLeft: sel ? `2px solid ${c.text}` : '2px solid transparent',
-                  transition: 'background 0.08s',
-                }}
-                onMouseEnter={(e) => { if (!sel) (e.currentTarget as HTMLElement).style.background = t.bgHover; }}
-                onMouseLeave={(e) => { if (!sel) (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
-              >
-                {/* Seq */}
-                <span style={{
-                  fontSize: 9, color: t.textMuted, fontFamily: "'JetBrains Mono', monospace",
-                  minWidth: 18, textAlign: 'right' as const, paddingTop: 3, fontWeight: 500,
-                }}>{event.seq}</span>
-
-                {/* Agent icon */}
-                <span style={{
-                  paddingTop: 2, color: isSystem ? t.warning : t.textMuted,
-                  display: 'flex', alignItems: 'center',
-                }}>
-                  {AGENT_ICONS[agentType]}
-                </span>
-
-                {/* Op badge */}
-                <OpBadge op={event.op} />
-
-                {/* Content: target + operand */}
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ display: 'flex', alignItems: 'center' }}>
-                    <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12.5, fontWeight: 500 }}>
-                      {parts.map((seg, i) => (
-                        <span key={i}>
-                          {i < parts.length - 1 ? (
-                            <>
-                              <span style={{ color: t.textMuted }}>{seg}</span>
-                              <span style={{ color: t.borderDivider }}>.</span>
-                            </>
-                          ) : (
-                            <span style={{ color: t.textHeading }}>{seg}</span>
-                          )}
-                        </span>
-                      ))}
-                    </span>
-                    <LevelBadge level={level} />
-                  </div>
-                  {operandEl && (
-                    <div style={{ marginTop: 3, lineHeight: 1.3 }}>
-                      {operandEl}
-                    </div>
-                  )}
-                </div>
-
-                {/* Timestamp */}
-                <span style={{
-                  fontSize: 9, color: t.textMuted, fontFamily: "'JetBrains Mono', monospace",
-                  whiteSpace: 'nowrap' as const, paddingTop: 3,
-                }}>{formatTime(event.ts)}</span>
-              </div>
-            );
-          })}
-          {filtered.length === 0 && (
+          {/* Pagination footer */}
+          {filtered.length > 0 && (
             <div style={{
-              padding: 48, textAlign: 'center' as const, color: t.textMuted,
-              fontSize: 11, fontFamily: "'JetBrains Mono', monospace",
+              padding: '16px 24px', textAlign: 'center' as const, fontSize: 11,
+              color: t.textMuted, fontFamily: "'JetBrains Mono', monospace",
+              borderTop: `1px solid ${t.borderLight}`,
             }}>
-              {recentEvents.length === 0 ? 'no events yet' : 'no events match'}
+              Showing {Math.min(visibleCount, filtered.length)} of {filtered.length} events
+              {filtered.length > visibleCount && (
+                <button
+                  onClick={() => setVisibleCount((c) => c + 50)}
+                  style={{
+                    marginLeft: 12, padding: '2px 10px', fontSize: 10,
+                    border: `1px solid ${t.border}`, borderRadius: 3,
+                    background: 'transparent', color: t.accent, cursor: 'pointer',
+                    fontFamily: "'JetBrains Mono', monospace",
+                  }}
+                >
+                  show more
+                </button>
+              )}
             </div>
           )}
         </div>
