@@ -455,13 +455,13 @@ export function LogView({ targetFilter, spacePrefix }: { targetFilter?: string |
 
         {/* Table */}
         <div style={{ flex: 1, overflowY: 'auto' as const, overflowX: 'auto' as const }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse' as const, fontSize: 13, color: t.textHeading }}>
+          <table style={{ borderCollapse: 'collapse' as const, fontSize: 13, color: t.textHeading }}>
             <thead>
               <tr>
                 <th style={{ ...thStyle(t), width: 44, paddingLeft: 20 }}>seq</th>
                 <th style={{ ...thStyle(t), width: 48 }}>op</th>
-                <th style={{ ...thStyle(t) }}>target</th>
-                <th style={{ ...thStyle(t) }}>agent</th>
+                <th style={{ ...thStyle(t), maxWidth: 360 }}>target</th>
+                <th style={{ ...thStyle(t), maxWidth: 180 }}>agent</th>
                 <th style={{ ...thStyle(t), textAlign: 'right' as const, paddingRight: 20 }}>time</th>
               </tr>
             </thead>
@@ -499,6 +499,8 @@ export function LogView({ targetFilter, spacePrefix }: { targetFilter?: string |
                     <td style={{
                       ...tdStyle(t), fontFamily: "'JetBrains Mono', monospace",
                       fontSize: 11, color: t.accent,
+                      maxWidth: 360, overflow: 'hidden' as const,
+                      textOverflow: 'ellipsis' as const, whiteSpace: 'nowrap' as const,
                     }}>{event.target}</td>
                     <td style={{
                       ...tdStyle(t), fontFamily: "'JetBrains Mono', monospace",
