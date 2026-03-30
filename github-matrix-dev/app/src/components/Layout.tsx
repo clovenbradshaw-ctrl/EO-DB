@@ -19,6 +19,7 @@ import { LogView } from './LogView';
 import { ComposeView } from './ComposeView';
 import { GraphView } from './GraphView';
 import { SettingsView } from './SettingsView';
+import { SpaceMembers } from './SpaceMembers';
 import { useTheme, spaceBackgroundTint, type Theme } from '../theme';
 import type { EoState } from '../db/types';
 
@@ -47,6 +48,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
   const [activeView, setActiveView] = useState<View>('horizon');
   const [spaceOpen, setSpaceOpen] = useState(false);
   const [selectedSpace, setSelectedSpace] = useState<string | null>(null);
+  const [showMembers, setShowMembers] = useState(false);
   const [spaces, setSpaces] = useState<EoState[]>([]);
   const [allStates, setAllStates] = useState<EoState[]>([]);
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
@@ -279,22 +281,39 @@ export function Layout({ session, onLogout }: LayoutProps) {
                   const name = sp.target.split('.').pop() || sp.target;
                   const displayName = sp.value?.name || formatSpaceName(name);
                   const isActive = selectedSpace === sp.target;
+                  const memberCount = (sp.value?._sharing || []).length;
                   return (
                     <button
                       key={sp.target}
-                      onClick={() => { setSelectedSpace(sp.target); setSpaceOpen(false); setSelectedScope(null); setSelectedRecord(null); setActiveView('horizon'); }}
+                      onClick={() => { setSelectedSpace(sp.target); setSpaceOpen(false); setSelectedScope(null); setSelectedRecord(null); setShowMembers(false); setActiveView('horizon'); }}
                       style={{ ...s.nulspaceItem, ...(isActive ? { background: theme.bgHover } : {}) }}
                     >
-                      <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12 }}>{displayName}</span>
-                      <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: theme.textMuted }}>
-                        {sp.target}
-                      </span>
+                      <div>
+                        <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12, display: 'block' }}>{displayName}</span>
+                        <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: theme.textMuted }}>
+                          {sp.target}{memberCount > 0 ? ` · ${memberCount + 1} users` : ''}
+                        </span>
+                      </div>
                     </button>
                   );
                 })}
               </div>
             )}
           </div>
+
+          {/* Members button — visible when a space is selected */}
+          {selectedSpace && (
+            <button
+              onClick={() => setShowMembers(!showMembers)}
+              style={{
+                ...s.spaceBadge,
+                background: showMembers ? theme.accent : theme.bgMuted,
+                color: showMembers ? '#fff' : theme.textSecondary,
+              }}
+            >
+              Members
+            </button>
+          )}
         </div>
 
         <div style={s.topBarRight}>
@@ -343,6 +362,17 @@ export function Layout({ session, onLogout }: LayoutProps) {
         </aside>
 
         <main style={s.main} key={selectedSpace ?? '__all__'}>
+          {/* Space members panel */}
+          {showMembers && selectedSpace && (
+            <div style={{ padding: '16px 24px', maxWidth: 480 }}>
+              <SpaceMembers
+                spaceTarget={selectedSpace}
+                currentUserId={session.userId}
+                onClose={() => setShowMembers(false)}
+              />
+            </div>
+          )}
+
           <ErrorBoundary>
             {activeView === 'horizon' ? (
               <>
