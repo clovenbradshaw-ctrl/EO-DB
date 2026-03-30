@@ -506,7 +506,7 @@ async function computeCadence(store: EoStore, target: string): Promise<CadenceIn
   } else if (intervals.length >= 3) {
     const sorted = [...intervals].sort((a, b) => a - b);
     const median = sorted[Math.floor(sorted.length / 2)];
-    const periodic = intervals.filter(i => Math.abs(i - median) / median < 0.2).length;
+    const periodic = median > 0 ? intervals.filter(i => Math.abs(i - median) / median < 0.2).length : 0;
     if (periodic / intervals.length > 0.6) {
       classification = 'periodic';
       const periodHours = Math.round(median / 3600000);

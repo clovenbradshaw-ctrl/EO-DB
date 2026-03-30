@@ -19,7 +19,7 @@ export interface FilterRule {
 export interface ColumnDef {
   key: string;
   label: string;
-  type: 'text' | 'number' | 'select' | 'boolean' | 'object';
+  type: 'text' | 'number' | 'date' | 'select' | 'boolean' | 'object';
   selectOptions?: string[];
 }
 
@@ -35,6 +35,7 @@ export interface FilterDefinition {
 
 const TEXT_OPS: FilterOperator[] = ['equals', 'not_equals', 'contains', 'not_contains', 'starts_with', 'ends_with', 'is_empty', 'is_not_empty'];
 const NUMBER_OPS: FilterOperator[] = ['equals', 'not_equals', 'gt', 'lt', 'gte', 'lte', 'is_empty', 'is_not_empty'];
+const DATE_OPS: FilterOperator[] = ['equals', 'not_equals', 'gt', 'lt', 'gte', 'lte', 'is_empty', 'is_not_empty'];
 const SELECT_OPS: FilterOperator[] = ['equals', 'not_equals', 'is_empty', 'is_not_empty'];
 const BOOLEAN_OPS: FilterOperator[] = ['equals', 'not_equals'];
 const OBJECT_OPS: FilterOperator[] = ['is_empty', 'is_not_empty', 'contains'];
@@ -42,6 +43,7 @@ const OBJECT_OPS: FilterOperator[] = ['is_empty', 'is_not_empty', 'contains'];
 export function operatorsForType(type: ColumnDef['type']): FilterOperator[] {
   switch (type) {
     case 'number': return NUMBER_OPS;
+    case 'date': return DATE_OPS;
     case 'select': return SELECT_OPS;
     case 'boolean': return BOOLEAN_OPS;
     case 'object': return OBJECT_OPS;
@@ -64,7 +66,17 @@ export const OPERATOR_LABELS: Record<FilterOperator, string> = {
   lte: '<=',
 };
 
+/** Fields that represent operational metadata rather than current-state data.
+ *  Hidden from the Horizon table but visible in the record detail panel. */
+export const HORIZON_HIDDEN_FIELDS = new Set([
+  'OP', 'op', 'Op',
+  'Agent', 'agent', 'AGENT',
+  'last_op', 'last_agent',
+]);
+
 // --- Column Inference ---
+
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}/;
 
 export function inferColumnType(values: any[]): ColumnDef['type'] {
   const nonNull = values.filter(v => v != null);
@@ -74,6 +86,15 @@ export function inferColumnType(values: any[]): ColumnDef['type'] {
 
   if (types.size === 1 && types.has('number')) return 'number';
   if (types.size === 1 && types.has('boolean')) return 'boolean';
+
+  // Date detection: if >50% of non-null string values look like ISO dates
+  if (types.has('string')) {
+    const strings = nonNull.filter(v => typeof v === 'string') as string[];
+    if (strings.length > 0) {
+      const dateCount = strings.filter(s => ISO_DATE_RE.test(s) && !isNaN(new Date(s).getTime())).length;
+      if (dateCount / strings.length > 0.5) return 'date';
+    }
+  }
 
   // If all strings and < 10 unique values, treat as select
   if (types.size === 1 && types.has('string')) {
@@ -121,7 +142,13 @@ export function hasFieldsSubObject(records: EoState[]): boolean {
  * Otherwise reads from `value[key]`.
  */
 export function getFieldValue(rec: EoState, key: string, useFieldsSub: boolean): any {
-  if (useFieldsSub) return rec.value?.fields?.[key];
+  if (useFieldsSub) {
+    // Check fields sub-object first, then fall back to top-level value
+    // (e.g. `name` is set at value.name by the display field mechanism)
+    const fieldVal = rec.value?.fields?.[key];
+    if (fieldVal !== undefined) return fieldVal;
+    return rec.value?.[key];
+  }
   return rec.value?.[key];
 }
 
@@ -144,9 +171,18 @@ export function deriveColumns(
 
     for (const [key, val] of Object.entries(source)) {
       if (key.startsWith('_')) continue;
+      if (HORIZON_HIDDEN_FIELDS.has(key)) continue;
       const arr = keyValues.get(key) || [];
       arr.push(val);
       keyValues.set(key, arr);
+    }
+
+    // When using fields sub-object, also include top-level `name` if present
+    // (set by the _displayField mechanism during ingestion)
+    if (useFieldsSub && rec.value.name && typeof rec.value.name === 'string') {
+      const arr = keyValues.get('name') || [];
+      arr.push(rec.value.name);
+      keyValues.set('name', arr);
     }
   }
 
@@ -281,7 +317,7 @@ export function parseEoFilterExpr(expr: string): { rules: FilterRule[]; conjunct
 
     // Handle empty checks
     if (value === '∅') {
-      rules.push({ id: crypto.randomUUID(), field, operator: eoOp === '!' ? 'is_not_empty' : 'is_empty', value: '' });
+      rules.push({ id: crypto.randomUUID(), field, operator: eoOp === '!=' ? 'is_not_empty' : 'is_empty', value: '' });
       continue;
     }
 

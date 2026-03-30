@@ -45,6 +45,7 @@ export interface HydrationManifest {
     tables: Array<{
       id: string;
       name: string;
+      primaryFieldId?: string;
       fieldCount: number;
       fields: Array<{ id: string; name: string; type: string }>;
     }>;
@@ -103,6 +104,14 @@ export interface SyncCustomization {
    * Default: true (safe mode — EO-DB is source of truth once populated).
    */
   preserveExisting?: boolean;
+
+  /**
+   * Override the display name field per table (by table ID → field ID).
+   * When set, this field's value is used as the record's `name`.
+   * If not set, falls back to the table's primaryFieldId.
+   * Example: { 'tblClients': 'fldFullName' }
+   */
+  displayFields?: Record<string, string>;
 }
 
 // ─── Cursor management ──────────────────────────────────────────────────────
@@ -443,6 +452,7 @@ async function ingestRecord(
   fieldMeta: Map<string, FieldMeta>,
   exclusions: SyncExclusions = EMPTY_EXCLUSIONS,
   preserveExisting: boolean = true,
+  displayField?: string,
 ): Promise<'ingested' | 'skipped_no_change' | 'skipped_duplicate'> {
   const target = recordTarget(baseId, tableId, record.id);
 
@@ -524,6 +534,25 @@ async function ingestRecord(
       acquired_ts: new Date().toISOString(),
       client_event_id: clientEventId,
     }, feed);
+
+    // 6. Set display name as a separate DEF — ontologically distinct from the data import.
+    //    The name assignment is a user/system choice about how to present this record,
+    //    not part of the source data itself.
+    if (displayField) {
+      const nameVal = storableFields[displayField] ?? record.fields[displayField];
+      if (nameVal != null) {
+        await processEvent(db, {
+          op: 'DEF',
+          target,
+          operand: { name: String(nameVal) },
+          agent: `${agent}:display`,
+          ts: new Date().toISOString(),
+          acquired_ts: new Date().toISOString(),
+          client_event_id: `${clientEventId}:name`,
+        }, feed);
+      }
+    }
+
     return 'ingested';
   } catch (e: any) {
     // If idempotency caught it, it's a duplicate from another device
@@ -553,6 +582,7 @@ export async function discoverSchema(client: AirtableClient): Promise<HydrationM
       tables: tables.map(t => ({
         id: t.id,
         name: t.name,
+        primaryFieldId: t.primaryFieldId,
         fieldCount: t.fields.length,
         fields: t.fields.map(f => ({ id: f.id, name: f.name, type: f.type })),
       })),
@@ -595,6 +625,7 @@ export async function hydrationSync(
   const preserveExisting = opts?.customization?.preserveExisting ?? true;
   const selectedTables = opts?.customization?.selectedTables;
   const fieldExclusions = opts?.customization?.fieldExclusions;
+  const displayFields = opts?.customization?.displayFields;
   const manifest = await discoverSchema(client);
   const syncResults: SyncResult[] = [];
 
@@ -689,6 +720,7 @@ export async function hydrationSync(
               name: table.name,
               field_count: table.fieldCount,
               fields: table.fields,
+              _displayField: displayFields?.[table.id] || table.primaryFieldId || undefined,
               _airtable: { type: 'table', base_id: base.id, table_id: table.id },
             },
             agent,
@@ -862,6 +894,10 @@ async function syncTable(
   // Retrieve field metadata from the table's stored schema (set during hydration).
   const fieldMeta = await getTableFieldMeta(db, baseId, tableId);
 
+  // Retrieve the display field (primaryFieldId) so records get a `name` property.
+  const tableState = await getState(db, tableTarget(baseId, tableId));
+  const displayField: string | undefined = tableState?.value?._displayField;
+
   // Build filter: if we have a cursor, subtract a 60-second overlap window
   // to catch records modified during clock skew or during the previous sync.
   // Idempotency handles any re-fetched duplicates from the overlap.
@@ -890,7 +926,7 @@ async function syncTable(
 
     for (const record of page) {
       fetched++;
-      const result = await ingestRecord(db, feed, baseId, tableId, record, agent, fieldMeta, exclusions, preserveExisting);
+      const result = await ingestRecord(db, feed, baseId, tableId, record, agent, fieldMeta, exclusions, preserveExisting, displayField);
       switch (result) {
         case 'ingested': ingested++; break;
         case 'skipped_no_change': skippedNoChange++; break;
