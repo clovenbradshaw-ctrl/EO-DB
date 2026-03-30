@@ -13,7 +13,7 @@ import type { MatrixClient } from 'matrix-js-sdk';
 import type { EoStore } from '../db/encrypted-store';
 import type { EoState, GraphEdge, EvaRegistration, EoEvent } from '../db/types';
 import { processEvent } from '../db/fold';
-import { EO_SNAPSHOT_TYPE } from './event-bridge';
+import { EO_SNAPSHOT_TYPE, EO_SNAPSHOT_STATE_TYPE } from './event-bridge';
 import { readLogSince } from '../db/log';
 
 interface Snapshot {
@@ -115,13 +115,44 @@ export async function uploadSnapshot(
     version: snapshot.version,
   });
 
+  // Store the URI in room state for instant hydration on fresh devices.
+  // This overwrites the previous state event so the latest URI is always
+  // available without paginating the timeline.
+  await setSnapshotStateEvent(client, roomId, mxcUrl, snapshot.seq);
+
   return mxcUrl;
 }
 
 /**
- * Find the latest snapshot reference in the room timeline.
- * Paginates backwards through the timeline to find snapshot pointer events,
- * which is necessary on a fresh device where the SDK has minimal history.
+ * Store the latest snapshot URI in room state for fast hydration.
+ *
+ * Room state is available instantly via `room.currentState` — no timeline
+ * pagination needed. Each call overwrites the previous value so the state
+ * always points to the most recent snapshot. The snapshot blob itself
+ * carries `prev_mxc` to breadcrumb backwards through history. If any blob
+ * goes missing from the media store, the room timeline is the fallback.
+ */
+export async function setSnapshotStateEvent(
+  client: MatrixClient,
+  roomId: string,
+  mxc: string,
+  seq: number,
+): Promise<void> {
+  await client.sendStateEvent(roomId, EO_SNAPSHOT_STATE_TYPE as any, {
+    mxc,
+    seq,
+    ts: new Date().toISOString(),
+  }, '');
+}
+
+/**
+ * Find the latest snapshot URI — fast path via room state, slow fallback
+ * via timeline pagination.
+ *
+ * The room state gives us the latest mxc URI in O(1). From there the
+ * snapshot blob's `prev_mxc` field links backwards through the full
+ * history. The timeline fallback handles rooms that predate state-based
+ * tracking.
  */
 export async function findLatestSnapshot(
   client: MatrixClient,
@@ -130,13 +161,20 @@ export async function findLatestSnapshot(
   const room = client.getRoom(roomId);
   if (!room) return null;
 
-  // Paginate backwards to find snapshot events (they may not be in the
-  // initial sync window since they're only posted every 1000 events)
+  // Fast path: read directly from room state.
+  const stateEvent = room.currentState.getStateEvents(EO_SNAPSHOT_STATE_TYPE, '');
+  if (stateEvent) {
+    const content = stateEvent.getContent();
+    if (content.mxc && typeof content.seq === 'number') {
+      return { mxc: content.mxc, seq: content.seq };
+    }
+  }
+
+  // Slow fallback: paginate backwards through the timeline.
   const timeline = room.getLiveTimeline();
   let canPaginate = true;
   let latest: { mxc: string; seq: number } | null = null;
 
-  // Check current timeline first
   for (const event of timeline.getEvents()) {
     if (event.getType() === EO_SNAPSHOT_TYPE) {
       const content = event.getContent();
@@ -146,7 +184,6 @@ export async function findLatestSnapshot(
     }
   }
 
-  // If we already found one, great. Otherwise paginate backwards to find it.
   while (!latest && canPaginate) {
     try {
       canPaginate = await client.paginateEventTimeline(timeline, {

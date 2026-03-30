@@ -12,6 +12,7 @@ import { eoEventTypes, getDataRoomAlias } from '../lib/matrix-domain';
 const _types = eoEventTypes();
 export const EO_EVENT_TYPE = _types.event;
 export const EO_SNAPSHOT_TYPE = _types.snapshot;
+export const EO_SNAPSHOT_STATE_TYPE = _types.snapshotState;
 
 /** Room alias — configured at runtime via `configureMatrixDomain()`. */
 export function getDataRoom(): string {

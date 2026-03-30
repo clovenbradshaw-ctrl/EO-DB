@@ -27,6 +27,8 @@ export function eoEventTypes(prefix?: string) {
   return {
     event: `${p}.event`,
     snapshot: `${p}.snapshot`,
+    /** Room state event: stores the latest snapshot URI for fast hydration. */
+    snapshotState: `${p}.snapshot_state`,
   } as const;
 }
 

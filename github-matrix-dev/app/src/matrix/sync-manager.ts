@@ -17,7 +17,7 @@ import { processEvent } from '../db/fold';
 import { eventHash } from '../db/hash';
 import { AsyncMutex } from '../db/mutex';
 import { EO_EVENT_TYPE, getDataRoom, matrixEventToEo, sendEoEvent } from './event-bridge';
-import { findLatestSnapshot, applySnapshot, maybeCreateSnapshot, createSnapshot, uploadSnapshot, createDeltaSnapshot, uploadDeltaSnapshot } from './snapshot';
+import { findLatestSnapshot, applySnapshot, maybeCreateSnapshot, createSnapshot, uploadSnapshot, createDeltaSnapshot, uploadDeltaSnapshot, setSnapshotStateEvent, restoreFromDeltaChain } from './snapshot';
 
 /** Mutex protecting the offline queue from concurrent read-modify-write. */
 const queueMutex = new AsyncMutex();
@@ -94,12 +94,18 @@ export class SyncManager {
   }
 
   /**
-   * Hydrate the local store from the latest snapshot in Matrix media.
+   * Hydrate the local store from the latest snapshot in room state.
+   *
+   * Reads the latest URI from room state (O(1)), downloads the blob,
+   * and applies it. The blob's internal `prev_mxc` breadcrumbs backwards
+   * through history if the client needs to walk further.
    */
   private async hydrateFromSnapshot(): Promise<void> {
     const snap = await findLatestSnapshot(this.client, this.roomId);
     if (!snap) return;
-    const restoredSeq = await applySnapshot(this.client, this.store, snap.mxc);
+    const restoredSeq = await restoreFromDeltaChain(
+      this.client, this.store, snap.mxc, this.onEvent,
+    );
     await this.store.put('meta:snapshot_seq', restoredSeq);
   }
 
@@ -111,8 +117,9 @@ export class SyncManager {
     const seq = await this.store.getCurrentSeq();
     if (seq === 0) return; // nothing to snapshot
     const snapshot = await createSnapshot(this.store, this.client.getUserId()!);
-    await uploadSnapshot(this.client, this.roomId, snapshot);
+    const mxc = await uploadSnapshot(this.client, this.roomId, snapshot);
     await this.store.put('meta:snapshot_seq', seq);
+    await this.store.put('meta:snapshot_mxc', mxc);
   }
 
   /**
@@ -155,6 +162,9 @@ export class SyncManager {
     // 4. Update snapshot bookkeeping
     await this.store.put('meta:snapshot_seq', currentSeq);
     await this.store.put('meta:snapshot_mxc', mxc);
+
+    // 5. Update room state for fast hydration on fresh devices
+    await setSnapshotStateEvent(this.client, this.roomId, mxc, currentSeq);
 
     return { mxc, seq: currentSeq };
   }
