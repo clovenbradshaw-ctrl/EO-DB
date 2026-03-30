@@ -221,10 +221,14 @@ export async function downloadDeltaSnapshot(
 /**
  * Restore from a chain of delta snapshots.
  *
- * Uses `prev_mxcs` to skip ahead by up to 25 snapshots at a time instead
- * of downloading each link individually. Walks backwards until it reaches
- * the local seq, then applies events in chronological order through the
- * fold engine which handles dedup via content-addressable hashing.
+ * Downloads the latest delta, then batch-fetches all its `prev_mxcs`
+ * (up to 25) in parallel. If we still haven't reached local seq, the
+ * oldest fetched delta's own `prev_mxcs` gives us the next batch, and
+ * so on. This means we fetch ~26 deltas per round trip instead of 1.
+ *
+ * Once all needed deltas are collected, events are applied in
+ * chronological order through the fold engine (which deduplicates via
+ * content-addressable hashing).
  */
 export async function restoreFromDeltaChain(
   client: MatrixClient,
@@ -235,27 +239,44 @@ export async function restoreFromDeltaChain(
 ): Promise<number> {
   const localSeq = await store.getCurrentSeq();
   const deltas: DeltaSnapshot[] = [];
+  const seen = new Set<string>(); // avoid re-downloading the same mxc
 
-  let currentMxc: string | null = latestMxc;
-  while (currentMxc) {
-    const delta = await downloadDeltaSnapshot(client, currentMxc);
+  // Fetch the head delta first
+  const head = await downloadDeltaSnapshot(client, latestMxc);
+  seen.add(latestMxc);
 
-    // If this delta's events are all before our local seq, we're done
-    if (delta.to_seq <= localSeq) break;
+  if (head.to_seq <= localSeq) return localSeq; // nothing to apply
 
-    deltas.unshift(delta); // prepend so we process oldest first
+  deltas.push(head);
 
-    // If this delta starts at or before our local seq, we have continuity
-    if (delta.from_seq <= localSeq) break;
+  // Keep fetching batches until we have continuity with local state
+  let needMore = head.from_seq > localSeq;
 
-    // Jump as far back as possible using prev_mxcs (most-recent-first).
-    // The last entry is the oldest reachable snapshot — start there so
-    // we cover the most ground in one hop. The next iteration will
-    // download it, check its range, and either collect it or jump again
-    // using *its* prev_mxcs.
-    currentMxc = delta.prev_mxcs.length > 0
-      ? delta.prev_mxcs[delta.prev_mxcs.length - 1]
-      : null;
+  while (needMore) {
+    // Find the oldest delta we've collected so far — its prev_mxcs
+    // point to the next batch of snapshots to fetch.
+    const oldest = deltas[0];
+    const toFetch = oldest.prev_mxcs.filter((mxc) => !seen.has(mxc));
+
+    if (toFetch.length === 0) break; // no more links in the chain
+
+    // Batch-fetch all prev_mxcs in parallel
+    for (const mxc of toFetch) seen.add(mxc);
+    const batch = await Promise.all(
+      toFetch.map((mxc) => downloadDeltaSnapshot(client, mxc)),
+    );
+
+    // Insert in seq order (oldest first)
+    for (const delta of batch) {
+      if (delta.to_seq <= localSeq) continue; // already have these events
+      deltas.push(delta);
+    }
+
+    // Sort so deltas are in chronological order
+    deltas.sort((a, b) => a.from_seq - b.from_seq);
+
+    // Check if the oldest delta now reaches our local seq
+    needMore = deltas[0].from_seq > localSeq;
   }
 
   // Apply events from each delta through the fold engine.
