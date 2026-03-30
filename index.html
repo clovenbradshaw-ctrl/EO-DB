@@ -3277,8 +3277,6 @@ INS,app.tbl.rec1,"{""name"":""Alice""}"</pre>
             <!-- Provider tabs -->
             <div class="backup-provider-tabs">
               <button class="backup-provider-tab active" data-bp="filen" onclick="selectBackupProvider('filen')">Filen</button>
-              <button class="backup-provider-tab" data-bp="pixeldrain" onclick="selectBackupProvider('pixeldrain')">Pixeldrain</button>
-              <button class="backup-provider-tab" data-bp="s3" onclick="selectBackupProvider('s3')">S3 / R2</button>
             </div>
 
             <!-- Connected state -->
@@ -3306,33 +3304,6 @@ INS,app.tbl.rec1,"{""name"":""Alice""}"</pre>
               </div>
             </div>
 
-            <!-- Pixeldrain login -->
-            <div class="backup-fields" id="bpPixeldrainFields">
-              <div class="backup-field">
-                <label>API Key</label>
-                <input type="text" id="bpPdKey" placeholder="Paste your Pixeldrain API key" autocomplete="off">
-              </div>
-            </div>
-
-            <!-- S3 login -->
-            <div class="backup-fields" id="bpS3Fields">
-              <div class="backup-field">
-                <label>Endpoint</label>
-                <input type="text" id="bpS3Endpoint" placeholder="https://s3.us-east-1.amazonaws.com" autocomplete="off">
-              </div>
-              <div class="backup-field">
-                <label>Access Key ID</label>
-                <input type="text" id="bpS3Key" placeholder="AKIA..." autocomplete="off">
-              </div>
-              <div class="backup-field">
-                <label>Secret Access Key</label>
-                <input type="password" id="bpS3Secret" placeholder="Secret key" autocomplete="off">
-              </div>
-              <div class="backup-field">
-                <label>Bucket</label>
-                <input type="text" id="bpS3Bucket" placeholder="my-bucket" autocomplete="off">
-              </div>
-            </div>
 
             <div class="backup-status-msg" id="backupStatusMsg"></div>
 
@@ -4851,7 +4822,7 @@ function selectBackupProvider(provider) {
     t.classList.toggle('active', t.dataset.bp === provider);
   });
   document.querySelectorAll('.backup-fields').forEach(f => f.classList.remove('active'));
-  const fieldMap = { filen: 'bpFilenFields', pixeldrain: 'bpPixeldrainFields', s3: 'bpS3Fields' };
+  const fieldMap = { filen: 'bpFilenFields' };
   const el = document.getElementById(fieldMap[provider]);
   if (el) el.classList.add('active');
   clearBackupStatus();
@@ -5122,10 +5093,6 @@ async function connectBackup() {
   try {
     if (backupProvider === 'filen') {
       await connectFilen();
-    } else if (backupProvider === 'pixeldrain') {
-      await connectPixeldrain();
-    } else if (backupProvider === 's3') {
-      await connectS3();
     }
   } catch (e) {
     showBackupStatus(e.message, 'error');
@@ -5181,37 +5148,6 @@ async function connectFilen() {
   loadBackupFolder(backupCurrentFolderUuid);
 }
 
-async function connectPixeldrain() {
-  const apiKey = document.getElementById('bpPdKey').value.trim();
-  if (!apiKey) { showBackupStatus('API key required', 'error'); return; }
-
-  showBackupStatus('Verifying...', 'info');
-  const res = await fetch('https://pixeldrain.com/api/user', {
-    headers: { 'Authorization': 'Basic ' + btoa(':' + apiKey) },
-  });
-  if (!res.ok) { showBackupStatus('Invalid API key', 'error'); return; }
-  const user = await res.json();
-
-  backupAuth = { apiKey, username: user.username, provider: 'pixeldrain' };
-  showBackupConnected(`Pixeldrain · ${user.username}`);
-  clearBackupStatus();
-  registerPixeldrainSyncTarget();
-}
-
-async function connectS3() {
-  const endpoint = document.getElementById('bpS3Endpoint').value.trim();
-  const accessKey = document.getElementById('bpS3Key').value.trim();
-  const secret = document.getElementById('bpS3Secret').value.trim();
-  const bucket = document.getElementById('bpS3Bucket').value.trim();
-  if (!endpoint || !accessKey || !secret || !bucket) {
-    showBackupStatus('All fields required', 'error'); return;
-  }
-
-  backupAuth = { endpoint, accessKey, secret, bucket, provider: 's3' };
-  showBackupConnected(`S3 · ${bucket}`);
-  clearBackupStatus();
-  showBackupStatus('S3 upload requires AWS Signature V4 — coming soon', 'info');
-}
 
 function showBackupConnected(label) {
   document.getElementById('backupConnectedBar').style.display = 'flex';
@@ -5360,24 +5296,6 @@ async function backupSnapshot() {
         ts: snapshot.ts, size: compressed.byteLength, folder_uuid: backupFolderUuid,
       }));
       showBackupStatus(`Backed up ${snapshot.event_count} events (${sizeKB} KB) → Filen/eo-db-backups/${filename}`, 'success');
-    } else if (backupAuth.provider === 'pixeldrain') {
-      showBackupStatus('Uploading to Pixeldrain...', 'info');
-      const blob = new Blob([compressed], { type: 'application/octet-stream' });
-      const form = new FormData();
-      form.append('file', blob, filename);
-      const res = await fetch('https://pixeldrain.com/api/file', {
-        method: 'POST',
-        headers: { 'Authorization': 'Basic ' + btoa(':' + backupAuth.apiKey) },
-        body: form,
-      });
-      if (!res.ok) throw new Error(`Pixeldrain upload failed: ${res.status}`);
-      const { id } = await res.json();
-      localStorage.setItem(`eo_backup:${backupAuth.provider}:${space.id}`, JSON.stringify({
-        file_id: id, seq: snapshot.seq, ts: snapshot.ts, size: compressed.byteLength,
-      }));
-      showBackupStatus(`Backed up ${snapshot.event_count} events (${sizeKB} KB) → pixeldrain/${id}`, 'success');
-    } else {
-      showBackupStatus('S3 upload coming soon', 'info');
     }
   } catch (e) {
     showBackupStatus(e.message || 'Backup failed', 'error');
@@ -5415,33 +5333,6 @@ function registerFilenSyncTarget() {
   renderSyncTargets();
 }
 
-function registerPixeldrainSyncTarget() {
-  if (syncTargets.find(t => t.id === 'pixeldrain-backup')) return;
-  syncTargets.push({
-    name: 'Pixeldrain Backup',
-    id: 'pixeldrain-backup',
-    available() { return !!(backupAuth && backupAuth.provider === 'pixeldrain'); },
-    async connect(space) { return { space }; },
-    async writeEvents(ctx, events, onProgress) {
-      const { snapshot, compressed } = await buildSpaceSnapshot(ctx.space);
-      const filename = `eo-backup-${ctx.space.id}.bin`;
-      const form = new FormData();
-      form.append('file', new Blob([compressed], { type: 'application/octet-stream' }), filename);
-      const res = await fetch('https://pixeldrain.com/api/file', {
-        method: 'POST',
-        headers: { 'Authorization': 'Basic ' + btoa(':' + backupAuth.apiKey) },
-        body: form,
-      });
-      if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
-      const { id } = await res.json();
-      localStorage.setItem(`eo_backup:pixeldrain:${ctx.space.id}`, JSON.stringify({
-        file_id: id, seq: snapshot.seq, ts: snapshot.ts, size: compressed.byteLength,
-      }));
-      onProgress(events.length, events.length);
-    },
-  });
-  renderSyncTargets();
-}
 
 // ── Filen file browser ──
 
@@ -7057,7 +6948,7 @@ function getSyncCardHtml_matrix() {
 function getSyncCardHtml_backup() {
   const connected = !!backupAuth;
   const provider = backupProvider || 'none';
-  const providerLabel = { filen: 'Filen', pixeldrain: 'Pixeldrain', s3: 'S3 / R2' }[provider] || provider;
+  const providerLabel = { filen: 'Filen' }[provider] || provider;
 
   let dotClass = connected ? 'connected' : 'disconnected';
   let statusText = connected ? `Connected (${providerLabel})` : 'Not connected';
