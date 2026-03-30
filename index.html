@@ -8331,7 +8331,13 @@ function getHorizonFields() {
   const fields = new Set(['target', 'last_op', 'last_agent']);
   for (const s of Object.values(state)) {
     if (s.value && typeof s.value === 'object') {
-      Object.keys(s.value).forEach(k => fields.add('value.' + k));
+      // If the record uses the Airtable-style fields sub-object, expose those keys
+      const f = s.value.fields;
+      if (f && typeof f === 'object' && !Array.isArray(f)) {
+        Object.keys(f).forEach(k => fields.add('value.fields.' + k));
+      } else {
+        Object.keys(s.value).forEach(k => fields.add('value.' + k));
+      }
     }
   }
   return Array.from(fields).sort();
@@ -8341,6 +8347,16 @@ function getFieldValue(entry, field) {
   if (field === 'target') return entry.target;
   if (field === 'last_op') return entry.last_op;
   if (field === 'last_agent') return entry.last_agent;
+  if (field.startsWith('value.fields.')) {
+    const key = field.slice(13);
+    if (entry.value?.fields && typeof entry.value.fields === 'object') {
+      const v = entry.value.fields[key];
+      if (v === undefined || v === null) return '';
+      if (typeof v === 'object') return JSON.stringify(v);
+      return String(v);
+    }
+    return '';
+  }
   if (field.startsWith('value.')) {
     const key = field.slice(6);
     if (entry.value && typeof entry.value === 'object') {
@@ -8397,12 +8413,32 @@ function renderHorizon() {
       .sort((a, b) => a.target.localeCompare(b.target));
   }
 
-  // Text search filter
+  // Detect Airtable-style records (value.fields is a plain object keyed by field IDs)
+  let useFieldsSub = false;
+  for (const s of entries) {
+    const f = s.value?.fields;
+    if (f && typeof f === 'object' && !Array.isArray(f)) { useFieldsSub = true; break; }
+  }
+
+  // Build field ID → display name map from the scope (table) state
+  const fieldNameMap = new Map();
+  if (useFieldsSub && selectedScope) {
+    const scopeState = state[selectedScope];
+    if (scopeState?.value?.fields && Array.isArray(scopeState.value.fields)) {
+      for (const f of scopeState.value.fields) {
+        if (f.id && f.name) fieldNameMap.set(f.id, f.name);
+      }
+    }
+  }
+
+  // Text search filter — also search inside fields sub-object
   if (search) {
-    entries = entries.filter(s =>
-      s.target.toLowerCase().includes(search) ||
-      JSON.stringify(s.value).toLowerCase().includes(search)
-    );
+    entries = entries.filter(s => {
+      if (s.target.toLowerCase().includes(search)) return true;
+      const searchSource = useFieldsSub && s.value?.fields && typeof s.value.fields === 'object'
+        ? s.value.fields : s.value;
+      return JSON.stringify(searchSource).toLowerCase().includes(search);
+    });
   }
 
   // Apply operator type filter
@@ -8425,7 +8461,11 @@ function renderHorizon() {
   for (const s of entries) {
     if (s.value && typeof s.value === 'object' && !Array.isArray(s.value)) {
       hasObjectValues = true;
-      for (const k of Object.keys(s.value)) {
+      // When using Airtable-style fields sub-object, pivot its keys instead
+      const source = useFieldsSub
+        ? (s.value.fields && typeof s.value.fields === 'object' && !Array.isArray(s.value.fields) ? s.value.fields : {})
+        : s.value;
+      for (const k of Object.keys(source)) {
         if (!k.startsWith('_') && !keySet.has(k)) {
           keySet.add(k);
           valueKeys.push(k);
@@ -8456,7 +8496,7 @@ function renderHorizon() {
   if (hasObjectValues && valueKeys.length > 0) {
     thead.innerHTML = `<tr>
       <th style="position:sticky;left:0;background:var(--bg);z-index:2;">${selectedScope ? 'Record' : 'Target'}</th>
-      ${valueKeys.map(k => `<th>${escapeHtml(k)}</th>`).join('')}
+      ${valueKeys.map(k => `<th>${escapeHtml(fieldNameMap.get(k) || k)}</th>`).join('')}
       <th>Op</th>
       <th>Agent</th>
       <th>Updated</th>
@@ -8464,9 +8504,12 @@ function renderHorizon() {
 
     tbody.innerHTML = entries.map(s => {
       const val = (s.value && typeof s.value === 'object') ? s.value : {};
+      const source = useFieldsSub
+        ? (val.fields && typeof val.fields === 'object' && !Array.isArray(val.fields) ? val.fields : {})
+        : val;
       return `<tr onclick="selectTarget('${s.target}')">
         <td style="position:sticky;left:0;background:var(--bg);z-index:1;">${displayTarget(s.target)}</td>
-        ${valueKeys.map(k => `<td>${formatCellValue(val[k])}</td>`).join('')}
+        ${valueKeys.map(k => `<td>${formatCellValue(source[k])}</td>`).join('')}
         <td><span class="op-badge op-${s.last_op}">${s.last_op}</span></td>
         <td><span class="agent-tag">${s.last_agent.replace(':amino','')}</span></td>
         <td><span class="ts-tag">${formatTs(s.last_ts)}</span></td>
@@ -8518,6 +8561,21 @@ function formatCellValue(val) {
   if (val === undefined || val === null) return '<span class="val-null">—</span>';
   if (typeof val === 'string') return `<span class="val-str">${escapeHtml(val)}</span>`;
   if (typeof val === 'number' || typeof val === 'boolean') return `<span class="val-str">${val}</span>`;
+  if (Array.isArray(val)) {
+    // Array of field definitions (Airtable schema) — show as comma-separated names
+    if (val.length > 0 && val[0]?.name) {
+      const names = val.map(f => escapeHtml(f.name));
+      const display = names.slice(0, 5).join(', ') + (names.length > 5 ? ` +${names.length - 5} more` : '');
+      return `<span class="val-obj" title="${names.join(', ')}">${display}</span>`;
+    }
+    // Array of strings (e.g. multipleRecordLinks)
+    if (val.length > 0 && typeof val[0] === 'string') {
+      return val.map(t => `<span class="target-leaf" onclick="event.stopPropagation(); navigateToPath('${t}')">${escapeHtml(t)}</span>`).join(', ');
+    }
+    const str = JSON.stringify(val);
+    if (str.length > 60) return `<span class="val-obj" title="${escapeHtml(str)}">${escapeHtml(str.slice(0, 57))}…</span>`;
+    return `<span class="val-obj">${escapeHtml(str)}</span>`;
+  }
   if (typeof val === 'object') {
     if (val.formula) return `<span class="val-formula">ƒ ${escapeHtml(val.formula)}</span>`;
     if (val.linked && Array.isArray(val.linked)) {
@@ -8804,29 +8862,71 @@ function selectTarget(target) {
   document.getElementById('drawerTarget').textContent = target;
   document.getElementById('drawerSubtitle').textContent = `Last modified seq ${s?.last_seq || '—'}`;
 
-  // Current state
+  // Build field name map from parent table state if available
+  const drawerFieldNameMap = new Map();
+  const targetParts = target.split('.');
+  if (targetParts.length >= 4) {
+    const parentTable = targetParts.slice(0, 3).join('.');
+    const parentState = state[parentTable];
+    if (parentState?.value?.fields && Array.isArray(parentState.value.fields)) {
+      for (const f of parentState.value.fields) {
+        if (f.id && f.name) drawerFieldNameMap.set(f.id, f.name);
+      }
+    }
+  }
+
+  // Current state — flatten Airtable-style fields sub-object with readable names
   const stateDiv = document.getElementById('drawerState');
   if (s && typeof s.value === 'object' && s.value !== null) {
-    stateDiv.innerHTML = Object.entries(s.value).map(([k,v]) =>
-      `<div class="drawer-field"><span class="drawer-field-key">${k}</span><span class="drawer-field-val">${typeof v === 'string' ? v : JSON.stringify(v)}</span></div>`
+    // Detect if this record uses the fields sub-object pattern
+    const hasFieldsSub = s.value.fields && typeof s.value.fields === 'object' && !Array.isArray(s.value.fields);
+    let displayEntries;
+
+    if (hasFieldsSub) {
+      // Show the flattened fields with display names, plus any non-underscore top-level keys except 'fields'
+      const topLevel = Object.entries(s.value)
+        .filter(([k]) => k !== 'fields' && !k.startsWith('_'))
+        .map(([k,v]) => [k, v]);
+      const fieldEntries = Object.entries(s.value.fields)
+        .map(([k,v]) => [drawerFieldNameMap.get(k) || k, v]);
+      displayEntries = [...topLevel, ...fieldEntries];
+    } else {
+      displayEntries = Object.entries(s.value).filter(([k]) => !k.startsWith('_'));
+    }
+
+    stateDiv.innerHTML = displayEntries.map(([k,v]) =>
+      `<div class="drawer-field"><span class="drawer-field-key">${escapeHtml(k)}</span><span class="drawer-field-val">${typeof v === 'string' ? escapeHtml(v) : escapeHtml(JSON.stringify(v))}</span></div>`
     ).join('');
   } else {
     stateDiv.innerHTML = `<div class="drawer-field"><span class="drawer-field-key">value</span><span class="drawer-field-val">${s?.value ?? '∅'}</span></div>`;
   }
 
-  // Event history for this target
+  // Event history for this target — flatten Airtable field values for readability
   const histDiv = document.getElementById('drawerHistory');
   const events = LOG.filter((e, i) => i <= replayIndex && (e.target === target || e.target.startsWith(target + '.')));
-  histDiv.innerHTML = events.map(e => `
+  histDiv.innerHTML = events.map(e => {
+    let operandDisplay;
+    if (typeof e.operand === 'string') {
+      operandDisplay = escapeHtml(e.operand);
+    } else if (e.operand && typeof e.operand === 'object' && e.operand.fields && typeof e.operand.fields === 'object' && !Array.isArray(e.operand.fields)) {
+      // Show flattened field values with display names
+      const entries = Object.entries(e.operand.fields)
+        .map(([k,v]) => `${escapeHtml(drawerFieldNameMap.get(k) || k)}: ${typeof v === 'string' ? escapeHtml(v) : escapeHtml(JSON.stringify(v))}`)
+        .join(', ');
+      operandDisplay = entries || escapeHtml(JSON.stringify(e.operand));
+    } else {
+      operandDisplay = escapeHtml(JSON.stringify(e.operand));
+    }
+    return `
     <div class="drawer-log-entry">
       <div class="drawer-log-meta">
         <span class="op-badge op-${e.op}">${e.op}</span>
         <span class="ts-tag">${formatTs(e.ts)}</span>
         <span class="agent-tag">${e.agent.replace(':amino','')}</span>
       </div>
-      <div class="drawer-log-operand">${typeof e.operand === 'string' ? e.operand : JSON.stringify(e.operand)}</div>
-    </div>
-  `).join('') || '<div style="color:var(--text-faint);font-size:10px;">No events</div>';
+      <div class="drawer-log-operand">${operandDisplay}</div>
+    </div>`;
+  }).join('') || '<div style="color:var(--text-faint);font-size:10px;">No events</div>';
 }
 
 function renderLog() {
