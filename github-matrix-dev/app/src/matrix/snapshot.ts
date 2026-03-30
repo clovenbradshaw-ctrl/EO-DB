@@ -118,118 +118,68 @@ export async function uploadSnapshot(
   // Store the URI in room state for instant hydration on fresh devices.
   // This overwrites the previous state event so the latest URI is always
   // available without paginating the timeline.
-  await setSnapshotStateEvent(client, roomId, mxcUrl, snapshot.seq, snapshot.version);
+  await setSnapshotStateEvent(client, roomId, mxcUrl, snapshot.seq);
 
   return mxcUrl;
 }
 
-/** A single entry in the snapshot chain stored in room state. */
-export interface SnapshotChainEntry {
-  mxc: string;
-  seq: number;            // to_seq for deltas, seq for full snapshots
-  from_seq?: number;      // only on deltas — exclusive lower bound
-  type: 'full' | 'delta';
-}
-
-/** Shape of the room state event content for snapshot hydration. */
-export interface SnapshotStateContent {
-  /** Ordered newest-first chain of snapshot URIs. */
-  chain: SnapshotChainEntry[];
-  /** Timestamp of the last update. */
-  ts: string;
-}
-
 /**
- * Read the current snapshot chain from room state, or return empty.
- */
-function readSnapshotChain(room: any): SnapshotChainEntry[] {
-  const stateEvent = room.currentState.getStateEvents(EO_SNAPSHOT_STATE_TYPE, '');
-  if (!stateEvent) return [];
-  const content = stateEvent.getContent() as Partial<SnapshotStateContent>;
-
-  // Backwards compat: old state events stored a flat {mxc, seq, version}
-  if (!content.chain && (content as any).mxc) {
-    const legacy = content as any;
-    return [{ mxc: legacy.mxc, seq: legacy.seq, type: legacy.version === 2 ? 'full' : 'delta' }];
-  }
-
-  return content.chain ?? [];
-}
-
-/**
- * Store the snapshot chain in room state for instant hydration.
+ * Store the latest snapshot URI in room state for fast hydration.
  *
- * Room state events are always available via `room.currentState` without
- * pagination, making hydration O(1) instead of O(n) timeline walks.
- * Each call overwrites the previous state event (state_key = "").
- *
- * When a full snapshot is added, all prior entries are pruned since the
- * full snapshot supersedes them. Delta entries accumulate until the next
- * full snapshot.
+ * Room state is available instantly via `room.currentState` — no timeline
+ * pagination needed. Each call overwrites the previous value so the state
+ * always points to the most recent snapshot. The snapshot blob itself
+ * carries `prev_mxc` to breadcrumb backwards through history. If any blob
+ * goes missing from the media store, the room timeline is the fallback.
  */
 export async function setSnapshotStateEvent(
   client: MatrixClient,
   roomId: string,
   mxc: string,
   seq: number,
-  version: number,
-  fromSeq?: number,
 ): Promise<void> {
-  const room = client.getRoom(roomId);
-  const type: 'full' | 'delta' = version === 2 ? 'full' : 'delta';
-
-  const entry: SnapshotChainEntry = { mxc, seq, type };
-  if (type === 'delta' && fromSeq !== undefined) {
-    entry.from_seq = fromSeq;
-  }
-
-  let chain: SnapshotChainEntry[];
-
-  if (type === 'full') {
-    // Full snapshot supersedes everything before it — start fresh.
-    chain = [entry];
-  } else {
-    // Delta: prepend to existing chain (newest first).
-    const existing = room ? readSnapshotChain(room) : [];
-    chain = [entry, ...existing];
-  }
-
   await client.sendStateEvent(roomId, EO_SNAPSHOT_STATE_TYPE as any, {
-    chain,
+    mxc,
+    seq,
     ts: new Date().toISOString(),
-  } satisfies SnapshotStateContent, '');
+  }, '');
 }
 
 /**
- * Read the full snapshot chain from room state.
+ * Find the latest snapshot URI — fast path via room state, slow fallback
+ * via timeline pagination.
  *
- * Returns the ordered chain (newest-first) so the caller can decide how
- * to hydrate: apply the most recent full snapshot, then replay deltas on
- * top, or use `restoreFromDeltaChain` if no full snapshot exists yet.
- *
- * Falls back to timeline pagination for rooms created before state-based
- * tracking was introduced.
+ * The room state gives us the latest mxc URI in O(1). From there the
+ * snapshot blob's `prev_mxc` field links backwards through the full
+ * history. The timeline fallback handles rooms that predate state-based
+ * tracking.
  */
-export async function getSnapshotChain(
+export async function findLatestSnapshot(
   client: MatrixClient,
   roomId: string,
-): Promise<SnapshotChainEntry[]> {
+): Promise<{ mxc: string; seq: number } | null> {
   const room = client.getRoom(roomId);
-  if (!room) return [];
+  if (!room) return null;
 
-  const chain = readSnapshotChain(room);
-  if (chain.length > 0) return chain;
+  // Fast path: read directly from room state.
+  const stateEvent = room.currentState.getStateEvents(EO_SNAPSHOT_STATE_TYPE, '');
+  if (stateEvent) {
+    const content = stateEvent.getContent();
+    if (content.mxc && typeof content.seq === 'number') {
+      return { mxc: content.mxc, seq: content.seq };
+    }
+  }
 
   // Slow fallback: paginate backwards through the timeline.
   const timeline = room.getLiveTimeline();
   let canPaginate = true;
-  let latest: SnapshotChainEntry | null = null;
+  let latest: { mxc: string; seq: number } | null = null;
 
   for (const event of timeline.getEvents()) {
     if (event.getType() === EO_SNAPSHOT_TYPE) {
       const content = event.getContent();
       if (!latest || content.seq > latest.seq) {
-        latest = { mxc: content.mxc, seq: content.seq, type: content.version === 2 ? 'full' : 'delta' };
+        latest = { mxc: content.mxc, seq: content.seq };
       }
     }
   }
@@ -248,28 +198,13 @@ export async function getSnapshotChain(
       if (event.getType() === EO_SNAPSHOT_TYPE) {
         const content = event.getContent();
         if (!latest || content.seq > latest.seq) {
-          latest = { mxc: content.mxc, seq: content.seq, type: content.version === 2 ? 'full' : 'delta' };
+          latest = { mxc: content.mxc, seq: content.seq };
         }
       }
     }
   }
 
-  return latest ? [latest] : [];
-}
-
-/**
- * Find the latest snapshot reference — convenience wrapper over `getSnapshotChain`.
- *
- * Returns the newest entry in the chain (the tip). For full hydration
- * including delta replay, use `getSnapshotChain` directly.
- */
-export async function findLatestSnapshot(
-  client: MatrixClient,
-  roomId: string,
-): Promise<{ mxc: string; seq: number } | null> {
-  const chain = await getSnapshotChain(client, roomId);
-  if (chain.length === 0) return null;
-  return { mxc: chain[0].mxc, seq: chain[0].seq };
+  return latest;
 }
 
 /**

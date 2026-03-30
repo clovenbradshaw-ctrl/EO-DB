@@ -17,7 +17,7 @@ import { processEvent } from '../db/fold';
 import { eventHash } from '../db/hash';
 import { AsyncMutex } from '../db/mutex';
 import { EO_EVENT_TYPE, getDataRoom, matrixEventToEo, sendEoEvent } from './event-bridge';
-import { getSnapshotChain, applySnapshot, maybeCreateSnapshot, createSnapshot, uploadSnapshot, createDeltaSnapshot, uploadDeltaSnapshot, setSnapshotStateEvent, restoreFromDeltaChain, type SnapshotChainEntry } from './snapshot';
+import { findLatestSnapshot, applySnapshot, maybeCreateSnapshot, createSnapshot, uploadSnapshot, createDeltaSnapshot, uploadDeltaSnapshot, setSnapshotStateEvent, restoreFromDeltaChain } from './snapshot';
 
 /** Mutex protecting the offline queue from concurrent read-modify-write. */
 const queueMutex = new AsyncMutex();
@@ -94,42 +94,18 @@ export class SyncManager {
   }
 
   /**
-   * Hydrate the local store from the snapshot chain in room state.
+   * Hydrate the local store from the latest snapshot in room state.
    *
-   * The chain is ordered newest-first. We find the most recent full
-   * snapshot (if any), apply it, then replay any deltas that come after
-   * it in chronological order.
+   * Reads the latest URI from room state (O(1)), downloads the blob,
+   * and applies it. The blob's internal `prev_mxc` breadcrumbs backwards
+   * through history if the client needs to walk further.
    */
   private async hydrateFromSnapshot(): Promise<void> {
-    const chain = await getSnapshotChain(this.client, this.roomId);
-    if (chain.length === 0) return;
-
-    // Find the most recent full snapshot in the chain.
-    const fullIdx = chain.findIndex((e) => e.type === 'full');
-
-    let restoredSeq: number;
-
-    if (fullIdx !== -1) {
-      // Apply the full snapshot as the base.
-      const full = chain[fullIdx];
-      restoredSeq = await applySnapshot(this.client, this.store, full.mxc);
-
-      // Replay deltas newer than the full snapshot (they precede it in
-      // the array since the chain is newest-first). Reverse so we apply
-      // oldest delta first.
-      const deltas = chain.slice(0, fullIdx).reverse();
-      for (const delta of deltas) {
-        restoredSeq = await restoreFromDeltaChain(
-          this.client, this.store, delta.mxc, this.onEvent,
-        );
-      }
-    } else {
-      // No full snapshot — walk the delta chain from the newest entry.
-      restoredSeq = await restoreFromDeltaChain(
-        this.client, this.store, chain[0].mxc, this.onEvent,
-      );
-    }
-
+    const snap = await findLatestSnapshot(this.client, this.roomId);
+    if (!snap) return;
+    const restoredSeq = await restoreFromDeltaChain(
+      this.client, this.store, snap.mxc, this.onEvent,
+    );
     await this.store.put('meta:snapshot_seq', restoredSeq);
   }
 
@@ -188,7 +164,7 @@ export class SyncManager {
     await this.store.put('meta:snapshot_mxc', mxc);
 
     // 5. Update room state for fast hydration on fresh devices
-    await setSnapshotStateEvent(this.client, this.roomId, mxc, currentSeq, 1, delta.from_seq);
+    await setSnapshotStateEvent(this.client, this.roomId, mxc, currentSeq);
 
     return { mxc, seq: currentSeq };
   }
