@@ -317,7 +317,7 @@ export function parseEoFilterExpr(expr: string): { rules: FilterRule[]; conjunct
 
     // Handle empty checks
     if (value === '∅') {
-      rules.push({ id: crypto.randomUUID(), field, operator: eoOp === '!' ? 'is_not_empty' : 'is_empty', value: '' });
+      rules.push({ id: crypto.randomUUID(), field, operator: eoOp === '!=' ? 'is_not_empty' : 'is_empty', value: '' });
       continue;
     }
 

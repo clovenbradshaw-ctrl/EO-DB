@@ -44,6 +44,7 @@ export class PeerSync {
   private roomId: string;
   private store: EoStore;
   private onEvent?: (event: any) => void;
+  private toDeviceHandler?: (event: MatrixEvent) => void;
 
   constructor(
     client: MatrixClient,
@@ -61,11 +62,27 @@ export class PeerSync {
    * Start peer sync — announce presence and listen for messages.
    */
   async start(): Promise<void> {
+    // Remove previous listener if start() is called again
+    if (this.toDeviceHandler) {
+      this.client.removeListener('toDeviceEvent' as any, this.toDeviceHandler);
+    }
+
     await this.announceToPeers();
 
-    this.client.on('toDeviceEvent' as any, (event: MatrixEvent) => {
+    this.toDeviceHandler = (event: MatrixEvent) => {
       this.handleToDeviceEvent(event);
-    });
+    };
+    this.client.on('toDeviceEvent' as any, this.toDeviceHandler);
+  }
+
+  /**
+   * Stop peer sync — remove the event listener.
+   */
+  stop(): void {
+    if (this.toDeviceHandler) {
+      this.client.removeListener('toDeviceEvent' as any, this.toDeviceHandler);
+      this.toDeviceHandler = undefined;
+    }
   }
 
   /**
