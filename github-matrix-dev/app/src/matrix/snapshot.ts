@@ -280,8 +280,11 @@ export async function applySnapshot(
 }
 
 /**
- * Auto-snapshot: create every 1000 events.
+ * Auto-snapshot: create every 500 log entries.
+ * Below this threshold the hydration state lives in room data only.
  */
+const SNAPSHOT_FREQUENCY = 500;
+
 export async function maybeCreateSnapshot(
   client: MatrixClient,
   roomId: string,
@@ -291,7 +294,7 @@ export async function maybeCreateSnapshot(
   const lastSeq = await store.getCurrentSeq();
   const lastSnapshotSeq = (await store.get('meta:snapshot_seq')) || 0;
 
-  if (lastSeq - lastSnapshotSeq >= 1000) {
+  if (lastSeq - lastSnapshotSeq >= SNAPSHOT_FREQUENCY) {
     const snapshot = await createSnapshot(store, myUserId);
     await uploadSnapshot(client, roomId, snapshot);
     await store.put('meta:snapshot_seq', lastSeq);

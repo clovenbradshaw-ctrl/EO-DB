@@ -3,7 +3,7 @@
  *
  * Data is persisted as encrypted binary snapshots in Matrix media.
  * On a fresh device, the latest snapshot is downloaded and applied.
- * Snapshots are auto-saved every 1000 events and on explicit saveSnapshot() calls.
+ * Snapshots are auto-saved every 500 log entries and on explicit saveSnapshot() calls.
  *
  * Offline queue is append-only via atomic read-modify-write through the
  * queue mutex. Events that fail to send are retried individually on reconnect;
@@ -273,7 +273,7 @@ export class SyncManager {
       await this.enqueueOfflineEvent(localEvent);
     }
 
-    // Auto-snapshot to Matrix media every 1000 events
+    // Auto-snapshot to Matrix media every 500 log entries
     await maybeCreateSnapshot(this.client, this.roomId, this.store, this.client.getUserId()!);
 
     return seq;
