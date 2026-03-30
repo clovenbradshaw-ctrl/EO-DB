@@ -136,7 +136,7 @@ describe('Full Lifecycle E2E', () => {
 
     res = await get('/horizon/app.tblClients.rec001');
     expect(res.json().figure.last_op).toBe('SEG');
-    expect(res.json().figure.value).toEqual({ boundary: 'exclude', reason: 'archived' });
+    expect(res.json().figure.value).toEqual({ boundary: 'exclude', reason: 'archived', fldEmail: { strategy: 'latest' } });
 
     res = await get('/horizon/schema.tblCases.fldUrgency');
     expect(res.json().figure.value).toEqual({ type: 'select' });

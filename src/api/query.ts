@@ -26,7 +26,6 @@ export function registerQueryRoutes(app: FastifyInstance, db: EoDb): void {
       ancestry: query.ancestry !== 'false',
       nearby: query.nearby !== 'false',
       governance: query.governance !== 'false',
-      trajectory: query.trajectory !== 'false',
     });
     if (result === null) {
       return reply.code(404).send({ error: 'Target not found' });
