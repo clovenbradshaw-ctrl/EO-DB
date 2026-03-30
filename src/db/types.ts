@@ -98,6 +98,17 @@ export interface HorizonResponse {
   governance?: GovernanceEntry[];            // EVA policies that govern this target
   trajectory?: TrajectoryEntry[];            // compact operator history with running hashes
   signals?: SignalEntry[];                   // statistical patterns (on-demand, expensive)
+  // ─── Pattern Surfacing (cheap, auto-computed) ───
+  /** Structural twins — targets with the exact same transformation hash */
+  hashCohort?: string[];
+  /** Trajectory fingerprint — operator sequence archetype */
+  trajectoryFingerprint?: TrajectoryFingerprint;
+  /** Temporal cadence — event rhythm classification */
+  cadence?: CadenceInfo;
+  /** Graph metrics — CON graph role and degree */
+  graphMetrics?: GraphMetrics;
+  /** REC cycle info — if this target is part of a dependency cycle */
+  recCycle?: RecCycleInfo;
 }
 
 // An ancestor in the ontology chain — each level is a mini-Horizon
@@ -143,6 +154,54 @@ export interface SignalEntry {
   predicate?: Record<string, any>;
   n: number;
   computed_at: string;
+}
+
+// ─── Pattern Surfacing ────────────────────────────────────────────────────
+
+/** Trajectory fingerprint — the operator sequence shape of a target's history. */
+export interface TrajectoryFingerprint {
+  /** The operator sequence as a dot-joined string, e.g. "INS.DEF.DEF.CON.DEF" */
+  sequence: string;
+  /** Hash of the sequence string for indexing */
+  fingerprint: string;
+  /** Count of each operator type (7-dimensional vector) */
+  opCounts: Record<LoggableOperator, number>;
+}
+
+/** Temporal cadence classification for a target's event rhythm. */
+export type CadenceClass = 'burst' | 'periodic' | 'dormant' | 'steady' | 'sparse';
+
+export interface CadenceInfo {
+  classification: CadenceClass;
+  /** Timestamp of last event */
+  lastEventTs: string;
+  /** Number of events in trajectory */
+  eventCount: number;
+  /** Description of the rhythm pattern */
+  description: string;
+}
+
+/** Graph role classification for a node in the CON graph. */
+export type GraphRole = 'hub' | 'bridge' | 'leaf' | 'isolated';
+
+export interface GraphMetrics {
+  role: GraphRole;
+  degree: number;
+  inDegree: number;
+  outDegree: number;
+  mutualCount: number;
+}
+
+/** REC cycle visualization data for UX surfacing. */
+export interface RecCycleInfo {
+  /** The targets participating in the cycle */
+  participants: string[];
+  /** The event that closed the cycle (triggered_by) */
+  triggeringSeq?: number;
+  /** Result of the convergence/oscillation check */
+  result: RecResult;
+  /** Dependency edges forming the cycle */
+  edges: Array<{ source: string; dest: string }>;
 }
 
 // ─── Ingestion job tracking ────────────────────────────────────────────────

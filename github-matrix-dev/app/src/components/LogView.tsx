@@ -337,6 +337,7 @@ export function LogView({ targetFilter }: { targetFilter?: string | null }) {
   const [filterText, setFilterText] = useState('');
   const [opMenuOpen, setOpMenuOpen] = useState(false);
   const [visibleCount, setVisibleCount] = useState(50);
+  const [systemOnly, setSystemOnly] = useState(false);
 
   // Filtered events (newest first)
   const filtered = useMemo(() => {
@@ -345,9 +346,10 @@ export function LogView({ targetFilter }: { targetFilter?: string | null }) {
       if (activeFilters.size > 0 && !activeFilters.has(e.op)) return false;
       if (targetFilter && !e.target.startsWith(targetFilter)) return false;
       if (filterText && !e.target.toLowerCase().includes(filterText.toLowerCase())) return false;
+      if (systemOnly && e.agent !== 'system' && (e.level ?? 1) < 2) return false;
       return true;
     });
-  }, [recentEvents, activeFilters, filterText, targetFilter]);
+  }, [recentEvents, activeFilters, filterText, targetFilter, systemOnly]);
 
   const visible = filtered.slice(0, visibleCount);
 
@@ -432,6 +434,21 @@ export function LogView({ targetFilter }: { targetFilter?: string | null }) {
                 </>
               )}
             </div>
+            <button
+              onClick={() => setSystemOnly(!systemOnly)}
+              style={{
+                padding: '6px 12px', fontSize: 11, fontWeight: 600,
+                border: `1px solid ${systemOnly ? 'rgba(239,68,68,0.25)' : t.border}`,
+                borderRadius: 4,
+                background: systemOnly ? 'rgba(239,68,68,0.12)' : t.bgCard,
+                color: systemOnly ? '#ef4444' : t.textMuted,
+                cursor: 'pointer',
+                fontFamily: "'JetBrains Mono', monospace",
+                transition: 'all 0.1s',
+              }}
+            >
+              SYS
+            </button>
           </div>
         </div>
 
