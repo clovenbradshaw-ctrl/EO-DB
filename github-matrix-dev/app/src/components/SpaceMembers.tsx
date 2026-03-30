@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useEoStore } from '../store/eo-store';
 import { useTheme, type Theme } from '../theme';
 import type { EoState } from '../db/types';
@@ -18,16 +18,16 @@ interface SpaceMembersProps {
   onClose: () => void;
 }
 
-const ACCESS_LABELS: Record<AccessLevel, string> = {
-  read: 'Read',
-  write: 'Write',
-  admin: 'Admin',
-};
+const ROLE_OPTIONS: { value: AccessLevel; label: string; desc: string }[] = [
+  { value: 'read', label: 'Can view', desc: 'View data only' },
+  { value: 'write', label: 'Can edit', desc: 'View and edit data' },
+  { value: 'admin', label: 'Full access', desc: 'Edit data and manage people' },
+];
 
-const ACCESS_DESC: Record<AccessLevel, string> = {
-  read: 'Can view data',
-  write: 'Can view and edit data',
-  admin: 'Full access, can manage members',
+const ROLE_LABELS: Record<AccessLevel, string> = {
+  read: 'Can view',
+  write: 'Can edit',
+  admin: 'Full access',
 };
 
 export function SpaceMembers({ spaceTarget, currentUserId, onClose }: SpaceMembersProps) {
@@ -47,10 +47,24 @@ export function SpaceMembers({ spaceTarget, currentUserId, onClose }: SpaceMembe
   const [addError, setAddError] = useState('');
   const [addSuccess, setAddSuccess] = useState('');
 
-  // Load space state
+  // Dropdown state
+  const [openDropdown, setOpenDropdown] = useState<string | null>(null);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
   useEffect(() => {
     loadSpace();
   }, [spaceTarget]);
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    function handleClick(e: MouseEvent) {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setOpenDropdown(null);
+      }
+    }
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, []);
 
   async function loadSpace() {
     setLoading(true);
@@ -87,6 +101,15 @@ export function SpaceMembers({ spaceTarget, currentUserId, onClose }: SpaceMembe
       return userId.split(':')[1];
     }
     return '';
+  }
+
+  function avatarColor(userId: string): string {
+    let hash = 0;
+    for (let i = 0; i < userId.length; i++) {
+      hash = userId.charCodeAt(i) + ((hash << 5) - hash);
+    }
+    const colors = [theme.accent, theme.purple, theme.teal, theme.gold, theme.warning, theme.danger];
+    return colors[((hash % colors.length) + colors.length) % colors.length];
   }
 
   async function handleAddMember() {
@@ -131,7 +154,7 @@ export function SpaceMembers({ spaceTarget, currentUserId, onClose }: SpaceMembe
       });
       setMembers(updatedSharing);
       setNewMatrixId('');
-      setAddSuccess(`Added ${formatUserId(targetId)}`);
+      setAddSuccess(`${formatUserId(targetId)} added`);
       setTimeout(() => setAddSuccess(''), 3000);
     } catch (e: any) {
       setAddError('Failed: ' + e.message);
@@ -153,6 +176,7 @@ export function SpaceMembers({ spaceTarget, currentUserId, onClose }: SpaceMembe
         acquired_ts: new Date().toISOString(),
       });
       setMembers(updated);
+      setOpenDropdown(null);
     } catch (e: any) {
       setAddError('Failed to update: ' + e.message);
     }
@@ -171,6 +195,7 @@ export function SpaceMembers({ spaceTarget, currentUserId, onClose }: SpaceMembe
         acquired_ts: new Date().toISOString(),
       });
       setMembers(updated);
+      setOpenDropdown(null);
     } catch (e: any) {
       setAddError('Failed to remove: ' + e.message);
     }
@@ -189,107 +214,403 @@ export function SpaceMembers({ spaceTarget, currentUserId, onClose }: SpaceMembe
     );
   }
 
+  const totalPeople = members.length + 1; // +1 for owner
+
   return (
-    <div style={s.container}>
+    <div style={s.container} ref={dropdownRef}>
       {/* Header */}
       <div style={s.header}>
-        <div>
-          <div style={s.headerTitle}>Members &middot; {spaceName}</div>
-          <div style={s.headerSub}>{spaceTarget}</div>
-        </div>
+        <div style={s.headerTitle}>Share "{spaceName}"</div>
         <button style={s.closeBtn} onClick={onClose}>&times;</button>
       </div>
 
-      {/* Owner */}
-      <div style={s.section}>
-        <div style={s.sectionLabel}>OWNER</div>
-        <div style={s.memberRow}>
-          <div style={s.memberInfo}>
-            <div style={s.memberAvatar}>{formatUserId(owner).charAt(0).toUpperCase()}</div>
-            <div>
-              <div style={s.memberName}>{formatUserId(owner)}</div>
-              <div style={s.memberServer}>{formatHomeserver(owner)}</div>
-            </div>
-          </div>
-          <div style={s.ownerBadge}>Owner</div>
-        </div>
-      </div>
-
-      {/* Members list */}
-      <div style={s.section}>
-        <div style={s.sectionLabel}>
-          MEMBERS ({members.length})
-        </div>
-        {members.length === 0 && (
-          <div style={s.emptyMsg}>No members yet. Add someone by their Matrix ID.</div>
-        )}
-        {members.map((m) => (
-          <div key={m.user_id} style={s.memberRow}>
-            <div style={s.memberInfo}>
-              <div style={s.memberAvatar}>{formatUserId(m.user_id).charAt(0).toUpperCase()}</div>
-              <div>
-                <div style={s.memberName}>{formatUserId(m.user_id)}</div>
-                <div style={s.memberServer}>{formatHomeserver(m.user_id)}</div>
-              </div>
-            </div>
-            <div style={s.memberActions}>
-              {canManageMembers() ? (
-                <>
-                  <select
-                    style={s.accessSelect}
-                    value={m.access}
-                    onChange={(e) => handleChangeAccess(m.user_id, e.target.value as AccessLevel)}
-                  >
-                    <option value="read">Read</option>
-                    <option value="write">Write</option>
-                    <option value="admin">Admin</option>
-                  </select>
-                  <button
-                    style={s.removeBtn}
-                    onClick={() => handleRemoveMember(m.user_id)}
-                    title="Remove member"
-                  >
-                    &times;
-                  </button>
-                </>
-              ) : (
-                <span style={s.accessBadge}>{ACCESS_LABELS[m.access]}</span>
-              )}
-            </div>
-          </div>
-        ))}
-      </div>
-
-      {/* Add member */}
+      {/* Invite bar */}
       {canManageMembers() && (
-        <div style={s.section}>
-          <div style={s.sectionLabel}>ADD MEMBER</div>
-          <div style={s.addRow}>
+        <div style={s.inviteSection}>
+          <div style={s.inviteRow}>
             <input
-              style={s.input}
+              style={s.inviteInput}
               value={newMatrixId}
-              onChange={(e) => setNewMatrixId(e.target.value)}
-              placeholder="@user:homeserver.com"
+              onChange={(e) => { setNewMatrixId(e.target.value); setAddError(''); }}
+              placeholder="Add people by Matrix ID..."
               onKeyDown={(e) => e.key === 'Enter' && handleAddMember()}
             />
-            <select
-              style={s.accessSelect}
+            <RolePicker
+              theme={theme}
               value={newAccess}
-              onChange={(e) => setNewAccess(e.target.value as AccessLevel)}
+              onChange={setNewAccess}
+              compact
+            />
+            <button
+              style={{
+                ...s.inviteBtn,
+                opacity: newMatrixId.trim() ? 1 : 0.5,
+              }}
+              onClick={handleAddMember}
             >
-              <option value="read">Read</option>
-              <option value="write">Write</option>
-              <option value="admin">Admin</option>
-            </select>
-            <button style={s.addBtn} onClick={handleAddMember}>
-              Add
+              Invite
             </button>
           </div>
-          <div style={s.accessHint}>{ACCESS_DESC[newAccess]}</div>
-          {addError && <div style={{ ...s.feedback, color: theme.danger }}>{addError}</div>}
-          {addSuccess && <div style={{ ...s.feedback, color: theme.success }}>{addSuccess}</div>}
+          {addError && <div style={s.errorMsg}>{addError}</div>}
+          {addSuccess && <div style={s.successMsg}>{addSuccess}</div>}
         </div>
       )}
+
+      {/* People with access */}
+      <div style={s.peopleSection}>
+        <div style={s.peopleSectionHeader}>
+          People with access
+          <span style={s.peopleCount}>{totalPeople}</span>
+        </div>
+
+        {/* Owner row */}
+        <PersonRow
+          theme={theme}
+          name={formatUserId(owner)}
+          server={formatHomeserver(owner)}
+          color={avatarColor(owner)}
+          role="Owner"
+          isYou={owner === currentUserId}
+        />
+
+        {/* Member rows */}
+        {members.map((m) => {
+          const isOpen = openDropdown === m.user_id;
+          return (
+            <PersonRow
+              key={m.user_id}
+              theme={theme}
+              name={formatUserId(m.user_id)}
+              server={formatHomeserver(m.user_id)}
+              color={avatarColor(m.user_id)}
+              role={ROLE_LABELS[m.access]}
+              isYou={m.user_id === currentUserId}
+              canManage={canManageMembers()}
+              isOpen={isOpen}
+              onToggle={() => setOpenDropdown(isOpen ? null : m.user_id)}
+              onChangeAccess={(level) => handleChangeAccess(m.user_id, level)}
+              onRemove={() => handleRemoveMember(m.user_id)}
+              currentAccess={m.access}
+            />
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/* ---- Role picker for the invite bar ---- */
+
+function RolePicker({
+  theme,
+  value,
+  onChange,
+  compact,
+}: {
+  theme: Theme;
+  value: AccessLevel;
+  onChange: (v: AccessLevel) => void;
+  compact?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const mono = "'JetBrains Mono', monospace";
+
+  useEffect(() => {
+    function handleClick(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, []);
+
+  return (
+    <div ref={ref} style={{ position: 'relative' }}>
+      <button
+        onClick={() => setOpen(!open)}
+        style={{
+          fontFamily: mono,
+          fontSize: 11,
+          color: theme.textSecondary,
+          background: theme.bgMuted,
+          border: `1px solid ${theme.border}`,
+          borderRadius: 6,
+          padding: '6px 10px',
+          cursor: 'pointer',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 4,
+          whiteSpace: 'nowrap' as const,
+        }}
+      >
+        {ROLE_LABELS[value]}
+        <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+          <path d="M2.5 4L5 6.5L7.5 4" stroke={theme.textMuted} strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
+        </svg>
+      </button>
+
+      {open && (
+        <div style={{
+          position: 'absolute',
+          top: '100%',
+          right: 0,
+          marginTop: 4,
+          background: theme.bgCard,
+          border: `1px solid ${theme.border}`,
+          borderRadius: 8,
+          boxShadow: `0 8px 24px ${theme.shadow}`,
+          minWidth: 180,
+          zIndex: 100,
+          overflow: 'hidden',
+          padding: '4px 0',
+        }}>
+          {ROLE_OPTIONS.map((opt) => (
+            <button
+              key={opt.value}
+              onClick={() => { onChange(opt.value); setOpen(false); }}
+              style={{
+                display: 'block',
+                width: '100%',
+                textAlign: 'left' as const,
+                padding: '8px 12px',
+                background: opt.value === value ? theme.accentBg : 'transparent',
+                border: 'none',
+                cursor: 'pointer',
+                fontFamily: mono,
+              }}
+              onMouseEnter={(e) => {
+                if (opt.value !== value) e.currentTarget.style.background = theme.bgHover;
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background = opt.value === value ? theme.accentBg : 'transparent';
+              }}
+            >
+              <div style={{
+                fontSize: 11,
+                fontWeight: 500,
+                color: opt.value === value ? theme.accent : theme.text,
+              }}>{opt.label}</div>
+              <div style={{
+                fontSize: 9,
+                color: theme.textMuted,
+                marginTop: 1,
+              }}>{opt.desc}</div>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---- Person row ---- */
+
+function PersonRow({
+  theme,
+  name,
+  server,
+  color,
+  role,
+  isYou,
+  canManage,
+  isOpen,
+  onToggle,
+  onChangeAccess,
+  onRemove,
+  currentAccess,
+}: {
+  theme: Theme;
+  name: string;
+  server: string;
+  color: string;
+  role: string;
+  isYou?: boolean;
+  canManage?: boolean;
+  isOpen?: boolean;
+  onToggle?: () => void;
+  onChangeAccess?: (level: AccessLevel) => void;
+  onRemove?: () => void;
+  currentAccess?: AccessLevel;
+}) {
+  const mono = "'JetBrains Mono', monospace";
+
+  return (
+    <div style={{
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      padding: '8px 0',
+      position: 'relative',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+        {/* Avatar */}
+        <div style={{
+          width: 32,
+          height: 32,
+          borderRadius: '50%',
+          background: `${color}18`,
+          color: color,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          fontFamily: mono,
+          fontSize: 13,
+          fontWeight: 600,
+          flexShrink: 0,
+        }}>
+          {name.charAt(0).toUpperCase()}
+        </div>
+        <div style={{ minWidth: 0 }}>
+          <div style={{
+            fontFamily: mono,
+            fontSize: 12,
+            fontWeight: 500,
+            color: theme.text,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap' as const,
+          }}>
+            {name}{isYou && <span style={{ color: theme.textMuted, fontWeight: 400 }}> (you)</span>}
+          </div>
+          {server && (
+            <div style={{
+              fontFamily: mono,
+              fontSize: 10,
+              color: theme.textMuted,
+            }}>
+              {server}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Role button / dropdown */}
+      <div style={{ position: 'relative', flexShrink: 0 }}>
+        {canManage && onToggle ? (
+          <button
+            onClick={onToggle}
+            style={{
+              fontFamily: mono,
+              fontSize: 11,
+              color: theme.textSecondary,
+              background: 'transparent',
+              border: 'none',
+              cursor: 'pointer',
+              padding: '4px 8px',
+              borderRadius: 4,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 4,
+            }}
+            onMouseEnter={(e) => e.currentTarget.style.background = theme.bgHover}
+            onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
+          >
+            {role}
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+              <path d="M2.5 4L5 6.5L7.5 4" stroke={theme.textMuted} strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+          </button>
+        ) : (
+          <span style={{
+            fontFamily: mono,
+            fontSize: 11,
+            color: theme.textMuted,
+            padding: '4px 8px',
+          }}>
+            {role}
+          </span>
+        )}
+
+        {/* Dropdown */}
+        {isOpen && onChangeAccess && onRemove && (
+          <div style={{
+            position: 'absolute',
+            top: '100%',
+            right: 0,
+            marginTop: 4,
+            background: theme.bgCard,
+            border: `1px solid ${theme.border}`,
+            borderRadius: 8,
+            boxShadow: `0 8px 24px ${theme.shadow}`,
+            minWidth: 180,
+            zIndex: 100,
+            overflow: 'hidden',
+            padding: '4px 0',
+          }}>
+            {ROLE_OPTIONS.map((opt) => (
+              <button
+                key={opt.value}
+                onClick={() => onChangeAccess(opt.value)}
+                style={{
+                  display: 'block',
+                  width: '100%',
+                  textAlign: 'left' as const,
+                  padding: '8px 12px',
+                  background: opt.value === currentAccess ? theme.accentBg : 'transparent',
+                  border: 'none',
+                  cursor: 'pointer',
+                  fontFamily: mono,
+                }}
+                onMouseEnter={(e) => {
+                  if (opt.value !== currentAccess) e.currentTarget.style.background = theme.bgHover;
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = opt.value === currentAccess ? theme.accentBg : 'transparent';
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <div>
+                    <div style={{
+                      fontSize: 11,
+                      fontWeight: 500,
+                      color: opt.value === currentAccess ? theme.accent : theme.text,
+                    }}>{opt.label}</div>
+                    <div style={{
+                      fontSize: 9,
+                      color: theme.textMuted,
+                      marginTop: 1,
+                    }}>{opt.desc}</div>
+                  </div>
+                  {opt.value === currentAccess && (
+                    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                      <path d="M3 7.5L5.5 10L11 4" stroke={theme.accent} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                    </svg>
+                  )}
+                </div>
+              </button>
+            ))}
+
+            <div style={{
+              height: 1,
+              background: theme.border,
+              margin: '4px 0',
+            }} />
+
+            <button
+              onClick={onRemove}
+              style={{
+                display: 'block',
+                width: '100%',
+                textAlign: 'left' as const,
+                padding: '8px 12px',
+                background: 'transparent',
+                border: 'none',
+                cursor: 'pointer',
+                fontFamily: mono,
+                fontSize: 11,
+                fontWeight: 500,
+                color: theme.danger,
+              }}
+              onMouseEnter={(e) => e.currentTarget.style.background = theme.dangerBg}
+              onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
+            >
+              Remove access
+            </button>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -308,28 +629,23 @@ function styles(t: Theme): Record<string, React.CSSProperties> {
       flexDirection: 'column' as const,
       background: t.bgCard,
       border: `1px solid ${t.border}`,
-      borderRadius: 8,
-      overflow: 'hidden',
-      maxHeight: 520,
+      borderRadius: 12,
+      overflow: 'visible',
+      maxHeight: 560,
+      boxShadow: `0 12px 40px ${t.shadow}`,
     },
     header: {
       display: 'flex',
       justifyContent: 'space-between',
-      alignItems: 'flex-start',
-      padding: '14px 16px 10px',
+      alignItems: 'center',
+      padding: '18px 20px 14px',
       borderBottom: `1px solid ${t.border}`,
     },
     headerTitle: {
       fontFamily: mono,
-      fontSize: 13,
+      fontSize: 14,
       fontWeight: 600,
       color: t.text,
-    },
-    headerSub: {
-      fontFamily: mono,
-      fontSize: 10,
-      color: t.textMuted,
-      marginTop: 2,
     },
     closeBtn: {
       background: 'none',
@@ -339,146 +655,76 @@ function styles(t: Theme): Record<string, React.CSSProperties> {
       cursor: 'pointer',
       padding: '0 2px',
       fontFamily: mono,
+      borderRadius: 4,
     },
 
-    section: {
-      padding: '10px 16px',
+    inviteSection: {
+      padding: '14px 20px',
       borderBottom: `1px solid ${t.border}`,
     },
-    sectionLabel: {
-      fontFamily: mono,
-      fontSize: 9,
-      fontWeight: 700,
-      textTransform: 'uppercase' as const,
-      letterSpacing: '0.08em',
-      color: t.textMuted,
-      marginBottom: 8,
-    },
-
-    memberRow: {
+    inviteRow: {
       display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-      padding: '6px 0',
-    },
-    memberInfo: {
-      display: 'flex',
-      alignItems: 'center',
-      gap: 10,
-    },
-    memberAvatar: {
-      width: 28,
-      height: 28,
-      borderRadius: '50%',
-      background: t.accentBg,
-      color: t.accent,
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      fontFamily: mono,
-      fontSize: 12,
-      fontWeight: 600,
-      flexShrink: 0,
-    },
-    memberName: {
-      fontFamily: mono,
-      fontSize: 12,
-      color: t.text,
-      fontWeight: 500,
-    },
-    memberServer: {
-      fontFamily: mono,
-      fontSize: 10,
-      color: t.textMuted,
-    },
-    memberActions: {
-      display: 'flex',
-      alignItems: 'center',
-      gap: 6,
-    },
-
-    ownerBadge: {
-      fontFamily: mono,
-      fontSize: 10,
-      fontWeight: 600,
-      color: t.accent,
-      background: t.accentBg,
-      padding: '2px 8px',
-      borderRadius: 4,
-    },
-    accessBadge: {
-      fontFamily: mono,
-      fontSize: 10,
-      color: t.textSecondary,
-      background: t.bgMuted,
-      padding: '2px 8px',
-      borderRadius: 4,
-    },
-    accessSelect: {
-      fontFamily: mono,
-      fontSize: 10,
-      color: t.text,
-      background: t.bgMuted,
-      border: `1px solid ${t.border}`,
-      borderRadius: 4,
-      padding: '3px 6px',
-      cursor: 'pointer',
-      outline: 'none',
-    },
-    removeBtn: {
-      background: 'none',
-      border: 'none',
-      color: t.textMuted,
-      fontSize: 16,
-      cursor: 'pointer',
-      padding: '0 4px',
-      fontFamily: mono,
-      lineHeight: 1,
-    },
-
-    addRow: {
-      display: 'flex',
-      gap: 6,
+      gap: 8,
       alignItems: 'center',
     },
-    input: {
+    inviteInput: {
       flex: 1,
-      padding: '6px 8px',
-      background: t.bgMuted,
+      padding: '8px 12px',
+      background: t.bg,
       border: `1px solid ${t.border}`,
-      borderRadius: 4,
+      borderRadius: 8,
       color: t.text,
       fontFamily: mono,
       fontSize: 11,
       outline: 'none',
     },
-    addBtn: {
-      padding: '6px 12px',
+    inviteBtn: {
+      padding: '8px 16px',
       background: t.accent,
       color: '#fff',
       border: 'none',
-      borderRadius: 4,
-      fontFamily: mono,
-      fontSize: 10,
-      fontWeight: 600,
-      cursor: 'pointer',
-    },
-    accessHint: {
-      fontFamily: mono,
-      fontSize: 9,
-      color: t.textMuted,
-      marginTop: 4,
-    },
-    feedback: {
-      fontFamily: mono,
-      fontSize: 10,
-      marginTop: 4,
-    },
-    emptyMsg: {
+      borderRadius: 8,
       fontFamily: mono,
       fontSize: 11,
+      fontWeight: 600,
+      cursor: 'pointer',
+      whiteSpace: 'nowrap' as const,
+    },
+    errorMsg: {
+      fontFamily: mono,
+      fontSize: 10,
+      color: t.danger,
+      marginTop: 6,
+    },
+    successMsg: {
+      fontFamily: mono,
+      fontSize: 10,
+      color: t.success,
+      marginTop: 6,
+    },
+
+    peopleSection: {
+      padding: '14px 20px 16px',
+      overflowY: 'auto' as const,
+    },
+    peopleSectionHeader: {
+      fontFamily: mono,
+      fontSize: 11,
+      fontWeight: 600,
+      color: t.textSecondary,
+      marginBottom: 8,
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6,
+    },
+    peopleCount: {
+      fontFamily: mono,
+      fontSize: 10,
+      fontWeight: 500,
       color: t.textMuted,
-      padding: '8px 0',
+      background: t.bgMuted,
+      padding: '1px 6px',
+      borderRadius: 10,
     },
   };
 }
