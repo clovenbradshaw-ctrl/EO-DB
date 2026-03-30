@@ -16,6 +16,8 @@ import { HashCohort } from './HashCohort';
 import { RecCycleMap } from './RecCycleMap';
 import { CadenceBadge } from './CadenceBadge';
 import { GraphRoleBadge } from './GraphRoleBadge';
+import { TypeBadge } from './TypeSelector';
+import { ElementHistory } from './ElementHistory';
 import { useTheme, type Theme } from '../theme';
 
 interface RecordViewProps {
@@ -65,8 +67,11 @@ export function RecordView({ target, onNavigate }: RecordViewProps) {
       <div style={s.header}>
         <div style={s.headerTop}>
           <div style={s.clientName}>{value.name || target}</div>
-          <div style={{ ...s.statusBadge, ...statusStyleMap[statusClass] }}>
-            {value.status || 'unknown'}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            {value._type && <TypeBadge type={value._type} />}
+            <div style={{ ...s.statusBadge, ...statusStyleMap[statusClass] }}>
+              {value.status || 'unknown'}
+            </div>
           </div>
         </div>
         <div style={s.meta}>
@@ -125,6 +130,11 @@ export function RecordView({ target, onNavigate }: RecordViewProps) {
           <Trajectory entries={data.trajectory} fingerprint={data.trajectoryFingerprint} cadence={data.cadence} />
         </Section>
       )}
+
+      {/* Edit History */}
+      <Section title="Edit History" subtitle="changes to this record with revert" color={theme.warning}>
+        <ElementHistory target={target} />
+      </Section>
 
       {/* Layer 2: Grounds */}
       {data.grounds && data.grounds.length > 0 && (
