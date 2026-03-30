@@ -3,17 +3,19 @@ import { useEoStore } from '../store/eo-store';
 import { useTheme } from '../theme';
 import type { EoEvent, LoggableOperator } from '../db/types';
 
-// --- Operator colors (rgba-based, works on light and dark backgrounds) ---
+// --- Operator colors (pastel palette matching design spec) ---
 const OP_COLORS: Record<string, { bg: string; text: string; border: string }> = {
-  NUL: { bg: 'rgba(148,163,184,0.12)', text: '#94a3b8', border: 'rgba(148,163,184,0.25)' },
-  SIG: { bg: 'rgba(56,189,248,0.12)', text: '#38bdf8', border: 'rgba(56,189,248,0.25)' },
-  INS: { bg: 'rgba(34,197,94,0.12)', text: '#22c55e', border: 'rgba(34,197,94,0.25)' },
-  SEG: { bg: 'rgba(249,115,22,0.12)', text: '#f97316', border: 'rgba(249,115,22,0.25)' },
-  CON: { bg: 'rgba(168,85,247,0.12)', text: '#a855f7', border: 'rgba(168,85,247,0.25)' },
-  SYN: { bg: 'rgba(236,72,153,0.12)', text: '#ec4899', border: 'rgba(236,72,153,0.25)' },
-  DEF: { bg: 'rgba(59,130,246,0.12)', text: '#3b82f6', border: 'rgba(59,130,246,0.25)' },
-  EVA: { bg: 'rgba(234,179,8,0.12)', text: '#eab308', border: 'rgba(234,179,8,0.25)' },
-  REC: { bg: 'rgba(239,68,68,0.12)', text: '#ef4444', border: 'rgba(239,68,68,0.25)' },
+  NUL: { bg: '#F0F0F0', text: '#888', border: 'transparent' },
+  SIG: { bg: '#E6F1FB', text: '#185FA5', border: 'transparent' },
+  INS: { bg: '#EAF3DE', text: '#3B6D11', border: 'transparent' },
+  UPD: { bg: '#FAEEDA', text: '#854F0B', border: 'transparent' },
+  SEG: { bg: '#FFF3E0', text: '#E65100', border: 'transparent' },
+  CON: { bg: '#E6F1FB', text: '#185FA5', border: 'transparent' },
+  SYN: { bg: '#FCE4EC', text: '#C62828', border: 'transparent' },
+  DEF: { bg: '#FAEEDA', text: '#854F0B', border: 'transparent' },
+  EVA: { bg: '#FAEEDA', text: '#854F0B', border: 'transparent' },
+  REC: { bg: '#FCEBEB', text: '#A32D2D', border: 'transparent' },
+  DEL: { bg: '#FCEBEB', text: '#A32D2D', border: 'transparent' },
 };
 
 const ALL_OPS: LoggableOperator[] = ['NUL', 'INS', 'SEG', 'CON', 'SYN', 'DEF', 'EVA', 'REC'];
@@ -69,11 +71,11 @@ function OpBadge({ op }: { op: string }) {
   const c = OP_COLORS[op] || OP_COLORS.NUL;
   return (
     <span style={{
-      display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-      background: c.bg, color: c.text, border: `1px solid ${c.border}`,
-      borderRadius: 3, fontSize: 9.5, fontWeight: 700,
-      fontFamily: "'JetBrains Mono', monospace", padding: '2px 7px',
-      letterSpacing: '0.04em', lineHeight: 1.3, minWidth: 32, textAlign: 'center' as const,
+      display: 'inline-block',
+      background: c.bg, color: c.text,
+      borderRadius: 3, fontSize: 10, fontWeight: 500,
+      padding: '1px 6px',
+      lineHeight: 1.4, textAlign: 'center' as const,
     }}>
       {op}
     </span>
@@ -310,20 +312,19 @@ function DetailPanel({ event, onClose }: { event: EoEvent; onClose: () => void }
 }
 
 // --- Table cell styles ---
-function thStyle(t: { bg: string; textMuted: string; border: string }): React.CSSProperties {
+function thStyle(t: { bg: string; textMuted: string; border: string; bgCard: string }): React.CSSProperties {
   return {
-    position: 'sticky' as const, top: 0, background: t.bg,
-    padding: '10px 16px', textAlign: 'left' as const,
-    fontSize: 10, fontWeight: 600, textTransform: 'uppercase' as const,
-    letterSpacing: '0.04em', color: t.textMuted,
-    fontFamily: "'JetBrains Mono', monospace",
-    borderBottom: `2px solid ${t.border}`, whiteSpace: 'nowrap' as const, zIndex: 2,
+    position: 'sticky' as const, top: 0, background: t.bgCard,
+    padding: '10px 8px 10px 0', textAlign: 'left' as const,
+    fontSize: 11, fontWeight: 400, textTransform: 'uppercase' as const,
+    letterSpacing: '0.3px', color: t.textMuted,
+    borderBottom: `0.5px solid ${t.border}`, whiteSpace: 'nowrap' as const, zIndex: 2,
   };
 }
 
 function tdStyle(t: { border: string; bgCard: string; borderLight: string }): React.CSSProperties {
   return {
-    padding: '10px 16px', borderBottom: `1px solid ${t.borderLight}`,
+    padding: '10px 8px 10px 0', borderBottom: `0.5px solid ${t.borderLight}`,
     verticalAlign: 'middle' as const, background: t.bgCard,
   };
 }
@@ -366,39 +367,38 @@ export function LogView({ targetFilter }: { targetFilter?: string | null }) {
         {/* Header */}
         <div style={{
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          padding: '16px 24px', borderBottom: `1px solid ${t.border}`, flexShrink: 0,
+          padding: '12px 20px', borderBottom: `0.5px solid ${t.border}`, flexShrink: 0,
         }}>
-          <div style={{ display: 'flex', alignItems: 'baseline', gap: 12 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span style={{
-              fontFamily: "'Source Serif 4', Georgia, serif", fontSize: 20,
-              fontWeight: 600, color: t.textHeading,
+              fontSize: 14, fontWeight: 500, color: t.textHeading,
             }}>Event log</span>
             <span style={{
               fontSize: 12, color: t.textMuted,
-              fontFamily: "'JetBrains Mono', monospace",
+              background: t.bgMuted, padding: '1px 6px', borderRadius: 4,
             }}>{filtered.length} events</span>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <input
               value={filterText}
               onChange={(e) => setFilterText(e.target.value)}
-              placeholder="Filter by target..."
+              placeholder="Filter by target\u2026"
               style={{
-                background: t.bgMuted, border: `1px solid ${t.border}`,
-                borderRadius: 4, padding: '6px 10px', color: t.text,
-                fontSize: 12, fontFamily: "'JetBrains Mono', monospace",
-                width: 200, outline: 'none',
+                width: 140, height: 28, fontSize: 12,
+                padding: '0 8px', color: t.text,
+                border: `0.5px solid ${t.border}`,
+                borderRadius: 4, background: t.bgCard,
+                outline: 'none',
               }}
             />
             <div style={{ position: 'relative' as const }}>
               <button
                 onClick={() => setOpMenuOpen(!opMenuOpen)}
                 style={{
-                  padding: '6px 12px', fontSize: 12, fontWeight: 500,
-                  border: `1px solid ${t.border}`, borderRadius: 4,
+                  padding: '4px 10px', fontSize: 12,
+                  border: `0.5px solid ${t.border}`, borderRadius: 4,
                   background: activeFilters.size > 0 ? t.accentBg : t.bgCard,
-                  color: t.text, cursor: 'pointer',
-                  fontFamily: "'JetBrains Mono', monospace",
+                  color: t.textSecondary, cursor: 'pointer',
                 }}
               >
                 Op{activeFilters.size > 0 ? ` (${activeFilters.size})` : ''}
@@ -440,11 +440,11 @@ export function LogView({ targetFilter }: { targetFilter?: string | null }) {
           <table style={{ width: '100%', borderCollapse: 'collapse' as const, fontSize: 13, color: t.textHeading }}>
             <thead>
               <tr>
-                <th style={{ ...thStyle(t), minWidth: 50, textAlign: 'right' as const }}>SEQ</th>
-                <th style={{ ...thStyle(t), minWidth: 60 }}>OP</th>
-                <th style={{ ...thStyle(t), minWidth: 200 }}>TARGET</th>
-                <th style={{ ...thStyle(t), minWidth: 140 }}>AGENT</th>
-                <th style={{ ...thStyle(t), minWidth: 80, textAlign: 'right' as const }}>TIME</th>
+                <th style={{ ...thStyle(t), width: 44, paddingLeft: 20 }}>seq</th>
+                <th style={{ ...thStyle(t), width: 48 }}>op</th>
+                <th style={{ ...thStyle(t) }}>target</th>
+                <th style={{ ...thStyle(t) }}>agent</th>
+                <th style={{ ...thStyle(t), textAlign: 'right' as const, paddingRight: 20 }}>time</th>
               </tr>
             </thead>
             <tbody>
@@ -473,24 +473,25 @@ export function LogView({ targetFilter }: { targetFilter?: string | null }) {
                     onMouseLeave={(e) => { if (!sel) (e.currentTarget as HTMLElement).style.background = sel ? t.bgHover : 'transparent'; }}
                   >
                     <td style={{
-                      ...tdStyle(t), textAlign: 'right' as const,
-                      fontFamily: "'JetBrains Mono', monospace", fontSize: 12,
-                      color: t.textMuted, fontWeight: 500,
+                      ...tdStyle(t), paddingLeft: 20,
+                      fontFamily: "'JetBrains Mono', monospace", fontSize: 11,
+                      color: t.textMuted,
                     }}>{event.seq}</td>
                     <td style={tdStyle(t)}><OpBadge op={event.op} /></td>
                     <td style={{
                       ...tdStyle(t), fontFamily: "'JetBrains Mono', monospace",
-                      fontSize: 12, color: t.accent,
+                      fontSize: 11, color: t.accent,
                     }}>{event.target}</td>
                     <td style={{
-                      ...tdStyle(t), fontSize: 12, color: t.textSecondary,
+                      ...tdStyle(t), fontFamily: "'JetBrains Mono', monospace",
+                      fontSize: 11, color: t.textSecondary,
                       maxWidth: 180, overflow: 'hidden' as const,
                       textOverflow: 'ellipsis' as const, whiteSpace: 'nowrap' as const,
                     }}>{agentName}</td>
                     <td style={{
-                      ...tdStyle(t), textAlign: 'right' as const,
-                      fontFamily: "'JetBrains Mono', monospace", fontSize: 12,
-                      color: t.textMuted, whiteSpace: 'nowrap' as const,
+                      ...tdStyle(t), textAlign: 'right' as const, paddingRight: 20,
+                      fontSize: 11, color: t.textMuted,
+                      whiteSpace: 'nowrap' as const,
                     }}>{formatTime(event.ts)}</td>
                   </tr>
                 );
@@ -501,9 +502,8 @@ export function LogView({ targetFilter }: { targetFilter?: string | null }) {
           {/* Pagination footer */}
           {filtered.length > 0 && (
             <div style={{
-              padding: '16px 24px', textAlign: 'center' as const, fontSize: 11,
-              color: t.textMuted, fontFamily: "'JetBrains Mono', monospace",
-              borderTop: `1px solid ${t.borderLight}`,
+              padding: '12px 20px', textAlign: 'center' as const, fontSize: 11,
+              color: t.textMuted,
             }}>
               Showing {Math.min(visibleCount, filtered.length)} of {filtered.length} events
               {filtered.length > visibleCount && (
