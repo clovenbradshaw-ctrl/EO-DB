@@ -6,6 +6,7 @@ import { createStore } from '../db/encrypted-store';
 import { deriveKey } from '../lib/crypto';
 import { SyncManager } from '../matrix/sync-manager';
 import { resolveDataRoom } from '../matrix/event-bridge';
+import { configureMatrixDomain } from '../lib/matrix-domain';
 import { HolonNav } from './HolonNav';
 import { TableView } from './TableView';
 import { RecordDetailDrawer } from './RecordDetailDrawer';
@@ -71,6 +72,11 @@ export function Layout({ session, onLogout }: LayoutProps) {
       if (!mounted) return;
 
       await init(store);
+
+      // Configure Matrix domain from the session homeserver so room
+      // alias resolution and event types work correctly.
+      const domain = session.homeserver.replace(/^https?:\/\//, '').replace(/\/+$/, '');
+      configureMatrixDomain({ dataRoomAlias: `#amino-data:${domain}` });
 
       // Start Matrix sync — skip gracefully when offline
       if (!navigator.onLine) return;
