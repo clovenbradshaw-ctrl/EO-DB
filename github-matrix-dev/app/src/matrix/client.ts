@@ -1,6 +1,7 @@
 import * as sdk from 'matrix-js-sdk';
 
 const SESSION_KEY = 'eo-db-session';
+const DEVICE_ID_KEY = 'eo-db-device-id';
 
 export interface MatrixSession {
   userId: string;
@@ -40,10 +41,19 @@ export async function login(homeserver: string, username: string, password: stri
   const baseUrl = normalizeHomeserver(homeserver);
   const client = sdk.createClient({ baseUrl });
 
-  const response = await client.login('m.login.password', {
+  // Reuse the persisted deviceId so the same encryption key is derived
+  // across re-logins, allowing IndexedDB data to survive logout cycles.
+  const persistedDeviceId = localStorage.getItem(DEVICE_ID_KEY);
+
+  const loginBody: Record<string, string> = {
     user: username,
     password,
-  });
+  };
+  if (persistedDeviceId) {
+    loginBody.device_id = persistedDeviceId;
+  }
+
+  const response = await client.login('m.login.password', loginBody);
 
   const session: MatrixSession = {
     userId: response.user_id,
@@ -52,6 +62,8 @@ export async function login(homeserver: string, username: string, password: stri
     homeserver: baseUrl,
   };
 
+  // Persist deviceId separately — survives logout so encryption key stays stable
+  localStorage.setItem(DEVICE_ID_KEY, session.deviceId);
   localStorage.setItem(SESSION_KEY, JSON.stringify(session));
   return session;
 }
@@ -77,9 +89,12 @@ export function restoreSession(): MatrixSession | null {
 
 /**
  * Clear the session and discard all local auth state.
+ * The deviceId is intentionally preserved so the same encryption key
+ * can be derived on re-login, keeping IndexedDB data accessible.
  */
 export function logout(): void {
   localStorage.removeItem(SESSION_KEY);
+  // NOTE: DEVICE_ID_KEY is NOT removed — it's needed for stable key derivation
 }
 
 /**

@@ -41,6 +41,11 @@ interface LayoutProps {
   onLogout: () => void;
 }
 
+interface CachedSpace {
+  store: ReturnType<typeof createStore>;
+  syncManager: SyncManager | null;
+}
+
 export function Layout({ session, onLogout }: LayoutProps) {
   const init = useEoStore((s) => s.init);
   const teardown = useEoStore((s) => s.teardown);
@@ -170,7 +175,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
     let mounted = true;
 
     async function discoverSpaces() {
-      // Check localStorage cache first
+      // Check localStorage cache first — show UI immediately from cache
       const cached = localStorage.getItem('eo-spaces');
       if (cached) {
         try {
@@ -184,7 +189,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
 
       // Open root IDB to discover spaces from store data
       const idb = await createIdb();
-      const key = await deriveKey(session.userId, session.deviceId, session.accessToken);
+      const key = await deriveKey(session.userId, session.deviceId);
       const rootStore = createStore(idb, key);
 
       // If root store is empty, try hydrating from Matrix snapshot
@@ -223,30 +228,44 @@ export function Layout({ session, onLogout }: LayoutProps) {
     return () => { mounted = false; clearTimeout(timer); };
   }, [session]);
 
+  // --- Cached space stores (survive space switches, avoid re-init) ---
+  const spaceCacheRef = useRef<Map<string, CachedSpace>>(new Map());
+
   // --- Per-space store init (re-runs when selectedSpace changes) ---
   useEffect(() => {
     if (!selectedSpace) return;
 
     let mounted = true;
-    let cleanupBeforeUnload: (() => void) | undefined;
 
     async function setupSpaceStore() {
-      // Teardown previous space's store
-      teardown();
+      const cache = spaceCacheRef.current;
+      const existing = cache.get(selectedSpace!);
 
-      // Open space-scoped IDB
+      if (existing) {
+        // Reuse cached store — no IDB open, no key derivation, no Matrix hydration
+        if (!mounted) return;
+        await init(existing.store);
+        if (existing.syncManager) {
+          useEoStore.getState().setSyncManager(existing.syncManager);
+        }
+        return;
+      }
+
+      // Open space-scoped IDB with stable key (userId + deviceId, no accessToken)
       const idb = await createIdb(selectedSpace!);
-      const key = await deriveKey(session.userId, session.deviceId, session.accessToken);
+      const key = await deriveKey(session.userId, session.deviceId);
       const store = createStore(idb, key);
       if (!mounted) { store.close(); return; }
 
       await init(store);
 
+      let syncManager: SyncManager | null = null;
+
       // Set up sync manager scoped to this space
       if (matrixReadyRef.current && matrixClientRef.current && roomIdRef.current) {
         try {
           const spacePrefix = `${selectedSpace}.`;
-          const syncManager = new SyncManager(
+          syncManager = new SyncManager(
             matrixClientRef.current, roomIdRef.current, store,
             (event) => {
               useEoStore.setState((st) => ({
@@ -260,36 +279,56 @@ export function Layout({ session, onLogout }: LayoutProps) {
           if (!mounted) return;
 
           useEoStore.getState().setSyncManager(syncManager);
-
-          const handleBeforeUnload = () => {
-            syncManager.saveSnapshot().catch(() => {});
-          };
-          window.addEventListener('beforeunload', handleBeforeUnload);
-          cleanupBeforeUnload = () => window.removeEventListener('beforeunload', handleBeforeUnload);
         } catch {
           // Offline — local store is still available
         }
       }
+
+      // Cache this space's store + sync manager for fast re-access
+      cache.set(selectedSpace!, { store, syncManager });
     }
 
     setupSpaceStore();
 
     return () => {
       mounted = false;
-      cleanupBeforeUnload?.();
     };
-  }, [selectedSpace, session, init, teardown]);
+  }, [selectedSpace, session, init]);
 
   async function handleLogout() {
-    // Save snapshot to Matrix media before clearing local state
-    const { syncManager } = useEoStore.getState();
-    if (syncManager) {
-      try { await syncManager.saveSnapshot(); } catch { /* best effort */ }
+    // Save snapshots for ALL cached spaces before clearing state
+    const cache = spaceCacheRef.current;
+    const savePromises: Promise<void>[] = [];
+    for (const [, cached] of cache) {
+      if (cached.syncManager) {
+        savePromises.push(cached.syncManager.saveSnapshot().catch(() => {}));
+      }
     }
+    await Promise.all(savePromises);
+
+    // Close all cached stores
+    for (const [, cached] of cache) {
+      cached.store.close();
+    }
+    cache.clear();
+
     teardown();
     logout();
     onLogout();
   }
+
+  // Save all cached space snapshots on page unload
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      for (const [, cached] of spaceCacheRef.current) {
+        if (cached.syncManager) {
+          cached.syncManager.saveSnapshot().catch(() => {});
+        }
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, []);
 
   // Extract display name from Matrix user ID
   const displayName = session.userId.startsWith('@')
