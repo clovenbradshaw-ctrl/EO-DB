@@ -1,7 +1,7 @@
 import { useEffect, useState, useMemo } from 'react';
 import type { EoState } from '../db/types';
 import { useEoStore } from '../store/eo-store';
-import { deriveColumns, buildFieldNameMap, hasFieldsSubObject, getFieldValue, type ColumnDef } from './filter-types';
+import { deriveColumns, buildFieldNameMap, buildFieldNameMapFromSchema, hasFieldsSubObject, getFieldValue, type ColumnDef } from './filter-types';
 import { useTheme, type Theme } from '../theme';
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 import { TypeSelector, TypeBadge } from './TypeSelector';
@@ -94,8 +94,13 @@ export function TableView({ scope, onSelectRecord, onViewHistory, activeRecord, 
 
   const [records, setRecords] = useState<EoState[]>([]);
   const [fieldNameMap, setFieldNameMap] = useState<Map<string, string>>(new Map());
+  const [scopeName, setScopeName] = useState<string | null>(null);
   const [filterText, setFilterText] = useState('');
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; target: string } | null>(null);
+  const [columnMenu, setColumnMenu] = useState<{ x: number; y: number; key: string; label: string } | null>(null);
+  const [renameCol, setRenameCol] = useState<{ key: string; value: string } | null>(null);
+  const [sortConfig, setSortConfig] = useState<{ key: string; direction: 'asc' | 'desc' } | null>(null);
+  const [hiddenColumns, setHiddenColumns] = useState<Set<string>>(new Set());
   const [typeSelector, setTypeSelector] = useState<{ x: number; y: number; target: string; currentType?: string } | null>(null);
   const { theme } = useTheme();
   const s = makeStyles(theme);
@@ -109,7 +114,11 @@ export function TableView({ scope, onSelectRecord, onViewHistory, activeRecord, 
       const direct = states
         .filter((st) => {
           const parts = st.target.split('.');
-          return parts.length === scopeDepth + 1 && !st.value?._alias;
+          if (parts.length !== scopeDepth + 1 || st.value?._alias) return false;
+          // Hide internal entities (e.g. _schema)
+          const segment = parts[parts.length - 1];
+          if (segment.startsWith('_')) return false;
+          return true;
         })
         .map((st) => {
           // When fields is an array of DEFs ({id,name,type}), flatten into
@@ -126,14 +135,30 @@ export function TableView({ scope, onSelectRecord, onViewHistory, activeRecord, 
         });
       setRecords(direct);
     });
-    // Fetch the scope (table) state itself to get field metadata
-    getState(scope).then((scopeState) => {
-      const fields = scopeState?.value?.fields;
-      if (Array.isArray(fields)) {
-        setFieldNameMap(buildFieldNameMap(fields));
+    // Fetch field metadata: prefer per-field schema entities, fall back to array on table state
+    getStateByPrefix(scope + '._schema.').then((schemaStates) => {
+      // Filter to direct children of _schema only
+      const schemaDepth = scope.split('.').length + 2; // scope._schema.fieldId
+      const fieldStates = schemaStates.filter(
+        (st) => st.target.split('.').length === schemaDepth && !st.value?._alias,
+      );
+      if (fieldStates.length > 0) {
+        setFieldNameMap(buildFieldNameMapFromSchema(fieldStates));
       } else {
-        setFieldNameMap(new Map());
+        // Fallback: read field metadata from table state array
+        getState(scope).then((scopeState) => {
+          const fields = scopeState?.value?.fields;
+          if (Array.isArray(fields)) {
+            setFieldNameMap(buildFieldNameMap(fields));
+          } else {
+            setFieldNameMap(new Map());
+          }
+        });
       }
+    });
+    // Fetch scope display name
+    getState(scope).then((scopeState) => {
+      setScopeName(scopeState?.value?.name ?? null);
     });
   }, [ready, lastSeq, getStateByPrefix, getState, scope, scopeDepth]);
 
@@ -146,29 +171,125 @@ export function TableView({ scope, onSelectRecord, onViewHistory, activeRecord, 
   const useFieldsSub = useMemo(() => hasFieldsSubObject(records), [records]);
 
   const entityColumns = useMemo(() => deriveColumns(records, fieldNameMap), [records, fieldNameMap]);
-  const columns = useMemo<ColumnDef[]>(() => [
-    { key: '_record', label: 'record', type: 'text' as const },
-    ...entityColumns,
-  ], [entityColumns]);
+  const columns = useMemo<ColumnDef[]>(() => {
+    const all = [
+      { key: '_record', label: 'record', type: 'text' as const },
+      ...entityColumns,
+    ];
+    if (hiddenColumns.size === 0) return all;
+    return all.filter((col) => !hiddenColumns.has(col.key));
+  }, [entityColumns, hiddenColumns]);
 
   const filtered = useMemo(() => {
-    if (!filterText) return records;
-    const q = filterText.toLowerCase();
-    return records.filter((rec) => {
-      const target = rec.target.toLowerCase();
-      if (target.includes(q)) return true;
-      if (rec.value) {
-        // Search within flattened fields if using Airtable-style sub-object
-        const source = useFieldsSub && rec.value.fields && typeof rec.value.fields === 'object'
-          ? rec.value.fields
-          : rec.value;
-        return Object.values(source).some(v =>
-          v != null && String(v).toLowerCase().includes(q)
-        );
-      }
-      return false;
-    });
-  }, [records, filterText, useFieldsSub]);
+    let result = records;
+    if (filterText) {
+      const q = filterText.toLowerCase();
+      result = result.filter((rec) => {
+        const target = rec.target.toLowerCase();
+        if (target.includes(q)) return true;
+        if (rec.value) {
+          const source = useFieldsSub && rec.value.fields && typeof rec.value.fields === 'object'
+            ? rec.value.fields
+            : rec.value;
+          return Object.values(source).some(v =>
+            v != null && String(v).toLowerCase().includes(q)
+          );
+        }
+        return false;
+      });
+    }
+    if (sortConfig) {
+      result = [...result].sort((a, b) => {
+        const aVal = sortConfig.key === '_record'
+          ? (a.value?.name || a.target.split('.').pop() || '')
+          : getFieldValue(a, sortConfig.key, useFieldsSub);
+        const bVal = sortConfig.key === '_record'
+          ? (b.value?.name || b.target.split('.').pop() || '')
+          : getFieldValue(b, sortConfig.key, useFieldsSub);
+        const aStr = aVal != null ? String(aVal) : '';
+        const bStr = bVal != null ? String(bVal) : '';
+        const aNum = Number(aStr);
+        const bNum = Number(bStr);
+        const cmp = (!isNaN(aNum) && !isNaN(bNum) && aStr !== '' && bStr !== '')
+          ? aNum - bNum
+          : aStr.localeCompare(bStr);
+        return sortConfig.direction === 'asc' ? cmp : -cmp;
+      });
+    }
+    return result;
+  }, [records, filterText, useFieldsSub, sortConfig]);
+
+  function handleColumnContextMenu(e: React.MouseEvent, col: ColumnDef) {
+    e.preventDefault();
+    e.stopPropagation();
+    setColumnMenu({ x: e.clientX, y: e.clientY, key: col.key, label: col.label });
+    setContextMenu(null);
+  }
+
+  function getColumnMenuItems(colKey: string, colLabel: string): ContextMenuItem[] {
+    const isSorted = sortConfig?.key === colKey;
+    const items: ContextMenuItem[] = [
+      {
+        label: 'Rename column',
+        onClick: () => {
+          setRenameCol({ key: colKey, value: colLabel });
+          setColumnMenu(null);
+        },
+      },
+      { label: '', onClick: () => {}, separator: true },
+      {
+        label: `Sort ascending${isSorted && sortConfig?.direction === 'asc' ? ' (active)' : ''}`,
+        onClick: () => setSortConfig({ key: colKey, direction: 'asc' }),
+      },
+      {
+        label: `Sort descending${isSorted && sortConfig?.direction === 'desc' ? ' (active)' : ''}`,
+        onClick: () => setSortConfig({ key: colKey, direction: 'desc' }),
+      },
+      ...(isSorted ? [{
+        label: 'Remove sort',
+        onClick: () => setSortConfig(null),
+      }] : []),
+      { label: '', onClick: () => {}, separator: true },
+      {
+        label: 'Filter by this column',
+        onClick: () => setFilterText(`${colLabel}:`),
+      },
+      { label: '', onClick: () => {}, separator: true },
+      {
+        label: 'Hide column',
+        onClick: () => setHiddenColumns((prev) => new Set([...prev, colKey])),
+        disabled: colKey === '_record',
+      },
+    ];
+    if (hiddenColumns.size > 0) {
+      items.push({
+        label: `Show all columns (${hiddenColumns.size} hidden)`,
+        onClick: () => setHiddenColumns(new Set()),
+      });
+    }
+    return items;
+  }
+
+  async function handleColumnRename(fieldKey: string, newLabel: string) {
+    const schemaTarget = `${scope}._schema.${fieldKey}`;
+    try {
+      await dispatch({
+        op: 'DEF',
+        target: schemaTarget,
+        operand: { _label: newLabel },
+        agent: `user:${session.userId}`,
+        ts: new Date().toISOString(),
+        acquired_ts: new Date().toISOString(),
+      });
+      // Update local field name map immediately
+      setFieldNameMap((prev) => {
+        const next = new Map(prev);
+        next.set(fieldKey, newLabel);
+        return next;
+      });
+    } catch { /* ignore */ }
+    setRenameCol(null);
+  }
 
   function handleContextMenu(e: React.MouseEvent, target: string) {
     e.preventDefault();
@@ -226,7 +347,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, activeRecord, 
       {/* Toolbar */}
       <div style={s.toolbar}>
         <div style={s.toolbarLeft}>
-          <div style={s.scopeName}>{formatScopeName(scope)}</div>
+          <div style={s.scopeName}>{scopeName || formatScopeName(scope)}</div>
           <span style={s.recordCount}>{filtered.length} records</span>
         </div>
         <div style={s.toolbarRight}>
@@ -245,8 +366,37 @@ export function TableView({ scope, onSelectRecord, onViewHistory, activeRecord, 
           <thead>
             <tr>
               {columns.map((col) => (
-                <th key={col.key} style={s.th}>
-                  {col.label}
+                <th
+                  key={col.key}
+                  style={{ ...s.th, cursor: 'context-menu', userSelect: 'none' }}
+                  onContextMenu={(e) => handleColumnContextMenu(e, col)}
+                >
+                  {renameCol?.key === col.key ? (
+                    <input
+                      autoFocus
+                      defaultValue={renameCol.value}
+                      style={{
+                        fontSize: 11, fontWeight: 400, border: `1px solid ${theme.accent}`,
+                        borderRadius: 3, padding: '2px 4px', background: theme.bgCard,
+                        color: theme.text, outline: 'none', width: '100%',
+                        textTransform: 'none' as const,
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') handleColumnRename(col.key, (e.target as HTMLInputElement).value);
+                        if (e.key === 'Escape') setRenameCol(null);
+                      }}
+                      onBlur={(e) => handleColumnRename(col.key, e.target.value)}
+                    />
+                  ) : (
+                    <span>
+                      {col.label}
+                      {sortConfig?.key === col.key && (
+                        <span style={{ marginLeft: 4, fontSize: 10 }}>
+                          {sortConfig.direction === 'asc' ? '\u25B4' : '\u25BE'}
+                        </span>
+                      )}
+                    </span>
+                  )}
                 </th>
               ))}
             </tr>
@@ -281,7 +431,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, activeRecord, 
                             <span style={{
                               fontFamily: "'JetBrains Mono', monospace", fontSize: 11,
                               color: theme.accent, cursor: 'pointer',
-                            }}>{rec.target.split('.').pop()}</span>
+                            }}>{rec.value?.name || rec.target.split('.').pop()}</span>
                             {rec.value?._type && <TypeBadge type={rec.value._type} />}
                           </span>
                         : renderCell(getFieldValue(rec, col.key, useFieldsSub), col.key, onSelectRecord, theme)
@@ -295,13 +445,23 @@ export function TableView({ scope, onSelectRecord, onViewHistory, activeRecord, 
         </table>
       </div>
 
-      {/* Right-click context menu */}
+      {/* Right-click context menu (rows) */}
       {contextMenu && (
         <ContextMenu
           x={contextMenu.x}
           y={contextMenu.y}
           items={getContextMenuItems(contextMenu.target)}
           onClose={() => setContextMenu(null)}
+        />
+      )}
+
+      {/* Right-click context menu (columns) */}
+      {columnMenu && (
+        <ContextMenu
+          x={columnMenu.x}
+          y={columnMenu.y}
+          items={getColumnMenuItems(columnMenu.key, columnMenu.label)}
+          onClose={() => setColumnMenu(null)}
         />
       )}
 

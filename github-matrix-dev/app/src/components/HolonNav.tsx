@@ -65,17 +65,24 @@ function buildTree(states: EoState[], statePrefix: string): TreeNode[] {
     const segment = fullPath.split('.').pop()!;
     const childPaths = [...entry.childPaths].sort();
     const children = childPaths
-      .filter(cp => pathSet.has(cp))
+      .filter(cp => {
+        if (!pathSet.has(cp)) return false;
+        // Hide internal entities (e.g. _schema) from the tree
+        const seg = cp.split('.').pop();
+        return !seg || !seg.startsWith('_');
+      })
       .map(cp => buildNode(cp));
 
     const segments = entry.state?.value?._segments as Record<string, FilterDefinition> | undefined;
 
-    // Count children by operator type and derived status
+    // Count children by operator type and derived status (excluding internal entities)
     let conCount = 0;
     let segCount = 0;
     let recCount = 0;
     let derivedCount = 0;
     for (const cp of entry.childPaths) {
+      const cpSeg = cp.split('.').pop();
+      if (cpSeg?.startsWith('_')) continue;
       const childEntry = pathSet.get(cp);
       if (childEntry?.state) {
         const op = childEntry.state.last_op;
@@ -90,7 +97,10 @@ function buildTree(states: EoState[], statePrefix: string): TreeNode[] {
       segment,
       fullPath,
       children,
-      childCount: entry.childPaths.size,
+      childCount: [...entry.childPaths].filter(cp => {
+        const seg = cp.split('.').pop();
+        return !seg?.startsWith('_');
+      }).length,
       conCount,
       segCount,
       recCount,

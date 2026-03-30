@@ -104,6 +104,25 @@ export function buildFieldNameMap(
 }
 
 /**
+ * Build a field name map from per-field schema entities (stored under _schema).
+ * Each schema entity has `value.name` (Airtable field name) and optionally
+ * `value._label` (user-set display name override).
+ * The last segment of the target path is the field ID.
+ */
+export function buildFieldNameMapFromSchema(
+  schemaStates: EoState[],
+): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const st of schemaStates) {
+    const fieldId = st.target.split('.').pop();
+    if (!fieldId) continue;
+    const label = st.value?._label || st.value?.name;
+    if (label) map.set(fieldId, label);
+  }
+  return map;
+}
+
+/**
  * Check whether the records use the Airtable-style `fields` sub-object
  * (i.e. `value.fields` is a plain object whose keys are field IDs).
  */
