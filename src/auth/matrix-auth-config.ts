@@ -704,7 +704,7 @@ export async function isHomeserverAllowed(db: EoDb, homeserver: string): Promise
 
   // Check server_rules
   const rule = config.server_rules.find(r => r.homeserver === homeserver);
-  if (rule) return rule.mode !== 'whitelist' || true; // whitelist still allows the server, just gates users
+  if (rule) return true; // server has an explicit rule — allowed (user gating is separate)
 
   // Legacy: empty list = no restriction
   if (config.allowed_homeservers.length === 0) return true;
