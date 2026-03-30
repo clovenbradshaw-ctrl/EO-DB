@@ -144,8 +144,6 @@ export function deriveColumns(
 
     for (const [key, val] of Object.entries(source)) {
       if (key.startsWith('_')) continue;
-      // Skip array-valued fields (e.g. Airtable table schema metadata)
-      if (Array.isArray(val)) continue;
       const arr = keyValues.get(key) || [];
       arr.push(val);
       keyValues.set(key, arr);
