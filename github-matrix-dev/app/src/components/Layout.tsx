@@ -21,8 +21,11 @@ import { GraphView } from './GraphView';
 import { SettingsView } from './SettingsView';
 import { SpaceMembers } from './SpaceMembers';
 import { BuilderView } from './builder/BuilderView';
+import { RecordPageView } from './builder/RecordPageView';
+import { useBuilderStore } from '../store/builder-store';
 import { useTheme, spaceBackgroundTint, type Theme } from '../theme';
 import type { EoState } from '../db/types';
+import type { ViewDefinition } from '../blocks/types';
 import { TimeScrubber } from './TimeScrubber';
 import { type TimeScrubberFilter, type DateColumnOption, DEFAULT_FILTER, detectDateColumns } from './time-scrubber-utils';
 import { hasFieldsSubObject, buildFieldNameMap } from './filter-types';
@@ -507,14 +510,88 @@ export function Layout({ session, onLogout }: LayoutProps) {
         </main>
 
         {selectedRecord && activeView === 'horizon' && (
-          <RecordDetailDrawer
-            target={selectedRecord}
+          <RecordPageOrDrawer
+            recordTarget={selectedRecord}
+            allStates={allStates}
             onClose={() => setSelectedRecord(null)}
             onNavigate={(t) => setSelectedRecord(t)}
           />
         )}
       </div>
     </div>
+  );
+}
+
+/**
+ * RecordPageOrDrawer — When a record is selected, check if there's a custom
+ * record page view for the record's collection. If yes, render RecordPageView
+ * in a drawer. If no, fall back to the default RecordDetailDrawer.
+ */
+function RecordPageOrDrawer({ recordTarget, allStates, onClose, onNavigate }: {
+  recordTarget: string;
+  allStates: EoState[];
+  onClose: () => void;
+  onNavigate: (target: string) => void;
+}) {
+  const loadView = useBuilderStore((s) => s.loadView);
+
+  // Find a record page view whose recordSource.scope matches this record's parent
+  const recordPageView = useMemo(() => {
+    const parts = recordTarget.split('.');
+    const possibleScopes: string[] = [];
+    for (let i = parts.length - 1; i >= 1; i--) {
+      possibleScopes.push(parts.slice(0, i).join('.'));
+    }
+
+    const viewStates = allStates.filter(s => s.target.startsWith('views.'));
+    for (const vs of viewStates) {
+      const def = vs.value as ViewDefinition | null;
+      if (def?.pageType === 'record' && def.recordSource?.scope) {
+        if (possibleScopes.includes(def.recordSource.scope)) {
+          const viewId = vs.target.replace(/^views\./, '');
+          return { viewId, definition: def };
+        }
+      }
+    }
+    return null;
+  }, [recordTarget, allStates]);
+
+  // Load the record page view into the builder store when found
+  useEffect(() => {
+    if (recordPageView) {
+      loadView(recordPageView.viewId, recordPageView.definition);
+    }
+  }, [recordPageView, loadView]);
+
+  // If we have a matching record page, render RecordPageView in a panel
+  if (recordPageView) {
+    return (
+      <div style={{
+        position: 'fixed', inset: 0, display: 'flex',
+        justifyContent: 'flex-end', zIndex: 1000,
+        background: 'rgba(0,0,0,0.3)',
+      }} onClick={onClose}>
+        <div style={{
+          width: 720, maxWidth: '100vw', height: '100vh',
+          background: 'var(--bg, #fff)',
+        }} onClick={e => e.stopPropagation()}>
+          <RecordPageView
+            recordTarget={recordTarget}
+            onNavigate={onNavigate}
+            onBack={onClose}
+          />
+        </div>
+      </div>
+    );
+  }
+
+  // Fallback to default drawer
+  return (
+    <RecordDetailDrawer
+      target={recordTarget}
+      onClose={onClose}
+      onNavigate={onNavigate}
+    />
   );
 }
 
