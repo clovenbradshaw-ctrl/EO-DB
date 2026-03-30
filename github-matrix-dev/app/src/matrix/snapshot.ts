@@ -1,135 +1,31 @@
 /**
  * Snapshot — create, upload, download, and apply database snapshots.
  *
- * Snapshots are hydration accelerators stored as encrypted binary blobs
- * in the Matrix media store. The room event history is the source of truth.
+ * Snapshots are delta-only: each one contains events since the last snapshot
+ * plus up to 25 previous snapshot URIs for fast chain traversal. Below the
+ * snapshot frequency threshold, hydration state lives in room data only.
  *
- * Full snapshots include the event log so that a device hydrated from a
- * snapshot can serve as a peer sync source for other devices.
+ * The room event history remains the source of truth.
  */
 
 import { pack, unpack } from 'msgpackr';
 import type { MatrixClient } from 'matrix-js-sdk';
 import type { EoStore } from '../db/encrypted-store';
-import type { EoState, GraphEdge, EvaRegistration, EoEvent } from '../db/types';
+import type { EoEvent } from '../db/types';
 import { processEvent } from '../db/fold';
 import { EO_SNAPSHOT_TYPE, EO_SNAPSHOT_STATE_TYPE } from './event-bridge';
 import { readLogSince } from '../db/log';
 
-interface Snapshot {
-  version: 2;
-  seq: number;
-  ts: string;
-  created_by: string;
-  state: Record<string, EoState>;
-  graph_fwd: Record<string, GraphEdge>;
-  graph_rev: Record<string, GraphEdge>;
-  eva: Record<string, EvaRegistration>;
-  /** Event log — included so hydrated devices can serve as peer sync sources. */
-  log?: EoEvent[];
-  /** Idempotency keys — included so hydrated devices don't re-fold events. */
-  idem?: Record<string, number>;
-}
-
-/**
- * Create a snapshot from current store state, including the event log.
- */
-export async function createSnapshot(
-  store: EoStore,
-  myUserId: string,
-): Promise<Snapshot> {
-  const state: Record<string, EoState> = {};
-  const stateEntries = await store.iterator('state:');
-  for (const [key, value] of stateEntries) {
-    const target = key.slice(6); // remove 'state:'
-    state[target] = value as EoState;
-  }
-
-  const graph_fwd: Record<string, GraphEdge> = {};
-  const fwdEntries = await store.iterator('graph:fwd:');
-  for (const [key, value] of fwdEntries) {
-    graph_fwd[key] = value as GraphEdge;
-  }
-
-  const graph_rev: Record<string, GraphEdge> = {};
-  const revEntries = await store.iterator('graph:rev:');
-  for (const [key, value] of revEntries) {
-    graph_rev[key] = value as GraphEdge;
-  }
-
-  const eva: Record<string, EvaRegistration> = {};
-  const evaEntries = await store.iterator('eva:');
-  for (const [key, value] of evaEntries) {
-    const target = key.slice(4); // remove 'eva:'
-    eva[target] = value as EvaRegistration;
-  }
-
-  // Include the event log so hydrated devices have full history
-  const log = await readLogSince(store, 0);
-
-  // Include idempotency keys so hydrated devices don't re-process events
-  const idem: Record<string, number> = {};
-  const idemEntries = await store.iterator('idem:');
-  for (const [key, value] of idemEntries) {
-    idem[key.slice(5)] = value as number; // remove 'idem:'
-  }
-
-  const seq = await store.getCurrentSeq();
-
-  return {
-    version: 2,
-    seq,
-    ts: new Date().toISOString(),
-    created_by: myUserId,
-    state,
-    graph_fwd,
-    graph_rev,
-    eva,
-    log,
-    idem,
-  };
-}
-
-/**
- * Serialize and upload a snapshot to the Matrix media store.
- */
-export async function uploadSnapshot(
-  client: MatrixClient,
-  roomId: string,
-  snapshot: Snapshot,
-): Promise<string> {
-  const binary = pack(snapshot);
-
-  const uploadResult = await client.uploadContent(new Blob([binary]), {
-    name: `eo-snapshot-${snapshot.seq}.bin`,
-    type: 'application/octet-stream',
-  });
-
-  const mxcUrl = uploadResult.content_uri;
-
-  await client.sendEvent(roomId, EO_SNAPSHOT_TYPE as any, {
-    mxc: mxcUrl,
-    seq: snapshot.seq,
-    ts: snapshot.ts,
-    size_bytes: binary.byteLength,
-    version: snapshot.version,
-  });
-
-  // Store the URI in room state for instant hydration on fresh devices.
-  // This overwrites the previous state event so the latest URI is always
-  // available without paginating the timeline.
-  await setSnapshotStateEvent(client, roomId, mxcUrl, snapshot.seq);
-
-  return mxcUrl;
-}
+/** Maximum number of previous snapshot URIs carried in each snapshot. */
+const MAX_PREV_MXCS = 25;
 
 /**
  * Store the latest snapshot URI in room state for fast hydration.
  *
  * Room state is available instantly via `room.currentState` — no timeline
  * pagination needed. Each call overwrites the previous value so the state
- * always points to the most recent snapshot. The snapshot blob itself
- * carries `prev_mxc` to breadcrumb backwards through history. If any blob
+ * always points to the most recent snapshot. The snapshot blob carries
+ * `prev_mxcs` (up to 25 URIs) for fast chain traversal. If any blob
  * goes missing from the media store, the room timeline is the fallback.
  */
 export async function setSnapshotStateEvent(
@@ -150,9 +46,9 @@ export async function setSnapshotStateEvent(
  * via timeline pagination.
  *
  * The room state gives us the latest mxc URI in O(1). From there the
- * snapshot blob's `prev_mxc` field links backwards through the full
- * history. The timeline fallback handles rooms that predate state-based
- * tracking.
+ * snapshot blob's `prev_mxcs` array links backwards through up to 25
+ * prior snapshots. The timeline fallback handles rooms that predate
+ * state-based tracking.
  */
 export async function findLatestSnapshot(
   client: MatrixClient,
@@ -207,80 +103,27 @@ export async function findLatestSnapshot(
   return latest;
 }
 
+/* ── Delta Snapshots ──────────────────────────────────────── */
+
 /**
- * Download and apply a snapshot to the store.
- *
- * Loads state, graph, EVA registrations, and (if present) the event log
- * and idempotency keys. The seq counter is set to the snapshot's seq so
- * new events continue from the right place.
+ * A delta snapshot captures only the log events since the last snapshot.
+ * Each delta carries up to 25 previous snapshot URIs (`prev_mxcs`) so
+ * hydrating devices can jump back in large strides instead of walking
+ * the chain one link at a time.
  */
-export async function applySnapshot(
-  client: MatrixClient,
-  store: EoStore,
-  mxcUrl: string,
-  spacePrefix?: string,
-): Promise<number> {
-  const httpUrl = client.mxcUrlToHttp(mxcUrl);
-  if (!httpUrl) throw new Error('Cannot resolve mxc URL');
-
-  const response = await fetch(httpUrl);
-  const buffer = await response.arrayBuffer();
-  const snapshot = unpack(new Uint8Array(buffer)) as Snapshot;
-
-  // Helper: does a target belong to this space?
-  const inScope = (target: string) => !spacePrefix || target.startsWith(spacePrefix);
-
-  // Load state (filtered by space)
-  for (const [target, state] of Object.entries(snapshot.state)) {
-    if (inScope(target)) {
-      await store.put(`state:${target}`, state);
-    }
-  }
-
-  // Load graph (filtered — graph keys embed the full target path)
-  for (const [key, edge] of Object.entries(snapshot.graph_fwd)) {
-    if (inScope(edge.source)) {
-      await store.put(key, edge);
-    }
-  }
-  for (const [key, edge] of Object.entries(snapshot.graph_rev)) {
-    if (inScope(edge.dest)) {
-      await store.put(key, edge);
-    }
-  }
-
-  // Load EVA registrations (filtered by space)
-  for (const [target, reg] of Object.entries(snapshot.eva)) {
-    if (inScope(target)) {
-      await store.put(`eva:${target}`, reg);
-    }
-  }
-
-  // Load event log — only events in scope (v2 snapshots include this)
-  let maxSeq = 0;
-  if (snapshot.log) {
-    for (const event of snapshot.log) {
-      if (inScope(event.target)) {
-        const padded = String(event.seq).padStart(12, '0');
-        await store.put(`log:${padded}`, event);
-        if (event.seq > maxSeq) maxSeq = event.seq;
-      }
-    }
-  }
-
-  // Load idempotency keys (v2 snapshots include this)
-  if (snapshot.idem) {
-    for (const [id, seq] of Object.entries(snapshot.idem)) {
-      await store.put(`idem:${id}`, seq);
-    }
-  }
-
-  // When space-scoped, use the max seq from filtered events (may differ from snapshot.seq)
-  return spacePrefix ? maxSeq : snapshot.seq;
+export interface DeltaSnapshot {
+  version: 2;
+  type: 'delta';
+  from_seq: number;        // exclusive: events after this seq
+  to_seq: number;          // inclusive: up to and including this seq
+  prev_mxcs: string[];     // most-recent-first, up to MAX_PREV_MXCS URIs
+  ts: string;
+  created_by: string;
+  events: EoEvent[];
 }
 
 /**
- * Auto-snapshot: create every 500 log entries.
+ * Auto-snapshot: create a delta every 500 log entries.
  * Below this threshold the hydration state lives in room data only.
  */
 const SNAPSHOT_FREQUENCY = 500;
@@ -295,32 +138,17 @@ export async function maybeCreateSnapshot(
   const lastSnapshotSeq = (await store.get('meta:snapshot_seq')) || 0;
 
   if (lastSeq - lastSnapshotSeq >= SNAPSHOT_FREQUENCY) {
-    const snapshot = await createSnapshot(store, myUserId);
-    await uploadSnapshot(client, roomId, snapshot);
+    const delta = await createDeltaSnapshot(store, myUserId);
+    const mxc = await uploadDeltaSnapshot(client, roomId, delta);
     await store.put('meta:snapshot_seq', lastSeq);
+    await store.put('meta:snapshot_mxc', mxc);
+    await store.put('meta:snapshot_prev_mxcs', [mxc, ...delta.prev_mxcs].slice(0, MAX_PREV_MXCS));
   }
-}
-
-/* ── Delta Snapshots ──────────────────────────────────────── */
-
-/**
- * A delta snapshot captures only the log events since the last snapshot.
- * Each delta references the previous snapshot's mxc URI, forming a chain
- * that allows full reconstruction by walking backwards.
- */
-interface DeltaSnapshot {
-  version: 1;
-  type: 'delta';
-  from_seq: number;       // exclusive: events after this seq
-  to_seq: number;         // inclusive: up to and including this seq
-  prev_mxc: string | null; // mxc URI of the previous delta (or null if first)
-  ts: string;
-  created_by: string;
-  events: EoEvent[];
 }
 
 /**
  * Create a delta snapshot from the log events since the last snapshot.
+ * Carries prev_mxcs from store for chain traversal.
  */
 export async function createDeltaSnapshot(
   store: EoStore,
@@ -328,16 +156,16 @@ export async function createDeltaSnapshot(
 ): Promise<DeltaSnapshot> {
   const lastSnapshotSeq: number = (await store.get('meta:snapshot_seq')) || 0;
   const currentSeq = await store.getCurrentSeq();
-  const prevMxc: string | null = (await store.get('meta:snapshot_mxc')) || null;
+  const prevMxcs: string[] = (await store.get('meta:snapshot_prev_mxcs')) || [];
 
   const events = await readLogSince(store, lastSnapshotSeq);
 
   return {
-    version: 1,
+    version: 2,
     type: 'delta',
     from_seq: lastSnapshotSeq,
     to_seq: currentSeq,
-    prev_mxc: prevMxc,
+    prev_mxcs: prevMxcs.slice(0, MAX_PREV_MXCS),
     ts: new Date().toISOString(),
     created_by: myUserId,
     events,
@@ -345,10 +173,11 @@ export async function createDeltaSnapshot(
 }
 
 /**
- * Upload a delta snapshot and return its mxc URI.
+ * Upload a delta snapshot to Matrix media and post a timeline event.
  */
 export async function uploadDeltaSnapshot(
   client: MatrixClient,
+  roomId: string,
   delta: DeltaSnapshot,
 ): Promise<string> {
   const binary = pack(delta);
@@ -358,7 +187,20 @@ export async function uploadDeltaSnapshot(
     type: 'application/octet-stream',
   });
 
-  return uploadResult.content_uri;
+  const mxcUrl = uploadResult.content_uri;
+
+  await client.sendEvent(roomId, EO_SNAPSHOT_TYPE as any, {
+    mxc: mxcUrl,
+    seq: delta.to_seq,
+    ts: delta.ts,
+    size_bytes: binary.byteLength,
+    version: delta.version,
+    type: 'delta',
+  });
+
+  await setSnapshotStateEvent(client, roomId, mxcUrl, delta.to_seq);
+
+  return mxcUrl;
 }
 
 /**
@@ -379,10 +221,10 @@ export async function downloadDeltaSnapshot(
 /**
  * Restore from a chain of delta snapshots.
  *
- * Walks the prev_mxc chain backwards from the given mxc URI, collecting
- * deltas until it reaches the local seq (i.e. events we already have).
- * Then applies them in chronological order through the fold engine,
- * which handles deduplication via content-addressable hashing.
+ * Uses `prev_mxcs` to skip ahead by up to 25 snapshots at a time instead
+ * of downloading each link individually. Walks backwards until it reaches
+ * the local seq, then applies events in chronological order through the
+ * fold engine which handles dedup via content-addressable hashing.
  */
 export async function restoreFromDeltaChain(
   client: MatrixClient,
@@ -406,17 +248,21 @@ export async function restoreFromDeltaChain(
     // If this delta starts at or before our local seq, we have continuity
     if (delta.from_seq <= localSeq) break;
 
-    currentMxc = delta.prev_mxc;
+    // Jump as far back as possible using prev_mxcs (most-recent-first).
+    // The last entry is the oldest reachable snapshot — start there so
+    // we cover the most ground in one hop. The next iteration will
+    // download it, check its range, and either collect it or jump again
+    // using *its* prev_mxcs.
+    currentMxc = delta.prev_mxcs.length > 0
+      ? delta.prev_mxcs[delta.prev_mxcs.length - 1]
+      : null;
   }
 
   // Apply events from each delta through the fold engine.
-  // processEvent handles dedup: events we already have are skipped
-  // via the idempotency check (content hash or client_event_id).
   let lastAppliedSeq = localSeq;
   for (const delta of deltas) {
     for (const event of delta.events) {
-      if (event.seq <= localSeq) continue; // fast-skip known events
-      // Skip events outside this space's scope
+      if (event.seq <= localSeq) continue;
       if (spacePrefix && !event.target.startsWith(spacePrefix)) continue;
       const seq = await processEvent(store, event, onEvent);
       lastAppliedSeq = Math.max(lastAppliedSeq, seq);
