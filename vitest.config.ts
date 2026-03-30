@@ -5,5 +5,6 @@ export default defineConfig({
     globals: true,
     testTimeout: 15000,
     fileParallelism: false,
+    exclude: ['github-matrix-dev/**', 'node_modules/**'],
   },
 });

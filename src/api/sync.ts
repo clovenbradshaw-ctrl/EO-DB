@@ -4,7 +4,7 @@ import { getCurrentSeq } from '../db/level.js';
 import { readLogSince } from '../db/log.js';
 import { Feed } from '../db/feed.js';
 import { verifyMatrixToken } from '../auth/matrix.js';
-import { isAccountAllowed, extractHomeserver } from '../auth/matrix-auth-config.js';
+import { isAccountAllowed } from '../auth/matrix-auth-config.js';
 import type { EoEvent, Operator } from '../db/types.js';
 import type { RoomSyncCoordinator } from '../ingestion/room-sync-coordinator.js';
 import websocketPlugin from '@fastify/websocket';
