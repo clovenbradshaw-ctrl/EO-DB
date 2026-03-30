@@ -213,6 +213,194 @@ function evaluateRule(value: any, rule: FilterRule): boolean {
   }
 }
 
+// ─── EO / SQL ↔ FilterRule Conversion ─────────────────────────────────
+
+/** Operator mapping: EO filter syntax → FilterOperator */
+const EO_OP_MAP: Record<string, FilterOperator> = {
+  '=': 'equals',
+  '!=': 'not_equals',
+  '~': 'contains',
+  '!~': 'not_contains',
+  '>': 'gt',
+  '<': 'lt',
+  '>=': 'gte',
+  '<=': 'lte',
+};
+
+const FILTER_OP_TO_EO: Record<FilterOperator, string> = {
+  equals: '=',
+  not_equals: '!=',
+  contains: '~',
+  not_contains: '!~',
+  starts_with: '^=',
+  ends_with: '$=',
+  is_empty: '=∅',
+  is_not_empty: '!=∅',
+  gt: '>',
+  lt: '<',
+  gte: '>=',
+  lte: '<=',
+};
+
+const FILTER_OP_TO_SQL: Record<FilterOperator, string> = {
+  equals: '=',
+  not_equals: '!=',
+  contains: 'LIKE',
+  not_contains: 'NOT LIKE',
+  starts_with: 'LIKE',
+  ends_with: 'LIKE',
+  is_empty: 'IS NULL',
+  is_not_empty: 'IS NOT NULL',
+  gt: '>',
+  lt: '<',
+  gte: '>=',
+  lte: '<=',
+};
+
+/**
+ * Parse an EO filter expression (the part inside brackets) into FilterRules.
+ * Example: "status=active,score>100,name~John"
+ */
+export function parseEoFilterExpr(expr: string): { rules: FilterRule[]; conjunction: 'AND' | 'OR' } {
+  const rules: FilterRule[] = [];
+  // EO uses comma for AND, pipe for OR
+  const isOr = expr.includes('|') && !expr.includes(',');
+  const parts = isOr ? expr.split('|') : expr.split(',');
+  const conjunction: 'AND' | 'OR' = isOr ? 'OR' : 'AND';
+
+  for (const part of parts) {
+    const trimmed = part.trim();
+    if (!trimmed) continue;
+
+    // Match: field{op}value  (ops: >=, <=, !=, !~, ~, >, <, =)
+    const m = trimmed.match(/^(\w+)(>=|<=|!=|!~|~|>|<|=)(.*)$/);
+    if (!m) continue;
+
+    const [, field, eoOp, value] = m;
+    const operator = EO_OP_MAP[eoOp] || 'equals';
+
+    // Handle empty checks
+    if (value === '∅') {
+      rules.push({ id: crypto.randomUUID(), field, operator: eoOp === '!' ? 'is_not_empty' : 'is_empty', value: '' });
+      continue;
+    }
+
+    rules.push({ id: crypto.randomUUID(), field, operator, value });
+  }
+
+  return { rules, conjunction };
+}
+
+/**
+ * Parse a SQL WHERE clause into FilterRules.
+ * Example: "status = 'active' AND score > 100"
+ */
+export function parseSqlWhereClause(whereStr: string): { rules: FilterRule[]; conjunction: 'AND' | 'OR' } {
+  const rules: FilterRule[] = [];
+  const conjunction: 'AND' | 'OR' = /\bOR\b/i.test(whereStr) ? 'OR' : 'AND';
+  const parts = whereStr.split(/\s+(?:AND|OR)\s+/i);
+
+  for (const part of parts) {
+    const trimmed = part.trim();
+    if (!trimmed) continue;
+
+    // IS NULL / IS NOT NULL
+    const nullMatch = trimmed.match(/^(\w+)\s+(IS\s+NOT\s+NULL|IS\s+NULL)$/i);
+    if (nullMatch) {
+      const operator: FilterOperator = /NOT/i.test(nullMatch[2]) ? 'is_not_empty' : 'is_empty';
+      rules.push({ id: crypto.randomUUID(), field: nullMatch[1], operator, value: '' });
+      continue;
+    }
+
+    // field op value
+    const m = trimmed.match(/^(\w+)\s*(NOT\s+LIKE|LIKE|>=|<=|!=|<>|>|<|=)\s*(.+)$/i);
+    if (!m) continue;
+
+    const [, field, sqlOp, rawVal] = m;
+    let value = rawVal.trim().replace(/^['"]|['"]$/g, '');
+    const opUpper = sqlOp.toUpperCase().replace(/\s+/g, ' ');
+
+    let operator: FilterOperator;
+    switch (opUpper) {
+      case '=': operator = 'equals'; break;
+      case '!=': case '<>': operator = 'not_equals'; break;
+      case '>': operator = 'gt'; break;
+      case '<': operator = 'lt'; break;
+      case '>=': operator = 'gte'; break;
+      case '<=': operator = 'lte'; break;
+      case 'LIKE':
+        if (value.startsWith('%') && value.endsWith('%')) {
+          operator = 'contains'; value = value.slice(1, -1);
+        } else if (value.endsWith('%')) {
+          operator = 'starts_with'; value = value.slice(0, -1);
+        } else if (value.startsWith('%')) {
+          operator = 'ends_with'; value = value.slice(1);
+        } else {
+          operator = 'equals';
+        }
+        break;
+      case 'NOT LIKE':
+        operator = 'not_contains';
+        value = value.replace(/^%|%$/g, '');
+        break;
+      default: operator = 'equals';
+    }
+
+    rules.push({ id: crypto.randomUUID(), field, operator, value });
+  }
+
+  return { rules, conjunction };
+}
+
+/** Convert FilterRules to an EO filter expression string. */
+export function filtersToEo(
+  scope: string,
+  rules: FilterRule[],
+  conjunction: 'AND' | 'OR',
+): string {
+  if (rules.length === 0) return `${scope}.*`;
+
+  const sep = conjunction === 'OR' ? '|' : ',';
+  const exprs = rules.map((r) => {
+    const eoOp = FILTER_OP_TO_EO[r.operator] || '=';
+    if (r.operator === 'is_empty') return `${r.field}=∅`;
+    if (r.operator === 'is_not_empty') return `${r.field}!=∅`;
+    return `${r.field}${eoOp}${r.value}`;
+  });
+
+  return `${scope}[${exprs.join(sep)}]`;
+}
+
+/** Convert FilterRules to a SQL SELECT string. */
+export function filtersToSql(
+  scope: string,
+  rules: FilterRule[],
+  conjunction: 'AND' | 'OR',
+): string {
+  const table = scope.split('.').pop() || scope;
+
+  if (rules.length === 0) return `SELECT * FROM ${table}`;
+
+  const clauses = rules.map((r) => {
+    const sqlOp = FILTER_OP_TO_SQL[r.operator];
+    switch (r.operator) {
+      case 'is_empty': return `${r.field} IS NULL`;
+      case 'is_not_empty': return `${r.field} IS NOT NULL`;
+      case 'contains': return `${r.field} LIKE '%${r.value}%'`;
+      case 'not_contains': return `${r.field} NOT LIKE '%${r.value}%'`;
+      case 'starts_with': return `${r.field} LIKE '${r.value}%'`;
+      case 'ends_with': return `${r.field} LIKE '%${r.value}'`;
+      default: {
+        const isNum = !isNaN(Number(r.value)) && r.value !== '';
+        const val = isNum ? r.value : `'${r.value}'`;
+        return `${r.field} ${sqlOp} ${val}`;
+      }
+    }
+  });
+
+  return `SELECT * FROM ${table} WHERE ${clauses.join(` ${conjunction} `)}`;
+}
+
 export function applyFilters(
   records: EoState[],
   filters: FilterRule[],
