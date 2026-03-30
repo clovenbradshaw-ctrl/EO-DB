@@ -282,3 +282,37 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
 export function useTheme() {
   return useContext(ThemeContext);
 }
+
+/**
+ * Generate subtle space-specific background color overrides.
+ * Each space gets a unique but very subtle tint derived from its name,
+ * so users can visually distinguish which space they're in.
+ */
+export function spaceBackgroundTint(spaceName: string | null, mode: 'light' | 'dark'): {
+  bg: string;
+  bgCard: string;
+  bgMuted: string;
+} | null {
+  if (!spaceName) return null;
+
+  // Simple hash from space name to get a consistent hue
+  let hash = 0;
+  for (let i = 0; i < spaceName.length; i++) {
+    hash = spaceName.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  const hue = ((hash % 360) + 360) % 360;
+
+  if (mode === 'light') {
+    return {
+      bg: `hsl(${hue}, 12%, 97%)`,
+      bgCard: `hsl(${hue}, 10%, 99%)`,
+      bgMuted: `hsl(${hue}, 10%, 95%)`,
+    };
+  } else {
+    return {
+      bg: `hsl(${hue}, 10%, 7%)`,
+      bgCard: `hsl(${hue}, 8%, 9%)`,
+      bgMuted: `hsl(${hue}, 8%, 12%)`,
+    };
+  }
+}

@@ -17,7 +17,7 @@ import { processEvent } from '../db/fold';
 import { eventHash } from '../db/hash';
 import { AsyncMutex } from '../db/mutex';
 import { EO_EVENT_TYPE, getDataRoom, matrixEventToEo, sendEoEvent } from './event-bridge';
-import { findLatestSnapshot, applySnapshot, maybeCreateSnapshot, createSnapshot, uploadSnapshot, createDeltaSnapshot, uploadDeltaSnapshot, setSnapshotStateEvent, restoreFromDeltaChain } from './snapshot';
+import { findLatestSnapshot, maybeCreateSnapshot, createSnapshot, uploadSnapshot, createDeltaSnapshot, uploadDeltaSnapshot, setSnapshotStateEvent, restoreFromDeltaChain } from './snapshot';
 
 /** Mutex protecting the offline queue from concurrent read-modify-write. */
 const queueMutex = new AsyncMutex();
@@ -55,17 +55,21 @@ export class SyncManager {
   private roomId: string;
   private store: EoStore;
   private onEvent?: (event: any) => void;
+  /** When set, only events whose target starts with this prefix are folded. */
+  private spacePrefix?: string;
 
   constructor(
     client: MatrixClient,
     roomId: string,
     store: EoStore,
     onEvent?: (event: any) => void,
+    spacePrefix?: string,
   ) {
     this.client = client;
     this.roomId = roomId;
     this.store = store;
     this.onEvent = onEvent;
+    this.spacePrefix = spacePrefix;
   }
 
   /**
@@ -104,7 +108,7 @@ export class SyncManager {
     const snap = await findLatestSnapshot(this.client, this.roomId);
     if (!snap) return;
     const restoredSeq = await restoreFromDeltaChain(
-      this.client, this.store, snap.mxc, this.onEvent,
+      this.client, this.store, snap.mxc, this.onEvent, this.spacePrefix,
     );
     await this.store.put('meta:snapshot_seq', restoredSeq);
   }
@@ -284,6 +288,9 @@ export class SyncManager {
    */
   private async processIncomingEvent(matrixEvent: MatrixEvent): Promise<void> {
     const eoEvent = matrixEventToEo(matrixEvent);
+
+    // Skip events outside this space's scope
+    if (this.spacePrefix && !eoEvent.target.startsWith(this.spacePrefix)) return;
 
     // Fast path: if we have a client_event_id, check locally before entering
     // the fold mutex. This avoids queueing behind the mutex for events we

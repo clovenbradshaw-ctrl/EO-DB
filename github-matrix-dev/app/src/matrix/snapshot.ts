@@ -218,6 +218,7 @@ export async function applySnapshot(
   client: MatrixClient,
   store: EoStore,
   mxcUrl: string,
+  spacePrefix?: string,
 ): Promise<number> {
   const httpUrl = client.mxcUrlToHttp(mxcUrl);
   if (!httpUrl) throw new Error('Cannot resolve mxc URL');
@@ -226,29 +227,44 @@ export async function applySnapshot(
   const buffer = await response.arrayBuffer();
   const snapshot = unpack(new Uint8Array(buffer)) as Snapshot;
 
-  // Load state
+  // Helper: does a target belong to this space?
+  const inScope = (target: string) => !spacePrefix || target.startsWith(spacePrefix);
+
+  // Load state (filtered by space)
   for (const [target, state] of Object.entries(snapshot.state)) {
-    await store.put(`state:${target}`, state);
+    if (inScope(target)) {
+      await store.put(`state:${target}`, state);
+    }
   }
 
-  // Load graph
+  // Load graph (filtered — graph keys embed the full target path)
   for (const [key, edge] of Object.entries(snapshot.graph_fwd)) {
-    await store.put(key, edge);
+    if (inScope(edge.source)) {
+      await store.put(key, edge);
+    }
   }
   for (const [key, edge] of Object.entries(snapshot.graph_rev)) {
-    await store.put(key, edge);
+    if (inScope(edge.dest)) {
+      await store.put(key, edge);
+    }
   }
 
-  // Load EVA registrations
+  // Load EVA registrations (filtered by space)
   for (const [target, reg] of Object.entries(snapshot.eva)) {
-    await store.put(`eva:${target}`, reg);
+    if (inScope(target)) {
+      await store.put(`eva:${target}`, reg);
+    }
   }
 
-  // Load event log (v2 snapshots include this)
+  // Load event log — only events in scope (v2 snapshots include this)
+  let maxSeq = 0;
   if (snapshot.log) {
     for (const event of snapshot.log) {
-      const padded = String(event.seq).padStart(12, '0');
-      await store.put(`log:${padded}`, event);
+      if (inScope(event.target)) {
+        const padded = String(event.seq).padStart(12, '0');
+        await store.put(`log:${padded}`, event);
+        if (event.seq > maxSeq) maxSeq = event.seq;
+      }
     }
   }
 
@@ -259,7 +275,8 @@ export async function applySnapshot(
     }
   }
 
-  return snapshot.seq;
+  // When space-scoped, use the max seq from filtered events (may differ from snapshot.seq)
+  return spacePrefix ? maxSeq : snapshot.seq;
 }
 
 /**
@@ -369,6 +386,7 @@ export async function restoreFromDeltaChain(
   store: EoStore,
   latestMxc: string,
   onEvent?: (event: any) => void,
+  spacePrefix?: string,
 ): Promise<number> {
   const localSeq = await store.getCurrentSeq();
   const deltas: DeltaSnapshot[] = [];
@@ -395,6 +413,8 @@ export async function restoreFromDeltaChain(
   for (const delta of deltas) {
     for (const event of delta.events) {
       if (event.seq <= localSeq) continue; // fast-skip known events
+      // Skip events outside this space's scope
+      if (spacePrefix && !event.target.startsWith(spacePrefix)) continue;
       const seq = await processEvent(store, event, onEvent);
       lastAppliedSeq = Math.max(lastAppliedSeq, seq);
     }
