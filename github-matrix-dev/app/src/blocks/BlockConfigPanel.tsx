@@ -1,7 +1,9 @@
 import { useBuilderStore } from '../store/builder-store';
 import { getRegistration } from './registry';
 import { useTheme, type Theme } from '../theme';
-import type { BlockNode, BlockId } from './types';
+import type { BlockNode, BlockId, DataBinding } from './types';
+import { ScopePicker } from '../components/ScopePicker';
+import { useDataBindingContext } from '../contexts/DataBindingContext';
 
 // ---------------------------------------------------------------------------
 // Find block in tree by ID
@@ -75,6 +77,7 @@ interface ConfigFormProps {
 
 function ConfigForm({ block, update, theme }: ConfigFormProps) {
   const s = makeFieldStyles(theme);
+  const { contextItem } = useDataBindingContext();
 
   switch (block.type) {
     case 'section':
@@ -83,6 +86,12 @@ function ConfigForm({ block, update, theme }: ConfigFormProps) {
           <Field label="Title" s={s}>
             <input style={s.input} value={block.props.title || ''} onChange={(e) => update('title', e.target.value)} />
           </Field>
+          <ScopePicker
+            label="Data Context (@)"
+            value={block.props.binding}
+            onChange={(binding: DataBinding) => update('binding', binding)}
+            context={contextItem}
+          />
           <Field label="Border" s={s}>
             <Checkbox checked={block.props.borderVisible !== false} onChange={(v) => update('borderVisible', v)} theme={theme} />
           </Field>
@@ -145,8 +154,14 @@ function ConfigForm({ block, update, theme }: ConfigFormProps) {
             </select>
           </Field>
           <Field label="Text" s={s}>
-            <input style={s.input} value={block.props.text || ''} onChange={(e) => update('text', e.target.value)} />
+            <input style={s.input} value={block.props.text || ''} placeholder="Static text or leave empty for binding" onChange={(e) => update('text', e.target.value)} />
           </Field>
+          <ScopePicker
+            label="Bind text from"
+            value={block.props.binding}
+            onChange={(binding: DataBinding) => update('binding', binding)}
+            context={contextItem}
+          />
           <Field label="Alignment" s={s}>
             <select style={s.select} value={block.props.alignment || 'left'} onChange={(e) => update('alignment', e.target.value)}>
               <option value="left">Left</option>
@@ -163,9 +178,16 @@ function ConfigForm({ block, update, theme }: ConfigFormProps) {
             <textarea
               style={{ ...s.input, minHeight: 60, resize: 'vertical' }}
               value={block.props.text || ''}
+              placeholder="Static text or leave empty for binding"
               onChange={(e) => update('text', e.target.value)}
             />
           </Field>
+          <ScopePicker
+            label="Bind text from"
+            value={block.props.binding}
+            onChange={(binding: DataBinding) => update('binding', binding)}
+            context={contextItem}
+          />
           <Field label="Alignment" s={s}>
             <select style={s.select} value={block.props.alignment || 'left'} onChange={(e) => update('alignment', e.target.value)}>
               <option value="left">Left</option>
@@ -179,7 +201,19 @@ function ConfigForm({ block, update, theme }: ConfigFormProps) {
     case 'table':
       return (
         <>
-          <Field label="Data Source" s={s}>
+          <ScopePicker
+            label="Data Source"
+            value={block.props.binding}
+            onChange={(binding: DataBinding) => {
+              update('binding', binding);
+              // Also set scope for backward compatibility
+              if (binding.mode === 'hierarchy' && binding.target) {
+                update('scope', binding.target);
+              }
+            }}
+            context={contextItem}
+          />
+          <Field label="Scope (legacy)" s={s}>
             <input style={s.input} placeholder="e.g. demo_space.clients" value={block.props.scope || ''} onChange={(e) => update('scope', e.target.value)} />
           </Field>
           <Field label="Search" s={s}>
@@ -231,6 +265,12 @@ function ConfigForm({ block, update, theme }: ConfigFormProps) {
           <Field label="Target" s={s}>
             <input style={s.input} placeholder="View ID or URL" value={block.props.actionTarget || ''} onChange={(e) => update('actionTarget', e.target.value)} />
           </Field>
+          <ScopePicker
+            label="Action Binding"
+            value={block.props.binding}
+            onChange={(binding: DataBinding) => update('binding', binding)}
+            context={contextItem}
+          />
         </>
       );
 

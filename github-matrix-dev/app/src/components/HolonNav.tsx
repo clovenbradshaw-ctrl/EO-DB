@@ -5,6 +5,7 @@ import type { FilterDefinition } from './filter-types';
 import { useTheme, type Theme } from '../theme';
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 import { TypeSelector, TypeBadge } from './TypeSelector';
+import { buildTree, formatName, type TreeNode } from './scope-picker-utils';
 
 interface HolonNavProps {
   selectedScope: string | null;
@@ -12,109 +13,6 @@ interface HolonNavProps {
   onSelectSegment?: (scope: string, segment: FilterDefinition) => void;
   /** Prefix to scope which records are loaded. Empty string = all records. */
   statePrefix?: string;
-}
-
-interface TreeNode {
-  segment: string;       // just this level's name (e.g. "tblClients")
-  fullPath: string;      // full dot-path (e.g. "app.tblClients")
-  children: TreeNode[];
-  childCount: number;    // number of direct children with state
-  conCount: number;      // children whose last_op is CON
-  segCount: number;      // children whose last_op is SEG
-  recCount: number;      // children whose last_op is REC
-  derivedCount: number;  // children at INS level 2+ (system-discovered)
-  segments?: Record<string, FilterDefinition>;
-  state?: EoState;       // the EoState for this node (if any)
-}
-
-function formatName(segment: string): string {
-  // Strip tbl/rec/fld prefixes, add spaces before capitals
-  let name = segment.replace(/^(tbl|rec|fld)/, '');
-  name = name.replace(/([a-z])([A-Z])/g, '$1 $2');
-  return name || segment;
-}
-
-function buildTree(states: EoState[], statePrefix: string): TreeNode[] {
-  const pathSet = new Map<string, { childPaths: Set<string>; state?: EoState }>();
-
-  for (const s of states) {
-    if (s.value?._alias) continue;
-    const parts = s.target.split('.');
-
-    // Register every prefix level
-    for (let i = 1; i <= parts.length; i++) {
-      const path = parts.slice(0, i).join('.');
-      if (!pathSet.has(path)) {
-        pathSet.set(path, { childPaths: new Set() });
-      }
-    }
-
-    // Register this target's state at its path
-    const entry = pathSet.get(s.target)!;
-    entry.state = s;
-
-    // Register as child of parent
-    if (parts.length > 1) {
-      const parentPath = parts.slice(0, -1).join('.');
-      pathSet.get(parentPath)!.childPaths.add(s.target);
-    }
-  }
-
-  function buildNode(fullPath: string): TreeNode {
-    const entry = pathSet.get(fullPath)!;
-    const segment = fullPath.split('.').pop()!;
-    const childPaths = [...entry.childPaths].sort();
-    const children = childPaths
-      .filter(cp => pathSet.has(cp))
-      .map(cp => buildNode(cp));
-
-    const segments = entry.state?.value?._segments as Record<string, FilterDefinition> | undefined;
-
-    // Count children by operator type and derived status
-    let conCount = 0;
-    let segCount = 0;
-    let recCount = 0;
-    let derivedCount = 0;
-    for (const cp of entry.childPaths) {
-      const childEntry = pathSet.get(cp);
-      if (childEntry?.state) {
-        const op = childEntry.state.last_op;
-        if (op === 'CON') conCount++;
-        else if (op === 'SEG') segCount++;
-        else if (op === 'REC') recCount++;
-        if ((childEntry.state.level ?? 1) >= 2) derivedCount++;
-      }
-    }
-
-    return {
-      segment,
-      fullPath,
-      children,
-      childCount: entry.childPaths.size,
-      conCount,
-      segCount,
-      recCount,
-      derivedCount,
-      segments,
-      state: entry.state,
-    };
-  }
-
-  // Find root nodes — scoped to the statePrefix depth
-  // When statePrefix is 'space.amino.', roots are at depth 3 (e.g. space.amino.tblClients)
-  // When statePrefix is '', roots are at depth 1 (top-level segments)
-  const prefixDepth = statePrefix
-    ? statePrefix.split('.').filter(Boolean).length
-    : 0;
-
-  const roots: TreeNode[] = [];
-  for (const [path] of pathSet) {
-    const depth = path.split('.').length;
-    if (depth === prefixDepth + 1) {
-      roots.push(buildNode(path));
-    }
-  }
-  return roots;
 }
 
 export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, statePrefix = '' }: HolonNavProps) {

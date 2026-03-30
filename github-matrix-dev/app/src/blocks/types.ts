@@ -1,6 +1,51 @@
 import type { FilterRule } from '../components/filter-types';
 
 // ---------------------------------------------------------------------------
+// Data Binding — universal item selection for all blocks
+// ---------------------------------------------------------------------------
+
+/** How items are selected */
+export type SelectionMode = 'hierarchy' | 'depth' | 'type' | 'connection' | 'query';
+
+export interface DataBinding {
+  mode: SelectionMode;
+
+  // --- hierarchy mode ---
+  /** Target path selected in the tree (e.g., "app.tblClients") */
+  target?: string;
+  /** Whether to include descendants or just direct children */
+  depth?: 'children' | 'all';
+
+  // --- depth mode ---
+  /** Absolute depth level (e.g., 3 = all records across all tables) */
+  level?: number;
+  /** Optional root to scope the depth query */
+  root?: string;
+
+  // --- type mode ---
+  /** _type value to match (e.g., "Person", "Case") */
+  typeFilter?: string;
+  /** Optional root to scope the type query */
+  typeRoot?: string;
+
+  // --- connection mode ---
+  /** Field chain expression, e.g. "@.cases" or "@.assigned_to.cases" */
+  fieldChain?: string;
+
+  // --- query mode (power user) ---
+  /** Raw EOQL or SQL string */
+  query?: string;
+  /** Query language */
+  queryLang?: 'eo' | 'sql';
+
+  // --- shared ---
+  /** Additional filter rules applied after selection */
+  filters?: FilterRule[];
+  /** Field to extract (for single-value bindings like heading text) */
+  field?: string;
+}
+
+// ---------------------------------------------------------------------------
 // Block Type Discriminators
 // ---------------------------------------------------------------------------
 
@@ -67,6 +112,8 @@ export interface SectionProps {
   background?: string;
   borderVisible?: boolean;
   padding?: number;
+  /** Data binding — sets the @ context for child blocks */
+  binding?: DataBinding;
 }
 
 export interface ColumnsProps {
@@ -91,11 +138,15 @@ export interface HeadingProps {
   level: 1 | 2 | 3;
   text: string;
   alignment: 'left' | 'center';
+  /** Data binding — e.g. "@.name" to pull text from context item */
+  binding?: DataBinding;
 }
 
 export interface ParagraphProps {
   text: string;
   alignment: 'left' | 'center' | 'right';
+  /** Data binding — e.g. "@.description" to pull text from context item */
+  binding?: DataBinding;
 }
 
 export interface TableBlockProps {
@@ -109,6 +160,8 @@ export interface TableBlockProps {
   rowClickAction?: 'none' | 'detail' | 'url';
   rowClickTarget?: string;
   emptyText?: string;
+  /** Data binding — replaces scope when present */
+  binding?: DataBinding;
 }
 
 export interface ButtonProps {
@@ -121,4 +174,6 @@ export interface ButtonProps {
   actionPayload?: Record<string, any>;
   confirmationMessage?: string;
   visible?: boolean;
+  /** Data binding — for action target resolution */
+  binding?: DataBinding;
 }
