@@ -73,7 +73,7 @@ export function createStore(idb: EoIdb, cryptoKey: CryptoKey): EoStore {
     async getCurrentSeq(): Promise<number> {
       const raw = await idbGet(idb, 'meta:seq');
       if (!raw) return 0;
-      return decryptValue(raw) as Promise<number>;
+      return await decryptValue(raw) as number;
     },
 
     close(): void {
