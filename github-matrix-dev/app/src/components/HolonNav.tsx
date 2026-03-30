@@ -3,6 +3,8 @@ import type { EoState } from '../db/types';
 import { useEoStore } from '../store/eo-store';
 import type { FilterDefinition } from './filter-types';
 import { useTheme, type Theme } from '../theme';
+import { ContextMenu, type ContextMenuItem } from './ContextMenu';
+import { TypeSelector, TypeBadge } from './TypeSelector';
 
 interface HolonNavProps {
   selectedScope: string | null;
@@ -115,10 +117,14 @@ function buildTree(states: EoState[], statePrefix: string): TreeNode[] {
 
 export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, statePrefix = '' }: HolonNavProps) {
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
+  const getState = useEoStore((s) => s.getState);
+  const dispatch = useEoStore((s) => s.dispatch);
   const ready = useEoStore((s) => s.ready);
   const lastSeq = useEoStore((s) => s.lastSeq);
   const [allStates, setAllStates] = useState<EoState[]>([]);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; target: string } | null>(null);
+  const [typeSelector, setTypeSelector] = useState<{ x: number; y: number; target: string; currentType?: string } | null>(null);
   const { theme } = useTheme();
   const s = makeStyles(theme);
 
@@ -150,6 +156,47 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
     });
   }
 
+  function handleContextMenu(e: React.MouseEvent, fullPath: string) {
+    e.preventDefault();
+    e.stopPropagation();
+    setContextMenu({ x: e.clientX, y: e.clientY, target: fullPath });
+  }
+
+  function openTypeSelector(target: string, x: number, y: number) {
+    const state = allStates.find((s) => s.target === target);
+    setTypeSelector({ x, y, target, currentType: state?.value?._type });
+    setContextMenu(null);
+  }
+
+  async function handleTypeChange(target: string, type: string) {
+    try {
+      await dispatch({
+        op: 'DEF',
+        target,
+        operand: { _type: type || undefined },
+        agent: 'user',
+        ts: new Date().toISOString(),
+        acquired_ts: new Date().toISOString(),
+      });
+    } catch { /* ignore */ }
+    setTypeSelector(null);
+  }
+
+  function getContextMenuItems(target: string): ContextMenuItem[] {
+    const state = allStates.find((s) => s.target === target);
+    return [
+      {
+        label: state?.value?._type ? `Change type (${state.value._type})` : 'Set page type...',
+        onClick: () => openTypeSelector(target, contextMenu!.x, contextMenu!.y),
+      },
+      { label: '', onClick: () => {}, separator: true },
+      {
+        label: 'Copy target path',
+        onClick: () => navigator.clipboard.writeText(target),
+      },
+    ];
+  }
+
   function renderNode(node: TreeNode, depth: number) {
     const isActive = selectedScope === node.fullPath;
     const isExpanded = expanded.has(node.fullPath);
@@ -164,6 +211,7 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
             ...(isActive ? s.itemActive : {}),
           }}
           onClick={() => onSelectScope(node.fullPath)}
+          onContextMenu={(e) => handleContextMenu(e, node.fullPath)}
         >
           {/* Expand/collapse chevron */}
           <span
@@ -177,6 +225,13 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
           </span>
 
           <span style={s.name}>{formatName(node.segment)}</span>
+
+          {/* Type badge */}
+          {(() => {
+            const state = allStates.find((st) => st.target === node.fullPath);
+            const type = state?.value?._type;
+            return type ? <TypeBadge type={type} /> : null;
+          })()}
 
           {node.childCount > 0 && (
             <span style={s.count}>{node.childCount}</span>
@@ -231,6 +286,42 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
         )}
         {tree.map(node => renderNode(node, 0))}
       </div>
+
+      {/* Right-click context menu */}
+      {contextMenu && (
+        <ContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          items={getContextMenuItems(contextMenu.target)}
+          onClose={() => setContextMenu(null)}
+        />
+      )}
+
+      {/* Type selector popover */}
+      {typeSelector && (
+        <>
+          <div
+            style={{ position: 'fixed', inset: 0, zIndex: 9998 }}
+            onClick={() => setTypeSelector(null)}
+          />
+          <div style={{
+            position: 'fixed',
+            left: typeSelector.x,
+            top: typeSelector.y,
+            zIndex: 9999,
+            background: theme.bgCard,
+            border: `1px solid ${theme.border}`,
+            borderRadius: 8,
+            boxShadow: `0 8px 30px ${theme.shadow}`,
+          }}>
+            <TypeSelector
+              currentType={typeSelector.currentType}
+              onSelect={(type) => handleTypeChange(typeSelector.target, type)}
+              onClose={() => setTypeSelector(null)}
+            />
+          </div>
+        </>
+      )}
     </div>
   );
 }

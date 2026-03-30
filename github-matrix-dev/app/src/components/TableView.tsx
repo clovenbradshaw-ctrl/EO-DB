@@ -3,10 +3,13 @@ import type { EoState } from '../db/types';
 import { useEoStore } from '../store/eo-store';
 import { deriveColumns, type ColumnDef } from './filter-types';
 import { useTheme, type Theme } from '../theme';
+import { ContextMenu, type ContextMenuItem } from './ContextMenu';
+import { TypeSelector, TypeBadge } from './TypeSelector';
 
 interface TableViewProps {
   scope: string;
   onSelectRecord: (target: string) => void;
+  onViewHistory?: (target: string) => void;
   activeRecord?: string | null;
   session: { userId: string };
 }
@@ -82,13 +85,16 @@ function renderCell(value: any, key: string, onNavigate: (t: string) => void, t:
   return <span>{String(value)}</span>;
 }
 
-export function TableView({ scope, onSelectRecord, activeRecord, session }: TableViewProps) {
+export function TableView({ scope, onSelectRecord, onViewHistory, activeRecord, session }: TableViewProps) {
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
+  const dispatch = useEoStore((s) => s.dispatch);
   const ready = useEoStore((s) => s.ready);
   const lastSeq = useEoStore((s) => s.lastSeq);
 
   const [records, setRecords] = useState<EoState[]>([]);
   const [filterText, setFilterText] = useState('');
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; target: string } | null>(null);
+  const [typeSelector, setTypeSelector] = useState<{ x: number; y: number; target: string; currentType?: string } | null>(null);
   const { theme } = useTheme();
   const s = makeStyles(theme);
 
@@ -131,6 +137,57 @@ export function TableView({ scope, onSelectRecord, activeRecord, session }: Tabl
       return false;
     });
   }, [records, filterText]);
+
+  function handleContextMenu(e: React.MouseEvent, target: string) {
+    e.preventDefault();
+    e.stopPropagation();
+    const rec = records.find((r) => r.target === target);
+    setContextMenu({ x: e.clientX, y: e.clientY, target });
+  }
+
+  function getContextMenuItems(target: string): ContextMenuItem[] {
+    const rec = records.find((r) => r.target === target);
+    return [
+      {
+        label: rec?.value?._type ? `Change type (${rec.value._type})` : 'Set page type...',
+        onClick: () => {
+          setTypeSelector({
+            x: contextMenu!.x,
+            y: contextMenu!.y,
+            target,
+            currentType: rec?.value?._type,
+          });
+          setContextMenu(null);
+        },
+      },
+      {
+        label: 'View history',
+        onClick: () => {
+          onViewHistory?.(target);
+          onSelectRecord(target);
+        },
+      },
+      { label: '', onClick: () => {}, separator: true },
+      {
+        label: 'Copy target path',
+        onClick: () => navigator.clipboard.writeText(target),
+      },
+    ];
+  }
+
+  async function handleTypeChange(target: string, type: string) {
+    try {
+      await dispatch({
+        op: 'DEF',
+        target,
+        operand: { _type: type || undefined },
+        agent: 'user',
+        ts: new Date().toISOString(),
+        acquired_ts: new Date().toISOString(),
+      });
+    } catch { /* ignore */ }
+    setTypeSelector(null);
+  }
 
   return (
     <div style={s.container}>
@@ -177,6 +234,7 @@ export function TableView({ scope, onSelectRecord, activeRecord, session }: Tabl
                   key={rec.target}
                   style={isActive ? s.rowActive : undefined}
                   onClick={() => onSelectRecord(rec.target)}
+                  onContextMenu={(e) => handleContextMenu(e, rec.target)}
                   onMouseEnter={(e) => {
                     if (!isActive) (e.currentTarget as HTMLElement).style.background = theme.bgHover;
                   }}
@@ -187,10 +245,13 @@ export function TableView({ scope, onSelectRecord, activeRecord, session }: Tabl
                   {columns.map((col) => (
                     <td key={col.key} style={s.td}>
                       {col.key === '_record'
-                        ? <span style={{
-                            fontFamily: "'JetBrains Mono', monospace", fontSize: 11,
-                            color: theme.accent, cursor: 'pointer',
-                          }}>{rec.target.split('.').pop()}</span>
+                        ? <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                            <span style={{
+                              fontFamily: "'JetBrains Mono', monospace", fontSize: 11,
+                              color: theme.accent, cursor: 'pointer',
+                            }}>{rec.target.split('.').pop()}</span>
+                            {rec.value?._type && <TypeBadge type={rec.value._type} />}
+                          </span>
                         : renderCell(rec.value?.[col.key], col.key, onSelectRecord, theme)
                       }
                     </td>
@@ -201,6 +262,42 @@ export function TableView({ scope, onSelectRecord, activeRecord, session }: Tabl
           </tbody>
         </table>
       </div>
+
+      {/* Right-click context menu */}
+      {contextMenu && (
+        <ContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          items={getContextMenuItems(contextMenu.target)}
+          onClose={() => setContextMenu(null)}
+        />
+      )}
+
+      {/* Type selector popover */}
+      {typeSelector && (
+        <>
+          <div
+            style={{ position: 'fixed', inset: 0, zIndex: 9998 }}
+            onClick={() => setTypeSelector(null)}
+          />
+          <div style={{
+            position: 'fixed',
+            left: typeSelector.x,
+            top: typeSelector.y,
+            zIndex: 9999,
+            background: theme.bgCard,
+            border: `1px solid ${theme.border}`,
+            borderRadius: 8,
+            boxShadow: `0 8px 30px ${theme.shadow}`,
+          }}>
+            <TypeSelector
+              currentType={typeSelector.currentType}
+              onSelect={(type) => handleTypeChange(typeSelector.target, type)}
+              onClose={() => setTypeSelector(null)}
+            />
+          </div>
+        </>
+      )}
     </div>
   );
 }
