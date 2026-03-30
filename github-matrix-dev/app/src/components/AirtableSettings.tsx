@@ -1157,7 +1157,7 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       marginLeft: 22,
       marginBottom: 6,
       padding: '6px 8px',
-      background: t.bgSurface || t.bgApp,
+      background: t.bgMuted,
       borderRadius: 4,
       border: `1px solid ${t.borderLight}`,
     },
@@ -1181,7 +1181,7 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       padding: '2px 4px',
       borderRadius: 3,
       border: `1px solid ${t.border}`,
-      background: t.bgInput || t.bg,
+      background: t.bg,
       color: t.text,
     },
     fieldList: {
