@@ -3440,10 +3440,10 @@ INS,app.tbl.rec1,"{""name"":""Alice""}"</pre>
 
 <!-- Room Data Viewer -->
 <div class="login-overlay hidden" id="roomDataOverlay" style="z-index:1100;">
-  <div class="login-card" style="max-width:700px;max-height:85vh;display:flex;flex-direction:column;">
+  <div class="login-card" style="width:90vw;max-width:1100px;max-height:85vh;display:flex;flex-direction:column;">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
       <div class="login-title" style="margin-bottom:0;">Room Data</div>
-      <button onclick="hideRoomDataViewer()" style="background:transparent;border:1px solid var(--border);border-radius:4px;padding:4px 12px;font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-dim);cursor:pointer;">Close</button>
+      <button onclick="hideRoomDataViewer()" style="background:transparent;border:1px solid var(--border);border-radius:4px;padding:6px 14px;font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-dim);cursor:pointer;">Close</button>
     </div>
     <div class="login-subtitle" style="margin-bottom:12px;">Raw Matrix room state and timeline</div>
     <div id="roomDataContent" style="overflow-y:auto;flex:1;min-height:0;">
@@ -4726,9 +4726,9 @@ async function loadRoomData() {
       ${renderRoomSection(`Members (${members.length})`, `
         ${members.length === 0 ? '<div style="font-family:\'JetBrains Mono\',monospace;font-size:10px;color:var(--text-faint);font-style:italic;">No members</div>' :
           members.map(([uid, info]) => `
-            <div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid var(--border);">
-              <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text);">${escapeHtml(uid)}</span>
-              <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--text-dim);">${escapeHtml(info.display_name || '')}</span>
+            <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--border);">
+              <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text);">${escapeHtml(uid)}</span>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);">${escapeHtml(info.display_name || '')}</span>
             </div>
           `).join('')}
       `)}
@@ -4736,7 +4736,7 @@ async function loadRoomData() {
       ${renderRoomSection(`EO Events (${eoEvents.length})`, `
         <div style="margin-bottom:8px;">
           <input type="text" id="rdvEoFilter" placeholder="Filter by target, op, status..." oninput="filterRoomDataEoEvents()"
-            style="width:100%;padding:6px 10px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);font-family:'JetBrains Mono',monospace;font-size:10px;outline:none;" />
+            style="width:100%;padding:8px 12px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);font-family:'JetBrains Mono',monospace;font-size:12px;outline:none;" />
         </div>
         <div id="rdvEoList">
           ${renderEoEventList(eoEvents)}
@@ -4747,12 +4747,12 @@ async function loadRoomData() {
         ${systemEvents.length === 0 ? '<div style="font-family:\'JetBrains Mono\',monospace;font-size:10px;color:var(--text-faint);font-style:italic;">No system events</div>' :
           systemEvents.map((ev) => `
             <div style="padding:6px 0;border-bottom:1px solid var(--border);">
-              <div onclick="this.nextElementSibling.classList.toggle('hidden')" style="display:flex;align-items:center;gap:8px;cursor:pointer;">
-                <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--accent);flex-shrink:0;">${escapeHtml(ev.type)}</span>
-                <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(ev.sender || '')}</span>
-                <span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:var(--text-faint);margin-left:auto;flex-shrink:0;">${ev.origin_server_ts ? new Date(ev.origin_server_ts).toISOString().slice(11,19) : ''}</span>
+              <div onclick="this.nextElementSibling.classList.toggle('hidden')" style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+                <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--accent);flex-shrink:0;">${escapeHtml(ev.type)}</span>
+                <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(ev.sender || '')}</span>
+                <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-faint);margin-left:auto;flex-shrink:0;">${ev.origin_server_ts ? new Date(ev.origin_server_ts).toISOString().slice(11,19) : ''}</span>
               </div>
-              <pre class="hidden" style="margin-top:4px;padding:8px;background:var(--bg);border-radius:4px;border:1px solid var(--border);font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--text);overflow:auto;max-height:250px;white-space:pre-wrap;word-break:break-all;">${escapeHtml(JSON.stringify(ev.content, null, 2))}</pre>
+              <pre class="hidden" style="margin-top:6px;padding:12px;background:var(--bg);border-radius:4px;border:1px solid var(--border);font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text);overflow:auto;max-height:300px;white-space:pre-wrap;word-break:break-all;">${escapeHtml(JSON.stringify(ev.content, null, 2))}</pre>
             </div>
           `).join('')}
       `)}
@@ -4760,18 +4760,18 @@ async function loadRoomData() {
       ${renderRoomSection(`State Events (${stateEvents.length})`, `
         ${stateEvents.map((ev) => `
           <div style="padding:6px 0;border-bottom:1px solid var(--border);">
-            <div onclick="this.nextElementSibling.classList.toggle('hidden')" style="display:flex;align-items:center;gap:8px;cursor:pointer;">
-              <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--text);flex-shrink:0;">${escapeHtml(ev.type)}</span>
-              ${ev.state_key ? `<span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:var(--text-faint);background:var(--bg);padding:1px 4px;border-radius:2px;">${escapeHtml(ev.state_key)}</span>` : ''}
-              <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--text-dim);margin-left:auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(ev.sender || '')}</span>
+            <div onclick="this.nextElementSibling.classList.toggle('hidden')" style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+              <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text);flex-shrink:0;">${escapeHtml(ev.type)}</span>
+              ${ev.state_key ? `<span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-faint);background:var(--bg);padding:2px 6px;border-radius:2px;">${escapeHtml(ev.state_key)}</span>` : ''}
+              <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-left:auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(ev.sender || '')}</span>
             </div>
-            <pre class="hidden" style="margin-top:4px;padding:8px;background:var(--bg);border-radius:4px;border:1px solid var(--border);font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--text);overflow:auto;max-height:250px;white-space:pre-wrap;word-break:break-all;">${escapeHtml(JSON.stringify(ev.content, null, 2))}</pre>
+            <pre class="hidden" style="margin-top:6px;padding:12px;background:var(--bg);border-radius:4px;border:1px solid var(--border);font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text);overflow:auto;max-height:300px;white-space:pre-wrap;word-break:break-all;">${escapeHtml(JSON.stringify(ev.content, null, 2))}</pre>
           </div>
         `).join('')}
       `)}
 
       ${renderRoomSection('Raw JSON', `
-        <pre style="padding:10px;background:var(--bg);border-radius:4px;border:1px solid var(--border);font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--text);overflow:auto;max-height:400px;white-space:pre-wrap;word-break:break-all;">${escapeHtml(JSON.stringify({ roomId, alias, state: stateEvents, timeline, members: membersData.joined }, null, 2))}</pre>
+        <pre style="padding:12px;background:var(--bg);border-radius:4px;border:1px solid var(--border);font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text);overflow:auto;max-height:500px;white-space:pre-wrap;word-break:break-all;">${escapeHtml(JSON.stringify({ roomId, alias, state: stateEvents, timeline, members: membersData.joined }, null, 2))}</pre>
       `)}
     `;
   } catch (err) {
@@ -4803,32 +4803,32 @@ function renderEoEventList(eoEvents) {
     }).join('<span style="color:var(--border2);margin:0 4px;">|</span>');
 
     return `
-      <div style="padding:5px 0;border-bottom:1px solid var(--border);" data-eo-searchable="${escapeHtml((op + ' ' + target + ' ' + JSON.stringify(operand)).toLowerCase())}">
-        <div onclick="this.nextElementSibling.classList.toggle('hidden')" style="display:flex;align-items:center;gap:6px;cursor:pointer;">
-          <span style="font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:700;color:${opColor};width:26px;flex-shrink:0;">${escapeHtml(op)}</span>
-          <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--accent);flex-shrink:0;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(target)}">${escapeHtml(target)}</span>
-          <span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:var(--text-dim);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${fieldPairs}</span>
-          <span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:var(--text-faint);flex-shrink:0;">${seq ? '#' + seq : ''}</span>
-          <span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:var(--text-faint);flex-shrink:0;">${ts.slice(11, 19)}</span>
+      <div style="padding:6px 0;border-bottom:1px solid var(--border);" data-eo-searchable="${escapeHtml((op + ' ' + target + ' ' + JSON.stringify(operand)).toLowerCase())}">
+        <div onclick="this.nextElementSibling.classList.toggle('hidden')" style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+          <span style="font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;color:${opColor};width:32px;flex-shrink:0;">${escapeHtml(op)}</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--accent);flex-shrink:0;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(target)}">${escapeHtml(target)}</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-dim);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${fieldPairs}</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-faint);flex-shrink:0;">${seq ? '#' + seq : ''}</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-faint);flex-shrink:0;">${ts.slice(11, 19)}</span>
         </div>
-        <div class="hidden" style="margin-top:4px;padding:8px;background:var(--bg);border-radius:4px;border:1px solid var(--border);font-family:'JetBrains Mono',monospace;font-size:9px;overflow:auto;max-height:200px;">
-          <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:6px;">
+        <div class="hidden" style="margin-top:6px;padding:12px;background:var(--bg);border-radius:4px;border:1px solid var(--border);font-family:'JetBrains Mono',monospace;font-size:11px;overflow:auto;max-height:260px;">
+          <div style="display:flex;gap:20px;flex-wrap:wrap;margin-bottom:8px;">
             <span><span style="color:var(--text-faint);">op</span> <span style="color:${opColor};font-weight:600;">${escapeHtml(op)}</span></span>
             <span><span style="color:var(--text-faint);">target</span> <span style="color:var(--accent);">${escapeHtml(target)}</span></span>
             <span><span style="color:var(--text-faint);">seq</span> <span style="color:var(--text);">${seq}</span></span>
             <span><span style="color:var(--text-faint);">sender</span> <span style="color:var(--text-dim);">${escapeHtml(sender)}</span></span>
             <span><span style="color:var(--text-faint);">ts</span> <span style="color:var(--text-dim);">${escapeHtml(ts)}</span></span>
           </div>
-          <div style="border-top:1px solid var(--border);padding-top:6px;margin-top:2px;">
-            <div style="color:var(--text-faint);font-size:8px;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px;">Operand</div>
+          <div style="border-top:1px solid var(--border);padding-top:8px;margin-top:4px;">
+            <div style="color:var(--text-faint);font-size:10px;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px;">Operand</div>
             ${Object.keys(operand).length > 0 ? Object.entries(operand).map(([k, v]) => `
-              <div style="display:flex;gap:8px;padding:2px 0;">
+              <div style="display:flex;gap:10px;padding:3px 0;">
                 <span style="color:var(--text-dim);flex-shrink:0;">${escapeHtml(k)}</span>
                 <span style="color:var(--text);word-break:break-all;">${escapeHtml(typeof v === 'string' ? v : JSON.stringify(v))}</span>
               </div>
             `).join('') : '<span style="color:var(--text-faint);font-style:italic;">empty</span>'}
           </div>
-          ${c.client_event_id ? `<div style="border-top:1px solid var(--border);padding-top:4px;margin-top:4px;color:var(--text-faint);font-size:8px;">event_id: ${escapeHtml(c.client_event_id)}</div>` : ''}
+          ${c.client_event_id ? `<div style="border-top:1px solid var(--border);padding-top:6px;margin-top:6px;color:var(--text-faint);font-size:10px;">event_id: ${escapeHtml(c.client_event_id)}</div>` : ''}
         </div>
       </div>
     `;
@@ -4874,9 +4874,9 @@ function renderRoomSection(title, content, startOpen = false) {
 
 function roomField(label, value) {
   return `
-    <div style="display:flex;justify-content:space-between;padding:3px 0;gap:12px;">
-      <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-dim);flex-shrink:0;">${escapeHtml(label)}</span>
-      <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text);text-align:right;word-break:break-all;">${escapeHtml(value)}</span>
+    <div style="display:grid;grid-template-columns:180px 1fr;padding:4px 0;gap:16px;align-items:baseline;">
+      <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-dim);">${escapeHtml(label)}</span>
+      <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text);word-break:break-all;min-width:0;">${escapeHtml(value)}</span>
     </div>
   `;
 }
