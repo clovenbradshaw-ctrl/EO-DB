@@ -9834,6 +9834,25 @@ async function createNewSpace() {
   // Ensure Matrix room exists for the new space (skip alias lookup — room can't exist yet)
   await ensureMatrixRoomForSpace(space, { isNew: true });
 
+  // Auto-sync the space creation event to Matrix so other browsers can discover it
+  if (space.matrix_room_id && matrixToken) {
+    try {
+      const spaceEvents = await loadSpaceEventsSince(space.target_prefix, 0);
+      if (spaceEvents.length > 0) {
+        await matrixRoomTarget.writeEvents(
+          { roomId: space.matrix_room_id },
+          spaceEvents,
+          () => {}
+        );
+        const syncKey = `eo_sync:matrix-room:${space.id}`;
+        const maxSeq = Math.max(...spaceEvents.map(e => e.seq));
+        localStorage.setItem(syncKey, String(maxSeq));
+      }
+    } catch (e) {
+      console.warn('[sync] Auto-sync after space creation failed:', e);
+    }
+  }
+
   nameEl.value = '';
   descEl.value = '';
   await loadFromIndexedDB();
@@ -10140,6 +10159,209 @@ async function createDemoSpace() {
   await updateNulspaceLabel();
 }
 
+// ── Discover spaces from Matrix rooms ──
+// On a fresh browser, IndexedDB is empty. This function discovers all
+// EO-DB space rooms the user has joined, creates local space entries,
+// and pulls events from each room so data is available immediately.
+
+async function discoverSpacesFromMatrix() {
+  if (!matrixToken || !matrixUserId) return;
+
+  try {
+    // 1. Get all rooms the user has joined
+    const joinedRes = await fetch(
+      `${matrixHomeserver}/_matrix/client/v3/joined_rooms`,
+      { headers: { 'Authorization': `Bearer ${matrixToken}` } }
+    );
+    if (!joinedRes.ok) return;
+    const { joined_rooms: roomIds } = await joinedRes.json();
+    if (!roomIds || roomIds.length === 0) return;
+
+    const localSpaces = await getAllSpaces();
+    const localRoomIds = new Set(localSpaces.map(s => s.matrix_room_id).filter(Boolean));
+    let discovered = 0;
+
+    // 2. Check each room for EO-DB space markers
+    for (const roomId of roomIds) {
+      if (localRoomIds.has(roomId)) continue; // already known locally
+
+      try {
+        // Read room state to identify EO-DB spaces
+        const stateRes = await fetch(
+          `${matrixHomeserver}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state`,
+          { headers: { 'Authorization': `Bearer ${matrixToken}` } }
+        );
+        if (!stateRes.ok) continue;
+        const stateEvents = await stateRes.json();
+
+        // Look for room name matching "EO: {name}" pattern
+        const nameEvent = stateEvents.find(e => e.type === 'm.room.name' && e.state_key === '');
+        const topicEvent = stateEvents.find(e => e.type === 'm.room.topic' && e.state_key === '');
+        const aliasEvent = stateEvents.find(e => e.type === 'm.room.canonical_alias' && e.state_key === '');
+        const createEvent = stateEvents.find(e => e.type === 'm.room.create' && e.state_key === '');
+
+        const roomName = nameEvent?.content?.name || '';
+        const topic = topicEvent?.content?.topic || '';
+        const alias = aliasEvent?.content?.alias || '';
+
+        // Identify EO-DB rooms by name pattern or alias pattern
+        const isEoRoom = roomName.startsWith('EO: ') ||
+                         alias.includes('#eo-db-') ||
+                         topic.includes('Event log for space');
+
+        if (!isEoRoom) continue;
+
+        // Extract space ID from alias (#eo-db-{id}:domain) or topic
+        let spaceId = null;
+        let spaceName = null;
+
+        if (alias) {
+          const aliasMatch = alias.match(/#eo-db-([^:]+)/);
+          if (aliasMatch) spaceId = aliasMatch[1];
+        }
+
+        if (!spaceId && topic) {
+          const topicMatch = topic.match(/\(([^)]+)\)\s*$/);
+          if (topicMatch) spaceId = topicMatch[1];
+        }
+
+        if (roomName.startsWith('EO: ')) {
+          spaceName = roomName.slice(4);
+        }
+
+        if (!spaceId) continue;
+
+        // Skip if we already have this space by ID
+        const existingSpace = await getSpaceById(spaceId);
+        if (existingSpace) {
+          // Just update the room ID if missing
+          if (!existingSpace.matrix_room_id) {
+            existingSpace.matrix_room_id = roomId;
+            await putSpace(existingSpace);
+          }
+          continue;
+        }
+
+        // 3. Create local space entry
+        const creator = createEvent?.content?.creator || matrixUserId;
+        const now = new Date().toISOString();
+        const space = {
+          id: spaceId,
+          name: spaceName || spaceId,
+          description: '',
+          target_prefix: `space.${spaceId}`,
+          created_by: creator,
+          created_at: now,
+          updated_by: creator,
+          updated_at: now,
+          sharing: [],
+          matrix_room_id: roomId,
+        };
+        await putSpace(space);
+
+        // 4. Pull events from the room into local store
+        await pullEventsFromRoom(roomId, spaceId);
+
+        discovered++;
+        console.log(`[sync] Discovered space "${spaceName || spaceId}" from Matrix room ${roomId}`);
+      } catch (e) {
+        console.warn(`[sync] Failed to check room ${roomId}:`, e);
+      }
+    }
+
+    if (discovered > 0) {
+      console.log(`[sync] Discovered ${discovered} new space(s) from Matrix`);
+      await loadFromIndexedDB();
+      renderHorizon();
+      renderLog();
+      await loadSpaces();
+      await renderNulspaceDropdown();
+    }
+  } catch (e) {
+    console.warn('[sync] Space discovery from Matrix failed:', e);
+  }
+}
+
+/**
+ * Pull EO-DB events from a Matrix room into local IndexedDB.
+ * Paginates backwards through the room timeline and replays events.
+ */
+async function pullEventsFromRoom(roomId, spaceId) {
+  try {
+    let from = null;
+    let totalImported = 0;
+    const seenIds = new Set();
+
+    // Paginate backwards through room timeline
+    for (let page = 0; page < 50; page++) { // safety limit
+      let url = `${matrixHomeserver}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/messages?dir=b&limit=100`;
+      if (from) url += `&from=${encodeURIComponent(from)}`;
+
+      const res = await fetch(url, {
+        headers: { 'Authorization': `Bearer ${matrixToken}` },
+      });
+      if (!res.ok) break;
+      const data = await res.json();
+      const chunk = data.chunk || [];
+      if (chunk.length === 0) break;
+
+      // Process EO-DB events (in reverse since we're paginating backwards)
+      const eoEvents = chunk
+        .filter(e => e.type === EO_EVENT_TYPE)
+        .reverse();
+
+      for (const matrixEvent of eoEvents) {
+        const content = matrixEvent.content || {};
+        const sender = matrixEvent.sender || '';
+
+        // Handle batched events
+        if (content.batch && Array.isArray(content.batch)) {
+          for (const evt of content.batch) {
+            const eventId = evt.client_event_id || `imported_${matrixEvent.event_id}_${evt.seq}`;
+            if (seenIds.has(eventId)) continue;
+            seenIds.add(eventId);
+            await appendEvent({
+              op: evt.op,
+              target: evt.target,
+              operand: evt.operand,
+              agent: sender,
+              ts: evt.ts || new Date(matrixEvent.origin_server_ts).toISOString(),
+              client_event_id: eventId,
+              _from_server: true,
+            });
+            totalImported++;
+          }
+        } else if (content.op && content.target) {
+          // Single event
+          const eventId = content.client_event_id || `imported_${matrixEvent.event_id}`;
+          if (seenIds.has(eventId)) continue;
+          seenIds.add(eventId);
+          await appendEvent({
+            op: content.op,
+            target: content.target,
+            operand: content.operand,
+            agent: sender,
+            ts: content.ts || new Date(matrixEvent.origin_server_ts).toISOString(),
+            client_event_id: eventId,
+            _from_server: true,
+          });
+          totalImported++;
+        }
+      }
+
+      // Next page
+      from = data.end;
+      if (!from || from === data.start) break;
+    }
+
+    if (totalImported > 0) {
+      console.log(`[sync] Pulled ${totalImported} events from room for space ${spaceId}`);
+    }
+  } catch (e) {
+    console.warn(`[sync] Failed to pull events from room ${roomId}:`, e);
+  }
+}
+
 // ── Init ──
 (async function init() {
   try {
@@ -10157,8 +10379,10 @@ async function createDemoSpace() {
   renderLog();
   await updateNulspaceLabel();
   if (matrixToken) {
-    validateSession();
+    await validateSession();
     connectSync();
+    // Discover spaces from Matrix rooms the user has joined
+    await discoverSpacesFromMatrix();
   }
 
   // Check for share link in URL hash
