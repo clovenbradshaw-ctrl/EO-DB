@@ -121,7 +121,13 @@ export function hasFieldsSubObject(records: EoState[]): boolean {
  * Otherwise reads from `value[key]`.
  */
 export function getFieldValue(rec: EoState, key: string, useFieldsSub: boolean): any {
-  if (useFieldsSub) return rec.value?.fields?.[key];
+  if (useFieldsSub) {
+    // Check fields sub-object first, then fall back to top-level value
+    // (e.g. `name` is set at value.name by the display field mechanism)
+    const fieldVal = rec.value?.fields?.[key];
+    if (fieldVal !== undefined) return fieldVal;
+    return rec.value?.[key];
+  }
   return rec.value?.[key];
 }
 
@@ -147,6 +153,14 @@ export function deriveColumns(
       const arr = keyValues.get(key) || [];
       arr.push(val);
       keyValues.set(key, arr);
+    }
+
+    // When using fields sub-object, also include top-level `name` if present
+    // (set by the _displayField mechanism during ingestion)
+    if (useFieldsSub && rec.value.name && typeof rec.value.name === 'string') {
+      const arr = keyValues.get('name') || [];
+      arr.push(rec.value.name);
+      keyValues.set('name', arr);
     }
   }
 

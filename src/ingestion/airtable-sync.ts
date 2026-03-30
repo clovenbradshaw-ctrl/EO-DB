@@ -45,6 +45,7 @@ export interface HydrationManifest {
     tables: Array<{
       id: string;
       name: string;
+      primaryFieldId?: string;
       fieldCount: number;
       fields: Array<{ id: string; name: string; type: string }>;
     }>;
@@ -443,6 +444,7 @@ async function ingestRecord(
   fieldMeta: Map<string, FieldMeta>,
   exclusions: SyncExclusions = EMPTY_EXCLUSIONS,
   preserveExisting: boolean = true,
+  displayField?: string,
 ): Promise<'ingested' | 'skipped_no_change' | 'skipped_duplicate'> {
   const target = recordTarget(baseId, tableId, record.id);
 
@@ -506,11 +508,16 @@ async function ingestRecord(
   }
 
   // 5. Ingest via DEF with only storable fields (no computed/Horizon noise)
+  //    Extract display name from the primary field (if _displayField is set on the table).
+  const displayName = displayField
+    ? (storableFields[displayField] ?? record.fields[displayField])
+    : undefined;
   try {
     await processEvent(db, {
       op: 'DEF',
       target,
       operand: {
+        ...(displayName != null ? { name: String(displayName) } : {}),
         fields: storableFields,
         _airtable: {
           record_id: record.id,
@@ -553,6 +560,7 @@ export async function discoverSchema(client: AirtableClient): Promise<HydrationM
       tables: tables.map(t => ({
         id: t.id,
         name: t.name,
+        primaryFieldId: t.primaryFieldId,
         fieldCount: t.fields.length,
         fields: t.fields.map(f => ({ id: f.id, name: f.name, type: f.type })),
       })),
@@ -689,6 +697,7 @@ export async function hydrationSync(
               name: table.name,
               field_count: table.fieldCount,
               fields: table.fields,
+              _displayField: table.primaryFieldId || undefined,
               _airtable: { type: 'table', base_id: base.id, table_id: table.id },
             },
             agent,
@@ -862,6 +871,10 @@ async function syncTable(
   // Retrieve field metadata from the table's stored schema (set during hydration).
   const fieldMeta = await getTableFieldMeta(db, baseId, tableId);
 
+  // Retrieve the display field (primaryFieldId) so records get a `name` property.
+  const tableState = await getState(db, tableTarget(baseId, tableId));
+  const displayField: string | undefined = tableState?.value?._displayField;
+
   // Build filter: if we have a cursor, subtract a 60-second overlap window
   // to catch records modified during clock skew or during the previous sync.
   // Idempotency handles any re-fetched duplicates from the overlap.
@@ -890,7 +903,7 @@ async function syncTable(
 
     for (const record of page) {
       fetched++;
-      const result = await ingestRecord(db, feed, baseId, tableId, record, agent, fieldMeta, exclusions, preserveExisting);
+      const result = await ingestRecord(db, feed, baseId, tableId, record, agent, fieldMeta, exclusions, preserveExisting, displayField);
       switch (result) {
         case 'ingested': ingested++; break;
         case 'skipped_no_change': skippedNoChange++; break;
