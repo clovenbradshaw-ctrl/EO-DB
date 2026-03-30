@@ -127,7 +127,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
   // --- Matrix client (lives for the entire session, not per-space) ---
   const matrixClientRef = useRef<ReturnType<typeof createMatrixClient> | null>(null);
   const roomIdRef = useRef<string | null>(null);
-  const matrixReadyRef = useRef(false);
+  const [matrixReady, setMatrixReady] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -156,7 +156,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
         if (!mounted) { client.stopClient(); return; }
 
         roomIdRef.current = await resolveDataRoom(client);
-        matrixReadyRef.current = true;
+        setMatrixReady(true);
       } catch {
         // Offline — local store is still available
       }
@@ -169,11 +169,11 @@ export function Layout({ session, onLogout }: LayoutProps) {
       if (matrixClientRef.current) matrixClientRef.current.stopClient();
       matrixClientRef.current = null;
       roomIdRef.current = null;
-      matrixReadyRef.current = false;
+      setMatrixReady(false);
     };
   }, [session]);
 
-  // --- Space discovery (one-time, uses root IDB) ---
+  // --- Space discovery (re-runs when Matrix becomes ready) ---
   useEffect(() => {
     let mounted = true;
 
@@ -197,7 +197,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
 
       // If root store is empty, try hydrating from Matrix snapshot
       const rootSeq = await rootStore.getCurrentSeq();
-      if (rootSeq === 0 && matrixReadyRef.current && matrixClientRef.current && roomIdRef.current) {
+      if (rootSeq === 0 && matrixReady && matrixClientRef.current && roomIdRef.current) {
         try {
           const { findLatestSnapshot, restoreFromDeltaChain } = await import('../matrix/snapshot');
           const snap = await findLatestSnapshot(matrixClientRef.current, roomIdRef.current);
@@ -226,10 +226,9 @@ export function Layout({ session, onLogout }: LayoutProps) {
       rootStore.close();
     }
 
-    // Small delay to let Matrix client connect first
-    const timer = setTimeout(discoverSpaces, 100);
-    return () => { mounted = false; clearTimeout(timer); };
-  }, [session]);
+    discoverSpaces();
+    return () => { mounted = false; };
+  }, [session, matrixReady]);
 
   // --- Cached space stores (survive space switches, avoid re-init) ---
   const spaceCacheRef = useRef<Map<string, CachedSpace>>(new Map());
@@ -265,7 +264,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
       let syncManager: SyncManager | null = null;
 
       // Set up sync manager scoped to this space
-      if (matrixReadyRef.current && matrixClientRef.current && roomIdRef.current) {
+      if (matrixReady && matrixClientRef.current && roomIdRef.current) {
         try {
           const spacePrefix = `${selectedSpace}.`;
           syncManager = new SyncManager(
@@ -296,7 +295,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
     return () => {
       mounted = false;
     };
-  }, [selectedSpace, session, init]);
+  }, [selectedSpace, session, init, matrixReady]);
 
   async function handleLogout() {
     // Save snapshots for ALL cached spaces before clearing state
@@ -320,17 +319,36 @@ export function Layout({ session, onLogout }: LayoutProps) {
     onLogout();
   }
 
-  // Save all cached space snapshots on page unload
+  // Save all cached space snapshots when the page is hidden or unloaded.
+  // visibilitychange fires reliably when switching tabs/browsers/closing,
+  // unlike beforeunload which can't await async work.
   useEffect(() => {
-    const handleBeforeUnload = () => {
+    let snapshotInFlight = false;
+
+    const saveAllSnapshots = () => {
+      if (snapshotInFlight) return;
+      snapshotInFlight = true;
+      const promises: Promise<void>[] = [];
       for (const [, cached] of spaceCacheRef.current) {
         if (cached.syncManager) {
-          cached.syncManager.saveSnapshot().catch(() => {});
+          promises.push(cached.syncManager.saveSnapshot().catch(() => {}));
         }
       }
+      Promise.all(promises).finally(() => { snapshotInFlight = false; });
     };
-    window.addEventListener('beforeunload', handleBeforeUnload);
-    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        saveAllSnapshots();
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('beforeunload', saveAllSnapshots);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('beforeunload', saveAllSnapshots);
+    };
   }, []);
 
   // Extract display name from Matrix user ID
