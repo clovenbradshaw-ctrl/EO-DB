@@ -6192,11 +6192,11 @@ async function createShareSpace(label, isPublic) {
       name: `EO Share: ${label}`,
       topic: `Shared data — ${label}`,
       visibility: isPublic ? 'public' : 'private',
-      preset: isPublic ? 'public_chat' : 'private_chat',
+      preset: 'public_chat',
       initial_state: [{
-        type: 'm.room.encryption',
+        type: 'm.room.join_rules',
         state_key: '',
-        content: { algorithm: 'm.megolm.v1.aes-sha2' },
+        content: { join_rule: 'public' },
       }],
     }),
   });
@@ -6225,7 +6225,15 @@ async function joinSpace(spaceIdOrAlias) {
     headers: { 'Authorization': `Bearer ${matrixToken}`, 'Content-Type': 'application/json' },
     body: '{}',
   });
-  if (!res.ok) throw new Error(`Join failed: ${await res.text()}`);
+  if (!res.ok) {
+    const errText = await res.text();
+    let parsed;
+    try { parsed = JSON.parse(errText); } catch (_) { parsed = null; }
+    if (parsed && parsed.errcode === 'M_FORBIDDEN') {
+      throw new Error('Unable to join share: this share is private and you have not been invited.');
+    }
+    throw new Error(`Join failed: ${errText}`);
+  }
   return (await res.json()).room_id;
 }
 
