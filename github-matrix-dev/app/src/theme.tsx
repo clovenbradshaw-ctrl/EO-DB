@@ -148,9 +148,9 @@ export const lightTheme: Theme = {
   loginText: '#fff',
   loginTextDim: '#888',
 
-  shadow: 'rgba(0,0,0,0.08)',
-  shadowOverlay: 'rgba(0,0,0,0.3)',
-  shadowPanel: '-4px 0 24px rgba(0,0,0,0.08)',
+  shadow: 'rgba(0,0,0,0.06)',
+  shadowOverlay: 'rgba(0,0,0,0.2)',
+  shadowPanel: '-4px 0 32px rgba(0,0,0,0.06)',
 
   statusActive: { bg: '#e8f7ee', color: '#16643a', border: '#b8e4ca' },
   statusArchived: { bg: '#eceae6', color: '#aba69e', border: '#d4d0ca' },
