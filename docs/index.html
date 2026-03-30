@@ -15,14 +15,24 @@
     <style>
       * { margin: 0; padding: 0; box-sizing: border-box; }
       @keyframes spin { to { transform: rotate(360deg); } }
-      ::-webkit-scrollbar { width: 6px; }
+      @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+      ::-webkit-scrollbar { width: 6px; height: 6px; }
       ::-webkit-scrollbar-track { background: transparent; }
       ::-webkit-scrollbar-thumb { background: #e2dfda; border-radius: 3px; }
       ::-webkit-scrollbar-thumb:hover { background: #d4d0ca; }
       [data-theme="dark"] ::-webkit-scrollbar-thumb { background: #30363d; }
       [data-theme="dark"] ::-webkit-scrollbar-thumb:hover { background: #484f58; }
+      /* Smooth global transitions */
+      html { scroll-behavior: smooth; }
+      button:focus-visible { outline: 2px solid #1a6dd4; outline-offset: 2px; }
+      [data-theme="dark"] button:focus-visible { outline-color: #58a6ff; }
+      input:focus-visible { outline: 2px solid #1a6dd4; outline-offset: -1px; }
+      [data-theme="dark"] input:focus-visible { outline-color: #58a6ff; }
+      /* Selection color */
+      ::selection { background: rgba(26, 109, 212, 0.15); }
+      [data-theme="dark"] ::selection { background: rgba(88, 166, 255, 0.2); }
     </style>
-    <script type="module" crossorigin src="./assets/index-Ce606DiP.js"></script>
+    <script type="module" crossorigin src="./assets/index-CZaKODP-.js"></script>
     <link rel="modulepreload" crossorigin href="./assets/matrix-sdk-BxdHBrJm.js">
     <link rel="modulepreload" crossorigin href="./assets/react-vendor-QnXRpWzj.js">
   <link rel="manifest" href="./manifest.webmanifest"><script id="vite-plugin-pwa:register-sw" src="./registerSW.js"></script></head>

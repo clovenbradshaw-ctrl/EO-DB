@@ -338,6 +338,16 @@ export function Layout({ session, onLogout }: LayoutProps) {
     ? session.userId.slice(1).split(':')[0]
     : session.userId;
 
+  const NAV_ICONS: Record<string, string> = {
+    horizon: '\u25A6',  // grid icon
+    log: '\u2630',      // list icon
+    graph: '\u2B21',    // hexagon
+    compose: '\u270E',  // pencil
+    import: '\u2B07',   // download arrow
+    builder: '\u2B1A',  // blocks
+    settings: '\u2699', // gear
+  };
+
   return (
     <div style={s.container}>
       {/* Top bar */}
@@ -345,74 +355,99 @@ export function Layout({ session, onLogout }: LayoutProps) {
         <div style={s.topBarLeft}>
           <span style={s.logo}>
             <span style={{ color: theme.success }}>EO</span>
-            <span style={{ color: theme.borderLight }}>///</span>
+            <span style={{ color: theme.borderLight, opacity: 0.5 }}>///</span>
             <span style={{ color: theme.textHeading }}>DB</span>
           </span>
 
           <div style={s.divider} />
 
-          {/* Space badge */}
+          {/* Space selector */}
           <div style={{ position: 'relative' as const }}>
             <button
               onClick={() => setSpaceOpen(!spaceOpen)}
               style={s.spaceBadge}
             >
+              <span style={{ width: 6, height: 6, borderRadius: '50%', background: theme.accent, flexShrink: 0 }} />
               {selectedSpace
                 ? formatSpaceName(selectedSpace.split('.').pop() || '')
-                : 'All'}
+                : 'All Spaces'}
+              <span style={{ fontSize: 8, opacity: 0.5, marginLeft: 2 }}>{spaceOpen ? '\u25B4' : '\u25BE'}</span>
             </button>
 
             {spaceOpen && (
-              <div style={s.nulspaceDropdown}>
-                {spaces.map((sp) => {
-                  const name = sp.target.split('.').pop() || sp.target;
-                  const displayName = sp.value?.name || formatSpaceName(name);
-                  const isActive = selectedSpace === sp.target;
-                  const memberCount = (sp.value?._sharing || []).length;
-                  return (
-                    <button
-                      key={sp.target}
-                      onClick={() => { navigate({ space: sp.target, scope: null, record: null, view: 'horizon' }); setSpaceOpen(false); setShowMembers(false); }}
-                      style={{ ...s.nulspaceItem, ...(isActive ? { background: theme.bgHover } : {}) }}
-                    >
-                      <div>
-                        <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12, display: 'block' }}>{displayName}</span>
-                        <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: theme.textMuted }}>
-                          {sp.target}{memberCount > 0 ? ` · ${memberCount + 1} users` : ''}
-                        </span>
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
+              <>
+                <div style={{ position: 'fixed', inset: 0, zIndex: 99 }} onClick={() => setSpaceOpen(false)} />
+                <div style={s.spaceDropdown}>
+                  <div style={s.spaceDropdownLabel}>SPACES</div>
+                  {spaces.map((sp) => {
+                    const name = sp.target.split('.').pop() || sp.target;
+                    const displayName = sp.value?.name || formatSpaceName(name);
+                    const isActive = selectedSpace === sp.target;
+                    const memberCount = (sp.value?._sharing || []).length;
+                    return (
+                      <button
+                        key={sp.target}
+                        onClick={() => { navigate({ space: sp.target, scope: null, record: null, view: 'horizon' }); setSpaceOpen(false); setShowMembers(false); }}
+                        style={{ ...s.spaceDropdownItem, ...(isActive ? s.spaceDropdownItemActive : {}) }}
+                      >
+                        <span style={{ width: 6, height: 6, borderRadius: '50%', background: isActive ? theme.accent : theme.textMuted, flexShrink: 0 }} />
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 13, fontWeight: isActive ? 500 : 400, color: isActive ? theme.text : theme.textSecondary }}>{displayName}</div>
+                          {memberCount > 0 && (
+                            <div style={{ fontSize: 10, color: theme.textMuted, marginTop: 1 }}>
+                              {memberCount + 1} members
+                            </div>
+                          )}
+                        </div>
+                        {isActive && <span style={{ fontSize: 11, color: theme.accent }}>{'\u2713'}</span>}
+                      </button>
+                    );
+                  })}
+                </div>
+              </>
             )}
           </div>
 
-          {/* Members button — visible when a space is selected */}
+          {/* Members button */}
           {selectedSpace && (
             <button
               onClick={() => setShowMembers(!showMembers)}
               style={{
-                ...s.spaceBadge,
-                background: showMembers ? theme.accent : theme.bgMuted,
-                color: showMembers ? '#fff' : theme.textSecondary,
+                ...s.headerButton,
+                ...(showMembers ? { background: theme.accent, color: '#fff' } : {}),
               }}
+              title="Space members"
             >
-              Members
+              {'\u2B24'} {/* circle for avatar hint */}
+              <span style={{ fontSize: 11 }}>Members</span>
             </button>
           )}
         </div>
 
         <div style={s.topBarRight}>
+          {/* Stats — compact, subtle */}
           <div style={s.stats}>
-            <span>seq <b style={{ color: theme.text, fontWeight: 500 }}>{lastSeq}</b></span>
-            <span>evt <b style={{ color: theme.text, fontWeight: 500 }}>{recentEvents.length}</b></span>
-            <span>tgt <b style={{ color: theme.text, fontWeight: 500 }}>{targetCount}</b></span>
-            <span>edg <b style={{ color: theme.text, fontWeight: 500 }}>{edgeCount}</b></span>
+            <span title="Sequence number">{lastSeq} seq</span>
+            <span style={s.statSep}>{'\u00B7'}</span>
+            <span title="Event count">{recentEvents.length} events</span>
+            <span style={s.statSep}>{'\u00B7'}</span>
+            <span title="Target count">{targetCount} targets</span>
           </div>
-          <div style={s.statusDot}>
-            <ConnectionStatus state={connectionState} />
+          <ConnectionStatus state={connectionState} />
+          {/* Theme toggle */}
+          <button
+            onClick={toggleTheme}
+            style={s.headerIconButton}
+            title={theme.mode === 'light' ? 'Switch to dark mode' : 'Switch to light mode'}
+          >
+            {theme.mode === 'light' ? '\u263E' : '\u2600'}
+          </button>
+          {/* User */}
+          <div style={s.userArea}>
+            <div style={s.avatar}>{displayName.charAt(0).toUpperCase()}</div>
+            <span style={{ fontSize: 12, color: theme.textSecondary }}>{displayName}</span>
           </div>
+          <button onClick={handleLogout} style={s.logoutButton}>Log out</button>
         </div>
       </header>
 
@@ -426,12 +461,12 @@ export function Layout({ session, onLogout }: LayoutProps) {
         />
       )}
 
-      {/* Body — sidebar always visible */}
+      {/* Body */}
       <div style={s.body}>
         <aside style={s.sidebar}>
-          {/* View navigation — grouped: views | actions | config */}
+          {/* View navigation */}
           <nav style={s.sidebarNav}>
-            {/* Data views */}
+            <div style={s.navGroupLabel}>Views</div>
             {(['horizon', 'log', 'graph'] as View[]).map((view) => (
               <button
                 key={view}
@@ -441,11 +476,11 @@ export function Layout({ session, onLogout }: LayoutProps) {
                   ...(activeView === view ? s.navItemActive : {}),
                 }}
               >
+                <span style={s.navIcon}>{NAV_ICONS[view]}</span>
                 {view.charAt(0).toUpperCase() + view.slice(1)}
               </button>
             ))}
-            <div style={s.navDivider} />
-            {/* Data entry */}
+            <div style={s.navGroupLabel}>Actions</div>
             {(['compose', 'import'] as View[]).map((view) => (
               <button
                 key={view}
@@ -455,11 +490,11 @@ export function Layout({ session, onLogout }: LayoutProps) {
                   ...(activeView === view ? s.navItemActive : {}),
                 }}
               >
-                {view.charAt(0).toUpperCase() + view.slice(1)}
+                <span style={s.navIcon}>{NAV_ICONS[view]}</span>
+                {view === 'compose' ? '+ Compose' : view.charAt(0).toUpperCase() + view.slice(1)}
               </button>
             ))}
-            <div style={s.navDivider} />
-            {/* Builder */}
+            <div style={s.navGroupLabel}>Tools</div>
             <button
               onClick={() => navigate({ view: 'builder', builderViewId: null, customPageId: null })}
               style={{
@@ -467,10 +502,9 @@ export function Layout({ session, onLogout }: LayoutProps) {
                 ...(activeView === 'builder' ? s.navItemActive : {}),
               }}
             >
+              <span style={s.navIcon}>{NAV_ICONS.builder}</span>
               Builder
             </button>
-            <div style={s.navDivider} />
-            {/* System config */}
             <button
               onClick={() => navigate({ view: 'settings' })}
               style={{
@@ -478,6 +512,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
                 ...(activeView === 'settings' ? s.navItemActive : {}),
               }}
             >
+              <span style={s.navIcon}>{NAV_ICONS.settings}</span>
               Settings
             </button>
           </nav>
@@ -498,7 +533,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
         <main style={s.main} key={selectedSpace ?? '__all__'}>
           {/* Space members panel */}
           {showMembers && selectedSpace && (
-            <div style={{ padding: '16px 24px', maxWidth: 480 }}>
+            <div style={{ padding: '20px 28px', maxWidth: 480 }}>
               <SpaceMembers
                 spaceTarget={selectedSpace}
                 currentUserId={session.userId}
@@ -520,9 +555,10 @@ export function Layout({ session, onLogout }: LayoutProps) {
                   />
                 ) : (
                   <div style={s.empty}>
-                    <div style={s.emptyText}>Select an object type to view its records</div>
+                    <div style={s.emptyIcon}>{'\u25A6'}</div>
+                    <div style={s.emptyText}>Select an object to get started</div>
                     <div style={s.emptySub}>
-                      Choose from the hierarchy on the left to see records as a table
+                      Pick a table or collection from the sidebar to browse its records
                     </div>
                   </div>
                 )}
@@ -644,103 +680,184 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       background: t.bg,
       color: t.text,
       fontFamily: "'Outfit', system-ui, -apple-system, sans-serif",
-      transition: 'background 0.3s ease',
+      transition: 'background 0.25s ease',
     },
 
-    // Top bar
+    // Top bar — taller, cleaner, less dense
     topBar: {
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'space-between',
-      padding: '0 16px',
-      height: 40,
-      borderBottom: `0.5px solid ${t.border}`,
+      padding: '0 20px',
+      height: 48,
+      borderBottom: `1px solid ${t.border}`,
       background: t.bgCard,
       flexShrink: 0,
-      transition: 'background 0.3s ease',
+      transition: 'background 0.25s ease',
     },
-    topBarLeft: { display: 'flex', alignItems: 'center', gap: 12 },
-    topBarRight: { display: 'flex', alignItems: 'center', gap: 16 },
+    topBarLeft: { display: 'flex', alignItems: 'center', gap: 14 },
+    topBarRight: { display: 'flex', alignItems: 'center', gap: 10 },
     logo: {
       fontFamily: "'JetBrains Mono', monospace",
-      fontWeight: 500,
+      fontWeight: 600,
       fontSize: 15,
       letterSpacing: '-0.5px',
     },
-    divider: { width: 1, height: 18, background: t.borderDivider },
+    divider: { width: 1, height: 20, background: t.borderDivider, opacity: 0.5 },
 
-    // Space badge
+    // Space badge — pill-shaped with dot indicator
     spaceBadge: {
       display: 'inline-flex',
       alignItems: 'center',
-      background: t.accentBg,
-      color: t.accent,
-      border: 'none',
-      borderRadius: 4,
-      padding: '2px 8px',
-      fontSize: 11,
+      gap: 6,
+      background: t.bgMuted,
+      color: t.text,
+      border: `1px solid ${t.border}`,
+      borderRadius: 20,
+      padding: '4px 12px 4px 10px',
+      fontSize: 12,
       fontWeight: 500,
       cursor: 'pointer',
+      transition: 'all 0.15s ease',
     },
-    nulspaceDropdown: {
+    spaceDropdown: {
       position: 'absolute',
-      top: 'calc(100% + 4px)',
+      top: 'calc(100% + 8px)',
       left: 0,
       background: t.bgCard,
       border: `1px solid ${t.border}`,
-      borderRadius: 6,
-      padding: 4,
-      minWidth: 200,
-      boxShadow: `0 8px 24px ${t.shadow}`,
+      borderRadius: 10,
+      padding: 6,
+      minWidth: 240,
+      boxShadow: `0 12px 40px ${t.shadow}, 0 2px 8px ${t.shadow}`,
       zIndex: 100,
     } as React.CSSProperties,
-    nulspaceItem: {
+    spaceDropdownLabel: {
+      fontSize: 10,
+      fontWeight: 600,
+      color: t.textMuted,
+      letterSpacing: '0.5px',
+      padding: '8px 10px 4px',
+    },
+    spaceDropdownItem: {
       display: 'flex',
       alignItems: 'center',
-      justifyContent: 'space-between',
+      gap: 8,
       width: '100%',
-      padding: '7px 10px',
+      padding: '8px 10px',
       background: 'transparent',
       border: 'none',
-      borderRadius: 4,
+      borderRadius: 6,
       cursor: 'pointer',
       color: t.text,
       textAlign: 'left' as const,
+      transition: 'background 0.1s',
+    },
+    spaceDropdownItemActive: {
+      background: t.accentBg,
     },
 
-    // Stats
-    stats: {
-      display: 'flex',
-      gap: 12,
-      fontSize: 11,
+    // Header buttons
+    headerButton: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 5,
+      background: t.bgMuted,
       color: t.textSecondary,
-      fontFamily: "'JetBrains Mono', monospace",
+      border: `1px solid ${t.border}`,
+      borderRadius: 20,
+      padding: '4px 12px',
+      fontSize: 10,
+      fontWeight: 500,
+      cursor: 'pointer',
+      transition: 'all 0.15s ease',
     },
-    statusDot: {
+    headerIconButton: {
       display: 'flex',
       alignItems: 'center',
+      justifyContent: 'center',
+      width: 30,
+      height: 30,
+      borderRadius: '50%',
+      background: 'transparent',
+      border: 'none',
+      color: t.textSecondary,
+      fontSize: 15,
+      cursor: 'pointer',
+      transition: 'background 0.15s',
+    },
+    logoutButton: {
+      background: 'transparent',
+      border: `1px solid ${t.border}`,
+      borderRadius: 6,
+      padding: '4px 10px',
+      fontSize: 11,
+      color: t.textSecondary,
+      cursor: 'pointer',
+      transition: 'all 0.15s',
+    },
+    userArea: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6,
+    },
+    avatar: {
+      width: 24,
+      height: 24,
+      borderRadius: '50%',
+      background: t.accent,
+      color: '#fff',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      fontSize: 11,
+      fontWeight: 600,
     },
 
-    // Sidebar navigation
+    // Stats — subtle, monospace
+    stats: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6,
+      fontSize: 10,
+      color: t.textMuted,
+      fontFamily: "'JetBrains Mono', monospace",
+    },
+    statSep: {
+      opacity: 0.3,
+    },
+
+    // Sidebar navigation — cleaner with group labels
     sidebarNav: {
       display: 'flex',
       flexDirection: 'column' as const,
-      padding: '12px 0',
-      borderBottom: `0.5px solid ${t.border}`,
+      padding: '8px 0 4px',
+      borderBottom: `1px solid ${t.border}`,
+    },
+    navGroupLabel: {
+      fontSize: 10,
+      fontWeight: 600,
+      color: t.textMuted,
+      letterSpacing: '0.5px',
+      textTransform: 'uppercase' as const,
+      padding: '10px 16px 4px',
     },
     navItem: {
-      display: 'block',
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
       width: '100%',
-      padding: '6px 16px',
+      padding: '7px 16px',
       background: 'transparent',
       border: 'none',
       borderLeft: '2px solid transparent',
       cursor: 'pointer',
       fontSize: 12,
       fontWeight: 400,
+      fontFamily: "'Outfit', system-ui, sans-serif",
       color: t.textSecondary,
       textAlign: 'left' as const,
-      transition: 'background 0.1s, color 0.1s',
+      transition: 'all 0.12s ease',
     },
     navItemActive: {
       color: t.accent,
@@ -748,24 +865,34 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       borderLeft: `2px solid ${t.accent}`,
       fontWeight: 500,
     },
-    navDivider: {
-      height: 1,
-      margin: '4px 16px',
-      background: t.border,
-      opacity: 0.5,
+    navIcon: {
+      fontSize: 12,
+      width: 16,
+      textAlign: 'center' as const,
+      opacity: 0.7,
+      flexShrink: 0,
     },
 
     // Body
     body: { display: 'flex', flex: 1, overflow: 'hidden' },
     sidebar: {
-      width: 200,
-      borderRight: `0.5px solid ${t.border}`,
+      width: 220,
+      borderRight: `1px solid ${t.border}`,
       background: t.bgCard,
       display: 'flex',
       flexDirection: 'column' as const,
-      transition: 'background 0.3s ease',
+      transition: 'background 0.25s ease',
+      flexShrink: 0,
     },
-    main: { flex: 1, overflowY: 'auto' as const, overflow: 'hidden', display: 'flex', flexDirection: 'column' as const, background: t.bg, transition: 'background 0.3s ease' },
+    main: {
+      flex: 1,
+      overflowY: 'auto' as const,
+      overflow: 'hidden',
+      display: 'flex',
+      flexDirection: 'column' as const,
+      background: t.bg,
+      transition: 'background 0.25s ease',
+    },
 
     // Import page
     importPage: {
@@ -773,26 +900,27 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       overflowY: 'auto' as const,
       maxWidth: 640,
       margin: '0 auto',
-      padding: '0 24px 40px',
+      padding: '0 28px 48px',
     },
     importHeader: {
-      padding: '28px 0 8px',
+      padding: '32px 0 12px',
       borderBottom: `1px solid ${t.border}`,
-      marginBottom: 4,
+      marginBottom: 8,
     },
     importTitle: {
       fontFamily: "'Source Serif 4', Georgia, serif",
-      fontSize: 20,
+      fontSize: 22,
       fontWeight: 600,
       color: t.textHeading,
     },
     importSubtitle: {
-      fontSize: 12,
+      fontSize: 13,
       color: t.textSecondary,
       marginTop: 4,
+      lineHeight: 1.4,
     },
 
-    // Empty states
+    // Empty states — centered with icon
     empty: {
       display: 'flex',
       flexDirection: 'column',
@@ -800,9 +928,26 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       justifyContent: 'center',
       height: '100%',
       flex: 1,
-      gap: 8,
+      gap: 10,
+      padding: 40,
     },
-    emptyText: { fontSize: 14, color: t.textSecondary, fontWeight: 300 },
-    emptySub: { fontSize: 12, color: t.textMuted },
+    emptyIcon: {
+      fontSize: 36,
+      color: t.textMuted,
+      opacity: 0.3,
+      marginBottom: 4,
+    },
+    emptyText: {
+      fontSize: 15,
+      color: t.textSecondary,
+      fontWeight: 400,
+    },
+    emptySub: {
+      fontSize: 12,
+      color: t.textMuted,
+      maxWidth: 280,
+      textAlign: 'center' as const,
+      lineHeight: 1.5,
+    },
   };
 }

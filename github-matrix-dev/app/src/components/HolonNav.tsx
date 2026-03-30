@@ -216,11 +216,15 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
   return (
     <div style={s.container}>
       <div style={s.header}>
-        <span style={s.title}>OBJECTS</span>
+        <span style={s.title}>Objects</span>
+        {tree.length > 0 && <span style={s.objectCount}>{tree.length}</span>}
       </div>
       <div style={s.scroll}>
         {allStates.length === 0 && (
-          <div style={s.empty}>No objects yet</div>
+          <div style={s.empty}>
+            <span style={{ opacity: 0.4, fontSize: 18, marginBottom: 4 }}>{'\u2B1A'}</span>
+            No objects yet
+          </div>
         )}
         {tree.map(node => renderNode(node, 0))}
       </div>
@@ -354,29 +358,48 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       minHeight: 0,
     },
     header: {
-      padding: '0 16px 8px',
-      paddingTop: 12,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      padding: '12px 16px 8px',
     },
     title: {
-      fontWeight: 500, fontSize: 11, color: t.textMuted,
+      fontWeight: 600, fontSize: 10, color: t.textMuted,
       textTransform: 'uppercase' as const, letterSpacing: '0.5px',
     },
-    scroll: { flex: 1, overflowY: 'auto' },
-    empty: { padding: 16, fontSize: 12, color: t.textMuted },
+    objectCount: {
+      fontSize: 10,
+      color: t.textMuted,
+      background: t.bgMuted,
+      padding: '1px 6px',
+      borderRadius: 8,
+      fontFamily: "'JetBrains Mono', monospace",
+    },
+    scroll: { flex: 1, overflowY: 'auto', padding: '2px 0' },
+    empty: {
+      display: 'flex',
+      flexDirection: 'column' as const,
+      alignItems: 'center',
+      gap: 4,
+      padding: '24px 16px',
+      fontSize: 12,
+      color: t.textMuted,
+    },
     item: {
       display: 'flex',
       alignItems: 'center',
-      gap: 4,
-      padding: '5px 16px',
+      gap: 5,
+      padding: '6px 16px',
       cursor: 'pointer',
       fontSize: 12,
+      transition: 'background 0.1s',
     } as React.CSSProperties,
     itemActive: {
       background: t.accentBg,
       color: t.accent,
-      borderRadius: 4,
-      margin: '0 8px',
-      padding: '5px 8px',
+      borderRadius: 6,
+      margin: '1px 8px',
+      padding: '6px 8px',
       fontWeight: 500,
     } as React.CSSProperties,
     chevron: {
@@ -386,6 +409,7 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       flexShrink: 0,
       cursor: 'pointer',
       userSelect: 'none' as const,
+      transition: 'color 0.1s',
     },
     name: {
       fontWeight: 'inherit' as any,
@@ -399,42 +423,44 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       fontSize: 10,
       color: t.textMuted,
       flexShrink: 0,
-      float: 'right' as const,
+      fontFamily: "'JetBrains Mono', monospace",
     },
     countCon: {
       fontSize: 9,
-      color: '#185FA5',
-      background: '#E6F1FB',
-      padding: '1px 5px',
-      borderRadius: 4,
+      color: t.accent,
+      background: t.accentBg,
+      padding: '1px 6px',
+      borderRadius: 8,
       flexShrink: 0,
+      fontWeight: 500,
     },
     countSeg: {
       fontSize: 9,
-      color: '#E65100',
-      background: '#FFF3E0',
-      padding: '1px 5px',
-      borderRadius: 4,
+      color: t.warning,
+      background: t.warningBg,
+      padding: '1px 6px',
+      borderRadius: 8,
       flexShrink: 0,
+      fontWeight: 500,
     },
     countRec: {
       fontSize: 9,
-      color: '#A32D2D',
-      background: '#FCEBEB',
-      padding: '1px 5px',
-      borderRadius: 4,
+      color: t.danger,
+      background: t.dangerBg,
+      padding: '1px 6px',
+      borderRadius: 8,
       flexShrink: 0,
+      fontWeight: 500,
     },
     countDerived: {
       fontSize: 9,
-      color: '#0ea5e9',
+      color: t.teal,
       fontFamily: "'JetBrains Mono', monospace",
-      background: 'rgba(14,165,233,0.12)',
-      padding: '1px 5px',
+      background: t.tealBg,
+      padding: '1px 6px',
       borderRadius: 8,
       flexShrink: 0,
-      borderStyle: 'dashed' as const,
-      border: '1px dashed rgba(14,165,233,0.3)',
+      border: `1px dashed ${t.tealBorder}`,
     },
     segItem: {
       display: 'flex',
@@ -444,12 +470,14 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       cursor: 'pointer',
       fontSize: 11,
       color: t.purple,
+      transition: 'background 0.1s',
     } as React.CSSProperties,
     segIcon: {
       display: 'flex',
       alignItems: 'center',
-      color: t.danger,
+      color: t.purple,
       flexShrink: 0,
+      opacity: 0.7,
     },
     segName: {
       fontWeight: 500,
