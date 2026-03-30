@@ -12,6 +12,7 @@ import { registerAuthRoutes } from './api/auth.js';
 import { registerIngestionRoutes } from './api/ingestion.js';
 import { registerLogImportRoutes } from './api/log-import.js';
 import { registerRoomSyncRoutes } from './api/room-sync.js';
+import { registerDedupRoutes } from './api/dedup.js';
 import { configureMatrixDomain } from './config/matrix-domain.js';
 import { RoomSyncCoordinator } from './ingestion/room-sync-coordinator.js';
 
@@ -66,6 +67,7 @@ async function start(): Promise<void> {
     registerIngestionRoutes(protectedApp, db, feed);
     registerLogImportRoutes(protectedApp, db, feed);
     registerRoomSyncRoutes(protectedApp, db, coordinator);
+    registerDedupRoutes(protectedApp, db, feed);
   });
 
   // Start the room sync coordinator after routes are registered
