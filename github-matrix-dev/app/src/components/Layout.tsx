@@ -416,6 +416,16 @@ export function Layout({ session, onLogout }: LayoutProps) {
         </div>
       </header>
 
+      {/* Time scrubber — full width, under header */}
+      {activeView === 'horizon' && (
+        <TimeScrubber
+          records={scopedRecords}
+          dateColumns={dateColumns}
+          filter={timeScrubberFilter}
+          onFilterChange={setTimeScrubberFilter}
+        />
+      )}
+
       {/* Body — sidebar always visible */}
       <div style={s.body}>
         <aside style={s.sidebar}>
@@ -495,15 +505,6 @@ export function Layout({ session, onLogout }: LayoutProps) {
                 onClose={() => setShowMembers(false)}
               />
             </div>
-          )}
-
-          {activeView === 'horizon' && (
-            <TimeScrubber
-              records={scopedRecords}
-              dateColumns={dateColumns}
-              filter={timeScrubberFilter}
-              onFilterChange={setTimeScrubberFilter}
-            />
           )}
 
           <ErrorBoundary>
