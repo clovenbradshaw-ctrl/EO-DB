@@ -26,6 +26,13 @@ import type { QueryResult } from './query-engine';
 type View = 'horizon' | 'log' | 'import' | 'graph' | 'compose' | 'settings';
 const TABS: View[] = ['horizon', 'log', 'import', 'graph', 'compose', 'settings'];
 
+function formatSpaceName(segment: string): string {
+  // Strip common prefixes, replace underscores with spaces, capitalize
+  let name = segment.replace(/^space_/, '');
+  name = name.replace(/_/g, ' ');
+  return name.charAt(0).toUpperCase() + name.slice(1);
+}
+
 interface LayoutProps {
   session: MatrixSession;
   onLogout: () => void;
@@ -41,6 +48,8 @@ export function Layout({ session, onLogout }: LayoutProps) {
   const [selectedRecord, setSelectedRecord] = useState<string | null>(null);
   const [activeView, setActiveView] = useState<View>('horizon');
   const [spaceOpen, setSpaceOpen] = useState(false);
+  const [selectedSpace, setSelectedSpace] = useState<string | null>(null);
+  const [spaces, setSpaces] = useState<EoState[]>([]);
   const [allStates, setAllStates] = useState<EoState[]>([]);
   const [queryResults, setQueryResults] = useState<QueryResult | null>(null);
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
@@ -48,11 +57,31 @@ export function Layout({ session, onLogout }: LayoutProps) {
   const { theme, toggleTheme } = useTheme();
   const s = makeStyles(theme);
 
-  // Load all states for query bar autofill
+  // Load available spaces
   useEffect(() => {
     if (!ready) return;
-    getStateByPrefix('app.').then(setAllStates);
+    getStateByPrefix('space.').then((states) => {
+      // Spaces are depth-1 under "space." (e.g. space.demo_space)
+      const spaceRoots = states.filter((st) => {
+        const parts = st.target.split('.');
+        return parts.length === 2 && !st.value?._alias;
+      });
+      setSpaces(spaceRoots);
+      // Auto-select first space if none selected
+      if (spaceRoots.length > 0 && selectedSpace === null) {
+        setSelectedSpace(spaceRoots[0].target);
+      }
+    });
   }, [ready, lastSeq, getStateByPrefix]);
+
+  // The prefix to query — scoped to selected space, or everything if none
+  const statePrefix = selectedSpace ? `${selectedSpace}.` : '';
+
+  // Load states scoped to selected space for query bar autofill
+  useEffect(() => {
+    if (!ready) return;
+    getStateByPrefix(statePrefix).then(setAllStates);
+  }, [ready, lastSeq, getStateByPrefix, statePrefix]);
 
   // Compute target count from recent events
   const targetCount = new Set(recentEvents.map((e) => e.target)).size;
@@ -154,14 +183,18 @@ export function Layout({ session, onLogout }: LayoutProps) {
 
           <div style={s.divider} />
 
-          {/* NULSpace selector */}
+          {/* Space selector */}
           <div style={{ position: 'relative' as const }}>
             <button
               onClick={() => setSpaceOpen(!spaceOpen)}
               style={s.nulspaceBtn}
             >
-              <span style={s.nulTag}>NUL</span>
-              <span style={s.nulspaceName}>default</span>
+              <span style={s.nulTag}>SPACE</span>
+              <span style={s.nulspaceName}>
+                {selectedSpace
+                  ? formatSpaceName(selectedSpace.split('.').pop() || '')
+                  : 'All'}
+              </span>
               <svg width="10" height="10" viewBox="0 0 10 10" fill="none" style={{ marginLeft: 2 }}>
                 <path d="M2.5 4L5 6.5L7.5 4" stroke={theme.textMuted} strokeWidth="1.2" strokeLinecap="round" />
               </svg>
@@ -169,26 +202,33 @@ export function Layout({ session, onLogout }: LayoutProps) {
 
             {spaceOpen && (
               <div style={s.nulspaceDropdown}>
+                {/* "All" option — no space filter */}
                 <button
-                  onClick={() => setSpaceOpen(false)}
-                  style={{ ...s.nulspaceItem, background: theme.bgHover }}
+                  onClick={() => { setSelectedSpace(null); setSpaceOpen(false); setSelectedScope(null); setSelectedRecord(null); }}
+                  style={{ ...s.nulspaceItem, ...(selectedSpace === null ? { background: theme.bgHover } : {}) }}
                 >
-                  <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12 }}>default</span>
+                  <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12 }}>All</span>
                   <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: theme.textMuted }}>
-                    {targetCount} targets
+                    no filter
                   </span>
                 </button>
-                <div style={{ borderTop: `1px solid ${theme.border}`, margin: '4px 0' }} />
-                <button style={{
-                  ...s.nulspaceItem,
-                  color: theme.success,
-                  fontFamily: "'JetBrains Mono', monospace",
-                  fontSize: 11,
-                  gap: 5,
-                }}>
-                  <span style={{ fontSize: 14, lineHeight: 1 }}>+</span>
-                  new nulspace
-                </button>
+                {spaces.map((sp) => {
+                  const name = sp.target.split('.').pop() || sp.target;
+                  const displayName = sp.value?.name || formatSpaceName(name);
+                  const isActive = selectedSpace === sp.target;
+                  return (
+                    <button
+                      key={sp.target}
+                      onClick={() => { setSelectedSpace(sp.target); setSpaceOpen(false); setSelectedScope(null); setSelectedRecord(null); }}
+                      style={{ ...s.nulspaceItem, ...(isActive ? { background: theme.bgHover } : {}) }}
+                    >
+                      <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12 }}>{displayName}</span>
+                      <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: theme.textMuted }}>
+                        {sp.target}
+                      </span>
+                    </button>
+                  );
+                })}
               </div>
             )}
           </div>
@@ -270,6 +310,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
                 selectedScope={selectedScope}
                 onSelectScope={(scope) => { setSelectedScope(scope); setSelectedRecord(null); }}
                 onSelectSegment={(_scope, _seg) => { setSelectedScope(_scope); }}
+                statePrefix={statePrefix}
               />
             ) : (
               <SyncProgress message="Initializing store..." detail="Deriving encryption key" />
