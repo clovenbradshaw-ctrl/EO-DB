@@ -332,8 +332,9 @@ export function Layout({ session, onLogout }: LayoutProps) {
       {/* Body — sidebar always visible */}
       <div style={s.body}>
         <aside style={s.sidebar}>
-          {/* View navigation */}
+          {/* View navigation — grouped: views | actions | config */}
           <nav style={s.sidebarNav}>
+            {/* Data views */}
             {(['horizon', 'log', 'graph'] as View[]).map((view) => (
               <button
                 key={view}
@@ -346,6 +347,31 @@ export function Layout({ session, onLogout }: LayoutProps) {
                 {view.charAt(0).toUpperCase() + view.slice(1)}
               </button>
             ))}
+            <div style={s.navDivider} />
+            {/* Data entry */}
+            {(['compose', 'import'] as View[]).map((view) => (
+              <button
+                key={view}
+                onClick={() => setActiveView(view)}
+                style={{
+                  ...s.navItem,
+                  ...(activeView === view ? s.navItemActive : {}),
+                }}
+              >
+                {view.charAt(0).toUpperCase() + view.slice(1)}
+              </button>
+            ))}
+            <div style={s.navDivider} />
+            {/* System config */}
+            <button
+              onClick={() => setActiveView('settings')}
+              style={{
+                ...s.navItem,
+                ...(activeView === 'settings' ? s.navItemActive : {}),
+              }}
+            >
+              Settings
+            </button>
           </nav>
 
           {/* Objects tree */}
@@ -536,6 +562,12 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       background: t.accentBg,
       borderLeft: `2px solid ${t.accent}`,
       fontWeight: 500,
+    },
+    navDivider: {
+      height: 1,
+      margin: '4px 16px',
+      background: t.border,
+      opacity: 0.5,
     },
 
     // Body
