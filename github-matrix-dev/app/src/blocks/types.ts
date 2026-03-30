@@ -87,6 +87,23 @@ export interface BlockNode {
 }
 
 // ---------------------------------------------------------------------------
+// Page Types — Softr-style page classification
+// ---------------------------------------------------------------------------
+
+/** What kind of page/view this is */
+export type PageType = 'page' | 'list' | 'record';
+
+/** Collection binding for list and record pages */
+export interface RecordSource {
+  /** The collection scope (e.g., "app.tblClients") */
+  scope: string;
+  /** For list pages: which record page view ID to open on row click */
+  recordPageId?: string;
+  /** Binding used to select the collection */
+  binding?: DataBinding;
+}
+
+// ---------------------------------------------------------------------------
 // View Definition — stored as DEF operand on views.<viewId>
 // ---------------------------------------------------------------------------
 
@@ -94,6 +111,13 @@ export interface ViewDefinition {
   name: string;
   icon?: string;
   blocks: BlockNode[];
+
+  /** Page type: 'page' (static), 'list' (collection), 'record' (profile) */
+  pageType?: PageType;
+
+  /** For list/record pages: which collection this page is bound to */
+  recordSource?: RecordSource;
+
   dataSource?: {
     scope: string;
     filters?: FilterRule[];

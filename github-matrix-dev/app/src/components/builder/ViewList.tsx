@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { useEoStore } from '../../store/eo-store';
 import { useBuilderStore } from '../../store/builder-store';
 import { useTheme, type Theme } from '../../theme';
 import type { EoState } from '../../db/types';
-import type { ViewDefinition } from '../../blocks/types';
+import type { ViewDefinition, PageType } from '../../blocks/types';
+import { ScopePicker } from '../ScopePicker';
 
 interface ViewListProps {
   onSelectView: () => void;
@@ -21,17 +22,36 @@ export function ViewList({ onSelectView }: ViewListProps) {
   const [views, setViews] = useState<EoState[]>([]);
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState('');
+  const [newPageType, setNewPageType] = useState<PageType>('page');
+  const [newScope, setNewScope] = useState('');
+  const setRecordSource = useBuilderStore((s) => s.setRecordSource);
 
   useEffect(() => {
     if (!ready) return;
     getStateByPrefix('views.').then(setViews);
   }, [ready, lastSeq, getStateByPrefix]);
 
+  // Collect existing record pages for the "link to record page" dropdown
+  const recordPages = useMemo(() => {
+    return views.filter(v => {
+      const def = v.value as ViewDefinition | null;
+      return def?.pageType === 'record';
+    });
+  }, [views]);
+
   const handleCreate = () => {
     const name = newName.trim() || 'Untitled View';
-    newView(name);
+    const viewId = newView(name, newPageType);
+
+    // Set record source if list or record page
+    if ((newPageType === 'list' || newPageType === 'record') && newScope) {
+      setRecordSource({ scope: newScope });
+    }
+
     setCreating(false);
     setNewName('');
+    setNewPageType('page');
+    setNewScope('');
     onSelectView();
   };
 
@@ -53,7 +73,7 @@ export function ViewList({ onSelectView }: ViewListProps) {
 
       <div style={s.actions}>
         {creating ? (
-          <div style={s.createRow}>
+          <div style={s.createForm}>
             <input
               style={s.input}
               placeholder="View name..."
@@ -62,8 +82,49 @@ export function ViewList({ onSelectView }: ViewListProps) {
               onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
               autoFocus
             />
-            <button style={s.createBtn} onClick={handleCreate}>Create</button>
-            <button style={s.cancelBtn} onClick={() => setCreating(false)}>Cancel</button>
+
+            {/* Page type selector */}
+            <div style={s.pageTypeRow}>
+              <span style={s.fieldLabel}>Page Type</span>
+              <div style={s.pageTypeBtns}>
+                {([
+                  { key: 'page' as PageType, label: 'Page', desc: 'Static page' },
+                  { key: 'list' as PageType, label: 'List Page', desc: 'Shows a collection' },
+                  { key: 'record' as PageType, label: 'Record Page', desc: 'Profile / detail' },
+                ] as const).map(pt => (
+                  <button
+                    key={pt.key}
+                    type="button"
+                    style={{
+                      ...s.pageTypeBtn,
+                      ...(newPageType === pt.key ? s.pageTypeBtnActive : {}),
+                    }}
+                    onClick={() => setNewPageType(pt.key)}
+                  >
+                    <div style={{ fontWeight: 500 }}>{pt.label}</div>
+                    <div style={{ fontSize: 10, color: theme.textMuted, marginTop: 2 }}>{pt.desc}</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Collection picker for list/record pages */}
+            {(newPageType === 'list' || newPageType === 'record') && (
+              <div style={s.pageTypeRow}>
+                <span style={s.fieldLabel}>Collection</span>
+                <ScopePicker
+                  value={newScope ? { mode: 'hierarchy', target: newScope } : undefined}
+                  onChange={(binding) => {
+                    if (binding.target) setNewScope(binding.target);
+                  }}
+                />
+              </div>
+            )}
+
+            <div style={s.createRow}>
+              <button style={s.createBtn} onClick={handleCreate}>Create</button>
+              <button style={s.cancelBtn} onClick={() => { setCreating(false); setNewPageType('page'); setNewScope(''); }}>Cancel</button>
+            </div>
           </div>
         ) : (
           <button style={s.newBtn} onClick={() => setCreating(true)}>
@@ -79,11 +140,26 @@ export function ViewList({ onSelectView }: ViewListProps) {
             const def = v.value as ViewDefinition | null;
             const name = def?.name || v.target.replace(/^views\./, '');
             const blockCount = def?.blocks?.length || 0;
+            const pt = def?.pageType || 'page';
+            const scope = def?.recordSource?.scope;
             return (
               <div key={v.target} style={s.viewCard} onClick={() => handleOpen(v)}>
-                <div style={s.viewName}>{name}</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <div style={s.viewName}>{name}</div>
+                  <span style={{
+                    fontSize: 9,
+                    fontWeight: 600,
+                    textTransform: 'uppercase' as const,
+                    padding: '2px 6px',
+                    borderRadius: 4,
+                    background: pt === 'record' ? '#E6F1FB' : pt === 'list' ? '#FFF3E0' : `${theme.border}80`,
+                    color: pt === 'record' ? '#185FA5' : pt === 'list' ? '#E65100' : theme.textMuted,
+                  }}>{pt}</span>
+                </div>
                 <div style={s.viewMeta}>
-                  {blockCount} block{blockCount !== 1 ? 's' : ''} · Updated {new Date(v.last_ts).toLocaleDateString()}
+                  {blockCount} block{blockCount !== 1 ? 's' : ''}
+                  {scope && <> · {scope}</>}
+                  {' · '}Updated {new Date(v.last_ts).toLocaleDateString()}
                 </div>
               </div>
             );
@@ -127,10 +203,53 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
     actions: {
       marginBottom: 20,
     },
+    createForm: {
+      display: 'flex',
+      flexDirection: 'column' as const,
+      gap: 12,
+      padding: 16,
+      border: `1px solid ${t.border}`,
+      borderRadius: 8,
+      background: t.bgCard,
+    },
     createRow: {
       display: 'flex',
       gap: 8,
       alignItems: 'center',
+    },
+    fieldLabel: {
+      display: 'block',
+      fontFamily: "'JetBrains Mono', monospace",
+      fontSize: 10,
+      fontWeight: 600,
+      textTransform: 'uppercase' as const,
+      letterSpacing: '0.5px',
+      color: t.textMuted,
+      marginBottom: 6,
+    },
+    pageTypeRow: {
+      marginBottom: 0,
+    },
+    pageTypeBtns: {
+      display: 'flex',
+      gap: 8,
+    },
+    pageTypeBtn: {
+      flex: 1,
+      padding: '8px 10px',
+      fontSize: 12,
+      border: `1px solid ${t.border}`,
+      borderRadius: 6,
+      background: 'transparent',
+      color: t.text,
+      cursor: 'pointer',
+      textAlign: 'left' as const,
+      fontFamily: "'Outfit', sans-serif",
+    },
+    pageTypeBtnActive: {
+      borderColor: t.accent,
+      background: t.accentBg,
+      color: t.accent,
     },
     input: {
       flex: 1,

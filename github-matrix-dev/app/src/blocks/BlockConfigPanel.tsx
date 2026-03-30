@@ -1,7 +1,10 @@
+import { useState, useEffect, useMemo } from 'react';
 import { useBuilderStore } from '../store/builder-store';
+import { useEoStore } from '../store/eo-store';
 import { getRegistration } from './registry';
 import { useTheme, type Theme } from '../theme';
 import type { BlockNode, BlockId, DataBinding } from './types';
+import type { EoState } from '../db/types';
 import { ScopePicker } from '../components/ScopePicker';
 import { useDataBindingContext } from '../contexts/DataBindingContext';
 
@@ -77,7 +80,6 @@ interface ConfigFormProps {
 
 function ConfigForm({ block, update, theme }: ConfigFormProps) {
   const s = makeFieldStyles(theme);
-  const { contextItem } = useDataBindingContext();
 
   switch (block.type) {
     case 'section':
@@ -86,11 +88,11 @@ function ConfigForm({ block, update, theme }: ConfigFormProps) {
           <Field label="Title" s={s}>
             <input style={s.input} value={block.props.title || ''} onChange={(e) => update('title', e.target.value)} />
           </Field>
-          <ScopePicker
+          <DataSourceField
             label="Data Context (@)"
-            value={block.props.binding}
+            binding={block.props.binding}
             onChange={(binding: DataBinding) => update('binding', binding)}
-            context={contextItem}
+            theme={theme}
           />
           <Field label="Border" s={s}>
             <Checkbox checked={block.props.borderVisible !== false} onChange={(v) => update('borderVisible', v)} theme={theme} />
@@ -156,11 +158,11 @@ function ConfigForm({ block, update, theme }: ConfigFormProps) {
           <Field label="Text" s={s}>
             <input style={s.input} value={block.props.text || ''} placeholder="Static text or leave empty for binding" onChange={(e) => update('text', e.target.value)} />
           </Field>
-          <ScopePicker
+          <DataSourceField
             label="Bind text from"
-            value={block.props.binding}
+            binding={block.props.binding}
             onChange={(binding: DataBinding) => update('binding', binding)}
-            context={contextItem}
+            theme={theme}
           />
           <Field label="Alignment" s={s}>
             <select style={s.select} value={block.props.alignment || 'left'} onChange={(e) => update('alignment', e.target.value)}>
@@ -182,11 +184,11 @@ function ConfigForm({ block, update, theme }: ConfigFormProps) {
               onChange={(e) => update('text', e.target.value)}
             />
           </Field>
-          <ScopePicker
+          <DataSourceField
             label="Bind text from"
-            value={block.props.binding}
+            binding={block.props.binding}
             onChange={(binding: DataBinding) => update('binding', binding)}
-            context={contextItem}
+            theme={theme}
           />
           <Field label="Alignment" s={s}>
             <select style={s.select} value={block.props.alignment || 'left'} onChange={(e) => update('alignment', e.target.value)}>
@@ -201,9 +203,9 @@ function ConfigForm({ block, update, theme }: ConfigFormProps) {
     case 'table':
       return (
         <>
-          <ScopePicker
+          <DataSourceField
             label="Data Source"
-            value={block.props.binding}
+            binding={block.props.binding}
             onChange={(binding: DataBinding) => {
               update('binding', binding);
               // Also set scope for backward compatibility
@@ -211,7 +213,7 @@ function ConfigForm({ block, update, theme }: ConfigFormProps) {
                 update('scope', binding.target);
               }
             }}
-            context={contextItem}
+            theme={theme}
           />
           <Field label="Scope (legacy)" s={s}>
             <input style={s.input} placeholder="e.g. demo_space.clients" value={block.props.scope || ''} onChange={(e) => update('scope', e.target.value)} />
@@ -265,11 +267,11 @@ function ConfigForm({ block, update, theme }: ConfigFormProps) {
           <Field label="Target" s={s}>
             <input style={s.input} placeholder="View ID or URL" value={block.props.actionTarget || ''} onChange={(e) => update('actionTarget', e.target.value)} />
           </Field>
-          <ScopePicker
+          <DataSourceField
             label="Action Binding"
-            value={block.props.binding}
+            binding={block.props.binding}
             onChange={(binding: DataBinding) => update('binding', binding)}
-            context={contextItem}
+            theme={theme}
           />
         </>
       );
@@ -298,6 +300,139 @@ function Checkbox({ checked, onChange, theme }: { checked: boolean; onChange: (v
       <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
       <span style={{ color: theme.text }}>{checked ? 'Yes' : 'No'}</span>
     </label>
+  );
+}
+
+/**
+ * DataSourceField — Simplified data source picker for record pages.
+ *
+ * On a record page: shows "Source: Page Record (@)" with a field dropdown
+ * and a "Custom source" toggle to reveal the full ScopePicker.
+ *
+ * On other pages: shows the full ScopePicker directly.
+ */
+function DataSourceField({ label, binding, onChange, theme }: {
+  label: string;
+  binding?: DataBinding;
+  onChange: (binding: DataBinding) => void;
+  theme: Theme;
+}) {
+  const { pageRecord, pageType } = useDataBindingContext();
+  const pageTypeStore = useBuilderStore((s) => s.pageType);
+  const recordSource = useBuilderStore((s) => s.recordSource);
+  const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
+  const ready = useEoStore((s) => s.ready);
+  const [customMode, setCustomMode] = useState(false);
+  const [fields, setFields] = useState<string[]>([]);
+  const s = makeFieldStyles(theme);
+  const isRecordPage = pageTypeStore === 'record';
+
+  // Discover available fields from the collection
+  useEffect(() => {
+    if (!ready || !isRecordPage || !recordSource?.scope) return;
+    getStateByPrefix(recordSource.scope + '.').then((states: EoState[]) => {
+      const fieldSet = new Set<string>();
+      for (const st of states) {
+        if (!st.value || typeof st.value !== 'object') continue;
+        for (const key of Object.keys(st.value)) {
+          if (!key.startsWith('_')) fieldSet.add(key);
+        }
+        // Also check fields sub-object
+        if (st.value.fields && typeof st.value.fields === 'object') {
+          for (const key of Object.keys(st.value.fields)) {
+            fieldSet.add(key);
+          }
+        }
+      }
+      setFields([...fieldSet].sort());
+    });
+  }, [ready, isRecordPage, recordSource?.scope, getStateByPrefix]);
+
+  // On a record page, show simplified UI
+  if (isRecordPage && !customMode) {
+    const currentField = binding?.field || binding?.fieldChain?.replace(/^@\./, '') || '';
+
+    return (
+      <div style={s.field}>
+        <label style={s.label}>{label}</label>
+
+        {/* Source indicator */}
+        <div style={{
+          fontSize: 11,
+          color: theme.accent,
+          background: theme.accentBg,
+          padding: '4px 8px',
+          borderRadius: 4,
+          marginBottom: 6,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+        }}>
+          <span>Source: Page Record (@)</span>
+          <button
+            type="button"
+            onClick={() => setCustomMode(true)}
+            style={{
+              fontSize: 10,
+              color: theme.textMuted,
+              background: 'none',
+              border: 'none',
+              cursor: 'pointer',
+              textDecoration: 'underline',
+            }}
+          >
+            Custom source
+          </button>
+        </div>
+
+        {/* Field picker */}
+        <select
+          style={s.select}
+          value={currentField}
+          onChange={(e) => {
+            const field = e.target.value;
+            if (field) {
+              onChange({ mode: 'connection', fieldChain: `@.${field}`, field });
+            } else {
+              onChange({ mode: 'connection', fieldChain: undefined, field: undefined });
+            }
+          }}
+        >
+          <option value="">— select field —</option>
+          {fields.map(f => (
+            <option key={f} value={f}>@.{f}</option>
+          ))}
+        </select>
+      </div>
+    );
+  }
+
+  // Full ScopePicker (non-record pages or custom mode)
+  return (
+    <div style={s.field}>
+      {isRecordPage && customMode && (
+        <button
+          type="button"
+          onClick={() => setCustomMode(false)}
+          style={{
+            fontSize: 10,
+            color: theme.accent,
+            background: 'none',
+            border: 'none',
+            cursor: 'pointer',
+            marginBottom: 4,
+          }}
+        >
+          ← Back to page record
+        </button>
+      )}
+      <ScopePicker
+        label={label}
+        value={binding}
+        onChange={onChange}
+        context={pageRecord}
+      />
+    </div>
   );
 }
 

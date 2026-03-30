@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { BlockNode, BlockId, BlockType, ViewDefinition } from '../blocks/types';
+import type { BlockNode, BlockId, BlockType, ViewDefinition, PageType, RecordSource } from '../blocks/types';
 import { createBlock } from '../blocks/registry';
 
 // ---------------------------------------------------------------------------
@@ -149,11 +149,21 @@ interface BuilderState {
   mode: BuilderMode;
   isDirty: boolean;
 
+  /** Page type: 'page' (static), 'list' (collection), 'record' (profile) */
+  pageType: PageType;
+  /** For list/record pages: which collection this page is bound to */
+  recordSource?: RecordSource;
+  /** For record page preview: a sample record target to render with */
+  previewRecordTarget?: string;
+
   // Actions
-  newView: (name: string) => string;
+  newView: (name: string, pageType?: PageType) => string;
   loadView: (viewId: string, definition: ViewDefinition) => void;
   setMode: (mode: BuilderMode) => void;
   selectBlock: (id: BlockId | null) => void;
+  setPageType: (pageType: PageType) => void;
+  setRecordSource: (source: RecordSource | undefined) => void;
+  setPreviewRecordTarget: (target: string | undefined) => void;
 
   addBlock: (type: BlockType, parentId?: BlockId | null, slotKey?: string | null, index?: number) => BlockId;
   moveBlock: (blockId: BlockId, newParentId: BlockId | null, newSlotKey: string | null, newIndex: number) => void;
@@ -172,8 +182,11 @@ export const useBuilderStore = create<BuilderState>((set, get) => ({
   selectedBlockId: null,
   mode: 'build',
   isDirty: false,
+  pageType: 'page' as PageType,
+  recordSource: undefined,
+  previewRecordTarget: undefined,
 
-  newView(name: string) {
+  newView(name: string, pageType: PageType = 'page') {
     const viewId = crypto.randomUUID();
     set({
       viewId,
@@ -182,6 +195,9 @@ export const useBuilderStore = create<BuilderState>((set, get) => ({
       selectedBlockId: null,
       mode: 'build',
       isDirty: true,
+      pageType,
+      recordSource: undefined,
+      previewRecordTarget: undefined,
     });
     return viewId;
   },
@@ -194,6 +210,9 @@ export const useBuilderStore = create<BuilderState>((set, get) => ({
       selectedBlockId: null,
       mode: 'build',
       isDirty: false,
+      pageType: definition.pageType || 'page',
+      recordSource: definition.recordSource,
+      previewRecordTarget: undefined,
     });
   },
 
@@ -203,6 +222,18 @@ export const useBuilderStore = create<BuilderState>((set, get) => ({
 
   selectBlock(id: BlockId | null) {
     set({ selectedBlockId: id });
+  },
+
+  setPageType(pageType: PageType) {
+    set({ pageType, isDirty: true });
+  },
+
+  setRecordSource(source: RecordSource | undefined) {
+    set({ recordSource: source, isDirty: true });
+  },
+
+  setPreviewRecordTarget(target: string | undefined) {
+    set({ previewRecordTarget: target });
   },
 
   addBlock(type: BlockType, parentId = null, slotKey = null, index?: number) {
@@ -241,10 +272,12 @@ export const useBuilderStore = create<BuilderState>((set, get) => ({
   },
 
   getViewDefinition(): ViewDefinition {
-    const { viewName, blocks } = get();
+    const { viewName, blocks, pageType, recordSource } = get();
     return {
       name: viewName,
       blocks,
+      pageType,
+      recordSource,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -262,6 +295,9 @@ export const useBuilderStore = create<BuilderState>((set, get) => ({
       selectedBlockId: null,
       mode: 'build',
       isDirty: false,
+      pageType: 'page' as PageType,
+      recordSource: undefined,
+      previewRecordTarget: undefined,
     });
   },
 }));
