@@ -31,7 +31,7 @@ function formatName(segment: string): string {
   return name || segment;
 }
 
-function buildTree(states: EoState[]): TreeNode[] {
+function buildTree(states: EoState[], statePrefix: string): TreeNode[] {
   const pathSet = new Map<string, { childPaths: Set<string>; state?: EoState }>();
 
   for (const s of states) {
@@ -96,10 +96,17 @@ function buildTree(states: EoState[]): TreeNode[] {
     };
   }
 
-  // Find root nodes (depth 1)
+  // Find root nodes — scoped to the statePrefix depth
+  // When statePrefix is 'space.amino.', roots are at depth 3 (e.g. space.amino.tblClients)
+  // When statePrefix is '', roots are at depth 1 (top-level segments)
+  const prefixDepth = statePrefix
+    ? statePrefix.split('.').filter(Boolean).length
+    : 0;
+
   const roots: TreeNode[] = [];
   for (const [path] of pathSet) {
-    if (!path.includes('.')) {
+    const depth = path.split('.').length;
+    if (depth === prefixDepth + 1) {
       roots.push(buildNode(path));
     }
   }
@@ -125,7 +132,7 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
     setExpanded(new Set());
   }, [statePrefix]);
 
-  const tree = useMemo(() => buildTree(allStates), [allStates]);
+  const tree = useMemo(() => buildTree(allStates, statePrefix), [allStates, statePrefix]);
 
   // Auto-expand root on first load
   useEffect(() => {

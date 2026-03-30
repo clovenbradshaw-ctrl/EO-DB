@@ -80,10 +80,13 @@ export function Layout({ session, onLogout }: LayoutProps) {
     getStateByPrefix(statePrefix).then(setAllStates);
   }, [ready, lastSeq, getStateByPrefix, statePrefix]);
 
-  // Compute target count from recent events
-  const targetCount = new Set(recentEvents.map((e) => e.target)).size;
+  // Compute target count from recent events — scoped to selected space
+  const spaceEvents = statePrefix
+    ? recentEvents.filter((e) => e.target.startsWith(statePrefix))
+    : recentEvents;
+  const targetCount = new Set(spaceEvents.map((e) => e.target)).size;
   // Compute edge count (CON events)
-  const edgeCount = recentEvents.filter((e) => e.op === 'CON').length;
+  const edgeCount = spaceEvents.filter((e) => e.op === 'CON').length;
 
   // Initialize encrypted store and sync from Matrix on mount
   useEffect(() => {
@@ -296,9 +299,9 @@ export function Layout({ session, onLogout }: LayoutProps) {
                 )}
               </>
             ) : activeView === 'log' ? (
-              <LogView targetFilter={selectedScope} />
+              <LogView targetFilter={selectedScope} spacePrefix={statePrefix || undefined} />
             ) : activeView === 'graph' ? (
-              <GraphView />
+              <GraphView spacePrefix={statePrefix || undefined} />
             ) : activeView === 'import' ? (
               <div style={s.importPage}>
                 <div style={s.importHeader}>
@@ -308,7 +311,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
                 <AirtableSettingsSection session={session} />
               </div>
             ) : activeView === 'compose' ? (
-              <ComposeView />
+              <ComposeView spacePrefix={statePrefix || undefined} />
             ) : activeView === 'settings' ? (
               <SettingsView session={session} />
             ) : null}

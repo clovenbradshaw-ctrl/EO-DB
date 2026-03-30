@@ -8,18 +8,18 @@ const NODE_COLORS = ['#4ade80', '#38bdf8', '#a78bfa', '#34d399', '#fb923c', '#f4
 interface Edge { source: string; dest: string }
 interface NodePos { x: number; y: number }
 
-export function GraphView() {
+export function GraphView({ spacePrefix }: { spacePrefix?: string }) {
   const { theme } = useTheme();
   const recentEvents = useEoStore((s) => s.recentEvents);
   const [highlighted, setHighlighted] = useState<string | null>(null);
   const s = styles(theme);
 
-  // Extract CON edges
+  // Extract CON edges — filtered to selected space
   const { nodes, edges } = useMemo(() => {
     const nodesSet = new Set<string>();
     const edgeList: Edge[] = [];
     recentEvents
-      .filter((e) => e.op === 'CON')
+      .filter((e) => e.op === 'CON' && (!spacePrefix || e.target.startsWith(spacePrefix)))
       .forEach((e) => {
         const source = e.target.split('.').slice(0, 3).join('.');
         if (e.operand?.added) {
