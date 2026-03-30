@@ -79,10 +79,7 @@ export function RecordView({ target, onNavigate }: RecordViewProps) {
             <span style={s.metaLabel}>Target:</span> {target}
           </span>
           <span style={s.metaItem}>
-            <span style={s.metaLabel}>Last op:</span> {data.figure.last_op}
-          </span>
-          <span style={s.metaItem}>
-            <span style={s.metaLabel}>Agent:</span> {data.figure.last_agent}
+            <span style={s.metaLabel}>Last modified seq</span> {data.figure.last_seq}
           </span>
           {data.graphMetrics && <GraphRoleBadge metrics={data.graphMetrics} />}
           {data.cadence && <CadenceBadge cadence={data.cadence} />}
@@ -120,7 +117,7 @@ export function RecordView({ target, onNavigate }: RecordViewProps) {
       </div>
 
       {/* Layer 1: Figure */}
-      <Section title="Client Record" subtitle="what this target is" color={theme.accent}>
+      <Section title="Current State" subtitle="what this target is" color={theme.accent}>
         <FigureFields figure={data.figure} onNavigate={onNavigate} />
       </Section>
 
@@ -132,7 +129,7 @@ export function RecordView({ target, onNavigate }: RecordViewProps) {
       )}
 
       {/* Edit History */}
-      <Section title="Edit History" subtitle="changes to this record with revert" color={theme.warning}>
+      <Section title="Event History" subtitle="changes to this record with revert" color={theme.warning}>
         <ElementHistory target={target} />
       </Section>
 

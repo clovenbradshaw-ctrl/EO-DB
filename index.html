@@ -3452,70 +3452,49 @@ INS,app.tbl.rec1,"{""name"":""Alice""}"</pre>
   </div>
 </div>
 
-<!-- Share Dialog -->
+<!-- Share Dialog — Space Management Panel -->
 <div class="login-overlay hidden" id="shareOverlay">
-  <div class="login-card" style="max-width:480px;">
-    <div class="login-title">Share Data</div>
-    <div class="login-subtitle" id="shareScope">Scope: all targets</div>
+  <div class="login-card" style="max-width:520px;">
 
-    <div class="login-field">
-      <label>What to share</label>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;">
-        <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;">
-          <input type="radio" name="shareType" value="table" checked onchange="updateShareDialog()"> Entire table
-        </label>
-        <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;">
-          <input type="radio" name="shareType" value="filtered" onchange="updateShareDialog()"> With current filters
-        </label>
-        <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;">
-          <input type="radio" name="shareType" value="records" onchange="updateShareDialog()"> Selected records
-        </label>
+    <!-- Loading state -->
+    <div id="shareLoading" style="text-align:center;padding:20px;">
+      <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);" id="shareLoadingMsg">Loading space...</div>
+    </div>
+
+    <!-- Management panel -->
+    <div id="shareManagePanel" style="display:none;">
+
+      <!-- Space metadata -->
+      <div style="margin-bottom:16px;padding:12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;">
+        <div class="settings-session-field"><span class="settings-session-key">ID</span><span class="settings-session-val" id="spaceMeta_id" style="font-size:9px;word-break:break-all;"></span></div>
+        <div class="settings-session-field"><span class="settings-session-key">Target Prefix</span><span class="settings-session-val" id="spaceMeta_scope"></span></div>
+        <div class="settings-session-field"><span class="settings-session-key">Owner</span><span class="settings-session-val" id="spaceMeta_owner"></span></div>
+        <div class="settings-session-field"><span class="settings-session-key">Created</span><span class="settings-session-val" id="spaceMeta_created"></span></div>
+      </div>
+
+      <!-- SHARING section -->
+      <div style="font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-faint);margin-bottom:8px;">Sharing</div>
+
+      <!-- Current members list -->
+      <div id="spaceMembers" style="margin-bottom:12px;"></div>
+
+      <!-- Add member row -->
+      <div class="settings-add-row" style="align-items:center;">
+        <input class="settings-add-input" id="spaceInviteInput" placeholder="@user:homeserver.com" autocomplete="off">
+        <select id="spaceInvitePerm" style="background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:6px 8px;color:var(--text);font-family:'JetBrains Mono',monospace;font-size:10px;">
+          <option value="read">Read</option>
+        </select>
+        <button class="settings-add-btn" onclick="handleSpaceInvite()" style="background:var(--accent);color:#fff;border-color:var(--accent);">+ Share</button>
+      </div>
+
+      <!-- Error display -->
+      <div class="login-error" id="shareError"></div>
+
+      <!-- Delete Space button -->
+      <div style="margin-top:20px;">
+        <button class="settings-delete-btn" onclick="handleDeleteSpace()" style="padding:8px 16px;">Delete Space</button>
       </div>
     </div>
-
-    <div class="login-field">
-      <label>Access</label>
-      <div style="display:flex;gap:8px;">
-        <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;">
-          <input type="radio" name="shareMode" value="private" checked> Private (invite only)
-        </label>
-        <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;">
-          <input type="radio" name="shareMode" value="public"> Public (anyone with link)
-        </label>
-      </div>
-    </div>
-
-    <div class="login-field">
-      <label>Permission</label>
-      <div style="display:flex;gap:8px;">
-        <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;">
-          <input type="radio" name="sharePerm" value="view" checked> Can view
-        </label>
-        <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;">
-          <input type="radio" name="sharePerm" value="edit"> Can import
-        </label>
-      </div>
-    </div>
-
-    <div id="sharePublicWarning" style="display:none;background:rgba(250,204,21,0.1);border:1px solid rgba(250,204,21,0.3);border-radius:6px;padding:8px 12px;font-size:10px;color:var(--text-dim);margin-bottom:12px;">
-      Anyone with this link can access the data. Public shares cannot be revoked.
-    </div>
-
-    <div id="sharePreview" style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-dim);margin-bottom:12px;"></div>
-
-    <button class="login-btn" id="shareCreateBtn" onclick="handleCreateShare()">Create Share Link</button>
-
-    <div id="shareResult" style="display:none;margin-top:12px;">
-      <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--accent);margin-bottom:6px;">Share link created:</div>
-      <div style="display:flex;gap:6px;align-items:center;">
-        <input id="shareLinkInput" readonly style="flex:1;font-family:'JetBrains Mono',monospace;font-size:10px;padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);">
-        <button class="settings-add-btn" onclick="copyShareLink()" style="font-size:10px;padding:4px 10px;">Copy</button>
-      </div>
-    </div>
-
-    <div class="login-error" id="shareError"></div>
-
-    <div id="shareExistingList" style="margin-top:16px;border-top:1px solid var(--border);padding-top:12px;"></div>
 
     <div class="login-skip" onclick="closeShareDialog()">Close</div>
   </div>
@@ -6472,10 +6451,11 @@ async function createShare({ scope, mode, permissions, useFilters, selectedTarge
   saveShareRecord({
     share_id: spaceId,
     mode,
-    scope: scope || '(selected records)',
+    scope: scope || (selectedTargets ? '(selected records)' : '(all targets)'),
     record_count: states.length,
     permissions,
     created_at: manifest.created_at,
+    created_by: matrixUserId,
     link,
   });
 
@@ -6599,109 +6579,214 @@ function renderSharedSpacesUI() {
   `).join('');
 }
 
-/* ── Share Dialog UI ─────────────────────────────────────────── */
+/* ── Share Dialog UI — Space Management Panel ──────────────────── */
 
-function openShareDialog() {
-  document.getElementById('shareOverlay').classList.remove('hidden');
+const SHARE_MEMBER_TYPE = 'com.eo-db.share.member';
+let _currentManagedShare = null;
+let _shareDialogBusy = false;
+
+async function openShareDialog() {
+  const overlay = document.getElementById('shareOverlay');
+  overlay.classList.remove('hidden');
   document.getElementById('shareError').textContent = '';
-  document.getElementById('shareResult').style.display = 'none';
-  document.getElementById('shareCreateBtn').disabled = false;
-  document.getElementById('shareCreateBtn').textContent = 'Create Share Link';
-  updateShareDialog();
-  renderExistingSharesList();
+  document.getElementById('shareManagePanel').style.display = 'none';
+  document.getElementById('shareLoading').style.display = 'block';
+  document.getElementById('shareLoadingMsg').textContent = 'Loading space...';
+
+  if (!matrixToken || !matrixUserId) {
+    document.getElementById('shareLoadingMsg').textContent = 'Sign in to Matrix first.';
+    return;
+  }
+
+  if (_shareDialogBusy) return;
+  _shareDialogBusy = true;
+
+  const scope = selectedScope || null;
+  const scopeKey = scope || '(all targets)';
+
+  try {
+    // Find existing share space for this scope
+    const shares = loadShareRecords();
+    let share = shares.find(s => s.scope === scopeKey || s.scope === scope);
+
+    if (!share) {
+      // Auto-create a share space
+      document.getElementById('shareLoadingMsg').textContent = 'Creating share space...';
+      const result = await createShare({
+        scope,
+        mode: 'private',
+        permissions: 'view',
+        useFilters: false,
+        selectedTargets: null,
+      });
+      share = loadShareRecords().find(s => s.share_id === result.shareId);
+    }
+
+    if (!share) throw new Error('Could not find or create share space');
+    await renderSpaceManagePanel(share);
+  } catch (err) {
+    document.getElementById('shareLoadingMsg').textContent = 'Error: ' + err.message;
+  } finally {
+    _shareDialogBusy = false;
+  }
 }
 
 function closeShareDialog() {
   document.getElementById('shareOverlay').classList.add('hidden');
+  _currentManagedShare = null;
 }
 
-function updateShareDialog() {
-  const scope = selectedScope || '(all targets)';
-  document.getElementById('shareScope').textContent = `Scope: ${scope}`;
+async function renderSpaceManagePanel(share) {
+  _currentManagedShare = share;
 
-  const shareType = document.querySelector('input[name="shareType"]:checked').value;
-  const mode = document.querySelector('input[name="shareMode"]:checked').value;
+  // Fill metadata
+  document.getElementById('spaceMeta_id').textContent = share.share_id;
+  document.getElementById('spaceMeta_scope').textContent = share.scope;
+  document.getElementById('spaceMeta_owner').textContent = share.created_by || matrixUserId;
+  document.getElementById('spaceMeta_created').textContent = share.created_at
+    ? new Date(share.created_at).toLocaleString('sv-SE', { year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit' }).replace('T',' ')
+    : '—';
 
-  // Show/hide public warning
-  document.getElementById('sharePublicWarning').style.display = mode === 'public' ? 'block' : 'none';
+  // Fetch joined members from Matrix
+  try {
+    const res = await fetch(
+      `${matrixHomeserver}/_matrix/client/v3/rooms/${encodeURIComponent(share.share_id)}/joined_members`,
+      { headers: { 'Authorization': `Bearer ${matrixToken}` } }
+    );
+    if (!res.ok) throw new Error('Failed to fetch members');
+    const { joined } = await res.json();
 
-  // Preview record count
-  const states = collectShareData(
-    selectedScope,
-    shareType === 'filtered',
-    shareType === 'records' && selectedTarget ? [selectedTarget] : null
-  );
-  document.getElementById('sharePreview').textContent = `${states.length} records will be shared`;
+    // Also read member metadata state events for invite dates
+    let memberMeta = {};
+    try {
+      const allState = await readAllSpaceState(share.share_id);
+      for (const ev of allState) {
+        if (ev.type === SHARE_MEMBER_TYPE && ev.state_key) {
+          memberMeta[ev.state_key] = ev.content;
+        }
+      }
+    } catch (_) { /* ignore — metadata is optional */ }
+
+    renderSpaceMembers(joined, share, memberMeta);
+  } catch (err) {
+    document.getElementById('spaceMembers').innerHTML =
+      `<div style="font-size:10px;color:var(--danger);">Could not load members: ${escapeHtml(err.message)}</div>`;
+  }
+
+  // Show panel, hide loading
+  document.getElementById('shareLoading').style.display = 'none';
+  document.getElementById('shareManagePanel').style.display = 'block';
 }
 
-async function handleCreateShare() {
-  const btn = document.getElementById('shareCreateBtn');
+function renderSpaceMembers(joined, share, memberMeta) {
+  const container = document.getElementById('spaceMembers');
+  const userIds = Object.keys(joined);
+  const owner = share.created_by || matrixUserId;
+
+  if (userIds.length === 0) {
+    container.innerHTML = '<div style="font-size:10px;color:var(--text-faint);">No members</div>';
+    return;
+  }
+
+  container.innerHTML = userIds.map(userId => {
+    const isOwner = userId === owner;
+    const meta = memberMeta[userId];
+    const addedDate = meta && meta.added_at
+      ? new Date(meta.added_at).toISOString().slice(0, 10)
+      : null;
+    const permLabel = (meta && meta.permission) || 'Read';
+
+    return `
+      <div style="display:flex;align-items:center;gap:8px;padding:8px 12px;margin-bottom:6px;background:var(--bg);border:1px solid var(--border);border-radius:6px;font-family:'JetBrains Mono',monospace;">
+        <div style="flex:1;overflow:hidden;">
+          <div style="font-size:10px;color:var(--text);overflow:hidden;text-overflow:ellipsis;">${escapeHtml(userId)}</div>
+          <div style="font-size:9px;color:var(--text-faint);margin-top:2px;">${escapeHtml(permLabel.toUpperCase())}${addedDate ? ` &mdash; ADDED ${addedDate}` : ''}</div>
+        </div>
+        <select disabled style="background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:4px 6px;color:var(--text);font-family:'JetBrains Mono',monospace;font-size:9px;">
+          <option>Read</option>
+        </select>
+        ${isOwner
+          ? ''
+          : `<button class="settings-delete-btn" onclick="handleRemoveMember('${escapeHtml(userId)}')" style="font-size:9px;padding:2px 8px;">Remove</button>`
+        }
+      </div>`;
+  }).join('');
+}
+
+async function handleSpaceInvite() {
+  const input = document.getElementById('spaceInviteInput');
+  const userId = input.value.trim();
   const errEl = document.getElementById('shareError');
   errEl.textContent = '';
 
-  const shareType = document.querySelector('input[name="shareType"]:checked').value;
-  const mode = document.querySelector('input[name="shareMode"]:checked').value;
-  const permissions = document.querySelector('input[name="sharePerm"]:checked').value;
+  if (!userId || !userId.startsWith('@') || !userId.includes(':')) {
+    errEl.textContent = 'Enter a valid Matrix user ID (e.g. @user:homeserver.com)';
+    return;
+  }
 
-  btn.disabled = true;
-  btn.textContent = 'Creating space...';
+  if (!_currentManagedShare) return;
 
   try {
-    const result = await createShare({
-      scope: selectedScope,
-      mode,
-      permissions,
-      useFilters: shareType === 'filtered',
-      selectedTargets: shareType === 'records' && selectedTarget ? [selectedTarget] : null,
+    await inviteToSpace(_currentManagedShare.share_id, userId);
+
+    // Store member metadata (permission + invite date) as a state event
+    await postSpaceState(_currentManagedShare.share_id, SHARE_MEMBER_TYPE, userId, {
+      permission: 'read',
+      added_at: new Date().toISOString(),
+      added_by: matrixUserId,
     });
 
-    document.getElementById('shareResult').style.display = 'block';
-    document.getElementById('shareLinkInput').value = result.link;
-    btn.textContent = 'Share Created';
-    renderExistingSharesList();
-    renderSharedSpacesUI();
+    input.value = '';
+    // Refresh members
+    await renderSpaceManagePanel(_currentManagedShare);
   } catch (err) {
-    errEl.textContent = err.message;
-    btn.disabled = false;
-    btn.textContent = 'Create Share Link';
+    errEl.textContent = 'Invite failed: ' + err.message;
   }
 }
 
-function copyShareLink() {
-  const input = document.getElementById('shareLinkInput');
-  navigator.clipboard.writeText(input.value);
-  input.select();
+async function handleRemoveMember(userId) {
+  if (!confirm(`Remove ${userId} from this share?`)) return;
+  if (!_currentManagedShare) return;
+  const errEl = document.getElementById('shareError');
+  errEl.textContent = '';
+
+  try {
+    await fetch(
+      `${matrixHomeserver}/_matrix/client/v3/rooms/${encodeURIComponent(_currentManagedShare.share_id)}/kick`,
+      {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${matrixToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: userId, reason: 'Removed from share' }),
+      }
+    );
+    // Refresh
+    await renderSpaceManagePanel(_currentManagedShare);
+  } catch (err) {
+    errEl.textContent = 'Remove failed: ' + err.message;
+  }
+}
+
+async function handleDeleteSpace() {
+  if (!confirm('Delete this share space? All members will lose access.')) return;
+  if (!_currentManagedShare) return;
+
+  try {
+    await revokeShare(_currentManagedShare.share_id);
+    renderSharedSpacesUI();
+    closeShareDialog();
+  } catch (err) {
+    document.getElementById('shareError').textContent = 'Delete failed: ' + err.message;
+  }
 }
 
 async function handleRevokeShare(shareId) {
   if (!confirm('Revoke this share? Members will lose access.')) return;
   try {
     await revokeShare(shareId);
-    renderExistingSharesList();
     renderSharedSpacesUI();
   } catch (err) {
     alert('Revoke failed: ' + err.message);
   }
-}
-
-function renderExistingSharesList() {
-  const container = document.getElementById('shareExistingList');
-  if (!container) return;
-
-  const shares = loadShareRecords();
-  if (shares.length === 0) {
-    container.innerHTML = '';
-    return;
-  }
-
-  container.innerHTML = `<div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-dim);margin-bottom:8px;">Previous shares:</div>` +
-    shares.map(s => `
-      <div style="display:flex;align-items:center;gap:6px;padding:4px 0;font-family:'JetBrains Mono',monospace;font-size:10px;">
-        <span style="flex:1;color:var(--text-dim);">${escapeHtml(s.scope)} · ${s.record_count} records · ${s.mode}</span>
-        <button class="settings-add-btn" onclick="navigator.clipboard.writeText('${escapeHtml(s.link)}')" style="font-size:9px;padding:2px 6px;">Copy</button>
-        ${s.mode === 'private' ? `<button class="settings-delete-btn" onclick="handleRevokeShare('${escapeHtml(s.share_id)}')" style="font-size:9px;padding:2px 6px;">Revoke</button>` : ''}
-      </div>
-    `).join('');
 }
 
 /* ── Share Accept Overlay ────────────────────────────────────── */
