@@ -1,8 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import type { Theme } from '../theme';
 import { useTheme } from '../theme';
-import type { MatrixSession } from '../matrix/client';
-import { createMatrixClient } from '../matrix/client';
 
 // ==========================================
 // Filen API types
@@ -115,11 +113,7 @@ function fmtSize(b: number): string {
 // ==========================================
 // Component
 // ==========================================
-interface FilenStorageWidgetProps {
-  session?: MatrixSession;
-}
-
-export function FilenStorageWidget({ session: matrixSession }: FilenStorageWidgetProps) {
+export function FilenStorageWidget() {
   const { theme } = useTheme();
   const s = widgetStyles(theme);
 
@@ -141,11 +135,9 @@ export function FilenStorageWidget({ session: matrixSession }: FilenStorageWidge
   const [loading, setLoading] = useState(false);
   const [browseError, setBrowseError] = useState('');
 
-  // Share state — Matrix ID based
-  const [shareDialog, setShareDialog] = useState<{ uuid: string; name: string; key: string } | null>(null);
-  const [shareMatrixId, setShareMatrixId] = useState('');
+  // Share state
+  const [shareToast, setShareToast] = useState<{ name: string; url: string } | null>(null);
   const [sharingUuid, setSharingUuid] = useState<string | null>(null);
-  const [shareResult, setShareResult] = useState<{ msg: string; type: 'success' | 'error' } | null>(null);
 
   const masterKeysRef = useRef(masterKeys);
   masterKeysRef.current = masterKeys;
@@ -220,89 +212,27 @@ export function FilenStorageWidget({ session: matrixSession }: FilenStorageWidge
     }
   }
 
-  // Share by Matrix ID — open dialog to enter recipient
-  function openShareDialog(fileUuid: string, fileName: string, fileKey: string) {
-    setShareDialog({ uuid: fileUuid, name: fileName, key: fileKey });
-    setShareMatrixId('');
-    setShareResult(null);
-  }
-
-  // Send file reference to a Matrix user via DM
-  async function shareByMatrixId() {
-    if (!matrixSession || !shareDialog) return;
-    const targetUserId = shareMatrixId.trim();
-    if (!targetUserId.match(/^@[^:]+:.+$/)) {
-      setShareResult({ msg: 'Enter a valid Matrix ID (e.g. @user:server.com)', type: 'error' });
-      return;
-    }
-    if (targetUserId === matrixSession.userId) {
-      setShareResult({ msg: 'Cannot share with yourself', type: 'error' });
-      return;
-    }
-
-    setSharingUuid(shareDialog.uuid);
-    setShareResult(null);
+  // Share link
+  async function createShareLink(fileUuid: string, fileName: string, fileKey: string) {
+    if (!auth) return;
+    setSharingUuid(fileUuid);
     try {
-      const client = createMatrixClient(matrixSession);
-      await client.startClient({ initialSyncLimit: 0 });
-
-      // Wait for initial sync so room lookup works
-      await new Promise<void>((resolve) => {
-        if (client.isInitialSyncComplete()) {
-          resolve();
-        } else {
-          client.once('sync' as any, (state: string) => {
-            if (state === 'PREPARED') resolve();
-          });
-        }
-      });
-
-      // Find existing DM or create a new encrypted one
-      let dmRoomId: string | null = null;
-
-      // Check for existing DM with this user
-      const rooms = client.getRooms();
-      for (const room of rooms) {
-        const members = room.getJoinedMembers();
-        if (members.length === 2 && members.some(m => m.userId === targetUserId)) {
-          dmRoomId = room.roomId;
-          break;
-        }
+      const statusRes = await filenApi('/v3/file/link/status', { uuid: fileUuid }, auth.apiKey);
+      let linkUuid: string;
+      if (statusRes.status && statusRes.data?.enabled && statusRes.data?.uuid) {
+        linkUuid = statusRes.data.uuid;
+      } else {
+        linkUuid = statusRes.data?.uuid || crypto.randomUUID();
+        const editRes = await filenApi('/v3/file/link/edit', {
+          uuid: fileUuid, fileUUID: fileUuid, expiration: 'never',
+          password: 'empty', downloadBtn: true, type: 'enable', linkUUID: linkUuid,
+        }, auth.apiKey);
+        if (!editRes.status) throw new Error(editRes.message || 'Failed to create share link');
       }
-
-      if (!dmRoomId) {
-        // Create a new encrypted DM room
-        const createResult = await client.createRoom({
-          preset: 'trusted_private_chat' as any,
-          invite: [targetUserId],
-          is_direct: true,
-          initial_state: [
-            {
-              type: 'm.room.encryption',
-              state_key: '',
-              content: { algorithm: 'm.megolm.v1.aes-sha2' },
-            },
-          ],
-        });
-        dmRoomId = createResult.room_id;
-      }
-
-      // Send file reference as a Matrix message
-      await client.sendEvent(dmRoomId, 'm.room.message' as any, {
-        msgtype: 'com.eo-db.file_share',
-        body: `Shared file: ${shareDialog.name}`,
-        file_name: shareDialog.name,
-        file_uuid: shareDialog.uuid,
-        file_key: shareDialog.key,
-        shared_by: matrixSession.userId,
-        shared_at: new Date().toISOString(),
-      });
-
-      client.stopClient();
-      setShareResult({ msg: `Shared with ${targetUserId}`, type: 'success' });
-      setShareMatrixId('');
+      const shareUrl = `https://filen.io/f/${linkUuid}#${fileKey}`;
+      setShareToast({ name: fileName, url: shareUrl });
     } catch (e: any) {
-      setShareResult({ msg: 'Share failed: ' + e.message, type: 'error' });
+      setStatus({ msg: 'Share failed: ' + e.message, type: 'error' });
     } finally {
       setSharingUuid(null);
     }
@@ -383,8 +313,7 @@ export function FilenStorageWidget({ session: matrixSession }: FilenStorageWidge
     setPassword('');
     setTwofa('');
     setStatus(null);
-    setShareDialog(null);
-    setShareResult(null);
+    setShareToast(null);
   }
 
   // Breadcrumb parts
@@ -540,9 +469,9 @@ export function FilenStorageWidget({ session: matrixSession }: FilenStorageWidge
                 <span style={s.fIcon}>{fileIcon(item.name, item.type === 'folder')}</span>
                 <span style={s.fName}>{item.name}</span>
                 <span style={s.fSize}>{item.type === 'file' ? fmtSize(item.size || 0) : ''}</span>
-                {item.type === 'file' && matrixSession && (
+                {item.type === 'file' && (
                   <button style={s.shareBtn}
-                    onClick={e => { e.stopPropagation(); openShareDialog(item.uuid, item.name, item.key || ''); }}>
+                    onClick={e => { e.stopPropagation(); createShareLink(item.uuid, item.name, item.key || ''); }}>
                     {sharingUuid === item.uuid ? '...' : 'Share'}
                   </button>
                 )}
@@ -552,39 +481,21 @@ export function FilenStorageWidget({ session: matrixSession }: FilenStorageWidge
         </div>
       )}
 
-      {/* Share by Matrix ID dialog */}
-      {shareDialog && (
+      {/* Share toast */}
+      {shareToast && (
         <div style={s.shareToastBox}>
           <div style={s.shareToastHeader}>
-            <span>Share: {shareDialog.name}</span>
-            <button style={s.shareClose} onClick={() => { setShareDialog(null); setShareResult(null); }}>&times;</button>
+            <span>Link: {shareToast.name}</span>
+            <button style={s.shareClose} onClick={() => setShareToast(null)}>&times;</button>
           </div>
           <div style={s.shareToastLink}>
-            <input
-              style={s.shareLinkInput}
-              value={shareMatrixId}
-              onChange={e => setShareMatrixId(e.target.value)}
-              placeholder="@user:homeserver.com"
-              onKeyDown={e => e.key === 'Enter' && shareByMatrixId()}
-              disabled={!!sharingUuid}
-            />
-            <button
-              style={s.shareCopyBtn}
-              onClick={shareByMatrixId}
-              disabled={!!sharingUuid || !shareMatrixId.trim()}
-            >
-              {sharingUuid ? '...' : 'Send'}
-            </button>
+            <input style={s.shareLinkInput} value={shareToast.url} readOnly
+              onClick={e => (e.target as HTMLInputElement).select()} />
+            <button style={s.shareCopyBtn} onClick={() => {
+              navigator.clipboard.writeText(shareToast.url).catch(() => {});
+            }}>Copy</button>
           </div>
-          {shareResult && (
-            <div style={{
-              ...s.shareNote,
-              color: shareResult.type === 'success' ? theme.success : theme.danger,
-            }}>
-              {shareResult.msg}
-            </div>
-          )}
-          <div style={s.shareNote}>File will be shared via encrypted Matrix direct message</div>
+          <div style={s.shareNote}>Link includes decryption key — anyone with it can read the file</div>
         </div>
       )}
     </div>

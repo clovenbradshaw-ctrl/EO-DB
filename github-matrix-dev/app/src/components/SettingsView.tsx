@@ -118,7 +118,7 @@ export function SettingsView({ session }: SettingsViewProps) {
 
         {/* Filen Storage */}
         <Section title="Extra Storage" theme={theme}>
-          <FilenStorageWidget session={session} />
+          <FilenStorageWidget />
         </Section>
 
         {/* Danger Zone */}
