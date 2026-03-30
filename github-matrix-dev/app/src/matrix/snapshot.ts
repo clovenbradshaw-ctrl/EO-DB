@@ -123,12 +123,49 @@ export async function uploadSnapshot(
   return mxcUrl;
 }
 
+/** A single entry in the snapshot chain stored in room state. */
+export interface SnapshotChainEntry {
+  mxc: string;
+  seq: number;            // to_seq for deltas, seq for full snapshots
+  from_seq?: number;      // only on deltas — exclusive lower bound
+  type: 'full' | 'delta';
+}
+
+/** Shape of the room state event content for snapshot hydration. */
+export interface SnapshotStateContent {
+  /** Ordered newest-first chain of snapshot URIs. */
+  chain: SnapshotChainEntry[];
+  /** Timestamp of the last update. */
+  ts: string;
+}
+
 /**
- * Store the latest snapshot URI in room state for instant hydration.
+ * Read the current snapshot chain from room state, or return empty.
+ */
+function readSnapshotChain(room: any): SnapshotChainEntry[] {
+  const stateEvent = room.currentState.getStateEvents(EO_SNAPSHOT_STATE_TYPE, '');
+  if (!stateEvent) return [];
+  const content = stateEvent.getContent() as Partial<SnapshotStateContent>;
+
+  // Backwards compat: old state events stored a flat {mxc, seq, version}
+  if (!content.chain && (content as any).mxc) {
+    const legacy = content as any;
+    return [{ mxc: legacy.mxc, seq: legacy.seq, type: legacy.version === 2 ? 'full' : 'delta' }];
+  }
+
+  return content.chain ?? [];
+}
+
+/**
+ * Store the snapshot chain in room state for instant hydration.
  *
  * Room state events are always available via `room.currentState` without
  * pagination, making hydration O(1) instead of O(n) timeline walks.
  * Each call overwrites the previous state event (state_key = "").
+ *
+ * When a full snapshot is added, all prior entries are pruned since the
+ * full snapshot supersedes them. Delta entries accumulate until the next
+ * full snapshot.
  */
 export async function setSnapshotStateEvent(
   client: MatrixClient,
@@ -136,57 +173,67 @@ export async function setSnapshotStateEvent(
   mxc: string,
   seq: number,
   version: number,
+  fromSeq?: number,
 ): Promise<void> {
+  const room = client.getRoom(roomId);
+  const type: 'full' | 'delta' = version === 2 ? 'full' : 'delta';
+
+  const entry: SnapshotChainEntry = { mxc, seq, type };
+  if (type === 'delta' && fromSeq !== undefined) {
+    entry.from_seq = fromSeq;
+  }
+
+  let chain: SnapshotChainEntry[];
+
+  if (type === 'full') {
+    // Full snapshot supersedes everything before it — start fresh.
+    chain = [entry];
+  } else {
+    // Delta: prepend to existing chain (newest first).
+    const existing = room ? readSnapshotChain(room) : [];
+    chain = [entry, ...existing];
+  }
+
   await client.sendStateEvent(roomId, EO_SNAPSHOT_STATE_TYPE as any, {
-    mxc,
-    seq,
-    version,
+    chain,
     ts: new Date().toISOString(),
-  }, '');
+  } satisfies SnapshotStateContent, '');
 }
 
 /**
- * Find the latest snapshot reference — fast path via room state, slow fallback
- * via timeline pagination.
+ * Read the full snapshot chain from room state.
  *
- * Room state lookup is O(1) and works immediately after initial sync.
- * The timeline fallback handles rooms that haven't been upgraded yet (no state
- * event written). Once any device writes a snapshot, all future hydrations
- * hit the fast path.
+ * Returns the ordered chain (newest-first) so the caller can decide how
+ * to hydrate: apply the most recent full snapshot, then replay deltas on
+ * top, or use `restoreFromDeltaChain` if no full snapshot exists yet.
+ *
+ * Falls back to timeline pagination for rooms created before state-based
+ * tracking was introduced.
  */
-export async function findLatestSnapshot(
+export async function getSnapshotChain(
   client: MatrixClient,
   roomId: string,
-): Promise<{ mxc: string; seq: number } | null> {
+): Promise<SnapshotChainEntry[]> {
   const room = client.getRoom(roomId);
-  if (!room) return null;
+  if (!room) return [];
 
-  // Fast path: read the snapshot URI directly from room state.
-  const stateEvent = room.currentState.getStateEvents(EO_SNAPSHOT_STATE_TYPE, '');
-  if (stateEvent) {
-    const content = stateEvent.getContent();
-    if (content.mxc && typeof content.seq === 'number') {
-      return { mxc: content.mxc, seq: content.seq };
-    }
-  }
+  const chain = readSnapshotChain(room);
+  if (chain.length > 0) return chain;
 
   // Slow fallback: paginate backwards through the timeline.
-  // This handles rooms created before the state event was introduced.
   const timeline = room.getLiveTimeline();
   let canPaginate = true;
-  let latest: { mxc: string; seq: number } | null = null;
+  let latest: SnapshotChainEntry | null = null;
 
-  // Check current timeline first
   for (const event of timeline.getEvents()) {
     if (event.getType() === EO_SNAPSHOT_TYPE) {
       const content = event.getContent();
       if (!latest || content.seq > latest.seq) {
-        latest = { mxc: content.mxc, seq: content.seq };
+        latest = { mxc: content.mxc, seq: content.seq, type: content.version === 2 ? 'full' : 'delta' };
       }
     }
   }
 
-  // If we already found one, great. Otherwise paginate backwards to find it.
   while (!latest && canPaginate) {
     try {
       canPaginate = await client.paginateEventTimeline(timeline, {
@@ -201,13 +248,28 @@ export async function findLatestSnapshot(
       if (event.getType() === EO_SNAPSHOT_TYPE) {
         const content = event.getContent();
         if (!latest || content.seq > latest.seq) {
-          latest = { mxc: content.mxc, seq: content.seq };
+          latest = { mxc: content.mxc, seq: content.seq, type: content.version === 2 ? 'full' : 'delta' };
         }
       }
     }
   }
 
-  return latest;
+  return latest ? [latest] : [];
+}
+
+/**
+ * Find the latest snapshot reference — convenience wrapper over `getSnapshotChain`.
+ *
+ * Returns the newest entry in the chain (the tip). For full hydration
+ * including delta replay, use `getSnapshotChain` directly.
+ */
+export async function findLatestSnapshot(
+  client: MatrixClient,
+  roomId: string,
+): Promise<{ mxc: string; seq: number } | null> {
+  const chain = await getSnapshotChain(client, roomId);
+  if (chain.length === 0) return null;
+  return { mxc: chain[0].mxc, seq: chain[0].seq };
 }
 
 /**
