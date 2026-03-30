@@ -8,6 +8,8 @@ interface HolonNavProps {
   selectedScope: string | null;
   onSelectScope: (scope: string) => void;
   onSelectSegment?: (scope: string, segment: FilterDefinition) => void;
+  /** Prefix to scope which records are loaded. Empty string = all records. */
+  statePrefix?: string;
 }
 
 interface TreeNode {
@@ -100,7 +102,7 @@ function buildTree(states: EoState[]): TreeNode[] {
   return roots;
 }
 
-export function HolonNav({ selectedScope, onSelectScope, onSelectSegment }: HolonNavProps) {
+export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, statePrefix = '' }: HolonNavProps) {
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
   const ready = useEoStore((s) => s.ready);
   const lastSeq = useEoStore((s) => s.lastSeq);
@@ -111,8 +113,13 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment }: Holo
 
   useEffect(() => {
     if (!ready) return;
-    getStateByPrefix('app.').then(setAllStates);
-  }, [ready, lastSeq, getStateByPrefix]);
+    getStateByPrefix(statePrefix).then(setAllStates);
+  }, [ready, lastSeq, getStateByPrefix, statePrefix]);
+
+  // Reset expansion when space changes
+  useEffect(() => {
+    setExpanded(new Set());
+  }, [statePrefix]);
 
   const tree = useMemo(() => buildTree(allStates), [allStates]);
 
