@@ -730,6 +730,50 @@ export async function hydrationSync(
           }, feed);
         } catch { /* idempotency */ }
 
+        // Create per-field schema entities under _schema container
+        const schemaTarget = `${tblT}._schema`;
+        try {
+          await processEvent(db, {
+            op: 'INS',
+            target: schemaTarget,
+            operand: { _airtable: { type: 'schema', base_id: base.id, table_id: table.id } },
+            agent,
+            ts: new Date().toISOString(),
+            acquired_ts: new Date().toISOString(),
+            client_event_id: `at-ins-schema:${base.id}:${table.id}`,
+          }, feed);
+        } catch { /* idempotency */ }
+
+        for (const field of table.fields) {
+          const fieldTarget = `${schemaTarget}.${field.id}`;
+          try {
+            await processEvent(db, {
+              op: 'INS',
+              target: fieldTarget,
+              operand: { _airtable: { type: 'field', field_id: field.id, table_id: table.id } },
+              agent,
+              ts: new Date().toISOString(),
+              acquired_ts: new Date().toISOString(),
+              client_event_id: `at-ins-field:${base.id}:${table.id}:${field.id}`,
+            }, feed);
+          } catch { /* idempotency */ }
+          try {
+            await processEvent(db, {
+              op: 'DEF',
+              target: fieldTarget,
+              operand: {
+                name: field.name,
+                type: field.type,
+                _airtable: { field_id: field.id, table_id: table.id, base_id: base.id },
+              },
+              agent,
+              ts: new Date().toISOString(),
+              acquired_ts: new Date().toISOString(),
+              client_event_id: `at-field:${base.id}:${table.id}:${field.id}`,
+            }, feed);
+          } catch { /* idempotency */ }
+        }
+
         // Mark table in-progress in job
         if (tableProgress) {
           tableProgress.status = 'in_progress';
