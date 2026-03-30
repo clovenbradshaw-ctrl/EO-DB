@@ -2,6 +2,7 @@ import { useEffect, useState, useMemo } from 'react';
 import type { EoState } from '../db/types';
 import { useEoStore } from '../store/eo-store';
 import { deriveColumns, buildFieldNameMap, hasFieldsSubObject, getFieldValue, type ColumnDef } from './filter-types';
+import { type TimeScrubberFilter, applyTimeScrubber } from './time-scrubber-utils';
 import { useTheme, type Theme } from '../theme';
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 import { TypeSelector, TypeBadge } from './TypeSelector';
@@ -12,6 +13,7 @@ interface TableViewProps {
   onViewHistory?: (target: string) => void;
   activeRecord?: string | null;
   session: { userId: string };
+  timeScrubberFilter?: TimeScrubberFilter;
 }
 
 function formatScopeName(scope: string): string {
@@ -85,7 +87,7 @@ function renderCell(value: any, key: string, onNavigate: (t: string) => void, t:
   return <span>{String(value)}</span>;
 }
 
-export function TableView({ scope, onSelectRecord, onViewHistory, activeRecord, session }: TableViewProps) {
+export function TableView({ scope, onSelectRecord, onViewHistory, activeRecord, session, timeScrubberFilter }: TableViewProps) {
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
   const getState = useEoStore((s) => s.getState);
   const dispatch = useEoStore((s) => s.dispatch);
@@ -152,23 +154,33 @@ export function TableView({ scope, onSelectRecord, onViewHistory, activeRecord, 
   ], [entityColumns]);
 
   const filtered = useMemo(() => {
-    if (!filterText) return records;
-    const q = filterText.toLowerCase();
-    return records.filter((rec) => {
-      const target = rec.target.toLowerCase();
-      if (target.includes(q)) return true;
-      if (rec.value) {
-        // Search within flattened fields if using Airtable-style sub-object
-        const source = useFieldsSub && rec.value.fields && typeof rec.value.fields === 'object'
-          ? rec.value.fields
-          : rec.value;
-        return Object.values(source).some(v =>
-          v != null && String(v).toLowerCase().includes(q)
-        );
-      }
-      return false;
-    });
-  }, [records, filterText, useFieldsSub]);
+    let result = records;
+
+    // Text filter
+    if (filterText) {
+      const q = filterText.toLowerCase();
+      result = result.filter((rec) => {
+        const target = rec.target.toLowerCase();
+        if (target.includes(q)) return true;
+        if (rec.value) {
+          const source = useFieldsSub && rec.value.fields && typeof rec.value.fields === 'object'
+            ? rec.value.fields
+            : rec.value;
+          return Object.values(source).some(v =>
+            v != null && String(v).toLowerCase().includes(q)
+          );
+        }
+        return false;
+      });
+    }
+
+    // Time scrubber filter
+    if (timeScrubberFilter) {
+      result = applyTimeScrubber(result, timeScrubberFilter, useFieldsSub);
+    }
+
+    return result;
+  }, [records, filterText, useFieldsSub, timeScrubberFilter]);
 
   function handleContextMenu(e: React.MouseEvent, target: string) {
     e.preventDefault();

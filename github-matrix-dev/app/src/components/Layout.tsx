@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { logout, createMatrixClient, type MatrixSession } from '../matrix/client';
 import { useEoStore } from '../store/eo-store';
 import { createIdb } from '../db/idb';
@@ -23,6 +23,9 @@ import { SpaceMembers } from './SpaceMembers';
 import { BuilderView } from './builder/BuilderView';
 import { useTheme, spaceBackgroundTint, type Theme } from '../theme';
 import type { EoState } from '../db/types';
+import { TimeScrubber } from './TimeScrubber';
+import { type TimeScrubberFilter, type DateColumnOption, DEFAULT_FILTER, detectDateColumns } from './time-scrubber-utils';
+import { hasFieldsSubObject, buildFieldNameMap } from './filter-types';
 
 type View = 'horizon' | 'log' | 'graph' | 'import' | 'compose' | 'settings' | 'builder';
 
@@ -52,7 +55,11 @@ export function Layout({ session, onLogout }: LayoutProps) {
   const [showMembers, setShowMembers] = useState(false);
   const [spaces, setSpaces] = useState<EoState[]>([]);
   const [allStates, setAllStates] = useState<EoState[]>([]);
+  const [timeScrubberFilter, setTimeScrubberFilter] = useState<TimeScrubberFilter>(DEFAULT_FILTER);
+  const [scopedRecords, setScopedRecords] = useState<EoState[]>([]);
+  const [scopeFieldNameMap, setScopeFieldNameMap] = useState<Map<string, string>>(new Map());
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
+  const getState = useEoStore((s) => s.getState);
   const connectionState = useConnectionState();
   const { theme, toggleTheme } = useTheme();
   const spaceTint = spaceBackgroundTint(selectedSpace, theme.mode);
@@ -67,6 +74,43 @@ export function Layout({ session, onLogout }: LayoutProps) {
     if (!ready) return;
     getStateByPrefix(statePrefix).then(setAllStates);
   }, [ready, lastSeq, getStateByPrefix, statePrefix]);
+
+  // Load records scoped to selected scope for the time scrubber
+  useEffect(() => {
+    if (!ready || !selectedScope) {
+      setScopedRecords([]);
+      setScopeFieldNameMap(new Map());
+      return;
+    }
+    const scopeDepth = selectedScope.split('.').length;
+    getStateByPrefix(selectedScope + '.').then((states) => {
+      const direct = states.filter((st) => {
+        const parts = st.target.split('.');
+        return parts.length === scopeDepth + 1 && !st.value?._alias;
+      });
+      setScopedRecords(direct);
+    });
+    getState(selectedScope).then((scopeState) => {
+      const fields = scopeState?.value?.fields;
+      if (Array.isArray(fields)) {
+        setScopeFieldNameMap(buildFieldNameMap(fields));
+      } else {
+        setScopeFieldNameMap(new Map());
+      }
+    });
+  }, [ready, lastSeq, getStateByPrefix, getState, selectedScope]);
+
+  // Reset scrubber when scope changes
+  useEffect(() => {
+    setTimeScrubberFilter(DEFAULT_FILTER);
+  }, [selectedScope, selectedSpace]);
+
+  // Detect date columns for the scrubber
+  const useFieldsSub = useMemo(() => hasFieldsSubObject(scopedRecords), [scopedRecords]);
+  const dateColumns = useMemo<DateColumnOption[]>(
+    () => detectDateColumns(scopedRecords, useFieldsSub, scopeFieldNameMap),
+    [scopedRecords, useFieldsSub, scopeFieldNameMap],
+  );
 
   // Compute target count from recent events — all events belong to this space now
   const targetCount = new Set(recentEvents.map((e) => e.target)).size;
@@ -411,6 +455,15 @@ export function Layout({ session, onLogout }: LayoutProps) {
             </div>
           )}
 
+          {activeView === 'horizon' && (
+            <TimeScrubber
+              records={scopedRecords}
+              dateColumns={dateColumns}
+              filter={timeScrubberFilter}
+              onFilterChange={setTimeScrubberFilter}
+            />
+          )}
+
           <ErrorBoundary>
             {activeView === 'horizon' ? (
               <>
@@ -420,6 +473,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
                     onSelectRecord={setSelectedRecord}
                     activeRecord={selectedRecord}
                     session={{ userId: session.userId }}
+                    timeScrubberFilter={timeScrubberFilter}
                   />
                 ) : (
                   <div style={s.empty}>
