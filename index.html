@@ -3708,7 +3708,7 @@ async function appendEvent(event) {
   tx.objectStore('meta').put({ key: 'next_seq', value: nextSeq });
 
   // Update projected state
-  if (['INS', 'DEF', 'SEG', 'EVA', 'REC', 'SIG'].includes(ev.op)) {
+  if (['INS', 'DEF', 'SEG', 'EVA', 'REC', 'SIG', 'SYN'].includes(ev.op)) {
     const stateStore = tx.objectStore('state');
     let value = ev.operand;
     if (ev.op === 'DEF' && existingState && typeof existingState.value === 'object' && existingState.value !== null
@@ -3859,7 +3859,7 @@ async function checkAndEmitREC(conEvent) {
         // Duplicate key = another client (or earlier import) already emitted this REC
         console.log('[cycle] REC already exists for cycle:', sortedCycle.join(' + '));
       }
-      return emitted;
+      return recEvent;
     }
   }
   return null;
@@ -4349,11 +4349,10 @@ const matrixRoomTarget = {
         preset: 'private_chat',
         invite: invites,
         initial_state: [
-          {
-            type: 'm.room.encryption',
-            state_key: '',
-            content: { algorithm: 'm.megolm.v1.aes-sha2' },
-          },
+          // NOTE: E2EE (m.room.encryption) is intentionally NOT enabled here.
+          // This app sends custom events via plain HTTP PUT, which does not
+          // perform Megolm encryption. Enabling E2EE would cause the server to
+          // reject unencrypted events or make them unreadable to other clients.
           {
             type: 'm.room.power_levels',
             state_key: '',
@@ -7966,7 +7965,7 @@ function foldState(upToIndex) {
   const state = {};
   for (let i = 0; i <= upToIndex && i < LOG.length; i++) {
     const e = LOG[i];
-    if (e.op === 'INS' || e.op === 'DEF' || e.op === 'EVA' || e.op === 'SEG' || e.op === 'REC') {
+    if (e.op === 'INS' || e.op === 'DEF' || e.op === 'EVA' || e.op === 'SEG' || e.op === 'REC' || e.op === 'SYN' || e.op === 'SIG') {
       if (!state[e.target]) state[e.target] = { target: e.target, value: null, last_seq: 0, last_op: '', last_agent: '', last_ts: '' };
       if (e.op === 'INS') {
         state[e.target].value = e.operand;
@@ -8450,11 +8449,13 @@ function renderHolonNav() {
   const { pathChildren, pathCounts } = buildHolonTree();
   const container = document.getElementById('holonTree');
 
-  // Find root nodes (paths with depth 1)
+  // Find root nodes (paths with depth 1), scoped to active space
   const state = foldState(replayIndex);
+  const spacePrefix = activeNulspaceId ? `space.${activeNulspaceId}` : null;
   const roots = new Set();
   for (const s of Object.values(state)) {
     if (s.target.startsWith('_segments.')) continue;
+    if (spacePrefix && !(s.target === spacePrefix || s.target.startsWith(spacePrefix + '.'))) continue;
     roots.add(s.target.split('.')[0]);
   }
 
@@ -8610,6 +8611,9 @@ function renderHorizon() {
   const thead = document.getElementById('horizonHead');
   const tbody = document.getElementById('horizonBody');
 
+  // Determine the active space prefix to scope the view
+  const spacePrefix = activeNulspaceId ? `space.${activeNulspaceId}` : null;
+
   let entries;
 
   if (selectedScope) {
@@ -8620,8 +8624,14 @@ function renderHorizon() {
       .filter(s => s.target.startsWith(scopePrefix) && s.target.split('.').length === scopeDepth + 1)
       .filter(s => !s.target.startsWith('_segments.'))
       .sort((a, b) => a.target.localeCompare(b.target));
+  } else if (spacePrefix) {
+    // Space selected but no scope: show only targets within the active space
+    entries = Object.values(state)
+      .filter(s => s.target === spacePrefix || s.target.startsWith(spacePrefix + '.'))
+      .filter(s => !s.target.startsWith('_segments.'))
+      .sort((a, b) => a.target.localeCompare(b.target));
   } else {
-    // No scope selected: show all targets
+    // No scope and no space selected: show all targets
     entries = Object.values(state)
       .filter(s => !s.target.startsWith('_segments.'))
       .sort((a, b) => a.target.localeCompare(b.target));
@@ -10320,32 +10330,49 @@ async function pullEventsFromRoom(roomId, spaceId) {
             const eventId = evt.client_event_id || `imported_${matrixEvent.event_id}_${evt.seq}`;
             if (seenIds.has(eventId)) continue;
             seenIds.add(eventId);
-            await appendEvent({
-              op: evt.op,
-              target: evt.target,
-              operand: evt.operand,
-              agent: sender,
-              ts: evt.ts || new Date(matrixEvent.origin_server_ts).toISOString(),
-              client_event_id: eventId,
-              _from_server: true,
-            });
-            totalImported++;
+            // Check if this event already exists in IndexedDB to avoid duplicate seq allocation
+            const existingTx = db.transaction('log', 'readonly');
+            const existing = await idbGet(existingTx.objectStore('log'), eventId);
+            if (existing) continue;
+            try {
+              await appendEvent({
+                op: evt.op,
+                target: evt.target,
+                operand: evt.operand,
+                agent: sender,
+                ts: evt.ts || new Date(matrixEvent.origin_server_ts).toISOString(),
+                client_event_id: eventId,
+                _from_server: true,
+              });
+              totalImported++;
+            } catch (e) {
+              // Duplicate key — already exists, skip
+              if (e.name !== 'ConstraintError') console.warn('[sync] Import error:', e);
+            }
           }
         } else if (content.op && content.target) {
           // Single event
           const eventId = content.client_event_id || `imported_${matrixEvent.event_id}`;
           if (seenIds.has(eventId)) continue;
           seenIds.add(eventId);
-          await appendEvent({
-            op: content.op,
-            target: content.target,
-            operand: content.operand,
-            agent: sender,
-            ts: content.ts || new Date(matrixEvent.origin_server_ts).toISOString(),
-            client_event_id: eventId,
-            _from_server: true,
-          });
-          totalImported++;
+          // Check if this event already exists in IndexedDB
+          const existingTx = db.transaction('log', 'readonly');
+          const existing = await idbGet(existingTx.objectStore('log'), eventId);
+          if (existing) continue;
+          try {
+            await appendEvent({
+              op: content.op,
+              target: content.target,
+              operand: content.operand,
+              agent: sender,
+              ts: content.ts || new Date(matrixEvent.origin_server_ts).toISOString(),
+              client_event_id: eventId,
+              _from_server: true,
+            });
+            totalImported++;
+          } catch (e) {
+            if (e.name !== 'ConstraintError') console.warn('[sync] Import error:', e);
+          }
         }
       }
 
