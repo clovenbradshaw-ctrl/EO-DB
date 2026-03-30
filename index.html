@@ -1533,6 +1533,66 @@ body {
   flex-shrink: 0;
 }
 
+/* ── Share Dialog Segments & Perm Cards ── */
+.share-seg-btn {
+  flex: 1;
+  padding: 6px 8px;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: all 0.15s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.share-seg-btn:hover { color: var(--text); }
+.share-seg-btn.share-seg-active {
+  background: var(--bg);
+  color: var(--text);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+}
+
+.share-perm-card {
+  flex: 1;
+  padding: 14px;
+  background: var(--bg);
+  border: 2px solid var(--border);
+  border-radius: 10px;
+  cursor: pointer;
+  text-align: left;
+  font-family: 'JetBrains Mono', monospace;
+  transition: all 0.15s;
+}
+.share-perm-card:hover { border-color: var(--text-dim); }
+.share-perm-card.share-perm-active {
+  border-color: var(--accent);
+  background: var(--accent-bg, rgba(26,109,212,0.06));
+}
+
+.share-perm-icon {
+  color: var(--text-faint);
+  margin-bottom: 6px;
+}
+.share-perm-card.share-perm-active .share-perm-icon { color: var(--accent); }
+
+.share-perm-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 2px;
+}
+
+.share-perm-desc {
+  font-size: 9px;
+  color: var(--text-faint);
+  line-height: 1.3;
+}
+
 /* ── Login Modal ── */
 .login-overlay {
   position: fixed;
@@ -2182,26 +2242,214 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 12px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  margin-bottom: 6px;
+  padding: 8px 0;
   font-family: 'JetBrains Mono', monospace;
   font-size: 11px;
+  border-bottom: 1px solid var(--border);
 }
+.space-share-item:last-child { border-bottom: none; }
 
 .space-share-user {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
 }
 
-.space-share-user-id { color: var(--text); }
-.space-share-user-access { color: var(--text-faint); font-size: 9px; text-transform: uppercase; }
+.space-share-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.space-share-user-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.space-share-user-id {
+  color: var(--text);
+  font-weight: 500;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.space-share-user-server {
+  color: var(--text-faint);
+  font-size: 10px;
+}
 
 .space-share-actions { display: flex; gap: 6px; align-items: center; }
 
+/* Role dropdown trigger */
+.role-dropdown-wrap { position: relative; }
+
+.role-dropdown-btn {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--text-dim);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  transition: background 0.15s;
+}
+.role-dropdown-btn:hover { background: var(--bg2); }
+
+.role-dropdown-btn svg { opacity: 0.5; }
+
+/* Role dropdown menu */
+.role-dropdown-menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 4px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 8px 30px rgba(0,0,0,0.12);
+  min-width: 200px;
+  z-index: 200;
+  overflow: hidden;
+  padding: 4px 0;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.role-dropdown-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  text-align: left;
+  padding: 8px 14px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-family: 'JetBrains Mono', monospace;
+  transition: background 0.1s;
+}
+.role-dropdown-option:hover { background: var(--bg2); }
+.role-dropdown-option.active { background: var(--accent-bg, rgba(26,109,212,0.08)); }
+
+.role-dropdown-option .role-label {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text);
+}
+.role-dropdown-option.active .role-label { color: var(--accent); }
+
+.role-dropdown-option .role-desc {
+  font-size: 9px;
+  color: var(--text-faint);
+  margin-top: 1px;
+}
+
+.role-dropdown-option .role-check {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+.role-dropdown-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 0;
+}
+
+.role-dropdown-danger {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 8px 14px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--danger);
+  transition: background 0.1s;
+}
+.role-dropdown-danger:hover { background: rgba(217,72,122,0.06); }
+
+/* Invite row */
+.share-invite-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.share-invite-input {
+  flex: 1;
+  padding: 8px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.share-invite-input:focus { border-color: var(--accent); }
+.share-invite-input::placeholder { color: var(--text-faint); }
+
+.share-invite-btn {
+  padding: 8px 16px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: opacity 0.15s;
+}
+.share-invite-btn:hover { opacity: 0.9; }
+
+.share-people-header {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.share-people-count {
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--text-faint);
+  background: var(--bg2);
+  padding: 1px 7px;
+  border-radius: 10px;
+}
+
+.share-feedback {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  margin-top: 6px;
+}
+
+/* Legacy compat */
 .access-select {
   background: var(--bg2);
   border: 1px solid var(--border);
@@ -3040,24 +3288,43 @@ body {
           </div>
 
           <!-- Sharing -->
-          <div class="space-sharing-header">
-            <span style="font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:600;color:var(--text-faint);text-transform:uppercase;letter-spacing:0.5px;">Sharing</span>
-          </div>
+          <div id="spaceShareSection">
+            <!-- Invite row (owner only) -->
+            <div id="spaceShareAddRow" style="display:none;">
+              <div class="share-invite-row">
+                <input class="share-invite-input" id="shareUserId" placeholder="Add people by Matrix ID..." onkeydown="if(event.key==='Enter')addShareToSpace()">
+                <div class="role-dropdown-wrap">
+                  <button class="role-dropdown-btn" id="shareAccessBtn" onclick="toggleInviteRoleMenu()">
+                    Can view
+                    <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M2.5 4L5 6.5L7.5 4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  </button>
+                  <div class="role-dropdown-menu" id="shareAccessMenu" style="display:none;">
+                    <button class="role-dropdown-option active" onclick="setInviteRole('read')">
+                      <div><div class="role-label">Can view</div><div class="role-desc">View data only</div></div>
+                      <svg class="role-check" viewBox="0 0 14 14" fill="none"><path d="M3 7.5L5.5 10L11 4" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    </button>
+                    <button class="role-dropdown-option" onclick="setInviteRole('write')">
+                      <div><div class="role-label">Can edit</div><div class="role-desc">View and edit data</div></div>
+                      <svg class="role-check" viewBox="0 0 14 14" fill="none" style="display:none;"><path d="M3 7.5L5.5 10L11 4" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    </button>
+                    <button class="role-dropdown-option" onclick="setInviteRole('read_write')">
+                      <div><div class="role-label">Full access</div><div class="role-desc">Read and write data</div></div>
+                      <svg class="role-check" viewBox="0 0 14 14" fill="none" style="display:none;"><path d="M3 7.5L5.5 10L11 4" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    </button>
+                  </div>
+                </div>
+                <button class="share-invite-btn" onclick="addShareToSpace()">Invite</button>
+              </div>
+              <div id="shareInviteFeedback" class="share-feedback" style="display:none;"></div>
+            </div>
 
-          <div id="spaceShareList" class="settings-list" style="margin-bottom:12px;">
-            <div class="settings-empty">Not shared with anyone</div>
-          </div>
-
-          <!-- Add share (owner only) -->
-          <div id="spaceShareAddRow" style="display:none;">
-            <div class="settings-add-row">
-              <input class="settings-add-input" id="shareUserId" placeholder="@user:homeserver.com">
-              <select class="access-select" id="shareAccess">
-                <option value="read">Read</option>
-                <option value="write">Write</option>
-                <option value="read_write">Read+Write</option>
-              </select>
-              <button class="settings-add-btn" onclick="addShareToSpace()">+ Share</button>
+            <!-- People with access -->
+            <div style="margin-top:14px;">
+              <div class="share-people-header" id="sharePeopleHeader">
+                People with access
+                <span class="share-people-count" id="sharePeopleCount">1</span>
+              </div>
+              <div id="spaceShareList"></div>
             </div>
           </div>
 
@@ -3456,69 +3723,83 @@ INS,app.tbl.rec1,"{""name"":""Alice""}"</pre>
 <!-- Share Dialog -->
 <div class="login-overlay hidden" id="shareOverlay">
   <div class="login-card" style="max-width:480px;">
-    <div class="login-title">Share Data</div>
-    <div class="login-subtitle" id="shareScope">Scope: all targets</div>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
+      <div class="login-title" style="margin-bottom:0;">Share Data</div>
+      <button onclick="closeShareDialog()" style="background:none;border:none;color:var(--text-faint);font-size:18px;cursor:pointer;padding:0 4px;font-family:'JetBrains Mono',monospace;">&times;</button>
+    </div>
+    <div class="login-subtitle" id="shareScope" style="margin-bottom:16px;">Scope: all targets</div>
 
-    <div class="login-field">
-      <label>What to share</label>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;">
-        <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;">
-          <input type="radio" name="shareType" value="table" checked onchange="updateShareDialog()"> Entire table
-        </label>
-        <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;">
-          <input type="radio" name="shareType" value="filtered" onchange="updateShareDialog()"> With current filters
-        </label>
-        <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;">
-          <input type="radio" name="shareType" value="records" onchange="updateShareDialog()"> Selected records
-        </label>
+    <!-- What to share — segmented control -->
+    <div style="margin-bottom:16px;">
+      <div style="font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:600;color:var(--text-dim);margin-bottom:8px;">What to share</div>
+      <div style="display:flex;background:var(--bg2);border-radius:8px;padding:3px;gap:2px;" id="shareTypeSegment">
+        <button class="share-seg-btn share-seg-active" onclick="setShareType('table',this)">Entire table</button>
+        <button class="share-seg-btn" onclick="setShareType('filtered',this)">With filters</button>
+        <button class="share-seg-btn" onclick="setShareType('records',this)">Selected records</button>
       </div>
+      <input type="hidden" name="shareType" id="shareTypeValue" value="table">
     </div>
 
-    <div class="login-field">
-      <label>Access</label>
-      <div style="display:flex;gap:8px;">
-        <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;">
-          <input type="radio" name="shareMode" value="private" checked> Private (invite only)
-        </label>
-        <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;">
-          <input type="radio" name="shareMode" value="public"> Public (anyone with link)
-        </label>
+    <!-- Permission — role picker -->
+    <div style="margin-bottom:16px;">
+      <div style="font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:600;color:var(--text-dim);margin-bottom:8px;">Recipients can</div>
+      <div style="display:flex;gap:8px;" id="sharePermCards">
+        <button class="share-perm-card share-perm-active" onclick="setSharePerm('view',this)">
+          <div class="share-perm-icon">
+            <svg width="18" height="18" viewBox="0 0 18 18" fill="none"><path d="M1.5 9s3-5.5 7.5-5.5S16.5 9 16.5 9s-3 5.5-7.5 5.5S1.5 9 1.5 9z" stroke="currentColor" stroke-width="1.3"/><circle cx="9" cy="9" r="2.5" stroke="currentColor" stroke-width="1.3"/></svg>
+          </div>
+          <div class="share-perm-label">View only</div>
+          <div class="share-perm-desc">Can see data, cannot change it</div>
+        </button>
+        <button class="share-perm-card" onclick="setSharePerm('edit',this)">
+          <div class="share-perm-icon">
+            <svg width="18" height="18" viewBox="0 0 18 18" fill="none"><path d="M2.5 15.5h13M10.06 4.06l3.88 3.88M4 12l-.5 4 4-.5 8.94-8.94a1.5 1.5 0 000-2.12l-1.76-1.76a1.5 1.5 0 00-2.12 0L4 12z" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </div>
+          <div class="share-perm-label">Can import</div>
+          <div class="share-perm-desc">Import data into their database</div>
+        </button>
       </div>
+      <input type="hidden" name="sharePerm" id="sharePermValue" value="view">
     </div>
 
-    <div class="login-field">
-      <label>Permission</label>
-      <div style="display:flex;gap:8px;">
-        <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;">
-          <input type="radio" name="sharePerm" value="view" checked> Can view
-        </label>
-        <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer;">
-          <input type="radio" name="sharePerm" value="edit"> Can import
-        </label>
+    <!-- Access — segmented control -->
+    <div style="margin-bottom:16px;">
+      <div style="font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:600;color:var(--text-dim);margin-bottom:8px;">Link access</div>
+      <div style="display:flex;background:var(--bg2);border-radius:8px;padding:3px;gap:2px;" id="shareModeSegment">
+        <button class="share-seg-btn share-seg-active" onclick="setShareMode('private',this)">
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" style="margin-right:4px;"><rect x="2" y="5.5" width="8" height="5" rx="1" stroke="currentColor" stroke-width="1.1"/><path d="M4 5.5V4a2 2 0 114 0v1.5" stroke="currentColor" stroke-width="1.1"/></svg>
+          Private
+        </button>
+        <button class="share-seg-btn" onclick="setShareMode('public',this)">
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" style="margin-right:4px;"><circle cx="6" cy="6" r="4.5" stroke="currentColor" stroke-width="1.1"/><path d="M1.5 6h9M6 1.5c-1.5 1.5-1.5 7.5 0 9M6 1.5c1.5 1.5 1.5 7.5 0 9" stroke="currentColor" stroke-width="1.1"/></svg>
+          Anyone with link
+        </button>
       </div>
+      <input type="hidden" name="shareMode" id="shareModeValue" value="private">
     </div>
 
-    <div id="sharePublicWarning" style="display:none;background:rgba(250,204,21,0.1);border:1px solid rgba(250,204,21,0.3);border-radius:6px;padding:8px 12px;font-size:10px;color:var(--text-dim);margin-bottom:12px;">
+    <div id="sharePublicWarning" style="display:none;background:rgba(250,204,21,0.08);border:1px solid rgba(250,204,21,0.2);border-radius:8px;padding:10px 14px;font-size:10px;color:var(--text-dim);margin-bottom:14px;font-family:'JetBrains Mono',monospace;">
       Anyone with this link can access the data. Public shares cannot be revoked.
     </div>
 
-    <div id="sharePreview" style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-dim);margin-bottom:12px;"></div>
+    <div id="sharePreview" style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-bottom:14px;display:flex;align-items:center;gap:6px;">
+      <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 1v12M1 7h12" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+      <span id="sharePreviewText">19 records will be shared</span>
+    </div>
 
-    <button class="login-btn" id="shareCreateBtn" onclick="handleCreateShare()">Create Share Link</button>
+    <button class="login-btn" id="shareCreateBtn" onclick="handleCreateShare()" style="border-radius:10px;">Create Share Link</button>
 
-    <div id="shareResult" style="display:none;margin-top:12px;">
-      <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--accent);margin-bottom:6px;">Share link created:</div>
+    <div id="shareResult" style="display:none;margin-top:14px;">
+      <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--accent);margin-bottom:6px;font-weight:500;">Link ready — copy and send it</div>
       <div style="display:flex;gap:6px;align-items:center;">
-        <input id="shareLinkInput" readonly style="flex:1;font-family:'JetBrains Mono',monospace;font-size:10px;padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);">
-        <button class="settings-add-btn" onclick="copyShareLink()" style="font-size:10px;padding:4px 10px;">Copy</button>
+        <input id="shareLinkInput" readonly style="flex:1;font-family:'JetBrains Mono',monospace;font-size:10px;padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);">
+        <button onclick="copyShareLink()" style="padding:8px 14px;background:var(--accent);color:#fff;border:none;border-radius:8px;font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:600;cursor:pointer;">Copy</button>
       </div>
     </div>
 
     <div class="login-error" id="shareError"></div>
 
-    <div id="shareExistingList" style="margin-top:16px;border-top:1px solid var(--border);padding-top:12px;"></div>
-
-    <div class="login-skip" onclick="closeShareDialog()">Close</div>
+    <div id="shareExistingList" style="margin-top:16px;"></div>
   </div>
 </div>
 
@@ -6567,12 +6848,32 @@ function closeShareDialog() {
   document.getElementById('shareOverlay').classList.add('hidden');
 }
 
+function setShareType(val, btn) {
+  document.getElementById('shareTypeValue').value = val;
+  document.querySelectorAll('#shareTypeSegment .share-seg-btn').forEach(b => b.classList.remove('share-seg-active'));
+  btn.classList.add('share-seg-active');
+  updateShareDialog();
+}
+
+function setShareMode(val, btn) {
+  document.getElementById('shareModeValue').value = val;
+  document.querySelectorAll('#shareModeSegment .share-seg-btn').forEach(b => b.classList.remove('share-seg-active'));
+  btn.classList.add('share-seg-active');
+  updateShareDialog();
+}
+
+function setSharePerm(val, btn) {
+  document.getElementById('sharePermValue').value = val;
+  document.querySelectorAll('#sharePermCards .share-perm-card').forEach(b => b.classList.remove('share-perm-active'));
+  btn.classList.add('share-perm-active');
+}
+
 function updateShareDialog() {
   const scope = selectedScope || '(all targets)';
   document.getElementById('shareScope').textContent = `Scope: ${scope}`;
 
-  const shareType = document.querySelector('input[name="shareType"]:checked').value;
-  const mode = document.querySelector('input[name="shareMode"]:checked').value;
+  const shareType = document.getElementById('shareTypeValue').value;
+  const mode = document.getElementById('shareModeValue').value;
 
   // Show/hide public warning
   document.getElementById('sharePublicWarning').style.display = mode === 'public' ? 'block' : 'none';
@@ -6583,7 +6884,7 @@ function updateShareDialog() {
     shareType === 'filtered',
     shareType === 'records' && selectedTarget ? [selectedTarget] : null
   );
-  document.getElementById('sharePreview').textContent = `${states.length} records will be shared`;
+  document.getElementById('sharePreviewText').textContent = `${states.length} records will be shared`;
 }
 
 async function handleCreateShare() {
@@ -6591,9 +6892,9 @@ async function handleCreateShare() {
   const errEl = document.getElementById('shareError');
   errEl.textContent = '';
 
-  const shareType = document.querySelector('input[name="shareType"]:checked').value;
-  const mode = document.querySelector('input[name="shareMode"]:checked').value;
-  const permissions = document.querySelector('input[name="sharePerm"]:checked').value;
+  const shareType = document.getElementById('shareTypeValue').value;
+  const mode = document.getElementById('shareModeValue').value;
+  const permissions = document.getElementById('sharePermValue').value;
 
   btn.disabled = true;
   btn.textContent = 'Creating space...';
@@ -6646,14 +6947,20 @@ function renderExistingSharesList() {
     return;
   }
 
-  container.innerHTML = `<div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-dim);margin-bottom:8px;">Previous shares:</div>` +
-    shares.map(s => `
-      <div style="display:flex;align-items:center;gap:6px;padding:4px 0;font-family:'JetBrains Mono',monospace;font-size:10px;">
-        <span style="flex:1;color:var(--text-dim);">${escapeHtml(s.scope)} · ${s.record_count} records · ${s.mode}</span>
-        <button class="settings-add-btn" onclick="navigator.clipboard.writeText('${escapeHtml(s.link)}')" style="font-size:9px;padding:2px 6px;">Copy</button>
-        ${s.mode === 'private' ? `<button class="settings-delete-btn" onclick="handleRevokeShare('${escapeHtml(s.share_id)}')" style="font-size:9px;padding:2px 6px;">Revoke</button>` : ''}
-      </div>
-    `).join('');
+  container.innerHTML = `
+    <div style="border-top:1px solid var(--border);padding-top:14px;">
+      <div style="font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:600;color:var(--text-dim);margin-bottom:8px;">Active shares</div>
+      ${shares.map(s => `
+        <div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border);font-family:'JetBrains Mono',monospace;">
+          <div style="flex:1;min-width:0;">
+            <div style="font-size:11px;color:var(--text);font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(s.scope)}</div>
+            <div style="font-size:9px;color:var(--text-faint);margin-top:1px;">${s.record_count} records · ${s.mode === 'private' ? 'Private' : 'Public'} · ${s.permissions === 'edit' ? 'Can import' : 'View only'}</div>
+          </div>
+          <button onclick="navigator.clipboard.writeText('${escapeHtml(s.link)}');this.textContent='Copied!';setTimeout(()=>this.textContent='Copy',1500);" style="padding:4px 10px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--text-dim);cursor:pointer;">Copy</button>
+          ${s.mode === 'private' ? `<button onclick="handleRevokeShare('${escapeHtml(s.share_id)}')" style="padding:4px 10px;background:transparent;border:1px solid var(--border);border-radius:6px;font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--danger);cursor:pointer;">Revoke</button>` : ''}
+        </div>
+      `).join('')}
+    </div>`;
 }
 
 /* ── Share Accept Overlay ────────────────────────────────────── */
@@ -9682,6 +9989,29 @@ async function selectSpace(id) {
   await loadSpaces();
 }
 
+const ROLE_MAP = {
+  read: { label: 'Can view', desc: 'View data only' },
+  write: { label: 'Can edit', desc: 'View and edit data' },
+  read_write: { label: 'Full access', desc: 'Read and write data' },
+};
+
+function shareAvatarColor(userId) {
+  let hash = 0;
+  for (let i = 0; i < userId.length; i++) hash = userId.charCodeAt(i) + ((hash << 5) - hash);
+  const colors = ['#1a6dd4','#7c5cbf','#0e8a6e','#8b6834','#c2700a','#d9487a'];
+  return colors[((hash % colors.length) + colors.length) % colors.length];
+}
+
+function shareFormatName(userId) {
+  if (userId.startsWith('@')) return userId.slice(1).split(':')[0];
+  return userId;
+}
+
+function shareFormatServer(userId) {
+  if (userId.includes(':')) return userId.split(':')[1];
+  return '';
+}
+
 function renderSpaceDetail(space) {
   const section = document.getElementById('spaceDetailSection');
   section.style.display = '';
@@ -9694,35 +10024,162 @@ function renderSpaceDetail(space) {
 
   const currentUser = matrixUserId || 'local';
   const isOwner = space.created_by === currentUser;
+  const totalPeople = space.sharing.length + 1;
 
-  // Sharing list
-  const shareListEl = document.getElementById('spaceShareList');
-  if (space.sharing.length === 0) {
-    shareListEl.innerHTML = '<div class="settings-empty">Not shared with anyone</div>';
-  } else {
-    shareListEl.innerHTML = space.sharing.map(s => `
-      <div class="space-share-item">
-        <div class="space-share-user">
-          <span class="space-share-user-id">${escHtml(s.user_id)}</span>
-          <span class="space-share-user-access">${s.access} — added ${s.added_at.slice(0, 10)}</span>
-        </div>
-        <div class="space-share-actions">
-          ${isOwner ? `
-            <select class="access-select" onchange="updateShare('${space.id}','${escAttr(s.user_id)}',this.value)">
-              <option value="read" ${s.access === 'read' ? 'selected' : ''}>Read</option>
-              <option value="write" ${s.access === 'write' ? 'selected' : ''}>Write</option>
-              <option value="read_write" ${s.access === 'read_write' ? 'selected' : ''}>Read+Write</option>
-            </select>
-            <button class="settings-delete-btn" onclick="removeShare('${space.id}','${escAttr(s.user_id)}')">Remove</button>
-          ` : `<span class="space-badge space-badge-shared">${s.access}</span>`}
+  // People count
+  document.getElementById('sharePeopleCount').textContent = totalPeople;
+
+  // Build people list: owner first, then members
+  const ownerColor = shareAvatarColor(space.created_by);
+  const ownerName = shareFormatName(space.created_by);
+  const ownerServer = shareFormatServer(space.created_by);
+  const isYouOwner = space.created_by === currentUser;
+
+  let html = `
+    <div class="space-share-item">
+      <div class="space-share-user">
+        <div class="space-share-avatar" style="background:${ownerColor}18;color:${ownerColor};">${ownerName.charAt(0).toUpperCase()}</div>
+        <div class="space-share-user-info">
+          <div class="space-share-user-id">${escHtml(ownerName)}${isYouOwner ? ' <span style="color:var(--text-faint);font-weight:400;">(you)</span>' : ''}</div>
+          ${ownerServer ? `<div class="space-share-user-server">${escHtml(ownerServer)}</div>` : ''}
         </div>
       </div>
-    `).join('');
-  }
+      <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-faint);padding:4px 8px;">Owner</span>
+    </div>`;
+
+  space.sharing.forEach(s => {
+    const color = shareAvatarColor(s.user_id);
+    const name = shareFormatName(s.user_id);
+    const server = shareFormatServer(s.user_id);
+    const isYou = s.user_id === currentUser;
+    const roleInfo = ROLE_MAP[s.access] || ROLE_MAP.read;
+
+    if (isOwner) {
+      html += `
+        <div class="space-share-item">
+          <div class="space-share-user">
+            <div class="space-share-avatar" style="background:${color}18;color:${color};">${name.charAt(0).toUpperCase()}</div>
+            <div class="space-share-user-info">
+              <div class="space-share-user-id">${escHtml(name)}${isYou ? ' <span style="color:var(--text-faint);font-weight:400;">(you)</span>' : ''}</div>
+              ${server ? `<div class="space-share-user-server">${escHtml(server)}</div>` : ''}
+            </div>
+          </div>
+          <div class="role-dropdown-wrap">
+            <button class="role-dropdown-btn" onclick="toggleMemberRoleMenu(this,'${space.id}','${escAttr(s.user_id)}','${s.access}')">
+              ${roleInfo.label}
+              <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M2.5 4L5 6.5L7.5 4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+          </div>
+        </div>`;
+    } else {
+      html += `
+        <div class="space-share-item">
+          <div class="space-share-user">
+            <div class="space-share-avatar" style="background:${color}18;color:${color};">${name.charAt(0).toUpperCase()}</div>
+            <div class="space-share-user-info">
+              <div class="space-share-user-id">${escHtml(name)}${isYou ? ' <span style="color:var(--text-faint);font-weight:400;">(you)</span>' : ''}</div>
+              ${server ? `<div class="space-share-user-server">${escHtml(server)}</div>` : ''}
+            </div>
+          </div>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-faint);padding:4px 8px;">${roleInfo.label}</span>
+        </div>`;
+    }
+  });
+
+  document.getElementById('spaceShareList').innerHTML = html;
 
   // Show/hide owner-only controls
   document.getElementById('spaceShareAddRow').style.display = isOwner ? '' : 'none';
   document.getElementById('spaceDeleteRow').style.display = isOwner ? '' : 'none';
+}
+
+/* ── Role dropdown menus for space sharing ── */
+
+let _activeRoleMenu = null;
+
+function closeMemberRoleMenus() {
+  if (_activeRoleMenu) {
+    _activeRoleMenu.remove();
+    _activeRoleMenu = null;
+  }
+}
+
+document.addEventListener('mousedown', (e) => {
+  if (_activeRoleMenu && !_activeRoleMenu.contains(e.target)) {
+    closeMemberRoleMenus();
+  }
+});
+
+function toggleMemberRoleMenu(btn, spaceId, userId, currentAccess) {
+  closeMemberRoleMenus();
+  const rect = btn.getBoundingClientRect();
+  const menu = document.createElement('div');
+  menu.className = 'role-dropdown-menu';
+  menu.style.position = 'fixed';
+  menu.style.top = (rect.bottom + 4) + 'px';
+  menu.style.right = (window.innerWidth - rect.right) + 'px';
+
+  const options = [
+    { value: 'read', label: 'Can view', desc: 'View data only' },
+    { value: 'write', label: 'Can edit', desc: 'View and edit data' },
+    { value: 'read_write', label: 'Full access', desc: 'Read and write data' },
+  ];
+
+  options.forEach(opt => {
+    const isActive = opt.value === currentAccess;
+    const optBtn = document.createElement('button');
+    optBtn.className = 'role-dropdown-option' + (isActive ? ' active' : '');
+    optBtn.innerHTML = `
+      <div><div class="role-label">${opt.label}</div><div class="role-desc">${opt.desc}</div></div>
+      ${isActive ? '<svg class="role-check" viewBox="0 0 14 14" fill="none"><path d="M3 7.5L5.5 10L11 4" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>' : ''}`;
+    optBtn.onclick = () => { closeMemberRoleMenus(); updateShare(spaceId, userId, opt.value); };
+    menu.appendChild(optBtn);
+  });
+
+  const divider = document.createElement('div');
+  divider.className = 'role-dropdown-divider';
+  menu.appendChild(divider);
+
+  const removeBtn = document.createElement('button');
+  removeBtn.className = 'role-dropdown-danger';
+  removeBtn.textContent = 'Remove access';
+  removeBtn.onclick = () => { closeMemberRoleMenus(); removeShare(spaceId, userId); };
+  menu.appendChild(removeBtn);
+
+  document.body.appendChild(menu);
+  _activeRoleMenu = menu;
+}
+
+/* ── Invite role picker for space sharing ── */
+
+let _currentInviteRole = 'read';
+
+function toggleInviteRoleMenu() {
+  const menu = document.getElementById('shareAccessMenu');
+  menu.style.display = menu.style.display === 'none' ? '' : 'none';
+}
+
+function setInviteRole(role) {
+  _currentInviteRole = role;
+  const label = ROLE_MAP[role]?.label || 'Can view';
+  document.getElementById('shareAccessBtn').innerHTML = `${label} <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M2.5 4L5 6.5L7.5 4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  document.getElementById('shareAccessMenu').style.display = 'none';
+
+  // Update checkmarks
+  const options = document.querySelectorAll('#shareAccessMenu .role-dropdown-option');
+  options.forEach(opt => {
+    const val = opt.onclick.toString(); // we'll use data attributes instead
+    opt.classList.remove('active');
+    opt.querySelector('.role-check').style.display = 'none';
+  });
+  // Find the right one by label
+  const labels = ['read', 'write', 'read_write'];
+  options.forEach((opt, i) => {
+    if (labels[i] === role) {
+      opt.classList.add('active');
+      opt.querySelector('.role-check').style.display = '';
+    }
+  });
 }
 
 function escAttr(s) {
@@ -9737,10 +10194,15 @@ function hideSpaceDetail() {
 async function addShareToSpace() {
   if (!selectedSpaceId) return;
   const userIdEl = document.getElementById('shareUserId');
-  const accessEl = document.getElementById('shareAccess');
+  const feedbackEl = document.getElementById('shareInviteFeedback');
   const userId = userIdEl.value.trim();
 
+  feedbackEl.style.display = 'none';
+
   if (!userId.startsWith('@') || !userId.includes(':')) {
+    feedbackEl.textContent = 'Enter a valid Matrix ID (e.g. @user:server.com)';
+    feedbackEl.style.color = 'var(--danger)';
+    feedbackEl.style.display = '';
     userIdEl.style.borderColor = 'var(--danger)';
     setTimeout(() => { userIdEl.style.borderColor = ''; }, 2000);
     return;
@@ -9751,18 +10213,24 @@ async function addShareToSpace() {
 
   const currentUser = matrixUserId || 'local';
   if (space.created_by !== currentUser) return;
-  if (userId === currentUser) return;
+  if (userId === currentUser) {
+    feedbackEl.textContent = 'Cannot add yourself';
+    feedbackEl.style.color = 'var(--danger)';
+    feedbackEl.style.display = '';
+    return;
+  }
 
+  const access = _currentInviteRole || 'read';
   const now = new Date().toISOString();
   const existing = space.sharing.find(s => s.user_id === userId);
   if (existing) {
-    existing.access = accessEl.value;
+    existing.access = access;
     existing.added_at = now;
     existing.added_by = currentUser;
   } else {
     space.sharing.push({
       user_id: userId,
-      access: accessEl.value,
+      access: access,
       added_at: now,
       added_by: currentUser,
     });
@@ -9771,6 +10239,12 @@ async function addShareToSpace() {
   space.updated_by = currentUser;
   space.updated_at = now;
   await putSpace(space);
+
+  const name = shareFormatName(userId);
+  feedbackEl.textContent = `${name} added`;
+  feedbackEl.style.color = 'var(--accent)';
+  feedbackEl.style.display = '';
+  setTimeout(() => { feedbackEl.style.display = 'none'; }, 3000);
 
   userIdEl.value = '';
   await loadSpaces();
