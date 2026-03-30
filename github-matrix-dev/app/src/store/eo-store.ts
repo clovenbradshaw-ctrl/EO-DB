@@ -59,8 +59,10 @@ export const useEoStore = create<EoDbState>((set, get) => ({
   resolvedPermissions: null,
 
   async init(store: EoStore) {
+    // Immediately mark not-ready so components show loading during the transition
+    set({ ready: false, recentEvents: [], lastSeq: 0 });
     const lastSeq = await store.getCurrentSeq();
-    set({ store, lastSeq, ready: true, recentEvents: [] });
+    set({ store, lastSeq, ready: true });
   },
 
   setSyncManager(syncManager: SyncManager) {

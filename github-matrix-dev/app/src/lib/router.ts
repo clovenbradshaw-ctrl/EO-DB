@@ -218,6 +218,8 @@ export function useHashRoute() {
       if (!('scope' in partial)) next.scope = null;
       if (!('record' in partial)) next.record = null;
       if (!('view' in partial)) next.view = 'horizon';
+      if (!('builderViewId' in partial)) next.builderViewId = null;
+      if (!('customPageId' in partial)) next.customPageId = null;
     }
     if ('scope' in partial && partial.scope !== current.scope) {
       if (!('record' in partial)) next.record = null;
