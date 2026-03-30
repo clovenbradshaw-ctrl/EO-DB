@@ -222,7 +222,19 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
     ];
   }
 
-  function renderNode(node: TreeNode, depth: number) {
+  function resolveDisplayName(node: TreeNode, parentDisplayField?: string): string {
+    // 1. Explicit name on the node itself (set via DEF or manual rename)
+    if (node.state?.value?.name) return node.state.value.name;
+    // 2. Parent's _displayField tells us which field to use from this node's fields
+    if (parentDisplayField && node.state?.value?.fields) {
+      const fieldVal = node.state.value.fields[parentDisplayField];
+      if (fieldVal != null) return String(fieldVal);
+    }
+    // 3. Fallback to formatted segment name
+    return formatName(node.segment);
+  }
+
+  function renderNode(node: TreeNode, depth: number, parentDisplayField?: string) {
     const isActive = selectedScope === node.fullPath;
     const isExpanded = expanded.has(node.fullPath);
     const hasChildren = node.children.length > 0;
@@ -250,7 +262,7 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
           </span>
 
           <span style={s.name}>
-            {node.state?.value?.name || formatName(node.segment)}
+            {resolveDisplayName(node, parentDisplayField)}
           </span>
 
           {/* Type badge */}
@@ -295,8 +307,10 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
           </div>
         ))}
 
-        {/* Children */}
-        {isExpanded && node.children.map(child => renderNode(child, depth + 1))}
+        {/* Children — pass this node's _displayField so children can resolve names */}
+        {isExpanded && node.children.map(child =>
+          renderNode(child, depth + 1, node.state?.value?._displayField)
+        )}
       </div>
     );
   }

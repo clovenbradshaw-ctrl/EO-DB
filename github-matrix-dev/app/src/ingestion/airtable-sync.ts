@@ -34,6 +34,7 @@ export interface HydrationManifest {
     tables: Array<{
       id: string;
       name: string;
+      primaryFieldId?: string;
       fieldCount: number;
       fields: Array<{ id: string; name: string; type: string }>;
     }>;
@@ -106,6 +107,14 @@ export interface SyncCustomization {
    * Useful for testing or partial imports. 0 or undefined means no limit.
    */
   recordLimit?: number;
+
+  /**
+   * Override the display name field per table (by table ID → field ID).
+   * When set, this field's value is used as the record's `name`.
+   * If not set, falls back to the table's primaryFieldId.
+   * Example: { 'tblClients': 'fldFullName' }
+   */
+  displayFields?: Record<string, string>;
 }
 
 // ─── Cursor management (IndexedDB meta store) ─────────────────────────────
@@ -228,6 +237,7 @@ async function ingestRecord(
   exclusions: SyncExclusions = EMPTY_EXCLUSIONS,
   preserveExisting: boolean = true,
   onEvent?: (event: any) => void,
+  displayField?: string,
 ): Promise<'ingested' | 'skipped_no_change' | 'skipped_duplicate'> {
   const target = recordTarget(baseId, tableId, record.id);
   let storableFields = extractStorableFields(record.fields, fieldMeta, exclusions);
@@ -276,6 +286,24 @@ async function ingestRecord(
       acquired_ts: new Date().toISOString(),
       client_event_id: clientEventId,
     }, onEvent);
+
+    // Set display name as a separate DEF — ontologically distinct from the data import.
+    // The name assignment is a user/system choice about how to present this record,
+    // not part of the source data itself.
+    if (displayField) {
+      const nameVal = storableFields[displayField] ?? record.fields[displayField];
+      if (nameVal != null) {
+        await processEvent(store, {
+          op: 'DEF',
+          target,
+          operand: { name: String(nameVal) },
+          agent: `${agent}:display`,
+          ts: new Date().toISOString(),
+          acquired_ts: new Date().toISOString(),
+          client_event_id: `${clientEventId}:name`,
+        }, onEvent);
+      }
+    }
     return 'ingested';
   } catch (e: any) {
     if (e.message?.includes('already')) return 'skipped_duplicate';
@@ -300,6 +328,7 @@ export async function discoverSchema(client: AirtableClient): Promise<HydrationM
       tables: tables.map(t => ({
         id: t.id,
         name: t.name,
+        primaryFieldId: t.primaryFieldId,
         fieldCount: t.fields.length,
         fields: t.fields.map(f => ({ id: f.id, name: f.name, type: f.type })),
       })),
@@ -334,6 +363,10 @@ async function syncTable(
 
   const fieldMeta = await getTableFieldMeta(store, baseId, tableId);
 
+  // Retrieve display field so records get a `name` property
+  const tableState = await getState(store, tableTarget(baseId, tableId));
+  const displayField: string | undefined = tableState?.value?._displayField;
+
   const filterByFormula = cursorSince
     ? `LAST_MODIFIED_TIME()>='${cursorSince}'`
     : undefined;
@@ -348,7 +381,7 @@ async function syncTable(
     for (const record of page) {
       if (fetched >= limit) { limitReached = true; break; }
       fetched++;
-      const result = await ingestRecord(store, baseId, tableId, record, agent, fieldMeta, exclusions, preserveExisting, onEvent);
+      const result = await ingestRecord(store, baseId, tableId, record, agent, fieldMeta, exclusions, preserveExisting, onEvent, displayField);
       switch (result) {
         case 'ingested': ingested++; break;
         case 'skipped_no_change': skippedNoChange++; break;
@@ -392,6 +425,7 @@ export async function hydrationSync(
   const selectedTables = opts?.customization?.selectedTables;
   const fieldExclusions = opts?.customization?.fieldExclusions;
   const recordLimit = opts?.customization?.recordLimit;
+  const displayFields = opts?.customization?.displayFields;
 
   opts?.onProgress?.({ phase: 'discovering' });
   const manifest = await discoverSchema(client);
@@ -428,6 +462,7 @@ export async function hydrationSync(
             name: table.name,
             field_count: table.fieldCount,
             fields: table.fields,
+            _displayField: displayFields?.[table.id] || table.primaryFieldId || undefined,
             _airtable: { type: 'table', base_id: base.id, table_id: table.id },
           },
           agent,
