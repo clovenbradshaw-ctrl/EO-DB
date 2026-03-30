@@ -111,6 +111,12 @@ export function AirtableSettingsSection({ session }: { session: MatrixSession })
   // ── Record limit per key (0 = no limit) ──
   const [recordLimits, setRecordLimits] = useState<Record<string, number>>({});
 
+  // ── Display field per table: { keyLabel: { tableId: fieldId } } ──
+  const [displayFieldSelections, setDisplayFieldSelections] = useState<Record<string, Record<string, string>>>({});
+
+  // ── Expanded tables (for field preview): Set of "keyLabel:tableId" ──
+  const [expandedTables, setExpandedTables] = useState<Set<string>>(new Set());
+
   // ── Load stored keys ──
   const loadKeys = useCallback(async () => {
     setLoadingKeys(true);
@@ -226,15 +232,86 @@ export function AirtableSettingsSection({ session }: { session: MatrixSession })
     return state?.value?.api_key ?? null;
   }
 
+  // ── Auto-guess the best display name field for a table ──
+  function guessNameField(fields: Array<{ id: string; name: string; type: string }>): string | undefined {
+    const namePatterns = [
+      /^name$/i,
+      /^full[\s_-]?name$/i,
+      /^display[\s_-]?name$/i,
+      /^title$/i,
+      /^label$/i,
+      /^client[\s_-]?name$/i,
+      /^company[\s_-]?name$/i,
+      /^project[\s_-]?name$/i,
+      /^subject$/i,
+      /name/i,
+      /title/i,
+    ];
+    for (const pattern of namePatterns) {
+      const match = fields.find(f => pattern.test(f.name) && (f.type === 'singleLineText' || f.type === 'multilineText' || f.type === 'richText'));
+      if (match) return match.id;
+    }
+    // Also check non-text fields with name patterns
+    for (const pattern of namePatterns) {
+      const match = fields.find(f => pattern.test(f.name));
+      if (match) return match.id;
+    }
+    return undefined;
+  }
+
+  // ── Resolve which display field to use for a table ──
+  function resolveDisplayField(
+    keyLabel: string,
+    table: { id: string; primaryFieldId?: string; fields: Array<{ id: string; name: string; type: string }> },
+  ): string | undefined {
+    // User override takes priority
+    const override = displayFieldSelections[keyLabel]?.[table.id];
+    if (override) return override;
+    // Auto-guess, falling back to primaryFieldId
+    return guessNameField(table.fields) || table.primaryFieldId;
+  }
+
+  // ── Toggle expanded table for field preview ──
+  function toggleExpandedTable(keyLabel: string, tableId: string) {
+    const key = `${keyLabel}:${tableId}`;
+    setExpandedTables((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+
+  // ── Set display field for a table ──
+  function setDisplayField(keyLabel: string, tableId: string, fieldId: string) {
+    setDisplayFieldSelections((prev) => ({
+      ...prev,
+      [keyLabel]: { ...(prev[keyLabel] || {}), [tableId]: fieldId },
+    }));
+  }
+
   // ── Build customization from current UI state ──
-  function buildCustomization(keyLabel: string): SyncCustomization {
+  function buildCustomization(keyLabel: string, manifest?: HydrationManifest): SyncCustomization {
     const selection = tableSelections[keyLabel];
     const hasSelection = selection && Object.values(selection).some(t => t.length > 0);
     const limit = recordLimits[keyLabel] || 0;
+
+    // Build display fields map from resolved values
+    const displayFieldsMap: Record<string, string> = {};
+    if (manifest) {
+      for (const base of manifest.bases) {
+        for (const table of base.tables) {
+          const resolved = resolveDisplayField(keyLabel, table);
+          if (resolved) displayFieldsMap[table.id] = resolved;
+        }
+      }
+    }
+
     return {
       selectedTables: hasSelection ? selection : undefined,
       preserveExisting: preserveFlags[keyLabel] ?? true,
       recordLimit: limit > 0 ? limit : undefined,
+      displayFields: Object.keys(displayFieldsMap).length > 0 ? displayFieldsMap : undefined,
     };
   }
 
@@ -293,7 +370,7 @@ export function AirtableSettingsSection({ session }: { session: MatrixSession })
       }
 
       const client = new AirtableClient(rawKey);
-      const customization = buildCustomization(key.label);
+      const customization = buildCustomization(key.label, manifests[key.label]);
       const onProgress = (p: { phase: string; table?: string; records_so_far?: number }) => {
         const msg = p.table
           ? `Syncing ${p.table}${p.records_so_far ? ` (${p.records_so_far} records)` : ''}...`
@@ -544,17 +621,99 @@ export function AirtableSettingsSection({ session }: { session: MatrixSession })
                           <span style={s.baseCount}>{base.tables.length} tables</span>
                         </div>
                         <div style={s.tableList}>
-                          {base.tables.map((table) => (
-                            <label key={table.id} style={s.tableItem}>
-                              <input
-                                type="checkbox"
-                                checked={selection.includes(table.id)}
-                                onChange={() => toggleTable(key.label, base.id, table.id)}
-                              />
-                              <span style={s.tableName}>{table.name}</span>
-                              <span style={s.fieldCount}>{table.fieldCount} fields</span>
-                            </label>
-                          ))}
+                          {base.tables.map((table) => {
+                            const expandKey = `${key.label}:${table.id}`;
+                            const isExpanded = expandedTables.has(expandKey);
+                            const resolvedField = resolveDisplayField(key.label, table);
+                            const resolvedFieldName = table.fields.find(f => f.id === resolvedField)?.name;
+
+                            return (
+                              <div key={table.id}>
+                                <div style={s.tableItem}>
+                                  <input
+                                    type="checkbox"
+                                    checked={selection.includes(table.id)}
+                                    onChange={() => toggleTable(key.label, base.id, table.id)}
+                                  />
+                                  <span
+                                    style={{ ...s.tableName, cursor: 'pointer' }}
+                                    onClick={() => toggleExpandedTable(key.label, table.id)}
+                                  >
+                                    <span style={{ marginRight: 4, fontSize: 10, opacity: 0.6 }}>
+                                      {isExpanded ? '\u25BE' : '\u25B8'}
+                                    </span>
+                                    {table.name}
+                                  </span>
+                                  <span style={s.fieldCount}>{table.fieldCount} fields</span>
+                                  {resolvedFieldName && (
+                                    <span style={{
+                                      fontSize: 10,
+                                      color: theme.accent,
+                                      marginLeft: 8,
+                                      opacity: 0.8,
+                                    }}>
+                                      name: {resolvedFieldName}
+                                    </span>
+                                  )}
+                                </div>
+
+                                {/* Expanded field preview + name field picker */}
+                                {isExpanded && (
+                                  <div style={s.fieldPreview}>
+                                    <div style={s.nameFieldPicker}>
+                                      <span style={s.nameFieldLabel}>Display name field:</span>
+                                      <select
+                                        value={displayFieldSelections[key.label]?.[table.id] || '_auto'}
+                                        onChange={(e) => {
+                                          const val = e.target.value;
+                                          if (val === '_auto') {
+                                            // Clear override, use auto-guess
+                                            setDisplayFieldSelections((prev) => {
+                                              const next = { ...prev, [key.label]: { ...(prev[key.label] || {}) } };
+                                              delete next[key.label][table.id];
+                                              return next;
+                                            });
+                                          } else if (val === '_first') {
+                                            // Use first field
+                                            if (table.fields.length > 0) {
+                                              setDisplayField(key.label, table.id, table.fields[0].id);
+                                            }
+                                          } else {
+                                            setDisplayField(key.label, table.id, val);
+                                          }
+                                        }}
+                                        style={s.nameFieldSelect}
+                                      >
+                                        <option value="_auto">Auto-guess{guessNameField(table.fields) ? ` (${table.fields.find(f => f.id === guessNameField(table.fields))?.name})` : ''}</option>
+                                        <option value="_first">First column ({table.fields[0]?.name || '?'})</option>
+                                        <optgroup label="Manual select">
+                                          {table.fields.map((f) => (
+                                            <option key={f.id} value={f.id}>
+                                              {f.name} ({f.type})
+                                            </option>
+                                          ))}
+                                        </optgroup>
+                                      </select>
+                                    </div>
+                                    <div style={s.fieldList}>
+                                      {table.fields.map((f) => (
+                                        <div key={f.id} style={{
+                                          ...s.fieldItem,
+                                          ...(f.id === resolvedField ? { background: theme.bgHover, fontWeight: 600 } : {}),
+                                        }}>
+                                          <span style={s.fieldItemName}>{f.name}</span>
+                                          <span style={s.fieldItemType}>{f.type}</span>
+                                          {f.id === resolvedField && (
+                                            <span style={{ fontSize: 10, color: theme.accent, marginLeft: 'auto' }}>name field</span>
+                                          )}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
                         </div>
                       </div>
                     );
@@ -992,6 +1151,63 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       fontSize: 10,
       color: t.textMuted,
     },
+
+    // ── Field preview (expanded table) ──
+    fieldPreview: {
+      marginLeft: 22,
+      marginBottom: 6,
+      padding: '6px 8px',
+      background: t.bgSurface || t.bgApp,
+      borderRadius: 4,
+      border: `1px solid ${t.borderLight}`,
+    },
+    nameFieldPicker: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      marginBottom: 6,
+      paddingBottom: 6,
+      borderBottom: `1px solid ${t.borderLight}`,
+    },
+    nameFieldLabel: {
+      fontSize: 10,
+      fontWeight: 600,
+      color: t.textSecondary,
+      whiteSpace: 'nowrap' as const,
+    },
+    nameFieldSelect: {
+      flex: 1,
+      fontSize: 11,
+      padding: '2px 4px',
+      borderRadius: 3,
+      border: `1px solid ${t.border}`,
+      background: t.bgInput || t.bg,
+      color: t.text,
+    },
+    fieldList: {
+      display: 'flex',
+      flexDirection: 'column' as const,
+      gap: 1,
+      maxHeight: 160,
+      overflowY: 'auto' as const,
+    },
+    fieldItem: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      padding: '2px 4px',
+      borderRadius: 2,
+      fontSize: 10,
+      color: t.text,
+    },
+    fieldItemName: {
+      fontFamily: "'JetBrains Mono', monospace",
+    },
+    fieldItemType: {
+      color: t.textMuted,
+      fontSize: 9,
+    },
+
     preserveRow: {
       marginTop: 10,
       padding: '8px 0',

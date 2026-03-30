@@ -104,6 +104,14 @@ export interface SyncCustomization {
    * Default: true (safe mode — EO-DB is source of truth once populated).
    */
   preserveExisting?: boolean;
+
+  /**
+   * Override the display name field per table (by table ID → field ID).
+   * When set, this field's value is used as the record's `name`.
+   * If not set, falls back to the table's primaryFieldId.
+   * Example: { 'tblClients': 'fldFullName' }
+   */
+  displayFields?: Record<string, string>;
 }
 
 // ─── Cursor management ──────────────────────────────────────────────────────
@@ -508,16 +516,11 @@ async function ingestRecord(
   }
 
   // 5. Ingest via DEF with only storable fields (no computed/Horizon noise)
-  //    Extract display name from the primary field (if _displayField is set on the table).
-  const displayName = displayField
-    ? (storableFields[displayField] ?? record.fields[displayField])
-    : undefined;
   try {
     await processEvent(db, {
       op: 'DEF',
       target,
       operand: {
-        ...(displayName != null ? { name: String(displayName) } : {}),
         fields: storableFields,
         _airtable: {
           record_id: record.id,
@@ -531,6 +534,25 @@ async function ingestRecord(
       acquired_ts: new Date().toISOString(),
       client_event_id: clientEventId,
     }, feed);
+
+    // 6. Set display name as a separate DEF — ontologically distinct from the data import.
+    //    The name assignment is a user/system choice about how to present this record,
+    //    not part of the source data itself.
+    if (displayField) {
+      const nameVal = storableFields[displayField] ?? record.fields[displayField];
+      if (nameVal != null) {
+        await processEvent(db, {
+          op: 'DEF',
+          target,
+          operand: { name: String(nameVal) },
+          agent: `${agent}:display`,
+          ts: new Date().toISOString(),
+          acquired_ts: new Date().toISOString(),
+          client_event_id: `${clientEventId}:name`,
+        }, feed);
+      }
+    }
+
     return 'ingested';
   } catch (e: any) {
     // If idempotency caught it, it's a duplicate from another device
@@ -603,6 +625,7 @@ export async function hydrationSync(
   const preserveExisting = opts?.customization?.preserveExisting ?? true;
   const selectedTables = opts?.customization?.selectedTables;
   const fieldExclusions = opts?.customization?.fieldExclusions;
+  const displayFields = opts?.customization?.displayFields;
   const manifest = await discoverSchema(client);
   const syncResults: SyncResult[] = [];
 
@@ -697,7 +720,7 @@ export async function hydrationSync(
               name: table.name,
               field_count: table.fieldCount,
               fields: table.fields,
-              _displayField: table.primaryFieldId || undefined,
+              _displayField: displayFields?.[table.id] || table.primaryFieldId || undefined,
               _airtable: { type: 'table', base_id: base.id, table_id: table.id },
             },
             agent,
