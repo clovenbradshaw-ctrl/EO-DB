@@ -14,6 +14,21 @@ interface TableViewProps {
   session: { userId: string };
 }
 
+function formatRelativeTime(ts: string): string {
+  const now = Date.now();
+  const then = new Date(ts).getTime();
+  const diff = now - then;
+  const sec = Math.floor(diff / 1000);
+  if (sec < 60) return 'just now';
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const days = Math.floor(hr / 24);
+  if (days < 30) return `${days}d ago`;
+  return new Date(ts).toLocaleDateString();
+}
+
 function formatScopeName(scope: string): string {
   const last = scope.split('.').pop() || scope;
   let name = last.replace(/^(tbl|rec|fld)/, '');
@@ -97,6 +112,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, activeRecord, 
   const [filterText, setFilterText] = useState('');
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; target: string } | null>(null);
   const [typeSelector, setTypeSelector] = useState<{ x: number; y: number; target: string; currentType?: string } | null>(null);
+  const [showLastUpdated, setShowLastUpdated] = useState(true);
   const { theme } = useTheme();
   const s = makeStyles(theme);
 
@@ -149,7 +165,8 @@ export function TableView({ scope, onSelectRecord, onViewHistory, activeRecord, 
   const columns = useMemo<ColumnDef[]>(() => [
     { key: '_record', label: 'record', type: 'text' as const },
     ...entityColumns,
-  ], [entityColumns]);
+    ...(showLastUpdated ? [{ key: '_last_updated', label: 'last updated', type: 'text' as const }] : []),
+  ], [entityColumns, showLastUpdated]);
 
   const filtered = useMemo(() => {
     if (!filterText) return records;
@@ -230,6 +247,18 @@ export function TableView({ scope, onSelectRecord, onViewHistory, activeRecord, 
           <span style={s.recordCount}>{filtered.length} records</span>
         </div>
         <div style={s.toolbarRight}>
+          <button
+            onClick={() => setShowLastUpdated(!showLastUpdated)}
+            style={{
+              ...s.toggleBtn,
+              background: showLastUpdated ? theme.accentBg : 'transparent',
+              color: showLastUpdated ? theme.accent : theme.textMuted,
+              border: `1px solid ${showLastUpdated ? theme.accentBorder : theme.border}`,
+            }}
+            title={showLastUpdated ? 'Hide last updated column' : 'Show last updated column'}
+          >
+            Last updated
+          </button>
           <input
             value={filterText}
             onChange={(e) => setFilterText(e.target.value)}
@@ -284,6 +313,11 @@ export function TableView({ scope, onSelectRecord, onViewHistory, activeRecord, 
                             }}>{rec.target.split('.').pop()}</span>
                             {rec.value?._type && <TypeBadge type={rec.value._type} />}
                           </span>
+                        : col.key === '_last_updated'
+                        ? <span style={{
+                            fontFamily: "'JetBrains Mono', monospace", fontSize: 11,
+                            color: theme.textSecondary,
+                          }}>{rec.last_ts ? formatRelativeTime(rec.last_ts) : '\u2014'}</span>
                         : renderCell(getFieldValue(rec, col.key, useFieldsSub), col.key, onSelectRecord, theme)
                       }
                     </td>
@@ -374,6 +408,15 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       background: t.bgMuted,
       padding: '1px 6px',
       borderRadius: 4,
+    },
+    toggleBtn: {
+      height: 28,
+      fontSize: 11,
+      padding: '0 10px',
+      borderRadius: 4,
+      cursor: 'pointer',
+      fontWeight: 500,
+      whiteSpace: 'nowrap' as const,
     },
     filterInput: {
       width: 140,

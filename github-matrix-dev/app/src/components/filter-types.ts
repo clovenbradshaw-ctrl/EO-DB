@@ -64,6 +64,14 @@ export const OPERATOR_LABELS: Record<FilterOperator, string> = {
   lte: '<=',
 };
 
+/** Fields that represent operational metadata rather than current-state data.
+ *  Hidden from the Horizon table but visible in the record detail panel. */
+export const HORIZON_HIDDEN_FIELDS = new Set([
+  'OP', 'op', 'Op',
+  'Agent', 'agent', 'AGENT',
+  'last_op', 'last_agent',
+]);
+
 // --- Column Inference ---
 
 export function inferColumnType(values: any[]): ColumnDef['type'] {
@@ -150,6 +158,7 @@ export function deriveColumns(
 
     for (const [key, val] of Object.entries(source)) {
       if (key.startsWith('_')) continue;
+      if (HORIZON_HIDDEN_FIELDS.has(key)) continue;
       const arr = keyValues.get(key) || [];
       arr.push(val);
       keyValues.set(key, arr);
