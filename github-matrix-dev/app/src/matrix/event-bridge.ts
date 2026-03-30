@@ -14,6 +14,13 @@ export const EO_EVENT_TYPE = _types.event;
 export const EO_SNAPSHOT_TYPE = _types.snapshot;
 export const EO_SNAPSHOT_STATE_TYPE = _types.snapshotState;
 
+// --- Governance event types ---
+export const EO_SCHEMA_TYPE = 'com.eo-db.schema';
+export const EO_GOVERNANCE_TYPE = 'com.eo-db.governance';
+export const EO_KEY_ANNOUNCE_TYPE = 'com.eo-db.key.announce';
+export const EO_SCHEMA_MANIFEST_TYPE = 'com.eo-db.schema.manifest';
+export const EO_SPACE_CONFIG_TYPE = 'com.eo-db.space.config';
+
 /** Room alias — configured at runtime via `configureMatrixDomain()`. */
 export function getDataRoom(): string {
   return getDataRoomAlias();

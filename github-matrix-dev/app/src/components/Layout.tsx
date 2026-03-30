@@ -22,6 +22,8 @@ import { SettingsView } from './SettingsView';
 import { SpaceMembers } from './SpaceMembers';
 import { BuilderView } from './builder/BuilderView';
 import { RecordPageView } from './builder/RecordPageView';
+import { PermissionBadge } from './PermissionBadge';
+import { ViewOnlyBanner } from './ViewOnlyBanner';
 import { useBuilderStore } from '../store/builder-store';
 import { useTheme, spaceBackgroundTint, type Theme } from '../theme';
 import type { EoState } from '../db/types';
@@ -30,6 +32,8 @@ import { TimeScrubber } from './TimeScrubber';
 import { type TimeScrubberFilter, type DateColumnOption, DEFAULT_FILTER, detectDateColumns } from './time-scrubber-utils';
 import { hasFieldsSubObject, buildFieldNameMap } from './filter-types';
 import { useHashRoute, type View } from '../lib/router';
+import { type AccessRole, powerLevelToRole, legacyAccessToRole } from '../permissions/types';
+import { resolvePermissionsFromSharing } from '../permissions/resolve';
 
 function formatSpaceName(segment: string): string {
   // Strip common prefixes, replace underscores with spaces, capitalize
@@ -338,6 +342,18 @@ export function Layout({ session, onLogout }: LayoutProps) {
     ? session.userId.slice(1).split(':')[0]
     : session.userId;
 
+  // --- Permission resolution ---
+  const currentSpaceState = useMemo(() => spaces.find(s => s.target === selectedSpace), [spaces, selectedSpace]);
+  const currentPermissions = useMemo(() => {
+    if (!currentSpaceState) return null;
+    const owner = currentSpaceState.last_agent;
+    const sharing = currentSpaceState.value?._sharing || [];
+    const fieldAssignments = currentSpaceState.value?._field_assignments || [];
+    return resolvePermissionsFromSharing(session.userId, owner, sharing, fieldAssignments);
+  }, [currentSpaceState, session.userId]);
+  const currentRole: AccessRole = currentPermissions?.role ?? 'viewer';
+  const isViewer = currentRole === 'viewer';
+
   return (
     <div style={s.container}>
       {/* Top bar */}
@@ -410,11 +426,17 @@ export function Layout({ session, onLogout }: LayoutProps) {
             <span>tgt <b style={{ color: theme.text, fontWeight: 500 }}>{targetCount}</b></span>
             <span>edg <b style={{ color: theme.text, fontWeight: 500 }}>{edgeCount}</b></span>
           </div>
+          {selectedSpace && (
+            <PermissionBadge role={currentRole} displayName={displayName} />
+          )}
           <div style={s.statusDot}>
             <ConnectionStatus state={connectionState} />
           </div>
         </div>
       </header>
+
+      {/* View-only banner for Viewer role */}
+      {selectedSpace && isViewer && <ViewOnlyBanner />}
 
       {/* Time scrubber — full width, under header */}
       {activeView === 'horizon' && (
@@ -459,27 +481,33 @@ export function Layout({ session, onLogout }: LayoutProps) {
               </button>
             ))}
             <div style={s.navDivider} />
-            {/* Builder */}
-            <button
-              onClick={() => navigate({ view: 'builder', builderViewId: null, customPageId: null })}
-              style={{
-                ...s.navItem,
-                ...(activeView === 'builder' ? s.navItemActive : {}),
-              }}
-            >
-              Builder
-            </button>
-            <div style={s.navDivider} />
-            {/* System config */}
-            <button
-              onClick={() => navigate({ view: 'settings' })}
-              style={{
-                ...s.navItem,
-                ...(activeView === 'settings' ? s.navItemActive : {}),
-              }}
-            >
-              Settings
-            </button>
+            {/* Builder — Admin+ only (PL >= 50) */}
+            {currentPermissions?.can_build_views !== false && (
+              <button
+                onClick={() => navigate({ view: 'builder', builderViewId: null, customPageId: null })}
+                style={{
+                  ...s.navItem,
+                  ...(activeView === 'builder' ? s.navItemActive : {}),
+                }}
+              >
+                Builder
+              </button>
+            )}
+            {/* Settings — Admin+ only (PL >= 50) */}
+            {currentPermissions?.can_set_governance !== false && (
+              <>
+                <div style={s.navDivider} />
+                <button
+                  onClick={() => navigate({ view: 'settings' })}
+                  style={{
+                    ...s.navItem,
+                    ...(activeView === 'settings' ? s.navItemActive : {}),
+                  }}
+                >
+                  Settings
+                </button>
+              </>
+            )}
           </nav>
 
           {/* Objects tree */}
@@ -517,6 +545,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
                     activeRecord={selectedRecord}
                     session={{ userId: session.userId }}
                     timeScrubberFilter={timeScrubberFilter}
+                    permissions={currentPermissions}
                   />
                 ) : (
                   <div style={s.empty}>
@@ -540,7 +569,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
                 <AirtableSettingsSection session={session} />
               </div>
             ) : activeView === 'compose' ? (
-              <ComposeView spacePrefix={statePrefix || undefined} />
+              <ComposeView spacePrefix={statePrefix || undefined} permissions={currentPermissions} />
             ) : activeView === 'builder' ? (
               <BuilderView />
             ) : activeView === 'settings' ? (

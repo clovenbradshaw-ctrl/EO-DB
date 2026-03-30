@@ -1,9 +1,32 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useEoStore } from '../store/eo-store';
 import { useTheme, type Theme } from '../theme';
 import type { ExternalOperator, EoState } from '../db/types';
+import type { ResolvedPermissions } from '../permissions/types';
 
 const OPERATORS: ExternalOperator[] = ['INS', 'DEF', 'CON', 'SEG', 'SYN', 'EVA', 'NUL'];
+
+/**
+ * Filter available operators by user's power level.
+ * - Viewer (PL 0): No operators (can't submit events)
+ * - Creator (PL 10): INS, DEF (own), NUL
+ * - Editor (PL 25): All external operators
+ * - Admin+ (PL 50): All operators + schema/governance
+ */
+function filterOperatorsByPermissions(
+  operators: ExternalOperator[],
+  permissions?: ResolvedPermissions | null,
+): ExternalOperator[] {
+  if (!permissions) return operators; // no restrictions when permissions unavailable
+
+  if (permissions.powerLevel < 10) return []; // Viewer can't compose
+  if (permissions.powerLevel < 25) {
+    // Creator: can INS (add records), DEF (own records), NUL
+    return operators.filter(op => ['INS', 'DEF', 'NUL'].includes(op));
+  }
+  // Editor+: all external operators
+  return operators;
+}
 
 const OP_COLORS: Record<string, string> = {
   INS: '#4ade80', DEF: '#38bdf8', CON: '#a78bfa', SEG: '#f472b6',
@@ -12,7 +35,7 @@ const OP_COLORS: Record<string, string> = {
 
 interface KvRow { key: string; value: string }
 
-export function ComposeView({ spacePrefix }: { spacePrefix?: string }) {
+export function ComposeView({ spacePrefix, permissions }: { spacePrefix?: string; permissions?: ResolvedPermissions | null }) {
   const { theme } = useTheme();
   const dispatch = useEoStore((s) => s.dispatch);
   const ready = useEoStore((s) => s.ready);
@@ -136,11 +159,11 @@ export function ComposeView({ spacePrefix }: { spacePrefix?: string }) {
   return (
     <div style={s.container}>
       <div style={s.form}>
-        {/* Operator selector */}
+        {/* Operator selector — filtered by power level */}
         <div style={s.row}>
           <div style={s.label}>Operator</div>
           <div style={s.opGroup}>
-            {OPERATORS.map((o) => (
+            {filterOperatorsByPermissions(OPERATORS, permissions).map((o) => (
               <button
                 key={o}
                 onClick={() => setOp(o)}
@@ -154,6 +177,11 @@ export function ComposeView({ spacePrefix }: { spacePrefix?: string }) {
                 {o}
               </button>
             ))}
+            {permissions && permissions.powerLevel < 10 && (
+              <span style={{ fontSize: 11, color: theme.textMuted, fontStyle: 'italic' }}>
+                View-only access — cannot compose events
+              </span>
+            )}
           </div>
         </div>
 

@@ -6,6 +6,7 @@ import { horizonGet, type HorizonOpts } from '../db/horizon';
 import { getState, getStateByPrefix } from '../db/state';
 import { readLogSince } from '../db/log';
 import type { SyncManager } from '../matrix/sync-manager';
+import type { ResolvedPermissions } from '../permissions/types';
 
 interface EoDbState {
   /** The encrypted store instance (set after login + key derivation) */
@@ -18,12 +19,17 @@ interface EoDbState {
   lastSeq: number;
   /** Whether the store is initialized and ready */
   ready: boolean;
+  /** Resolved permissions for the current user in the current space */
+  resolvedPermissions: ResolvedPermissions | null;
 
   /** Initialize the store with an encrypted store instance */
   init: (store: EoStore) => Promise<void>;
 
   /** Set the sync manager after it's initialized */
   setSyncManager: (syncManager: SyncManager) => void;
+
+  /** Set resolved permissions for the current space */
+  setPermissions: (permissions: ResolvedPermissions | null) => void;
 
   /** Process an event through the fold and sync to Matrix */
   dispatch: (event: EoEventInput) => Promise<number>;
@@ -50,6 +56,7 @@ export const useEoStore = create<EoDbState>((set, get) => ({
   recentEvents: [],
   lastSeq: 0,
   ready: false,
+  resolvedPermissions: null,
 
   async init(store: EoStore) {
     const lastSeq = await store.getCurrentSeq();
@@ -58,6 +65,10 @@ export const useEoStore = create<EoDbState>((set, get) => ({
 
   setSyncManager(syncManager: SyncManager) {
     set({ syncManager });
+  },
+
+  setPermissions(permissions: ResolvedPermissions | null) {
+    set({ resolvedPermissions: permissions });
   },
 
   async dispatch(event: EoEventInput) {
@@ -108,6 +119,6 @@ export const useEoStore = create<EoDbState>((set, get) => ({
   teardown() {
     const { store } = get();
     if (store) store.close();
-    set({ store: null, syncManager: null, ready: false, recentEvents: [], lastSeq: 0 });
+    set({ store: null, syncManager: null, ready: false, recentEvents: [], lastSeq: 0, resolvedPermissions: null });
   },
 }));
