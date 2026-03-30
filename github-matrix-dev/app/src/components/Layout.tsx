@@ -29,8 +29,7 @@ import type { ViewDefinition } from '../blocks/types';
 import { TimeScrubber } from './TimeScrubber';
 import { type TimeScrubberFilter, type DateColumnOption, DEFAULT_FILTER, detectDateColumns } from './time-scrubber-utils';
 import { hasFieldsSubObject, buildFieldNameMap } from './filter-types';
-
-type View = 'horizon' | 'log' | 'graph' | 'import' | 'compose' | 'settings' | 'builder';
+import { useHashRoute, type View } from '../lib/router';
 
 function formatSpaceName(segment: string): string {
   // Strip common prefixes, replace underscores with spaces, capitalize
@@ -55,11 +54,12 @@ export function Layout({ session, onLogout }: LayoutProps) {
   const ready = useEoStore((s) => s.ready);
   const lastSeq = useEoStore((s) => s.lastSeq);
   const recentEvents = useEoStore((s) => s.recentEvents);
-  const [selectedScope, setSelectedScope] = useState<string | null>(null);
-  const [selectedRecord, setSelectedRecord] = useState<string | null>(null);
-  const [activeView, setActiveView] = useState<View>('horizon');
+  const { route, navigate } = useHashRoute();
+  const activeView = route.view;
+  const selectedSpace = route.space;
+  const selectedScope = route.scope;
+  const selectedRecord = route.record;
   const [spaceOpen, setSpaceOpen] = useState(false);
-  const [selectedSpace, setSelectedSpace] = useState<string | null>(null);
   const [showMembers, setShowMembers] = useState(false);
   const [spaces, setSpaces] = useState<EoState[]>([]);
   const [allStates, setAllStates] = useState<EoState[]>([]);
@@ -185,7 +185,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
           const parsed = JSON.parse(cached) as EoState[];
           if (parsed.length > 0) {
             setSpaces(parsed);
-            if (selectedSpace === null) setSelectedSpace(parsed[0].target);
+            if (selectedSpace === null) navigate({ space: parsed[0].target });
           }
         } catch { /* ignore bad cache */ }
       }
@@ -220,7 +220,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
       if (spaceRoots.length > 0) {
         setSpaces(spaceRoots);
         localStorage.setItem('eo-spaces', JSON.stringify(spaceRoots));
-        if (selectedSpace === null) setSelectedSpace(spaceRoots[0].target);
+        if (selectedSpace === null) navigate({ space: spaceRoots[0].target });
       }
 
       rootStore.close();
@@ -372,7 +372,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
                   return (
                     <button
                       key={sp.target}
-                      onClick={() => { setSelectedSpace(sp.target); setSpaceOpen(false); setSelectedScope(null); setSelectedRecord(null); setShowMembers(false); setActiveView('horizon'); }}
+                      onClick={() => { navigate({ space: sp.target, scope: null, record: null, view: 'horizon' }); setSpaceOpen(false); setShowMembers(false); }}
                       style={{ ...s.nulspaceItem, ...(isActive ? { background: theme.bgHover } : {}) }}
                     >
                       <div>
@@ -425,7 +425,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
             {(['horizon', 'log', 'graph'] as View[]).map((view) => (
               <button
                 key={view}
-                onClick={() => setActiveView(view)}
+                onClick={() => navigate({ view })}
                 style={{
                   ...s.navItem,
                   ...(activeView === view ? s.navItemActive : {}),
@@ -439,7 +439,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
             {(['compose', 'import'] as View[]).map((view) => (
               <button
                 key={view}
-                onClick={() => setActiveView(view)}
+                onClick={() => navigate({ view })}
                 style={{
                   ...s.navItem,
                   ...(activeView === view ? s.navItemActive : {}),
@@ -451,7 +451,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
             <div style={s.navDivider} />
             {/* Builder */}
             <button
-              onClick={() => setActiveView('builder')}
+              onClick={() => navigate({ view: 'builder', builderViewId: null, customPageId: null })}
               style={{
                 ...s.navItem,
                 ...(activeView === 'builder' ? s.navItemActive : {}),
@@ -462,7 +462,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
             <div style={s.navDivider} />
             {/* System config */}
             <button
-              onClick={() => setActiveView('settings')}
+              onClick={() => navigate({ view: 'settings' })}
               style={{
                 ...s.navItem,
                 ...(activeView === 'settings' ? s.navItemActive : {}),
@@ -476,8 +476,8 @@ export function Layout({ session, onLogout }: LayoutProps) {
           {ready ? (
             <HolonNav
               selectedScope={selectedScope}
-              onSelectScope={(scope) => { setSelectedScope(scope); setSelectedRecord(null); }}
-              onSelectSegment={(_scope, _seg) => { setSelectedScope(_scope); }}
+              onSelectScope={(scope) => { navigate({ scope, record: null }); }}
+              onSelectSegment={(_scope, _seg) => { navigate({ scope: _scope }); }}
               statePrefix={statePrefix}
             />
           ) : (
@@ -512,7 +512,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
                 {selectedScope ? (
                   <TableView
                     scope={selectedScope}
-                    onSelectRecord={setSelectedRecord}
+                    onSelectRecord={(rec) => navigate({ record: rec })}
                     activeRecord={selectedRecord}
                     session={{ userId: session.userId }}
                     timeScrubberFilter={timeScrubberFilter}
@@ -552,8 +552,8 @@ export function Layout({ session, onLogout }: LayoutProps) {
           <RecordPageOrDrawer
             recordTarget={selectedRecord}
             allStates={allStates}
-            onClose={() => setSelectedRecord(null)}
-            onNavigate={(t) => setSelectedRecord(t)}
+            onClose={() => navigate({ record: null })}
+            onNavigate={(t) => navigate({ record: t })}
           />
         )}
       </div>
