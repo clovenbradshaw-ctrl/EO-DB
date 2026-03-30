@@ -1,3 +1,7 @@
+// Re-export governance & access control types
+export type { AccessRole, ResolvedPermissions, FieldAssignment, SpaceConfig } from '../permissions/types';
+export { ROLE_POWER_LEVELS, ROLE_LABELS, powerLevelToRole } from '../permissions/types';
+
 // The nine operators
 export type Operator = 'NUL' | 'SIG' | 'INS' | 'SEG' | 'CON' | 'SYN' | 'DEF' | 'EVA' | 'REC';
 

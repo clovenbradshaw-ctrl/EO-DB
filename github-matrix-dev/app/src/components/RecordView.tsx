@@ -18,14 +18,17 @@ import { CadenceBadge } from './CadenceBadge';
 import { GraphRoleBadge } from './GraphRoleBadge';
 import { TypeBadge } from './TypeSelector';
 import { ElementHistory } from './ElementHistory';
+import { RedactedCell } from './RedactedCell';
 import { useTheme, type Theme } from '../theme';
+import type { ResolvedPermissions } from '../permissions/types';
 
 interface RecordViewProps {
   target: string;
   onNavigate: (target: string) => void;
+  permissions?: ResolvedPermissions | null;
 }
 
-export function RecordView({ target, onNavigate }: RecordViewProps) {
+export function RecordView({ target, onNavigate, permissions }: RecordViewProps) {
   const horizon = useEoStore((s) => s.horizon);
   const [data, setData] = useState<HorizonResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -116,9 +119,28 @@ export function RecordView({ target, onNavigate }: RecordViewProps) {
         </div>
       </div>
 
-      {/* Layer 1: Figure */}
+      {/* Layer 1: Figure — with redacted field support */}
       <Section title="Current State" subtitle="what this target is" color={theme.accent}>
-        <FigureFields figure={data.figure} onNavigate={onNavigate} />
+        {permissions?.redacted_fields && permissions.redacted_fields.length > 0 ? (
+          <div>
+            <FigureFields figure={data.figure} onNavigate={onNavigate} />
+            <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {permissions.redacted_fields.map(field => (
+                <div key={field} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{
+                    fontFamily: "'JetBrains Mono', monospace",
+                    fontSize: 11,
+                    color: theme.textMuted,
+                    minWidth: 100,
+                  }}>{field}</span>
+                  <RedactedCell />
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <FigureFields figure={data.figure} onNavigate={onNavigate} />
+        )}
       </Section>
 
       {/* Layer 5: Trajectory */}

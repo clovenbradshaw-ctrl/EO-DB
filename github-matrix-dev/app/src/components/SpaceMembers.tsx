@@ -2,6 +2,18 @@ import { useState, useEffect, useRef } from 'react';
 import { useEoStore } from '../store/eo-store';
 import { useTheme, type Theme } from '../theme';
 import type { EoState } from '../db/types';
+import {
+  type AccessRole,
+  type FieldAssignment,
+  ROLE_LABELS,
+  ROLE_DESCRIPTIONS,
+  ROLE_POWER_LEVELS,
+  powerLevelToRole,
+  legacyAccessToRole,
+  roleToLegacyAccess,
+} from '../permissions/types';
+import { resolvePermissionsFromSharing } from '../permissions/resolve';
+import { FieldPermissions } from './FieldPermissions';
 
 type AccessLevel = 'read' | 'write' | 'admin';
 
@@ -18,13 +30,22 @@ interface SpaceMembersProps {
   onClose: () => void;
 }
 
+const ROLE_OPTIONS_5: { value: AccessRole; label: string; desc: string; pl: number }[] = [
+  { value: 'owner', label: 'Owner', desc: 'Full control (PL 100)', pl: 100 },
+  { value: 'admin', label: 'Full access', desc: 'Manage people (PL 50)', pl: 50 },
+  { value: 'editor', label: 'Can edit', desc: 'Edit any record (PL 25)', pl: 25 },
+  { value: 'creator', label: 'Can add', desc: 'Add & edit own (PL 10)', pl: 10 },
+  { value: 'viewer', label: 'Can view', desc: 'View data only (PL 0)', pl: 0 },
+];
+
+// Legacy 3-tier options (kept for backward-compat with _sharing DEF dispatch)
 const ROLE_OPTIONS: { value: AccessLevel; label: string; desc: string }[] = [
   { value: 'read', label: 'Can view', desc: 'View data only' },
   { value: 'write', label: 'Can edit', desc: 'View and edit data' },
   { value: 'admin', label: 'Full access', desc: 'Edit data and manage people' },
 ];
 
-const ROLE_LABELS: Record<AccessLevel, string> = {
+const LEGACY_ROLE_LABELS: Record<AccessLevel, string> = {
   read: 'Can view',
   write: 'Can edit',
   admin: 'Full access',
@@ -78,6 +99,41 @@ export function SpaceMembers({ spaceTarget, currentUserId, onClose }: SpaceMembe
   }
 
   const currentUserAccess = getAccessLevel(currentUserId);
+  const currentUserRole = getCurrentUserRole();
+  const currentPermissions = resolvePermissionsFromSharing(
+    currentUserId,
+    owner,
+    members,
+    fieldAssignments,
+  );
+
+  // Field assignments state (stored in space value)
+  const [fieldAssignments, setFieldAssignments] = useState<FieldAssignment[]>([]);
+  const [availableFields, setAvailableFields] = useState<string[]>([]);
+
+  // Load field assignments from space state
+  useEffect(() => {
+    if (spaceState?.value?._field_assignments) {
+      setFieldAssignments(spaceState.value._field_assignments);
+    }
+    if (spaceState?.value?._available_fields) {
+      setAvailableFields(spaceState.value._available_fields);
+    }
+  }, [spaceState]);
+
+  function getCurrentUserRole(): AccessRole {
+    if (currentUserId === owner) return 'owner';
+    const entry = members.find(m => m.user_id === currentUserId);
+    if (!entry) return 'viewer';
+    return legacyAccessToRole(entry.access);
+  }
+
+  function getUserRole(userId: string): AccessRole {
+    if (userId === owner) return 'owner';
+    const entry = members.find(m => m.user_id === userId);
+    if (!entry) return 'viewer';
+    return legacyAccessToRole(entry.access);
+  }
 
   function getAccessLevel(userId: string): AccessLevel | 'owner' {
     if (userId === owner) return 'owner';
@@ -86,7 +142,23 @@ export function SpaceMembers({ spaceTarget, currentUserId, onClose }: SpaceMembe
   }
 
   function canManageMembers(): boolean {
-    return currentUserId === owner || currentUserAccess === 'admin';
+    return currentPermissions.can_manage_members;
+  }
+
+  async function handleUpdateFieldAssignments(updated: FieldAssignment[]) {
+    try {
+      await dispatch({
+        op: 'DEF',
+        target: spaceTarget,
+        operand: { _field_assignments: updated },
+        agent: currentUserId,
+        ts: new Date().toISOString(),
+        acquired_ts: new Date().toISOString(),
+      });
+      setFieldAssignments(updated);
+    } catch (e: any) {
+      setAddError('Failed to update field permissions: ' + e.message);
+    }
   }
 
   function formatUserId(userId: string): string {
@@ -276,6 +348,7 @@ export function SpaceMembers({ spaceTarget, currentUserId, onClose }: SpaceMembe
         {/* Member rows */}
         {members.map((m) => {
           const isOpen = openDropdown === m.user_id;
+          const memberRole = getUserRole(m.user_id);
           return (
             <PersonRow
               key={m.user_id}
@@ -283,7 +356,7 @@ export function SpaceMembers({ spaceTarget, currentUserId, onClose }: SpaceMembe
               name={formatUserId(m.user_id)}
               server={formatHomeserver(m.user_id)}
               color={avatarColor(m.user_id)}
-              role={ROLE_LABELS[m.access]}
+              role={ROLE_LABELS[memberRole]}
               isYou={m.user_id === currentUserId}
               canManage={canManageMembers()}
               isOpen={isOpen}
@@ -294,6 +367,16 @@ export function SpaceMembers({ spaceTarget, currentUserId, onClose }: SpaceMembe
             />
           );
         })}
+      </div>
+
+      {/* Field permissions section */}
+      <div style={{ padding: '0 20px 16px' }}>
+        <FieldPermissions
+          fieldAssignments={fieldAssignments}
+          availableFields={availableFields}
+          onUpdate={handleUpdateFieldAssignments}
+          canManage={currentPermissions.can_set_governance}
+        />
       </div>
     </div>
   );
@@ -523,7 +606,7 @@ function PersonRow({
           </span>
         )}
 
-        {/* Dropdown */}
+        {/* Dropdown — 5-role picker with power levels */}
         {isOpen && onChangeAccess && onRemove && (
           <div style={{
             position: 'absolute',
@@ -534,53 +617,57 @@ function PersonRow({
             border: `1px solid ${theme.border}`,
             borderRadius: 8,
             boxShadow: `0 8px 24px ${theme.shadow}`,
-            minWidth: 180,
+            minWidth: 220,
             zIndex: 100,
             overflow: 'hidden',
             padding: '4px 0',
           }}>
-            {ROLE_OPTIONS.map((opt) => (
-              <button
-                key={opt.value}
-                onClick={() => onChangeAccess(opt.value)}
-                style={{
-                  display: 'block',
-                  width: '100%',
-                  textAlign: 'left' as const,
-                  padding: '8px 12px',
-                  background: opt.value === currentAccess ? theme.accentBg : 'transparent',
-                  border: 'none',
-                  cursor: 'pointer',
-                  fontFamily: mono,
-                }}
-                onMouseEnter={(e) => {
-                  if (opt.value !== currentAccess) e.currentTarget.style.background = theme.bgHover;
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = opt.value === currentAccess ? theme.accentBg : 'transparent';
-                }}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                  <div>
-                    <div style={{
-                      fontSize: 11,
-                      fontWeight: 500,
-                      color: opt.value === currentAccess ? theme.accent : theme.text,
-                    }}>{opt.label}</div>
-                    <div style={{
-                      fontSize: 9,
-                      color: theme.textMuted,
-                      marginTop: 1,
-                    }}>{opt.desc}</div>
+            {ROLE_OPTIONS_5.filter(opt => opt.value !== 'owner').map((opt) => {
+              const legacyAccess = roleToLegacyAccess(opt.value);
+              const isActive = currentAccess === legacyAccess;
+              return (
+                <button
+                  key={opt.value}
+                  onClick={() => onChangeAccess(legacyAccess)}
+                  style={{
+                    display: 'block',
+                    width: '100%',
+                    textAlign: 'left' as const,
+                    padding: '8px 12px',
+                    background: isActive ? theme.accentBg : 'transparent',
+                    border: 'none',
+                    cursor: 'pointer',
+                    fontFamily: mono,
+                  }}
+                  onMouseEnter={(e) => {
+                    if (!isActive) e.currentTarget.style.background = theme.bgHover;
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.background = isActive ? theme.accentBg : 'transparent';
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <div>
+                      <div style={{
+                        fontSize: 11,
+                        fontWeight: 500,
+                        color: isActive ? theme.accent : theme.text,
+                      }}>{opt.label}</div>
+                      <div style={{
+                        fontSize: 9,
+                        color: theme.textMuted,
+                        marginTop: 1,
+                      }}>{opt.desc}</div>
+                    </div>
+                    {isActive && (
+                      <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                        <path d="M3 7.5L5.5 10L11 4" stroke={theme.accent} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                      </svg>
+                    )}
                   </div>
-                  {opt.value === currentAccess && (
-                    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-                      <path d="M3 7.5L5.5 10L11 4" stroke={theme.accent} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-                    </svg>
-                  )}
-                </div>
-              </button>
-            ))}
+                </button>
+              );
+            })}
 
             <div style={{
               height: 1,
@@ -606,7 +693,7 @@ function PersonRow({
               onMouseEnter={(e) => e.currentTarget.style.background = theme.dangerBg}
               onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
             >
-              Remove access
+              Remove from room
             </button>
           </div>
         )}

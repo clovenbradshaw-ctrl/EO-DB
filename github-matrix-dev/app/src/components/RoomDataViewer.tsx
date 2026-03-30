@@ -220,26 +220,26 @@ function CollapsibleSection({ title, expanded, onToggle, children, theme }: {
   return (
     <div style={{
       borderBottom: `1px solid ${theme.border}`,
-      padding: '12px 0',
+      padding: '14px 0',
     }}>
       <button onClick={onToggle} style={{
         display: 'flex',
         alignItems: 'center',
-        gap: 6,
+        gap: 8,
         width: '100%',
         background: 'transparent',
         border: 'none',
         cursor: 'pointer',
         padding: 0,
         fontFamily: "'JetBrains Mono', monospace",
-        fontSize: 10,
+        fontSize: 12,
         fontWeight: 700,
         textTransform: 'uppercase' as const,
         letterSpacing: '0.08em',
         color: theme.textMuted,
       }}>
         <svg
-          width="10" height="10" viewBox="0 0 10 10" fill="none"
+          width="12" height="12" viewBox="0 0 10 10" fill="none"
           stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"
           style={{ transform: expanded ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform 0.15s' }}
         >
@@ -259,20 +259,21 @@ function CollapsibleSection({ title, expanded, onToggle, children, theme }: {
 function RawField({ label, value, theme }: { label: string; value: string; theme: Theme }) {
   return (
     <div style={{
-      display: 'flex',
-      justifyContent: 'space-between',
-      padding: '3px 0',
-      gap: 12,
+      display: 'grid',
+      gridTemplateColumns: '160px 1fr',
+      padding: '4px 0',
+      gap: 16,
+      alignItems: 'baseline',
     }}>
-      <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: theme.textMuted, flexShrink: 0 }}>
+      <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12, color: theme.textMuted }}>
         {label}
       </span>
       <span style={{
         fontFamily: "'JetBrains Mono', monospace",
-        fontSize: 10,
+        fontSize: 12,
         color: theme.text,
-        textAlign: 'right' as const,
         wordBreak: 'break-all' as const,
+        minWidth: 0,
       }}>
         {value}
       </span>
@@ -298,7 +299,7 @@ function EoEvent({ event, theme }: {
 
   return (
     <div style={{
-      padding: '5px 0',
+      padding: '6px 0',
       borderBottom: `1px solid ${theme.borderLight}`,
     }}>
       <div
@@ -306,26 +307,26 @@ function EoEvent({ event, theme }: {
         style={{
           display: 'flex',
           alignItems: 'center',
-          gap: 6,
+          gap: 8,
           cursor: 'pointer',
         }}
       >
         <span style={{
           fontFamily: "'JetBrains Mono', monospace",
-          fontSize: 9,
+          fontSize: 11,
           fontWeight: 700,
           color: opColor,
-          width: 26,
+          width: 32,
           flexShrink: 0,
         }}>
           {op}
         </span>
         <span style={{
           fontFamily: "'JetBrains Mono', monospace",
-          fontSize: 9,
+          fontSize: 11,
           color: theme.accent,
           flexShrink: 0,
-          maxWidth: 180,
+          maxWidth: 280,
           overflow: 'hidden',
           textOverflow: 'ellipsis',
           whiteSpace: 'nowrap' as const,
@@ -334,7 +335,7 @@ function EoEvent({ event, theme }: {
         </span>
         <span style={{
           fontFamily: "'JetBrains Mono', monospace",
-          fontSize: 8,
+          fontSize: 10,
           color: theme.textMuted,
           flex: 1,
           overflow: 'hidden',
@@ -343,7 +344,7 @@ function EoEvent({ event, theme }: {
         }}>
           {fieldPairs.map(([k, v], i) => (
             <span key={k}>
-              {i > 0 && <span style={{ color: theme.border, margin: '0 4px' }}>|</span>}
+              {i > 0 && <span style={{ color: theme.border, margin: '0 5px' }}>|</span>}
               <span style={{ color: theme.textMuted }}>{k}:</span>
               <span style={{ color: theme.text }}>{String(typeof v === 'string' ? v : JSON.stringify(v)).slice(0, 40)}</span>
             </span>
@@ -351,7 +352,7 @@ function EoEvent({ event, theme }: {
         </span>
         <span style={{
           fontFamily: "'JetBrains Mono', monospace",
-          fontSize: 8,
+          fontSize: 10,
           color: theme.textMuted,
           flexShrink: 0,
         }}>
@@ -359,7 +360,7 @@ function EoEvent({ event, theme }: {
         </span>
         <span style={{
           fontFamily: "'JetBrains Mono', monospace",
-          fontSize: 8,
+          fontSize: 10,
           color: theme.textMuted,
           flexShrink: 0,
         }}>
@@ -368,30 +369,30 @@ function EoEvent({ event, theme }: {
       </div>
       {expanded && (
         <div style={{
-          marginTop: 4,
-          padding: 8,
+          marginTop: 6,
+          padding: 12,
           background: theme.bgMuted,
           borderRadius: 4,
           border: `1px solid ${theme.border}`,
           fontFamily: "'JetBrains Mono', monospace",
-          fontSize: 9,
+          fontSize: 11,
           overflow: 'auto',
-          maxHeight: 200,
+          maxHeight: 260,
         }}>
-          <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' as const, marginBottom: 6 }}>
+          <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap' as const, marginBottom: 8 }}>
             <span><span style={{ color: theme.textMuted }}>op</span> <span style={{ color: opColor, fontWeight: 600 }}>{op}</span></span>
             <span><span style={{ color: theme.textMuted }}>target</span> <span style={{ color: theme.accent }}>{target}</span></span>
             <span><span style={{ color: theme.textMuted }}>seq</span> <span style={{ color: theme.text }}>{seq}</span></span>
             <span><span style={{ color: theme.textMuted }}>sender</span> <span style={{ color: theme.textMuted }}>{sender}</span></span>
             <span><span style={{ color: theme.textMuted }}>ts</span> <span style={{ color: theme.textMuted }}>{ts}</span></span>
           </div>
-          <div style={{ borderTop: `1px solid ${theme.border}`, paddingTop: 6, marginTop: 2 }}>
-            <div style={{ color: theme.textMuted, fontSize: 8, textTransform: 'uppercase' as const, letterSpacing: '0.5px', marginBottom: 4 }}>
+          <div style={{ borderTop: `1px solid ${theme.border}`, paddingTop: 8, marginTop: 4 }}>
+            <div style={{ color: theme.textMuted, fontSize: 10, textTransform: 'uppercase' as const, letterSpacing: '0.5px', marginBottom: 6 }}>
               Operand
             </div>
             {Object.keys(operand).length > 0 ? (
               Object.entries(operand).map(([k, v]) => (
-                <div key={k} style={{ display: 'flex', gap: 8, padding: '2px 0' }}>
+                <div key={k} style={{ display: 'flex', gap: 10, padding: '3px 0' }}>
                   <span style={{ color: theme.textMuted, flexShrink: 0 }}>{k}</span>
                   <span style={{ color: theme.text, wordBreak: 'break-all' as const }}>
                     {typeof v === 'string' ? v : JSON.stringify(v)}
@@ -403,7 +404,7 @@ function EoEvent({ event, theme }: {
             )}
           </div>
           {c.client_event_id && (
-            <div style={{ borderTop: `1px solid ${theme.border}`, paddingTop: 4, marginTop: 4, color: theme.textMuted, fontSize: 8 }}>
+            <div style={{ borderTop: `1px solid ${theme.border}`, paddingTop: 6, marginTop: 6, color: theme.textMuted, fontSize: 10 }}>
               event_id: {c.client_event_id}
             </div>
           )}
@@ -435,7 +436,7 @@ function TimelineEvent({ event, theme }: {
         }}
       >
         <svg
-          width="8" height="8" viewBox="0 0 10 10" fill="none"
+          width="10" height="10" viewBox="0 0 10 10" fill="none"
           stroke={theme.textMuted} strokeWidth="1.5" strokeLinecap="round"
           style={{ transform: expanded ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform 0.15s', flexShrink: 0 }}
         >
@@ -443,7 +444,7 @@ function TimelineEvent({ event, theme }: {
         </svg>
         <span style={{
           fontFamily: "'JetBrains Mono', monospace",
-          fontSize: 9,
+          fontSize: 11,
           color: theme.accent,
           flexShrink: 0,
         }}>
@@ -451,7 +452,7 @@ function TimelineEvent({ event, theme }: {
         </span>
         <span style={{
           fontFamily: "'JetBrains Mono', monospace",
-          fontSize: 9,
+          fontSize: 11,
           color: theme.textMuted,
           overflow: 'hidden',
           textOverflow: 'ellipsis',
@@ -461,7 +462,7 @@ function TimelineEvent({ event, theme }: {
         </span>
         <span style={{
           fontFamily: "'JetBrains Mono', monospace",
-          fontSize: 8,
+          fontSize: 10,
           color: theme.textMuted,
           marginLeft: 'auto',
           flexShrink: 0,
@@ -471,13 +472,13 @@ function TimelineEvent({ event, theme }: {
       </div>
       {expanded && (
         <pre style={{
-          marginTop: 4,
-          padding: 8,
+          marginTop: 6,
+          padding: 12,
           background: theme.bgMuted,
           borderRadius: 4,
           border: `1px solid ${theme.border}`,
           fontFamily: "'JetBrains Mono', monospace",
-          fontSize: 9,
+          fontSize: 11,
           color: theme.text,
           overflow: 'auto',
           maxHeight: 300,
@@ -512,7 +513,7 @@ function StateEvent({ event, theme }: {
         }}
       >
         <svg
-          width="8" height="8" viewBox="0 0 10 10" fill="none"
+          width="10" height="10" viewBox="0 0 10 10" fill="none"
           stroke={theme.textMuted} strokeWidth="1.5" strokeLinecap="round"
           style={{ transform: expanded ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform 0.15s', flexShrink: 0 }}
         >
@@ -520,7 +521,7 @@ function StateEvent({ event, theme }: {
         </svg>
         <span style={{
           fontFamily: "'JetBrains Mono', monospace",
-          fontSize: 9,
+          fontSize: 11,
           color: theme.purple,
           flexShrink: 0,
         }}>
@@ -529,10 +530,10 @@ function StateEvent({ event, theme }: {
         {event.stateKey && (
           <span style={{
             fontFamily: "'JetBrains Mono', monospace",
-            fontSize: 8,
+            fontSize: 10,
             color: theme.textMuted,
             background: theme.bgMuted,
-            padding: '1px 4px',
+            padding: '2px 6px',
             borderRadius: 2,
           }}>
             {event.stateKey}
@@ -540,7 +541,7 @@ function StateEvent({ event, theme }: {
         )}
         <span style={{
           fontFamily: "'JetBrains Mono', monospace",
-          fontSize: 9,
+          fontSize: 11,
           color: theme.textMuted,
           overflow: 'hidden',
           textOverflow: 'ellipsis',
@@ -552,13 +553,13 @@ function StateEvent({ event, theme }: {
       </div>
       {expanded && (
         <pre style={{
-          marginTop: 4,
-          padding: 8,
+          marginTop: 6,
+          padding: 12,
           background: theme.bgMuted,
           borderRadius: 4,
           border: `1px solid ${theme.border}`,
           fontFamily: "'JetBrains Mono', monospace",
-          fontSize: 9,
+          fontSize: 11,
           color: theme.text,
           overflow: 'auto',
           maxHeight: 300,
@@ -579,11 +580,11 @@ function styles(t: Theme): Record<string, React.CSSProperties> {
       overflowY: 'auto',
       display: 'flex',
       justifyContent: 'center',
-      padding: '8px 16px 40px',
+      padding: '12px 24px 40px',
     },
     inner: {
       width: '100%',
-      maxWidth: 560,
+      maxWidth: 840,
     },
     backBtn: {
       display: 'flex',
@@ -593,22 +594,22 @@ function styles(t: Theme): Record<string, React.CSSProperties> {
       border: 'none',
       cursor: 'pointer',
       fontFamily: "'JetBrains Mono', monospace",
-      fontSize: 11,
+      fontSize: 12,
       color: t.accent,
       padding: '8px 0',
     },
     title: {
       fontFamily: "'Source Serif 4', Georgia, serif",
-      fontSize: 18,
+      fontSize: 22,
       fontWeight: 600,
       color: t.textHeading,
       marginTop: 4,
     },
     subtitle: {
       fontFamily: "'JetBrains Mono', monospace",
-      fontSize: 10,
+      fontSize: 11,
       color: t.textMuted,
-      marginBottom: 12,
+      marginBottom: 16,
     },
     errorBox: {
       padding: '10px 12px',
@@ -621,19 +622,19 @@ function styles(t: Theme): Record<string, React.CSSProperties> {
     },
     filterInput: {
       width: '100%',
-      padding: '6px 10px',
+      padding: '8px 12px',
       background: t.bgMuted,
       border: `1px solid ${t.border}`,
       borderRadius: 4,
       color: t.text,
       fontFamily: "'JetBrains Mono', monospace",
-      fontSize: 10,
+      fontSize: 12,
       outline: 'none',
-      marginBottom: 8,
+      marginBottom: 10,
     },
     emptyNote: {
       fontFamily: "'JetBrains Mono', monospace",
-      fontSize: 10,
+      fontSize: 11,
       color: t.textMuted,
       fontStyle: 'italic',
     },
@@ -641,37 +642,37 @@ function styles(t: Theme): Record<string, React.CSSProperties> {
       display: 'flex',
       justifyContent: 'space-between',
       alignItems: 'center',
-      padding: '4px 0',
+      padding: '6px 0',
       borderBottom: `1px solid ${t.borderLight}`,
     },
     memberId: {
       fontFamily: "'JetBrains Mono', monospace",
-      fontSize: 10,
+      fontSize: 12,
       color: t.text,
     },
     memberMeta: {
       display: 'flex',
       alignItems: 'center',
-      gap: 6,
+      gap: 8,
       fontFamily: "'JetBrains Mono', monospace",
-      fontSize: 9,
+      fontSize: 11,
       color: t.textMuted,
     },
     badge: {
-      padding: '1px 5px',
+      padding: '2px 6px',
       background: t.bgMuted,
       border: `1px solid ${t.border}`,
       borderRadius: 3,
-      fontSize: 8,
+      fontSize: 10,
       fontWeight: 600,
     },
     rawJson: {
-      padding: 10,
+      padding: 12,
       background: t.bgMuted,
       borderRadius: 4,
       border: `1px solid ${t.border}`,
       fontFamily: "'JetBrains Mono', monospace",
-      fontSize: 9,
+      fontSize: 11,
       color: t.text,
       overflow: 'auto',
       maxHeight: 500,

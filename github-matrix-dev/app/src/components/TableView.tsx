@@ -6,6 +6,8 @@ import { type TimeScrubberFilter, applyTimeScrubber } from './time-scrubber-util
 import { useTheme, type Theme } from '../theme';
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 import { TypeSelector, TypeBadge } from './TypeSelector';
+import { RedactedCell, LockIcon, LockedCell } from './RedactedCell';
+import type { ResolvedPermissions } from '../permissions/types';
 
 interface TableViewProps {
   scope: string;
@@ -14,6 +16,7 @@ interface TableViewProps {
   activeRecord?: string | null;
   session: { userId: string };
   timeScrubberFilter?: TimeScrubberFilter;
+  permissions?: ResolvedPermissions | null;
 }
 
 function formatRelativeTime(ts: string): string {
@@ -102,7 +105,7 @@ function renderCell(value: any, key: string, onNavigate: (t: string) => void, t:
   return <span>{String(value)}</span>;
 }
 
-export function TableView({ scope, onSelectRecord, onViewHistory, activeRecord, session, timeScrubberFilter }: TableViewProps) {
+export function TableView({ scope, onSelectRecord, onViewHistory, activeRecord, session, timeScrubberFilter, permissions }: TableViewProps) {
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
   const getState = useEoStore((s) => s.getState);
   const dispatch = useEoStore((s) => s.dispatch);
@@ -326,8 +329,11 @@ export function TableView({ scope, onSelectRecord, onViewHistory, activeRecord, 
 
   function getContextMenuItems(target: string): ContextMenuItem[] {
     const rec = records.find((r) => r.target === target);
-    return [
-      {
+    const canEdit = permissions ? permissions.can_edit_any_record || permissions.can_edit_own_records : true;
+    const items: ContextMenuItem[] = [];
+
+    if (canEdit) {
+      items.push({
         label: rec?.value?._type ? `Change type (${rec.value._type})` : 'Set page type...',
         onClick: () => {
           setTypeSelector({
@@ -338,20 +344,23 @@ export function TableView({ scope, onSelectRecord, onViewHistory, activeRecord, 
           });
           setContextMenu(null);
         },
+      });
+    }
+
+    items.push({
+      label: 'View history',
+      onClick: () => {
+        onViewHistory?.(target);
+        onSelectRecord(target);
       },
-      {
-        label: 'View history',
-        onClick: () => {
-          onViewHistory?.(target);
-          onSelectRecord(target);
-        },
-      },
-      { label: '', onClick: () => {}, separator: true },
-      {
-        label: 'Copy target path',
-        onClick: () => navigator.clipboard.writeText(target),
-      },
-    ];
+    });
+    items.push({ label: '', onClick: () => {}, separator: true });
+    items.push({
+      label: 'Copy target path',
+      onClick: () => navigator.clipboard.writeText(target),
+    });
+
+    return items;
   }
 
   async function handleTypeChange(target: string, type: string) {
@@ -403,40 +412,45 @@ export function TableView({ scope, onSelectRecord, onViewHistory, activeRecord, 
         <table style={s.table}>
           <thead>
             <tr>
-              {columns.map((col) => (
-                <th
-                  key={col.key}
-                  style={{ ...s.th, cursor: 'context-menu', userSelect: 'none' }}
-                  onContextMenu={(e) => handleColumnContextMenu(e, col)}
-                >
-                  {renameCol?.key === col.key ? (
-                    <input
-                      autoFocus
-                      defaultValue={renameCol.value}
-                      style={{
-                        fontSize: 11, fontWeight: 400, border: `1px solid ${theme.accent}`,
-                        borderRadius: 3, padding: '2px 4px', background: theme.bgCard,
-                        color: theme.text, outline: 'none', width: '100%',
-                        textTransform: 'none' as const,
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') handleColumnRename(col.key, (e.target as HTMLInputElement).value);
-                        if (e.key === 'Escape') setRenameCol(null);
-                      }}
-                      onBlur={(e) => handleColumnRename(col.key, e.target.value)}
-                    />
-                  ) : (
-                    <span>
-                      {col.label}
-                      {sortConfig?.key === col.key && (
-                        <span style={{ marginLeft: 4, fontSize: 10 }}>
-                          {sortConfig.direction === 'asc' ? '\u25B4' : '\u25BE'}
-                        </span>
-                      )}
-                    </span>
-                  )}
-                </th>
-              ))}
+              {columns.map((col) => {
+                const isLocked = permissions?.locked_fields?.includes(col.key);
+                const isRedacted = permissions?.redacted_fields?.includes(col.key);
+                return (
+                  <th
+                    key={col.key}
+                    style={{ ...s.th, cursor: 'context-menu', userSelect: 'none' }}
+                    onContextMenu={(e) => handleColumnContextMenu(e, col)}
+                  >
+                    {renameCol?.key === col.key ? (
+                      <input
+                        autoFocus
+                        defaultValue={renameCol.value}
+                        style={{
+                          fontSize: 11, fontWeight: 400, border: `1px solid ${theme.accent}`,
+                          borderRadius: 3, padding: '2px 4px', background: theme.bgCard,
+                          color: theme.text, outline: 'none', width: '100%',
+                          textTransform: 'none' as const,
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') handleColumnRename(col.key, (e.target as HTMLInputElement).value);
+                          if (e.key === 'Escape') setRenameCol(null);
+                        }}
+                        onBlur={(e) => handleColumnRename(col.key, e.target.value)}
+                      />
+                    ) : (
+                      <span>
+                        {isLocked && <LockIcon />}
+                        {col.label}
+                        {sortConfig?.key === col.key && (
+                          <span style={{ marginLeft: 4, fontSize: 10 }}>
+                            {sortConfig.direction === 'asc' ? '\u25B4' : '\u25BE'}
+                          </span>
+                        )}
+                      </span>
+                    )}
+                  </th>
+                );
+              })}
             </tr>
           </thead>
           <tbody>
@@ -462,25 +476,33 @@ export function TableView({ scope, onSelectRecord, onViewHistory, activeRecord, 
                     if (!isActive) (e.currentTarget as HTMLElement).style.background = '';
                   }}
                 >
-                  {columns.map((col) => (
-                    <td key={col.key} style={s.td}>
-                      {col.key === '_record'
-                        ? <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                            <span style={{
+                  {columns.map((col) => {
+                    const isRedacted = permissions?.redacted_fields?.includes(col.key);
+                    const isLocked = permissions?.locked_fields?.includes(col.key);
+                    return (
+                      <td key={col.key} style={s.td}>
+                        {isRedacted
+                          ? <RedactedCell />
+                          : col.key === '_record'
+                          ? <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                              <span style={{
+                                fontFamily: "'JetBrains Mono', monospace", fontSize: 11,
+                                color: theme.accent, cursor: 'pointer',
+                              }}>{rec.value?.name || rec.target.split('.').pop()}</span>
+                              {rec.value?._type && <TypeBadge type={rec.value._type} />}
+                            </span>
+                          : col.key === '_last_updated'
+                          ? <span style={{
                               fontFamily: "'JetBrains Mono', monospace", fontSize: 11,
-                              color: theme.accent, cursor: 'pointer',
-                            }}>{rec.value?.name || rec.target.split('.').pop()}</span>
-                            {rec.value?._type && <TypeBadge type={rec.value._type} />}
-                          </span>
-                        : col.key === '_last_updated'
-                        ? <span style={{
-                            fontFamily: "'JetBrains Mono', monospace", fontSize: 11,
-                            color: theme.textSecondary,
-                          }}>{rec.last_ts ? formatRelativeTime(rec.last_ts) : '\u2014'}</span>
-                        : renderCell(getFieldValue(rec, col.key, useFieldsSub), col.key, onSelectRecord, theme)
-                      }
-                    </td>
-                  ))}
+                              color: theme.textSecondary,
+                            }}>{rec.last_ts ? formatRelativeTime(rec.last_ts) : '\u2014'}</span>
+                          : isLocked
+                          ? <LockedCell>{renderCell(getFieldValue(rec, col.key, useFieldsSub), col.key, onSelectRecord, theme)}</LockedCell>
+                          : renderCell(getFieldValue(rec, col.key, useFieldsSub), col.key, onSelectRecord, theme)
+                        }
+                      </td>
+                    );
+                  })}
                 </tr>
               );
             })}
