@@ -2,6 +2,9 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import type { ColumnDef, FilterRule, FilterOperator } from './filter-types';
 import { operatorsForType, OPERATOR_LABELS } from './filter-types';
 import { useTheme, type Theme } from '../theme';
+import { QueryFilterInput } from './QueryFilterInput';
+
+type FilterMode = 'visual' | 'query';
 
 interface FilterBarProps {
   columns: ColumnDef[];
@@ -10,15 +13,19 @@ interface FilterBarProps {
   conjunction: 'AND' | 'OR';
   onConjunctionChange: (c: 'AND' | 'OR') => void;
   onSaveSegment: (name: string) => void;
+  /** Current scope (e.g. "app.tblClients") for EO/SQL query generation */
+  scope?: string;
 }
 
 export function FilterBar({
   columns, filters, onFiltersChange,
   conjunction, onConjunctionChange, onSaveSegment,
+  scope = '',
 }: FilterBarProps) {
   const [open, setOpen] = useState(false);
   const [saveName, setSaveName] = useState('');
   const [showSave, setShowSave] = useState(false);
+  const [mode, setMode] = useState<FilterMode>('visual');
   const { theme } = useTheme();
   const s = makeStyles(theme);
   const btnRef = useRef<HTMLButtonElement>(null);
@@ -105,14 +112,41 @@ export function FilterBar({
           <div style={{ ...s.panel, top: panelPos.top, right: panelPos.right }}>
             <div style={s.panelHeader}>
               <span style={s.panelTitle}>Filters</span>
-              <button style={s.closeBtn} onClick={() => setOpen(false)}>&times;</button>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <button
+                  style={{ ...s.modeBtn, ...(mode === 'visual' ? s.modeBtnActive : {}) }}
+                  onClick={() => setMode('visual')}
+                >
+                  Visual
+                </button>
+                <button
+                  style={{ ...s.modeBtn, ...(mode === 'query' ? s.modeBtnActive : {}) }}
+                  onClick={() => setMode('query')}
+                >
+                  EO / SQL
+                </button>
+                <button style={s.closeBtn} onClick={() => setOpen(false)}>&times;</button>
+              </div>
             </div>
 
-            {filters.length === 0 && (
+            {mode === 'query' && (
+              <QueryFilterInput
+                columns={columns}
+                scope={scope}
+                currentFilters={filters}
+                currentConjunction={conjunction}
+                onApply={(rules, conj) => {
+                  onFiltersChange(rules);
+                  onConjunctionChange(conj);
+                }}
+              />
+            )}
+
+            {mode === 'visual' && filters.length === 0 && (
               <div style={s.emptyMsg}>No active filters. Add one to narrow your view.</div>
             )}
 
-            {filters.map((filter, idx) => {
+            {mode === 'visual' && filters.map((filter, idx) => {
               const col = columns.find(c => c.key === filter.field);
               const ops = col ? operatorsForType(col.type) : operatorsForType('text');
               const needsValue = !['is_empty', 'is_not_empty'].includes(filter.operator);
@@ -189,7 +223,7 @@ export function FilterBar({
               );
             })}
 
-            <div style={s.panelFooter}>
+            {mode === 'visual' && <div style={s.panelFooter}>
               <button style={s.addBtn} onClick={addFilter}>
                 + Add filter
               </button>
@@ -228,7 +262,7 @@ export function FilterBar({
                   )}
                 </>
               )}
-            </div>
+            </div>}
           </div>
         </>
       )}
@@ -299,6 +333,23 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       cursor: 'pointer',
       padding: 0,
       lineHeight: 1,
+      marginLeft: 6,
+    },
+    modeBtn: {
+      padding: '3px 8px',
+      fontSize: 10,
+      fontWeight: 600,
+      fontFamily: "'JetBrains Mono', monospace",
+      border: `1px solid ${t.border}`,
+      borderRadius: 4,
+      background: 'transparent',
+      color: t.textMuted,
+      cursor: 'pointer',
+    },
+    modeBtnActive: {
+      background: t.accent,
+      color: '#fff',
+      borderColor: t.accent,
     },
     emptyMsg: {
       padding: '16px',
