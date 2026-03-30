@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Login } from './components/Login';
 import { Layout } from './components/Layout';
 import { ErrorBoundary } from './components/ErrorBoundary';
@@ -12,6 +12,9 @@ function AppInner() {
   const teardown = useEoStore((s) => s.teardown);
   const { theme } = useTheme();
 
+  // Capture deep-link hash before login so we can restore it after auth
+  const pendingRedirect = useRef(window.location.hash || '');
+
   useEffect(() => {
     const saved = restoreSession();
     if (saved) {
@@ -19,6 +22,14 @@ function AppInner() {
     }
     setLoading(false);
   }, []);
+
+  function handleLogin(s: MatrixSession) {
+    setSession(s);
+    // Restore the deep-link the user originally landed on
+    if (pendingRedirect.current && pendingRedirect.current !== '#/') {
+      window.location.hash = pendingRedirect.current;
+    }
+  }
 
   function handleLogout() {
     teardown();
@@ -30,7 +41,7 @@ function AppInner() {
   }
 
   if (!session) {
-    return <Login onLogin={setSession} />;
+    return <Login onLogin={handleLogin} />;
   }
 
   return (

@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type { BlockNode, BlockId, BlockType, ViewDefinition, PageType, RecordSource } from '../blocks/types';
 import { createBlock } from '../blocks/registry';
+import { slugify } from '../lib/router';
 
 // ---------------------------------------------------------------------------
 // Tree helpers — immutable operations on the block tree
@@ -144,6 +145,7 @@ export type BuilderMode = 'build' | 'live';
 interface BuilderState {
   viewId: string | null;
   viewName: string;
+  viewSlug: string;
   blocks: BlockNode[];
   selectedBlockId: BlockId | null;
   mode: BuilderMode;
@@ -178,6 +180,7 @@ interface BuilderState {
 export const useBuilderStore = create<BuilderState>((set, get) => ({
   viewId: null,
   viewName: 'Untitled View',
+  viewSlug: '',
   blocks: [],
   selectedBlockId: null,
   mode: 'build',
@@ -191,6 +194,7 @@ export const useBuilderStore = create<BuilderState>((set, get) => ({
     set({
       viewId,
       viewName: name,
+      viewSlug: slugify(name),
       blocks: [],
       selectedBlockId: null,
       mode: 'build',
@@ -206,6 +210,7 @@ export const useBuilderStore = create<BuilderState>((set, get) => ({
     set({
       viewId,
       viewName: definition.name,
+      viewSlug: definition.slug || slugify(definition.name),
       blocks: deepCloneTree(definition.blocks),
       selectedBlockId: null,
       mode: 'build',
@@ -272,9 +277,10 @@ export const useBuilderStore = create<BuilderState>((set, get) => ({
   },
 
   getViewDefinition(): ViewDefinition {
-    const { viewName, blocks, pageType, recordSource } = get();
+    const { viewName, viewSlug, blocks, pageType, recordSource } = get();
     return {
       name: viewName,
+      slug: viewSlug || slugify(viewName),
       blocks,
       pageType,
       recordSource,
@@ -291,6 +297,7 @@ export const useBuilderStore = create<BuilderState>((set, get) => ({
     set({
       viewId: null,
       viewName: 'Untitled View',
+      viewSlug: '',
       blocks: [],
       selectedBlockId: null,
       mode: 'build',

@@ -109,6 +109,7 @@ export interface RecordSource {
 
 export interface ViewDefinition {
   name: string;
+  slug?: string;
   icon?: string;
   blocks: BlockNode[];
 
