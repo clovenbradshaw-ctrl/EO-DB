@@ -59,7 +59,7 @@ export async function encryptOperand(
   const ciphertextBuf = await crypto.subtle.encrypt(
     { name: 'AES-GCM', iv },
     key,
-    plainBytes,
+    plainBytes as unknown as ArrayBuffer,
   );
 
   // Combine IV + ciphertext into one buffer, then base64-encode
@@ -167,7 +167,7 @@ export async function exportKey(key: CryptoKey): Promise<Uint8Array> {
 export async function importKey(rawBytes: Uint8Array): Promise<CryptoKey> {
   return crypto.subtle.importKey(
     'raw',
-    rawBytes,
+    rawBytes as unknown as ArrayBuffer,
     { name: 'AES-GCM', length: AES_KEY_LENGTH },
     true,
     ['encrypt', 'decrypt'],

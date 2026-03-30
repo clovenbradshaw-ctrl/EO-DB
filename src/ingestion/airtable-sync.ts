@@ -258,7 +258,7 @@ export async function recoverInterruptedJobs(db: EoDb): Promise<HydrationJob[]> 
     lte: `${JOB_PREFIX}\xff`,
   })) {
     // Skip 'latest:' pointers
-    const keyStr = typeof key === 'string' ? key : key.toString();
+    const keyStr = String(key);
     if (keyStr.startsWith(JOB_LATEST_PREFIX)) continue;
     const job = decode(value) as HydrationJob;
     if (job.status === 'running') {
@@ -930,4 +930,3 @@ export {
   buildFieldMetaMap,
 };
 
-export type { SyncCustomization };
