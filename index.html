@@ -3079,12 +3079,12 @@ body {
 
         <!-- File Upload -->
         <div class="import-section">
-          <div class="import-section-title">Import Events — JSON or CSV</div>
+          <div class="import-section-title">Import Data — JSON, CSV, or TSV</div>
           <div class="import-drop-zone" id="importDropZone" onclick="document.getElementById('importFileInput').click()">
-            <div class="import-drop-label">Drop a .json or .csv file here, or click to browse</div>
-            <div class="import-drop-hint">JSON: array of event objects &nbsp;|&nbsp; CSV: header row + data rows</div>
+            <div class="import-drop-label">Drop a .json, .csv, or .tsv file here, or click to browse</div>
+            <div class="import-drop-hint">JSON: array or object &nbsp;|&nbsp; CSV/TSV: header row + data rows</div>
           </div>
-          <input type="file" id="importFileInput" accept=".json,.csv" style="display:none" onchange="handleImportFile(this.files[0])">
+          <input type="file" id="importFileInput" accept=".json,.csv,.tsv" style="display:none" onchange="handleImportFile(this.files[0])">
 
           <div class="import-file-info" id="importFileInfo">
             <div class="import-file-name" id="importFileName"></div>
@@ -3094,6 +3094,15 @@ body {
           <div class="import-preview" id="importPreview">
             <pre id="importPreviewContent"></pre>
           </div>
+        </div>
+
+        <!-- Target Prefix (for generic imports) -->
+        <div class="import-section" id="importTargetPrefixSection" style="display:none;">
+          <div class="import-section-title">Target Path Prefix</div>
+          <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-dim);margin-bottom:6px;">
+            Each row will be imported as an INS event. Specify the target prefix (e.g. <code>myspace.mytable</code>).
+          </div>
+          <input type="text" id="importTargetPrefix" placeholder="space.table" style="width:100%;padding:6px 10px;font-family:'JetBrains Mono',monospace;font-size:12px;background:var(--bg-input,#1a1a1a);color:var(--text,#ccc);border:1px solid var(--border,#333);border-radius:4px;">
         </div>
 
         <!-- Options -->
@@ -3125,14 +3134,18 @@ body {
         <div class="import-section" style="opacity:0.7;">
           <div class="import-section-title">Format Reference</div>
           <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-dim);line-height:1.7;">
-            <b>Valid operators:</b> INS, DEF, CON, SEG, SYN, EVA<br>
-            <b>Required fields:</b> op, target<br>
-            <b>Optional fields:</b> operand, ts, client_event_id, meta<br><br>
-            <b>JSON example:</b><br>
-            <pre style="margin:4px 0 8px;color:var(--text-faint);font-size:10px;">[{"op":"INS","target":"app.tbl.rec1","operand":{"name":"Alice"}}]</pre>
-            <b>CSV example:</b><br>
-            <pre style="margin:4px 0;color:var(--text-faint);font-size:10px;">op,target,operand
+            <b>Supported formats:</b> JSON, CSV, TSV<br><br>
+            <b>Generic data</b> (any columns) — each row becomes an INS event:<br>
+            <pre style="margin:4px 0 8px;color:var(--text-faint);font-size:10px;">name,email,status
+Alice,alice@example.com,active
+Bob,bob@example.com,pending</pre>
+            <b>Event format</b> (with op + target columns) — imported as-is:<br>
+            <pre style="margin:4px 0 8px;color:var(--text-faint);font-size:10px;">op,target,operand
 INS,app.tbl.rec1,"{""name"":""Alice""}"</pre>
+            <b>JSON examples:</b><br>
+            <pre style="margin:4px 0 8px;color:var(--text-faint);font-size:10px;">[{"name":"Alice","email":"alice@example.com"}]
+[{"op":"INS","target":"app.tbl.rec1","operand":{"name":"Alice"}}]</pre>
+            <b>Valid operators:</b> INS, DEF, CON, SEG, SYN, EVA<br>
           </div>
         </div>
 
@@ -7875,6 +7888,7 @@ function switchTab(tab) {
 const IMPORT_VALID_OPS = new Set(['INS', 'DEF', 'CON', 'SEG', 'SYN', 'EVA']);
 let importParsedRows = null;
 let importFileType = null;
+let importIsGeneric = false; // true when file lacks op/target columns
 
 // Drag and drop
 (function initImportDrop() {
@@ -7897,11 +7911,12 @@ let importFileType = null;
 function handleImportFile(file) {
   if (!file) return;
   const ext = file.name.split('.').pop().toLowerCase();
-  if (ext !== 'json' && ext !== 'csv') {
-    showImportResult('error', 'Unsupported file type. Please use .json or .csv');
+  if (ext !== 'json' && ext !== 'csv' && ext !== 'tsv') {
+    showImportResult('error', 'Unsupported file type. Please use .json, .csv, or .tsv');
     return;
   }
   importFileType = ext;
+  importIsGeneric = false;
   const reader = new FileReader();
   reader.onload = () => {
     try {
@@ -7909,12 +7924,24 @@ function handleImportFile(file) {
       if (ext === 'json') {
         importParsedRows = parseImportJson(text);
       } else {
-        importParsedRows = parseImportCsv(text);
+        importParsedRows = parseImportCsv(text, ext === 'tsv' ? '\t' : null);
       }
+
+      // Show/hide target prefix section for generic imports
+      const prefixSection = document.getElementById('importTargetPrefixSection');
+      prefixSection.style.display = importIsGeneric ? 'block' : 'none';
+      if (importIsGeneric) {
+        // Suggest prefix from filename
+        const baseName = file.name.replace(/\.[^.]+$/, '').replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase();
+        const prefixInput = document.getElementById('importTargetPrefix');
+        if (!prefixInput.value) prefixInput.value = 'import.' + baseName;
+      }
+
       // Show file info
       const infoEl = document.getElementById('importFileInfo');
       document.getElementById('importFileName').textContent = file.name;
-      document.getElementById('importFileStats').textContent = `${importParsedRows.length} event${importParsedRows.length !== 1 ? 's' : ''} · ${(file.size / 1024).toFixed(1)} KB · ${ext.toUpperCase()}`;
+      const label = importIsGeneric ? 'row' : 'event';
+      document.getElementById('importFileStats').textContent = `${importParsedRows.length} ${label}${importParsedRows.length !== 1 ? 's' : ''} · ${(file.size / 1024).toFixed(1)} KB · ${ext.toUpperCase()}${importIsGeneric ? ' (generic → INS)' : ''}`;
       infoEl.style.display = 'block';
 
       // Show preview (first 5 rows)
@@ -7926,9 +7953,11 @@ function handleImportFile(file) {
 
       document.getElementById('importRunBtn').disabled = false;
       document.getElementById('importClearBtn').style.display = 'inline-block';
-      showImportResult('info', `Parsed ${importParsedRows.length} events from ${file.name}. Review and click "Import Events" to proceed.`);
+      const modeNote = importIsGeneric ? ' Each row will be imported as an INS event.' : '';
+      showImportResult('info', `Parsed ${importParsedRows.length} ${label}s from ${file.name}.${modeNote} Review and click "Import Events" to proceed.`);
     } catch (e) {
       importParsedRows = null;
+      importIsGeneric = false;
       showImportResult('error', e.message);
     }
   };
@@ -7941,69 +7970,147 @@ function parseImportJson(text) {
     data = JSON.parse(text);
   } catch { throw new Error('Invalid JSON — could not parse file'); }
 
-  // Support bare array, { events: [...] }, or { _flat_events_for_import: [...] }
-  const arr = Array.isArray(data) ? data
+  // Support bare array, { events: [...] }, { _flat_events_for_import: [...] }, or single object
+  let arr = Array.isArray(data) ? data
     : Array.isArray(data?.events) ? data.events
     : Array.isArray(data?._flat_events_for_import) ? data._flat_events_for_import
     : null;
-  if (!arr) throw new Error('JSON must be an array of events, or an object with an "events" or "_flat_events_for_import" key');
-  if (arr.length === 0) throw new Error('JSON array is empty — nothing to import');
 
-  for (let i = 0; i < arr.length; i++) {
-    const row = arr[i];
-    if (typeof row !== 'object' || row === null) throw new Error(`Item ${i}: not an object`);
-    if (!row.op) throw new Error(`Item ${i}: missing "op"`);
-    if (!IMPORT_VALID_OPS.has(row.op.toUpperCase())) throw new Error(`Item ${i}: invalid op "${row.op}" — must be one of: ${[...IMPORT_VALID_OPS].join(', ')}`);
-    if (!row.target) throw new Error(`Item ${i}: missing "target"`);
-    row.op = row.op.toUpperCase();
+  // If it's a single object (not array, not wrapper), wrap it
+  if (!arr && typeof data === 'object' && data !== null && !Array.isArray(data)) {
+    // Check if it looks like a single record (not a wrapper with array values)
+    const hasArrayProp = Object.values(data).some(v => Array.isArray(v));
+    if (hasArrayProp && !data.op) {
+      // Might be a keyed collection like { "users": [...], "orders": [...] }
+      // Flatten all array values into a single array
+      const flattened = [];
+      for (const [key, val] of Object.entries(data)) {
+        if (Array.isArray(val)) {
+          val.forEach(item => {
+            if (typeof item === 'object' && item !== null) {
+              flattened.push({ _source_key: key, ...item });
+            }
+          });
+        }
+      }
+      if (flattened.length > 0) arr = flattened;
+    }
+    if (!arr) arr = [data]; // single object → array of one
+  }
+
+  if (!arr) throw new Error('JSON must be an array, an object, or contain an "events" key');
+  if (arr.length === 0) throw new Error('JSON is empty — nothing to import');
+
+  // Check if this looks like event-format data (has op + target on first item)
+  const looksLikeEvents = arr.length > 0 && arr[0].op && arr[0].target;
+
+  if (looksLikeEvents) {
+    // Event-format: validate op + target
+    for (let i = 0; i < arr.length; i++) {
+      const row = arr[i];
+      if (typeof row !== 'object' || row === null) throw new Error(`Item ${i}: not an object`);
+      if (!row.op) throw new Error(`Item ${i}: missing "op"`);
+      if (!IMPORT_VALID_OPS.has(row.op.toUpperCase())) throw new Error(`Item ${i}: invalid op "${row.op}" — must be one of: ${[...IMPORT_VALID_OPS].join(', ')}`);
+      if (!row.target) throw new Error(`Item ${i}: missing "target"`);
+      row.op = row.op.toUpperCase();
+    }
+    importIsGeneric = false;
+  } else {
+    // Generic JSON: each object becomes an INS event with the object as operand
+    importIsGeneric = true;
+    const rows = [];
+    for (let i = 0; i < arr.length; i++) {
+      const item = arr[i];
+      if (typeof item !== 'object' || item === null) throw new Error(`Item ${i}: not an object`);
+      rows.push({ op: 'INS', target: null, operand: item, _generic: true });
+    }
+    return rows;
   }
   return arr;
 }
 
-function parseImportCsv(text) {
-  const lines = parseCsvLines(text);
-  if (lines.length < 2) throw new Error('CSV must have a header row and at least one data row');
-
-  const headers = lines[0].map(h => h.trim().toLowerCase());
-  const opIdx = headers.indexOf('op');
-  const targetIdx = headers.indexOf('target');
-  if (opIdx === -1) throw new Error('CSV missing required column "op"');
-  if (targetIdx === -1) throw new Error('CSV missing required column "target"');
-
-  const operandIdx = headers.indexOf('operand');
-  const tsIdx = headers.indexOf('ts');
-  const cidIdx = headers.indexOf('client_event_id');
-  const metaIdx = headers.indexOf('meta');
-
-  const rows = [];
-  for (let i = 1; i < lines.length; i++) {
-    const cols = lines[i];
-    if (cols.length === 1 && cols[0].trim() === '') continue;
-    const op = (cols[opIdx] || '').trim().toUpperCase();
-    const target = (cols[targetIdx] || '').trim();
-    if (!op && !target) continue; // skip blank rows
-    if (!op) throw new Error(`CSV row ${i + 1}: missing "op"`);
-    if (!IMPORT_VALID_OPS.has(op)) throw new Error(`CSV row ${i + 1}: invalid op "${op}"`);
-    if (!target) throw new Error(`CSV row ${i + 1}: missing "target"`);
-
-    const row = { op, target };
-    if (operandIdx !== -1 && cols[operandIdx]?.trim()) {
-      try { row.operand = JSON.parse(cols[operandIdx].trim()); }
-      catch { throw new Error(`CSV row ${i + 1}: invalid JSON in "operand" column`); }
-    }
-    if (tsIdx !== -1 && cols[tsIdx]?.trim()) row.ts = cols[tsIdx].trim();
-    if (cidIdx !== -1 && cols[cidIdx]?.trim()) row.client_event_id = cols[cidIdx].trim();
-    if (metaIdx !== -1 && cols[metaIdx]?.trim()) {
-      try { row.meta = JSON.parse(cols[metaIdx].trim()); }
-      catch { throw new Error(`CSV row ${i + 1}: invalid JSON in "meta" column`); }
-    }
-    rows.push(row);
+function parseImportCsv(text, delimiter) {
+  // Auto-detect delimiter if not specified
+  if (!delimiter) {
+    const firstLine = text.split(/\r?\n/)[0];
+    const tabCount = (firstLine.match(/\t/g) || []).length;
+    const commaCount = (firstLine.match(/,/g) || []).length;
+    delimiter = tabCount > commaCount ? '\t' : ',';
   }
-  if (rows.length === 0) throw new Error('CSV has no data rows');
-  return rows;
+
+  const lines = parseCsvLines(text, delimiter);
+  if (lines.length < 2) throw new Error('File must have a header row and at least one data row');
+
+  const headers = lines[0].map(h => h.trim());
+  const headersLower = headers.map(h => h.toLowerCase());
+  const opIdx = headersLower.indexOf('op');
+  const targetIdx = headersLower.indexOf('target');
+  const hasEventFormat = opIdx !== -1 && targetIdx !== -1;
+
+  if (hasEventFormat) {
+    // Event-format CSV: require op + target, validate ops
+    importIsGeneric = false;
+    const operandIdx = headersLower.indexOf('operand');
+    const tsIdx = headersLower.indexOf('ts');
+    const cidIdx = headersLower.indexOf('client_event_id');
+    const metaIdx = headersLower.indexOf('meta');
+
+    const rows = [];
+    for (let i = 1; i < lines.length; i++) {
+      const cols = lines[i];
+      if (cols.length === 1 && cols[0].trim() === '') continue;
+      const op = (cols[opIdx] || '').trim().toUpperCase();
+      const target = (cols[targetIdx] || '').trim();
+      if (!op && !target) continue;
+      if (!op) throw new Error(`Row ${i + 1}: missing "op"`);
+      if (!IMPORT_VALID_OPS.has(op)) throw new Error(`Row ${i + 1}: invalid op "${op}"`);
+      if (!target) throw new Error(`Row ${i + 1}: missing "target"`);
+
+      const row = { op, target };
+      if (operandIdx !== -1 && cols[operandIdx]?.trim()) {
+        try { row.operand = JSON.parse(cols[operandIdx].trim()); }
+        catch { throw new Error(`Row ${i + 1}: invalid JSON in "operand" column`); }
+      }
+      if (tsIdx !== -1 && cols[tsIdx]?.trim()) row.ts = cols[tsIdx].trim();
+      if (cidIdx !== -1 && cols[cidIdx]?.trim()) row.client_event_id = cols[cidIdx].trim();
+      if (metaIdx !== -1 && cols[metaIdx]?.trim()) {
+        try { row.meta = JSON.parse(cols[metaIdx].trim()); }
+        catch { throw new Error(`Row ${i + 1}: invalid JSON in "meta" column`); }
+      }
+      rows.push(row);
+    }
+    if (rows.length === 0) throw new Error('File has no data rows');
+    return rows;
+  } else {
+    // Generic CSV/TSV: each row becomes an INS event with columns as operand fields
+    importIsGeneric = true;
+    const rows = [];
+    for (let i = 1; i < lines.length; i++) {
+      const cols = lines[i];
+      // Skip blank rows
+      if (cols.length === 1 && cols[0].trim() === '') continue;
+      if (cols.every(c => c.trim() === '')) continue;
+
+      const operand = {};
+      for (let j = 0; j < headers.length; j++) {
+        const val = (cols[j] || '').trim();
+        if (val === '') continue;
+        // Try to parse as number or boolean for cleaner data
+        if (val === 'true') operand[headers[j]] = true;
+        else if (val === 'false') operand[headers[j]] = false;
+        else if (val === 'null') operand[headers[j]] = null;
+        else if (val !== '' && !isNaN(val) && val !== '') operand[headers[j]] = Number(val);
+        else operand[headers[j]] = val;
+      }
+      rows.push({ op: 'INS', target: null, operand, _generic: true });
+    }
+    if (rows.length === 0) throw new Error('File has no data rows');
+    return rows;
+  }
 }
 
-function parseCsvLines(text) {
+function parseCsvLines(text, delimiter) {
+  delimiter = delimiter || ',';
   const results = [];
   let current = [];
   let field = '';
@@ -8018,7 +8125,7 @@ function parseCsvLines(text) {
       } else { field += ch; i++; }
     } else {
       if (ch === '"') { inQuotes = true; i++; }
-      else if (ch === ',') { current.push(field); field = ''; i++; }
+      else if (ch === delimiter) { current.push(field); field = ''; i++; }
       else if (ch === '\n' || (ch === '\r' && i + 1 < text.length && text[i + 1] === '\n')) {
         current.push(field); field = ''; results.push(current); current = [];
         i += ch === '\r' ? 2 : 1;
@@ -8054,6 +8161,19 @@ async function runImport() {
     return;
   }
 
+  // For generic imports, validate and resolve the target prefix
+  let targetPrefix = '';
+  if (importIsGeneric) {
+    targetPrefix = (document.getElementById('importTargetPrefix').value || '').trim();
+    if (!targetPrefix) {
+      showImportResult('error', 'Please enter a target path prefix (e.g. myspace.mytable)');
+      btn.disabled = false;
+      btn.textContent = 'Import Events';
+      progressEl.style.display = 'none';
+      return;
+    }
+  }
+
   const agent = matrixUserId || '@local:device';
   const total = importParsedRows.length;
   let processed = 0, skipped = 0;
@@ -8063,9 +8183,14 @@ async function runImport() {
     const row = importParsedRows[i];
 
     try {
+      // For generic rows, generate a target path
+      let target = row.target;
+      if (row._generic) {
+        target = `${targetPrefix}.rec${String(i + 1).padStart(String(total).length, '0')}`;
+      }
       const event = {
         op: row.op,
-        target: row.target,
+        target,
         operand: row.operand || {},
         agent,
         ts: row.ts,
@@ -8116,6 +8241,7 @@ function showImportResult(type, msg) {
 function clearImport() {
   importParsedRows = null;
   importFileType = null;
+  importIsGeneric = false;
   document.getElementById('importFileInput').value = '';
   document.getElementById('importFileInfo').style.display = 'none';
   document.getElementById('importPreview').style.display = 'none';
@@ -8123,6 +8249,7 @@ function clearImport() {
   document.getElementById('importResult').className = 'import-result';
   document.getElementById('importRunBtn').disabled = true;
   document.getElementById('importClearBtn').style.display = 'none';
+  document.getElementById('importTargetPrefixSection').style.display = 'none';
 }
 
 function formatTarget(target) {

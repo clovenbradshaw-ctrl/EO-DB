@@ -80,8 +80,11 @@ describe('parseJsonImport', () => {
     expect(rows[1].op).toBe('DEF');
   });
 
-  it('rejects non-array', () => {
-    expect(() => parseJsonImport({ op: 'INS' })).toThrow('must be an array');
+  it('handles single object as generic import', () => {
+    const rows = parseJsonImport({ name: 'Alice', age: 30 });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].op).toBe('INS');
+    expect(rows[0].operand).toEqual({ name: 'Alice', age: 30 });
   });
 
   it('rejects non-object items', () => {
@@ -110,8 +113,11 @@ describe('parseCsvImport', () => {
     expect(rows[0].client_event_id).toBe('evt-001');
   });
 
-  it('rejects missing header', () => {
-    expect(() => parseCsvImport('target\napp.a')).toThrow('missing required column "op"');
+  it('handles CSV without op/target as generic import', () => {
+    const rows = parseCsvImport('target\napp.a');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].op).toBe('INS');
+    expect(rows[0].operand).toEqual({ target: 'app.a' });
   });
 
   it('rejects too-short CSV', () => {
@@ -310,14 +316,16 @@ describe('POST /import/csv', () => {
     expect(res.statusCode).toBe(400);
   });
 
-  it('returns error details for invalid CSV', async () => {
+  it('accepts generic CSV without op/target columns', async () => {
     const res = await app.inject({
       method: 'POST',
       url: '/import/csv',
       headers: authHeaders(),
-      payload: { csv: 'bad-header\ndata' },
+      payload: { csv: 'name,email\nAlice,alice@test.com' },
     });
-    expect(res.statusCode).toBe(400);
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.processed).toBe(1);
   });
 });
 

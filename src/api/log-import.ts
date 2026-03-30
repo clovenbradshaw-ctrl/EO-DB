@@ -1,11 +1,11 @@
 /**
  * Log Import API routes.
  *
- * Endpoints for bulk-importing events from JSON or CSV.
+ * Endpoints for bulk-importing events from JSON, CSV, or TSV.
  * All routes are auth-protected (Matrix Bearer token).
  *
- *   POST /import/json          — Import events from a JSON array
- *   POST /import/csv           — Import events from CSV text
+ *   POST /import/json          — Import from JSON (event format or generic)
+ *   POST /import/csv           — Import from CSV or TSV text (event format or generic)
  */
 
 import type { FastifyInstance } from 'fastify';
@@ -21,21 +21,21 @@ import {
 export function registerLogImportRoutes(app: FastifyInstance, db: EoDb, feed: Feed): void {
 
   /**
-   * Import events from a JSON array.
+   * Import from JSON.
    *
-   * Body: { events: [...], halt_on_error?: boolean }
-   * Each event: { op, target, operand?, ts?, client_event_id?, meta? }
+   * Body: { events: [...], halt_on_error?: boolean, target_prefix?: string }
+   * Events can be event-format (with op+target) or generic objects.
    */
   app.post('/import/json', async (request: AuthenticatedRequest, reply) => {
     const agent = request.matrixUser?.user_id || 'unknown';
-    const body = request.body as { events?: unknown; halt_on_error?: boolean };
+    const body = request.body as { events?: unknown; halt_on_error?: boolean; target_prefix?: string };
 
     if (!body.events) {
       return reply.code(400).send({ error: 'Missing required field: events' });
     }
 
     try {
-      const rows = parseJsonImport(body.events);
+      const rows = parseJsonImport(body.events, body.target_prefix);
       const result = await processImport(db, feed, rows, agent, {
         halt_on_error: body.halt_on_error,
       });
@@ -46,22 +46,24 @@ export function registerLogImportRoutes(app: FastifyInstance, db: EoDb, feed: Fe
   });
 
   /**
-   * Import events from CSV text.
+   * Import from CSV or TSV text.
    *
-   * Body: { csv: "op,target,operand,...\nINS,app.foo,{}\n...", halt_on_error?: boolean }
-   * Required columns: op, target
-   * Optional columns: operand (JSON), ts, client_event_id, meta (JSON)
+   * Body: { csv: "...", halt_on_error?: boolean, delimiter?: string, target_prefix?: string }
+   * If the file has op+target columns, imports as events. Otherwise, generic → INS.
    */
   app.post('/import/csv', async (request: AuthenticatedRequest, reply) => {
     const agent = request.matrixUser?.user_id || 'unknown';
-    const body = request.body as { csv?: string; halt_on_error?: boolean };
+    const body = request.body as { csv?: string; halt_on_error?: boolean; delimiter?: string; target_prefix?: string };
 
     if (!body.csv || typeof body.csv !== 'string') {
       return reply.code(400).send({ error: 'Missing required field: csv (string)' });
     }
 
     try {
-      const rows = parseCsvImport(body.csv);
+      const rows = parseCsvImport(body.csv, {
+        delimiter: body.delimiter,
+        targetPrefix: body.target_prefix,
+      });
       const result = await processImport(db, feed, rows, agent, {
         halt_on_error: body.halt_on_error,
       });
