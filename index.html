@@ -1715,6 +1715,144 @@ body {
 .import-progress-fill { height:100%; background:var(--ins); transition:width 0.2s; width:0%; }
 .import-progress-text { font-family:'JetBrains Mono',monospace; font-size:10px; color:var(--text-dim); margin-top:4px; }
 
+/* ── Interface Panel ── */
+.interface-panel { flex-direction:row; }
+.iface-sidebar { width:200px; border-right:1px solid var(--border); display:flex; flex-direction:column; overflow-y:auto; flex-shrink:0; }
+.iface-sidebar-header { display:flex; align-items:center; justify-content:space-between; padding:10px 12px; border-bottom:1px solid var(--border); }
+.iface-sidebar-title { font-family:'JetBrains Mono',monospace; font-size:11px; font-weight:600; color:var(--text-dim); letter-spacing:0.5px; text-transform:uppercase; }
+.iface-sidebar-btn { background:var(--bg3); border:1px solid var(--border); border-radius:4px; color:var(--text-dim); cursor:pointer; width:22px; height:22px; display:flex; align-items:center; justify-content:center; font-size:13px; font-family:'JetBrains Mono',monospace; }
+.iface-sidebar-btn:hover { border-color:var(--accent); color:var(--accent); }
+.iface-sidebar-list { flex:1; overflow-y:auto; padding:4px 0; }
+.iface-view-item { padding:7px 12px; font-size:12px; color:var(--text); cursor:pointer; display:flex; align-items:center; justify-content:space-between; transition:background 0.1s; }
+.iface-view-item:hover { background:var(--bg2); }
+.iface-view-item.active { background:var(--bg3); color:var(--accent); }
+.iface-view-item .iface-view-hide { font-size:9px; color:var(--text-faint); cursor:pointer; opacity:0; transition:opacity 0.1s; padding:2px 4px; }
+.iface-view-item:hover .iface-view-hide { opacity:1; }
+.iface-canvas { flex:1; display:flex; flex-direction:column; overflow:hidden; min-width:0; }
+.iface-toolbar { display:flex; align-items:center; justify-content:space-between; padding:8px 16px; border-bottom:1px solid var(--border); flex-shrink:0; }
+.iface-view-name { font-family:'JetBrains Mono',monospace; font-size:13px; font-weight:500; color:var(--white); }
+.iface-btn { background:var(--bg3); border:1px solid var(--border); border-radius:4px; padding:4px 10px; cursor:pointer; font-size:10px; font-family:'JetBrains Mono',monospace; font-weight:600; color:var(--text-dim); transition:border-color 0.15s; }
+.iface-btn:hover { border-color:var(--border2); color:var(--text); }
+.iface-btn-primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+.iface-btn-primary:hover { opacity:0.9; }
+.iface-btn-active { background:var(--bg4); border-color:var(--accent); color:var(--accent); }
+.iface-page { flex:1; overflow-y:auto; padding:16px; }
+.iface-empty { display:flex; align-items:center; justify-content:center; height:100%; color:var(--text-faint); font-size:13px; font-family:'JetBrains Mono',monospace; }
+.iface-section { margin-bottom:12px; }
+.iface-section-controls { display:flex; align-items:center; gap:6px; margin-bottom:6px; padding:4px 0; }
+.iface-section-label { font-size:9px; color:var(--text-faint); font-family:'JetBrains Mono',monospace; }
+.iface-col-btn { width:22px; height:18px; border-radius:3px; cursor:pointer; font-size:10px; font-family:'JetBrains Mono',monospace; font-weight:600; display:flex; align-items:center; justify-content:center; border:1px solid var(--border); background:transparent; color:var(--text-faint); }
+.iface-col-btn.active { background:rgba(56,189,248,0.1); color:var(--accent); border-color:rgba(56,189,248,0.3); }
+.iface-grid { display:grid; gap:10px; }
+.iface-column { display:flex; flex-direction:column; gap:8px; }
+.iface-block { background:var(--bg1); border-radius:8px; border:1px solid var(--border); position:relative; overflow:hidden; transition:border-color 0.15s; }
+.iface-block:hover { border-color:var(--border2); }
+.iface-block-edit { position:absolute; top:6px; right:6px; z-index:10; background:var(--bg3); border:1px solid var(--border2); border-radius:4px; color:var(--text-dim); cursor:pointer; padding:2px 8px; font-size:9px; font-family:'JetBrains Mono',monospace; font-weight:600; display:none; }
+.iface-block:hover .iface-block-edit { display:block; }
+.iface-add-block { background:transparent; border:1px dashed var(--border); border-radius:8px; padding:14px 0; cursor:pointer; color:var(--text-faint); font-size:11px; font-family:'JetBrains Mono',monospace; width:100%; transition:border-color 0.15s,color 0.15s; }
+.iface-add-block:hover { border-color:var(--border2); color:var(--text-dim); }
+.iface-add-section { display:flex; align-items:center; gap:8px; margin-top:10px; }
+.iface-add-section hr { flex:1; border:none; height:1px; background:var(--border); }
+.iface-add-section button { background:transparent; border:1px solid var(--border); border-radius:4px; padding:3px 10px; cursor:pointer; color:var(--text-faint); font-size:9px; font-family:'JetBrains Mono',monospace; font-weight:600; }
+.iface-add-section button:hover { color:var(--accent); }
+.iface-metric-title { font-size:10px; color:var(--text-dim); font-family:'JetBrains Mono',monospace; letter-spacing:0.05em; margin-bottom:8px; }
+.iface-metric-value { font-size:32px; font-weight:700; font-family:'JetBrains Mono',monospace; }
+.iface-block-title { font-size:11px; font-weight:600; color:var(--text-dim); margin-bottom:8px; font-family:'JetBrains Mono',monospace; }
+.iface-table { width:100%; border-collapse:collapse; }
+.iface-table th { text-align:left; padding:6px 8px; font-size:9px; font-weight:600; color:var(--text-faint); border-bottom:1px solid var(--border); font-family:'JetBrains Mono',monospace; letter-spacing:0.05em; text-transform:uppercase; }
+.iface-table td { padding:7px 8px; border-bottom:1px solid var(--bg); font-size:12px; color:var(--text-dim); }
+.iface-table td:first-child { color:var(--text); font-weight:500; }
+.iface-table tr:hover { background:var(--bg); }
+.iface-status-badge { font-size:10px; font-weight:600; padding:2px 7px; border-radius:99px; font-family:'JetBrains Mono',monospace; }
+.iface-list-item { display:flex; justify-content:space-between; align-items:center; padding:8px 0; border-bottom:1px solid var(--bg); }
+.iface-list-primary { font-size:12px; color:var(--text); }
+.iface-list-secondary { font-size:10px; font-family:'JetBrains Mono',monospace; }
+.iface-no-data { padding:16px; text-align:center; color:var(--text-faint); font-size:11px; font-family:'JetBrains Mono',monospace; }
+.iface-history { width:240px; border-left:1px solid var(--border); flex-shrink:0; overflow-y:auto; }
+.iface-history-list { padding:4px 0; }
+.iface-history-item { padding:6px 12px; font-size:11px; color:var(--text-dim); cursor:pointer; border-bottom:1px solid var(--bg); display:flex; justify-content:space-between; }
+.iface-history-item:hover { background:var(--bg2); }
+.iface-history-item .iface-history-ts { font-size:9px; color:var(--text-faint); font-family:'JetBrains Mono',monospace; }
+
+/* ── Interface Block Editor Modal ── */
+.iface-modal-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.55); display:flex; align-items:center; justify-content:center; z-index:300; }
+.iface-modal { background:var(--bg1); border:1px solid var(--border); border-radius:10px; width:420px; max-height:80vh; overflow-y:auto; }
+.iface-modal-header { display:flex; justify-content:space-between; align-items:center; padding:12px 16px; border-bottom:1px solid var(--border); }
+.iface-modal-title { font-size:13px; font-weight:600; color:var(--white); }
+.iface-modal-body { padding:16px; }
+.iface-field-label { font-size:9px; font-weight:700; color:var(--text-faint); margin-bottom:4px; font-family:'JetBrains Mono',monospace; letter-spacing:0.06em; text-transform:uppercase; }
+.iface-field { margin-bottom:12px; }
+.iface-input { width:100%; background:var(--bg); border:1px solid var(--border); border-radius:4px; padding:6px 8px; color:var(--text); font-size:12px; font-family:'JetBrains Mono',monospace; outline:none; box-sizing:border-box; }
+.iface-input:focus { border-color:var(--accent); }
+.iface-select { width:100%; background:var(--bg); border:1px solid var(--border); border-radius:4px; padding:6px 8px; color:var(--text); font-size:12px; font-family:'JetBrains Mono',monospace; outline:none; }
+.iface-type-btn { flex:1; padding:6px 0; border:1px solid var(--border); border-radius:4px; color:var(--text-faint); cursor:pointer; font-size:10px; font-family:'JetBrains Mono',monospace; font-weight:600; background:transparent; }
+.iface-type-btn.active { background:var(--bg3); border-color:var(--border2); color:var(--text); }
+.iface-col-toggle { padding:3px 8px; border-radius:3px; font-size:10px; font-family:'JetBrains Mono',monospace; cursor:pointer; font-weight:600; border:1px solid var(--border); background:transparent; color:var(--text-faint); }
+.iface-col-toggle.on { background:rgba(74,222,128,0.1); color:var(--ins); border-color:rgba(74,222,128,0.3); }
+.iface-modal-footer { display:flex; justify-content:space-between; margin-top:16px; padding-top:12px; border-top:1px solid var(--border); }
+.iface-btn-danger { background:var(--danger); color:#fff; border:none; border-radius:4px; padding:5px 12px; cursor:pointer; font-size:10px; font-family:'JetBrains Mono',monospace; font-weight:600; }
+
+/* ── Record Selector (Softr-style) ── */
+.iface-modal.wide { width:680px; max-height:85vh; }
+.iface-modal-split { display:flex; min-height:420px; }
+.iface-modal-sidebar { width:200px; border-right:1px solid var(--border); padding:12px 0; overflow-y:auto; flex-shrink:0; background:var(--bg); }
+.iface-modal-main { flex:1; overflow-y:auto; padding:16px; }
+
+/* Record type cards */
+.rec-type-list { padding:0 8px; }
+.rec-type-card { display:flex; align-items:center; gap:8px; padding:8px 10px; border-radius:6px; cursor:pointer; transition:all 0.12s; margin-bottom:2px; border:1px solid transparent; }
+.rec-type-card:hover { background:var(--bg2); }
+.rec-type-card.active { background:var(--bg3); border-color:var(--accent); }
+.rec-type-icon { width:28px; height:28px; border-radius:6px; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:700; font-family:'JetBrains Mono',monospace; flex-shrink:0; }
+.rec-type-info { flex:1; min-width:0; }
+.rec-type-name { font-size:11px; font-weight:600; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.rec-type-count { font-size:9px; color:var(--text-faint); font-family:'JetBrains Mono',monospace; }
+.rec-type-section-label { font-size:8px; font-weight:700; color:var(--text-faint); text-transform:uppercase; letter-spacing:0.08em; padding:10px 10px 4px; font-family:'JetBrains Mono',monospace; }
+
+/* Filter builder */
+.rec-filter-row { display:flex; align-items:center; gap:6px; margin-bottom:6px; }
+.rec-filter-row select, .rec-filter-row input { background:var(--bg); border:1px solid var(--border); border-radius:4px; padding:4px 6px; color:var(--text); font-size:11px; font-family:'JetBrains Mono',monospace; outline:none; }
+.rec-filter-row select:focus, .rec-filter-row input:focus { border-color:var(--accent); }
+.rec-filter-row select { max-width:120px; }
+.rec-filter-row input { flex:1; min-width:60px; }
+.rec-filter-remove { background:none; border:none; color:var(--text-faint); cursor:pointer; font-size:14px; padding:0 2px; line-height:1; }
+.rec-filter-remove:hover { color:var(--danger); }
+.rec-add-filter { background:none; border:1px dashed var(--border); border-radius:4px; padding:4px 10px; color:var(--text-faint); font-size:10px; font-family:'JetBrains Mono',monospace; cursor:pointer; transition:all 0.12s; }
+.rec-add-filter:hover { border-color:var(--accent); color:var(--accent); }
+
+/* Sort controls */
+.rec-sort-row { display:flex; align-items:center; gap:6px; }
+.rec-sort-row select { background:var(--bg); border:1px solid var(--border); border-radius:4px; padding:4px 6px; color:var(--text); font-size:11px; font-family:'JetBrains Mono',monospace; outline:none; flex:1; }
+.rec-sort-dir { background:var(--bg); border:1px solid var(--border); border-radius:4px; padding:4px 8px; color:var(--text); font-size:11px; font-family:'JetBrains Mono',monospace; cursor:pointer; }
+.rec-sort-dir:hover { border-color:var(--accent); }
+
+/* Live preview */
+.rec-preview { background:var(--bg); border:1px solid var(--border); border-radius:6px; margin-top:12px; overflow:hidden; }
+.rec-preview-header { display:flex; justify-content:space-between; align-items:center; padding:8px 12px; border-bottom:1px solid var(--border); }
+.rec-preview-title { font-size:9px; font-weight:700; color:var(--text-faint); text-transform:uppercase; letter-spacing:0.06em; font-family:'JetBrains Mono',monospace; }
+.rec-preview-count { font-size:10px; color:var(--accent); font-family:'JetBrains Mono',monospace; font-weight:600; }
+.rec-preview-rows { max-height:160px; overflow-y:auto; }
+.rec-preview-row { display:flex; align-items:center; gap:8px; padding:6px 12px; border-bottom:1px solid var(--bg1); font-size:11px; }
+.rec-preview-row:last-child { border-bottom:none; }
+.rec-preview-target { color:var(--accent); font-family:'JetBrains Mono',monospace; font-size:10px; min-width:80px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.rec-preview-fields { flex:1; display:flex; gap:6px; flex-wrap:wrap; }
+.rec-preview-chip { background:var(--bg1); padding:1px 6px; border-radius:3px; font-size:9px; font-family:'JetBrains Mono',monospace; color:var(--text-dim); white-space:nowrap; max-width:140px; overflow:hidden; text-overflow:ellipsis; }
+.rec-preview-empty { padding:16px; text-align:center; color:var(--text-faint); font-size:11px; font-family:'JetBrains Mono',monospace; }
+
+/* Field chips for column/field selection */
+.rec-field-chips { display:flex; flex-wrap:wrap; gap:4px; }
+.rec-field-chip { padding:3px 8px; border-radius:4px; font-size:10px; font-family:'JetBrains Mono',monospace; cursor:pointer; font-weight:500; border:1px solid var(--border); background:transparent; color:var(--text-faint); transition:all 0.12s; user-select:none; }
+.rec-field-chip:hover { border-color:var(--border2); color:var(--text-dim); }
+.rec-field-chip.on { background:rgba(56,189,248,0.1); color:var(--accent); border-color:rgba(56,189,248,0.3); }
+
+/* Tabs in main panel */
+.rec-tabs { display:flex; gap:0; border-bottom:1px solid var(--border); margin-bottom:12px; }
+.rec-tab { padding:8px 14px; font-size:10px; font-weight:600; font-family:'JetBrains Mono',monospace; color:var(--text-faint); cursor:pointer; border-bottom:2px solid transparent; transition:all 0.12s; background:none; border-top:none; border-left:none; border-right:none; }
+.rec-tab:hover { color:var(--text-dim); }
+.rec-tab.active { color:var(--accent); border-bottom-color:var(--accent); }
+.rec-tab-panel { display:none; }
+.rec-tab-panel.active { display:block; }
+
 /* ── Settings Panel ── */
 .settings-panel {
   flex-direction: column;
@@ -2566,6 +2704,7 @@ body {
   <div class="nav-tab" onclick="switchTab('log')">Log</div>
   <div class="nav-tab" onclick="switchTab('graph')">Graph</div>
   <div class="nav-tab" onclick="switchTab('compose')" style="color:var(--ins);">+ Compose</div>
+  <div class="nav-tab" onclick="switchTab('interface')">Interface</div>
   <div class="nav-tab" onclick="switchTab('spaces')">Spaces</div>
   <div class="nav-tab" onclick="switchTab('import')">Import</div>
   <div class="nav-tab" onclick="switchTab('sync')">Sync</div>
@@ -3020,6 +3159,44 @@ INS,app.tbl.rec1,"{""name"":""Alice""}"</pre>
       <div class="sync-activity-item">
         <span class="sync-activity-time">--:--:--</span>
         <span class="sync-activity-msg" style="color:var(--text-faint);font-style:italic;">Waiting for activity...</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ Interface Panel ═══ -->
+  <div id="panel-interface" class="panel interface-panel">
+    <div style="display:flex;flex:1;overflow:hidden;">
+      <!-- View index sidebar -->
+      <div class="iface-sidebar" id="ifaceSidebar">
+        <div class="iface-sidebar-header">
+          <span class="iface-sidebar-title">Views</span>
+          <button class="iface-sidebar-btn" onclick="ifaceCreateView()">+</button>
+        </div>
+        <div class="iface-sidebar-list" id="ifaceViewList"></div>
+      </div>
+      <!-- Main canvas -->
+      <div class="iface-canvas" id="ifaceCanvas">
+        <div class="iface-toolbar" id="ifaceToolbar">
+          <div style="display:flex;align-items:center;gap:8px;">
+            <span class="iface-view-name" id="ifaceViewName">—</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px;">
+            <button class="iface-btn" id="ifaceShareBtn" onclick="ifaceShareView()" style="display:none;">share</button>
+            <button class="iface-btn" id="ifaceHistoryBtn" onclick="ifaceToggleHistory()" style="display:none;">history</button>
+            <button class="iface-btn iface-btn-primary" id="ifaceEditBtn" onclick="ifaceToggleEdit()" style="display:none;">edit page</button>
+          </div>
+        </div>
+        <div class="iface-page" id="ifacePage">
+          <div class="iface-empty" id="ifaceEmpty">Select or create a view</div>
+        </div>
+      </div>
+      <!-- History drawer -->
+      <div class="iface-history" id="ifaceHistory" style="display:none;">
+        <div class="iface-sidebar-header">
+          <span class="iface-sidebar-title">History</span>
+          <button class="iface-sidebar-btn" onclick="ifaceToggleHistory()">x</button>
+        </div>
+        <div class="iface-history-list" id="ifaceHistoryList"></div>
       </div>
     </div>
   </div>
@@ -6076,11 +6253,11 @@ async function createShareSpace(label, isPublic) {
       name: `EO Share: ${label}`,
       topic: `Shared data — ${label}`,
       visibility: isPublic ? 'public' : 'private',
-      preset: isPublic ? 'public_chat' : 'private_chat',
+      preset: 'public_chat',
       initial_state: [{
-        type: 'm.room.encryption',
+        type: 'm.room.join_rules',
         state_key: '',
-        content: { algorithm: 'm.megolm.v1.aes-sha2' },
+        content: { join_rule: 'public' },
       }],
     }),
   });
@@ -6109,7 +6286,15 @@ async function joinSpace(spaceIdOrAlias) {
     headers: { 'Authorization': `Bearer ${matrixToken}`, 'Content-Type': 'application/json' },
     body: '{}',
   });
-  if (!res.ok) throw new Error(`Join failed: ${await res.text()}`);
+  if (!res.ok) {
+    const errText = await res.text();
+    let parsed;
+    try { parsed = JSON.parse(errText); } catch (_) { parsed = null; }
+    if (parsed && parsed.errcode === 'M_FORBIDDEN') {
+      throw new Error('Unable to join share: this share is private and you have not been invited.');
+    }
+    throw new Error(`Join failed: ${errText}`);
+  }
   return (await res.json()).room_id;
 }
 
@@ -7679,6 +7864,7 @@ function switchTab(tab) {
   const panelEl = document.getElementById(`panel-${tab}`);
   if (panelEl) panelEl.classList.add('active');
   if (tab === 'graph') renderGraph();
+  if (tab === 'interface') renderInterface();
   if (tab === 'spaces') loadSpaces();
   if (tab === 'settings') loadSettings();
   if (tab === 'sync') startSyncViewRefresh();
@@ -9639,6 +9825,1158 @@ async function createDemoSpace() {
     checkBackupAdminAndAutoLoad();
   });
 })();
+
+// ═══════════════════════════════════════════════════════════════════
+// ██ Interface Editor
+// ═══════════════════════════════════════════════════════════════════
+
+const IFACE_STATUS_COLORS = {
+  Active:'#4ade80', Inactive:'#64748b', Lead:'#60a5fa', Qualified:'#60a5fa',
+  Proposal:'#c084fc', 'Closed Won':'#4ade80', 'Closed Lost':'#f87171',
+  Open:'#fb923c', Done:'#4ade80', High:'#ef4444', Medium:'#eab308', Low:'#4ade80'
+};
+
+let ifaceCurrentView = null;
+let ifaceEditMode = false;
+let ifaceIdCounter = Date.now();
+function ifaceNextId(prefix) { return prefix + (++ifaceIdCounter).toString(36); }
+
+// ── Block Type Registry ──────────────────────────────────────────
+
+const BLOCK_TYPES = {
+  metric: {
+    render(config, items, el) {
+      let val = config.formula === 'SUM'
+        ? items.reduce((s, i) => s + (Number(i.value?.[config.field]) || 0), 0)
+        : items.length;
+      el.innerHTML = `<div style="padding:20px 24px;">
+        <div class="iface-metric-title">${escapeHtml(config.title || 'Metric')}</div>
+        <div class="iface-metric-value" style="color:${config.color || 'var(--text)'}">${config.prefix || ''}${val.toLocaleString()}</div>
+      </div>`;
+    },
+    editor(config, fields, types, onUpdate) {
+      const d = document.createElement('div');
+      d.innerHTML = `
+        <div class="iface-field"><div class="iface-field-label">TITLE</div>
+          <input class="iface-input" value="${escapeHtml(config.title || '')}" data-key="title"></div>
+        <div class="iface-field"><div class="iface-field-label">DATA TYPE</div>
+          <select class="iface-select" data-key="_type">
+            <option value="">All</option>
+            ${types.map(t => `<option value="${t}" ${config.seg?._type === t ? 'selected' : ''}>${t}</option>`).join('')}
+          </select></div>
+        <div style="display:flex;gap:6px;">
+          <div class="iface-field" style="flex:1;"><div class="iface-field-label">FORMULA</div>
+            <select class="iface-select" data-key="formula">
+              <option value="COUNT" ${config.formula === 'COUNT' ? 'selected' : ''}>COUNT</option>
+              <option value="SUM" ${config.formula === 'SUM' ? 'selected' : ''}>SUM</option>
+            </select></div>
+          <div class="iface-field" style="flex:1;" id="iface-sum-field"><div class="iface-field-label">SUM FIELD</div>
+            <select class="iface-select" data-key="field">
+              <option value="">Pick…</option>
+              ${fields.map(f => `<option value="${f}" ${config.field === f ? 'selected' : ''}>${f}</option>`).join('')}
+            </select></div>
+          <div class="iface-field"><div class="iface-field-label">COLOR</div>
+            <input type="color" value="${config.color || '#4ade80'}" data-key="color" style="width:36px;height:30px;border:1px solid var(--border);border-radius:4px;background:var(--bg);cursor:pointer;"></div>
+        </div>
+        <div class="iface-field"><div class="iface-field-label">PREFIX</div>
+          <input class="iface-input" value="${escapeHtml(config.prefix || '')}" data-key="prefix" placeholder="e.g. $"></div>`;
+      d.querySelectorAll('[data-key]').forEach(el => {
+        el.addEventListener('input', () => {
+          const k = el.dataset.key;
+          if (k === '_type') { config.seg = { ...config.seg, _type: el.value || undefined }; }
+          else { config[k] = el.value; }
+          onUpdate(config);
+        });
+        el.addEventListener('change', () => el.dispatchEvent(new Event('input')));
+      });
+      return d;
+    }
+  },
+
+  table: {
+    render(config, items, el) {
+      const cols = config.columns || [];
+      let html = `<div style="padding:12px 16px;">
+        <div class="iface-block-title">${escapeHtml(config.title || 'Table')}</div>
+        <div style="overflow-x:auto;"><table class="iface-table"><thead><tr>`;
+      cols.forEach(c => { html += `<th>${escapeHtml(c.toUpperCase())}</th>`; });
+      html += `</tr></thead><tbody>`;
+      items.slice(0, 20).forEach(item => {
+        html += '<tr>';
+        cols.forEach(c => {
+          const v = item.value?.[c];
+          const sc = IFACE_STATUS_COLORS[v];
+          if (sc) html += `<td><span class="iface-status-badge" style="background:${sc}18;color:${sc}">${escapeHtml(String(v))}</span></td>`;
+          else html += `<td>${typeof v === 'number' ? v.toLocaleString() : escapeHtml(String(v ?? ''))}</td>`;
+        });
+        html += '</tr>';
+      });
+      html += '</tbody></table>';
+      if (!items.length) html += '<div class="iface-no-data">no data</div>';
+      html += '</div></div>';
+      el.innerHTML = html;
+    },
+    editor(config, fields, types, onUpdate) {
+      const d = document.createElement('div');
+      d.innerHTML = `
+        <div class="iface-field"><div class="iface-field-label">TITLE</div>
+          <input class="iface-input" value="${escapeHtml(config.title || '')}" data-key="title"></div>
+        <div class="iface-field"><div class="iface-field-label">DATA TYPE</div>
+          <select class="iface-select" data-key="_type">
+            <option value="">All</option>
+            ${types.map(t => `<option value="${t}" ${config.seg?._type === t ? 'selected' : ''}>${t}</option>`).join('')}
+          </select></div>
+        <div class="iface-field"><div class="iface-field-label">COLUMNS (click to toggle)</div>
+          <div style="display:flex;flex-wrap:wrap;gap:4px;" id="iface-col-toggles"></div></div>`;
+      function rebuildCols() {
+        const container = d.querySelector('#iface-col-toggles');
+        const activeFields = ifaceFieldsForType(config.seg?._type);
+        container.innerHTML = activeFields.map(f => {
+          const on = (config.columns || []).includes(f);
+          return `<button class="iface-col-toggle ${on ? 'on' : ''}" data-col="${f}">${f}</button>`;
+        }).join('');
+        container.querySelectorAll('[data-col]').forEach(btn => {
+          btn.onclick = () => {
+            const c = btn.dataset.col;
+            const cols = config.columns || [];
+            config.columns = cols.includes(c) ? cols.filter(x => x !== c) : [...cols, c];
+            onUpdate(config);
+            rebuildCols();
+          };
+        });
+      }
+      d.querySelector('[data-key="title"]').addEventListener('input', e => { config.title = e.target.value; onUpdate(config); });
+      d.querySelector('[data-key="_type"]').addEventListener('change', e => {
+        config.seg = { ...config.seg, _type: e.target.value || undefined };
+        config.columns = [];
+        onUpdate(config);
+        rebuildCols();
+      });
+      rebuildCols();
+      return d;
+    }
+  },
+
+  list: {
+    render(config, items, el) {
+      let html = `<div style="padding:12px 16px;">
+        <div class="iface-block-title">${escapeHtml(config.title || 'List')}</div>`;
+      items.forEach(item => {
+        const pv = item.value?.[config.primary || 'name'] || item.target;
+        const sv = config.secondary ? (item.value?.[config.secondary] || '') : '';
+        const sc = IFACE_STATUS_COLORS[sv];
+        html += `<div class="iface-list-item">
+          <span class="iface-list-primary">${escapeHtml(String(pv))}</span>
+          ${sv ? `<span class="iface-list-secondary" style="color:${sc || 'var(--text-faint)'}">${escapeHtml(String(sv))}</span>` : ''}
+        </div>`;
+      });
+      if (!items.length) html += '<div class="iface-no-data">no data</div>';
+      html += '</div>';
+      el.innerHTML = html;
+    },
+    editor(config, fields, types, onUpdate) {
+      const d = document.createElement('div');
+      d.innerHTML = `
+        <div class="iface-field"><div class="iface-field-label">TITLE</div>
+          <input class="iface-input" value="${escapeHtml(config.title || '')}" data-key="title"></div>
+        <div class="iface-field"><div class="iface-field-label">DATA TYPE</div>
+          <select class="iface-select" data-key="_type">
+            <option value="">All</option>
+            ${types.map(t => `<option value="${t}" ${config.seg?._type === t ? 'selected' : ''}>${t}</option>`).join('')}
+          </select></div>
+        <div style="display:flex;gap:6px;">
+          <div class="iface-field" style="flex:1;"><div class="iface-field-label">PRIMARY FIELD</div>
+            <select class="iface-select" data-key="primary">
+              ${fields.map(f => `<option value="${f}" ${config.primary === f ? 'selected' : ''}>${f}</option>`).join('')}
+            </select></div>
+          <div class="iface-field" style="flex:1;"><div class="iface-field-label">SECONDARY FIELD</div>
+            <select class="iface-select" data-key="secondary">
+              <option value="">None</option>
+              ${fields.map(f => `<option value="${f}" ${config.secondary === f ? 'selected' : ''}>${f}</option>`).join('')}
+            </select></div>
+        </div>`;
+      d.querySelectorAll('[data-key]').forEach(el => {
+        const handler = () => {
+          const k = el.dataset.key;
+          if (k === '_type') config.seg = { ...config.seg, _type: el.value || undefined };
+          else config[k] = el.value;
+          onUpdate(config);
+        };
+        el.addEventListener('input', handler);
+        el.addEventListener('change', handler);
+      });
+      return d;
+    }
+  },
+
+  text: {
+    render(config, items, el) {
+      el.innerHTML = `<div style="padding:16px 20px;">
+        ${config.heading ? `<div style="font-size:16px;font-weight:600;color:var(--white);margin-bottom:6px;">${escapeHtml(config.heading)}</div>` : ''}
+        <div style="font-size:13px;color:var(--text-dim);line-height:1.6;">${escapeHtml(config.body || 'Click edit to add text.')}</div>
+      </div>`;
+    },
+    editor(config, fields, types, onUpdate) {
+      const d = document.createElement('div');
+      d.innerHTML = `
+        <div class="iface-field"><div class="iface-field-label">HEADING</div>
+          <input class="iface-input" value="${escapeHtml(config.heading || '')}" data-key="heading"></div>
+        <div class="iface-field"><div class="iface-field-label">BODY</div>
+          <textarea class="iface-input" rows="4" data-key="body" style="resize:vertical;">${escapeHtml(config.body || '')}</textarea></div>`;
+      d.querySelectorAll('[data-key]').forEach(el => {
+        el.addEventListener('input', () => { config[el.dataset.key] = el.value; onUpdate(config); });
+      });
+      return d;
+    }
+  }
+};
+
+// ── Data Queries ─────────────────────────────────────────────────
+
+function ifaceQueryData(seg, filters, sort, limit) {
+  // Query the in-memory LOG via foldState — same data as Horizon
+  const state = foldState(replayIndex);
+  let results = Object.values(state).filter(s => {
+    if (!s.value || typeof s.value !== 'object') return false;
+    if (s.target.startsWith('_') || s.target.startsWith('views.')) return false;
+    for (const [k, v] of Object.entries(seg || {})) {
+      if (v !== undefined && v !== '' && s.value[k] !== v) return false;
+    }
+    // Apply additional filters
+    if (filters && filters.length) {
+      for (const f of filters) {
+        if (!f.field || !f.op) continue;
+        const fv = s.value[f.field];
+        const cv = f.value;
+        if (f.op === 'eq' && String(fv) !== String(cv)) return false;
+        if (f.op === 'neq' && String(fv) === String(cv)) return false;
+        if (f.op === 'contains' && !String(fv || '').toLowerCase().includes(String(cv || '').toLowerCase())) return false;
+        if (f.op === 'gt' && !(Number(fv) > Number(cv))) return false;
+        if (f.op === 'lt' && !(Number(fv) < Number(cv))) return false;
+        if (f.op === 'empty' && fv !== undefined && fv !== null && fv !== '') return false;
+        if (f.op === 'not_empty' && (fv === undefined || fv === null || fv === '')) return false;
+      }
+    }
+    return true;
+  });
+  // Apply sorting
+  if (sort && sort.field) {
+    const dir = sort.dir === 'desc' ? -1 : 1;
+    results.sort((a, b) => {
+      const av = a.value?.[sort.field], bv = b.value?.[sort.field];
+      if (av == null && bv == null) return 0;
+      if (av == null) return dir;
+      if (bv == null) return -dir;
+      if (typeof av === 'number' && typeof bv === 'number') return (av - bv) * dir;
+      return String(av).localeCompare(String(bv)) * dir;
+    });
+  }
+  // Apply limit
+  if (limit && limit > 0) results = results.slice(0, limit);
+  return results;
+}
+
+function ifaceAllTypes() {
+  const state = foldState(replayIndex);
+  const types = new Set();
+  Object.values(state).forEach(s => {
+    if (s.target.startsWith('_') || s.target.startsWith('views.')) return;
+    if (s.value && typeof s.value === 'object' && s.value._type) types.add(s.value._type);
+  });
+  return [...types].sort();
+}
+
+function ifaceFieldsForType(type) {
+  const state = foldState(replayIndex);
+  const fields = new Set();
+  Object.values(state).forEach(s => {
+    if (s.target.startsWith('_') || s.target.startsWith('views.')) return;
+    if (type && s.value?._type !== type) return;
+    if (s.value && typeof s.value === 'object') {
+      Object.keys(s.value).forEach(k => { if (!k.startsWith('_')) fields.add(k); });
+    }
+  });
+  return [...fields].sort();
+}
+
+// ── View CRUD (EO events) ────────────────────────────────────────
+
+async function ifaceListViews() {
+  const state = foldState(replayIndex);
+  return Object.values(state)
+    .filter(s => s.target.startsWith('views.') && s.value && !s.value._nul)
+    .filter(s => !s.value.hidden)
+    .sort((a, b) => (b.last_ts || '').localeCompare(a.last_ts || ''));
+}
+
+async function ifaceCreateView() {
+  const id = ifaceNextId('v');
+  const target = 'views.' + id;
+  const defaultSections = [
+    { id: ifaceNextId('s'), columns: 1, blocks: [] }
+  ];
+  await appendEvent({
+    op: 'INS', target,
+    operand: { _type: 'view', name: 'New View', hidden: false, sections: defaultSections },
+    agent: matrixUserId || 'local'
+  });
+  LOG = await loadAllEvents();
+  replayIndex = Math.max(0, LOG.length - 1);
+  ifaceCurrentView = target;
+  renderInterface();
+}
+
+async function ifaceSaveView(viewTarget, updates) {
+  await appendEvent({
+    op: 'DEF', target: viewTarget,
+    operand: updates,
+    agent: matrixUserId || 'local'
+  });
+  LOG = await loadAllEvents();
+  replayIndex = Math.max(0, LOG.length - 1);
+}
+
+async function ifaceDeleteView(viewTarget) {
+  await appendEvent({
+    op: 'DEF', target: viewTarget,
+    operand: { _nul: true },
+    agent: matrixUserId || 'local'
+  });
+  LOG = await loadAllEvents();
+  replayIndex = Math.max(0, LOG.length - 1);
+  if (ifaceCurrentView === viewTarget) ifaceCurrentView = null;
+  renderInterface();
+}
+
+// ── Rendering ────────────────────────────────────────────────────
+
+async function renderInterface() {
+  const views = await ifaceListViews();
+  const listEl = document.getElementById('ifaceViewList');
+  const pageEl = document.getElementById('ifacePage');
+  const emptyEl = document.getElementById('ifaceEmpty');
+  const nameEl = document.getElementById('ifaceViewName');
+  const editBtn = document.getElementById('ifaceEditBtn');
+  const shareBtn = document.getElementById('ifaceShareBtn');
+  const historyBtn = document.getElementById('ifaceHistoryBtn');
+
+  // Render sidebar view list
+  listEl.innerHTML = views.map(v =>
+    `<div class="iface-view-item ${ifaceCurrentView === v.target ? 'active' : ''}" onclick="ifaceSelectView('${v.target}')">
+      <span>${escapeHtml(v.value.name || v.target.replace('views.', ''))}</span>
+      <span class="iface-view-hide" onclick="event.stopPropagation();ifaceToggleHidden('${v.target}')" title="Hide view">&#10005;</span>
+    </div>`
+  ).join('');
+
+  if (!ifaceCurrentView) {
+    emptyEl.style.display = 'flex';
+    pageEl.querySelectorAll('.iface-section,.iface-add-section').forEach(e => e.remove());
+    nameEl.textContent = '—';
+    editBtn.style.display = 'none';
+    shareBtn.style.display = 'none';
+    historyBtn.style.display = 'none';
+    return;
+  }
+
+  const state = foldState(replayIndex);
+  const viewState = state[ifaceCurrentView];
+  if (!viewState || !viewState.value || viewState.value._nul) {
+    ifaceCurrentView = null;
+    renderInterface();
+    return;
+  }
+
+  emptyEl.style.display = 'none';
+  nameEl.textContent = viewState.value.name || ifaceCurrentView.replace('views.', '');
+  editBtn.style.display = '';
+  shareBtn.style.display = '';
+  historyBtn.style.display = '';
+  editBtn.textContent = ifaceEditMode ? 'done' : 'edit page';
+  editBtn.className = ifaceEditMode ? 'iface-btn iface-btn-active' : 'iface-btn iface-btn-primary';
+
+  const sections = viewState.value.sections || [];
+  ifaceRenderSections(pageEl, sections);
+}
+
+function ifaceRenderSections(container, sections) {
+  // Clear previous content but keep the empty div
+  container.querySelectorAll('.iface-section,.iface-add-section').forEach(e => e.remove());
+
+  sections.forEach((section, si) => {
+    const secEl = document.createElement('div');
+    secEl.className = 'iface-section';
+
+    // Section controls (edit mode only)
+    if (ifaceEditMode) {
+      const controls = document.createElement('div');
+      controls.className = 'iface-section-controls';
+      controls.innerHTML = `
+        <span class="iface-section-label">section ${si + 1}</span>
+        <div style="display:flex;gap:2px;margin-left:8px;">
+          ${[1,2,3,4].map(n =>
+            `<button class="iface-col-btn ${section.columns === n ? 'active' : ''}" onclick="ifaceSetColumns('${section.id}',${n})">${n}</button>`
+          ).join('')}
+          <span style="font-size:8px;color:var(--text-faint);font-family:'JetBrains Mono',monospace;margin-left:4px;align-self:center;">cols</span>
+        </div>
+        <div style="flex:1"></div>
+        <button class="iface-col-btn" onclick="ifaceMoveSection(${si},-1)">&#8593;</button>
+        <button class="iface-col-btn" onclick="ifaceMoveSection(${si},1)">&#8595;</button>
+        <button class="iface-col-btn" style="background:rgba(239,68,68,0.15);color:var(--danger);border-color:rgba(239,68,68,0.3);" onclick="ifaceDeleteSection('${section.id}')">&#10005;</button>`;
+      secEl.appendChild(controls);
+    }
+
+    // Grid
+    const grid = document.createElement('div');
+    grid.className = 'iface-grid';
+    grid.style.gridTemplateColumns = `repeat(${section.columns}, 1fr)`;
+
+    for (let ci = 0; ci < section.columns; ci++) {
+      const colEl = document.createElement('div');
+      colEl.className = 'iface-column';
+      const blocks = (section.blocks || []).filter(b => b.col === ci);
+
+      blocks.forEach(block => {
+        const blockEl = document.createElement('div');
+        blockEl.className = 'iface-block';
+
+        if (ifaceEditMode) {
+          const editBtnEl = document.createElement('button');
+          editBtnEl.className = 'iface-block-edit';
+          editBtnEl.style.display = 'block';
+          editBtnEl.textContent = 'edit';
+          editBtnEl.onclick = () => ifaceOpenBlockEditor(block);
+          blockEl.appendChild(editBtnEl);
+        }
+
+        const type = BLOCK_TYPES[block.type];
+        if (type) {
+          const items = block.type !== 'text' ? ifaceQueryData(block.config?.seg || {}, block.config?.filters, block.config?.sort, block.config?.limit) : [];
+          type.render(block.config || {}, items, blockEl);
+        } else {
+          blockEl.innerHTML = '<div class="iface-no-data">empty block</div>';
+        }
+        colEl.appendChild(blockEl);
+      });
+
+      if (ifaceEditMode) {
+        const addBtn = document.createElement('button');
+        addBtn.className = 'iface-add-block';
+        addBtn.textContent = '+ add block';
+        addBtn.onclick = () => ifaceAddBlock(section.id, ci);
+        colEl.appendChild(addBtn);
+      }
+      grid.appendChild(colEl);
+    }
+    secEl.appendChild(grid);
+
+    // Add section divider (edit mode)
+    if (ifaceEditMode) {
+      const divider = document.createElement('div');
+      divider.className = 'iface-add-section';
+      divider.innerHTML = `<hr><button onclick="ifaceAddSection(${si})">+ section</button><hr>`;
+      secEl.appendChild(divider);
+    }
+
+    container.appendChild(secEl);
+  });
+
+  // Empty state for edit mode with no sections
+  if (ifaceEditMode && sections.length === 0) {
+    const addFirst = document.createElement('div');
+    addFirst.className = 'iface-add-section';
+    addFirst.innerHTML = `<hr><button onclick="ifaceAddSection(-1)">+ add first section</button><hr>`;
+    container.appendChild(addFirst);
+  }
+}
+
+// ── View Actions ─────────────────────────────────────────────────
+
+function ifaceSelectView(target) {
+  ifaceCurrentView = target;
+  ifaceEditMode = false;
+  renderInterface();
+}
+
+function ifaceToggleEdit() {
+  ifaceEditMode = !ifaceEditMode;
+  renderInterface();
+}
+
+async function ifaceToggleHidden(target) {
+  await ifaceSaveView(target, { hidden: true });
+  if (ifaceCurrentView === target) ifaceCurrentView = null;
+  renderInterface();
+}
+
+// ── Section Mutations ────────────────────────────────────────────
+
+function ifaceGetViewSections() {
+  const state = foldState(replayIndex);
+  const vs = state[ifaceCurrentView];
+  return vs?.value?.sections ? JSON.parse(JSON.stringify(vs.value.sections)) : [];
+}
+
+async function ifaceAddSection(afterIdx) {
+  const sections = ifaceGetViewSections();
+  sections.splice(afterIdx + 1, 0, { id: ifaceNextId('s'), columns: 1, blocks: [] });
+  await ifaceSaveView(ifaceCurrentView, { sections });
+  renderInterface();
+}
+
+async function ifaceDeleteSection(sid) {
+  const sections = ifaceGetViewSections().filter(s => s.id !== sid);
+  await ifaceSaveView(ifaceCurrentView, { sections });
+  renderInterface();
+}
+
+async function ifaceMoveSection(idx, dir) {
+  const sections = ifaceGetViewSections();
+  const ni = idx + dir;
+  if (ni < 0 || ni >= sections.length) return;
+  [sections[idx], sections[ni]] = [sections[ni], sections[idx]];
+  await ifaceSaveView(ifaceCurrentView, { sections });
+  renderInterface();
+}
+
+async function ifaceSetColumns(sid, n) {
+  const sections = ifaceGetViewSections().map(s =>
+    s.id === sid ? { ...s, columns: n, blocks: s.blocks.filter(b => b.col < n) } : s
+  );
+  await ifaceSaveView(ifaceCurrentView, { sections });
+  renderInterface();
+}
+
+// ── Block Mutations ──────────────────────────────────────────────
+
+async function ifaceAddBlock(sid, col) {
+  const block = { id: ifaceNextId('b'), col, type: 'text', config: { heading: '', body: 'New block' } };
+  const sections = ifaceGetViewSections().map(s =>
+    s.id === sid ? { ...s, blocks: [...s.blocks, block] } : s
+  );
+  await ifaceSaveView(ifaceCurrentView, { sections });
+  renderInterface();
+  ifaceOpenBlockEditor(block);
+}
+
+async function ifaceSaveBlock(updated) {
+  const sections = ifaceGetViewSections().map(s => ({
+    ...s, blocks: s.blocks.map(b => b.id === updated.id ? updated : b)
+  }));
+  await ifaceSaveView(ifaceCurrentView, { sections });
+  renderInterface();
+}
+
+async function ifaceRemoveBlock(bid) {
+  const sections = ifaceGetViewSections().map(s => ({
+    ...s, blocks: s.blocks.filter(b => b.id !== bid)
+  }));
+  await ifaceSaveView(ifaceCurrentView, { sections });
+  renderInterface();
+}
+
+// ── Record Type Metadata ─────────────────────────────────────────
+
+const REC_TYPE_COLORS = [
+  { bg:'rgba(74,222,128,0.12)', fg:'#4ade80', border:'rgba(74,222,128,0.3)' },
+  { bg:'rgba(96,165,250,0.12)', fg:'#60a5fa', border:'rgba(96,165,250,0.3)' },
+  { bg:'rgba(244,114,182,0.12)', fg:'#f472b6', border:'rgba(244,114,182,0.3)' },
+  { bg:'rgba(167,139,250,0.12)', fg:'#a78bfa', border:'rgba(167,139,250,0.3)' },
+  { bg:'rgba(251,191,36,0.12)', fg:'#fbbf24', border:'rgba(251,191,36,0.3)' },
+  { bg:'rgba(56,189,248,0.12)', fg:'#38bdf8', border:'rgba(56,189,248,0.3)' },
+  { bg:'rgba(52,211,153,0.12)', fg:'#34d399', border:'rgba(52,211,153,0.3)' },
+  { bg:'rgba(251,146,60,0.12)', fg:'#fb923c', border:'rgba(251,146,60,0.3)' },
+];
+
+function ifaceRecordTypeMeta() {
+  const state = foldState(replayIndex);
+  const typeMap = {};
+  let allCount = 0;
+  Object.values(state).forEach(s => {
+    if (!s.value || typeof s.value !== 'object') return;
+    if (s.target.startsWith('_') || s.target.startsWith('views.')) return;
+    allCount++;
+    const t = s.value._type || '(untyped)';
+    if (!typeMap[t]) typeMap[t] = { name: t, count: 0, fields: new Set(), sampleValues: {} };
+    typeMap[t].count++;
+    if (s.value && typeof s.value === 'object') {
+      Object.keys(s.value).forEach(k => {
+        if (!k.startsWith('_')) {
+          typeMap[t].fields.add(k);
+          if (!typeMap[t].sampleValues[k] && s.value[k] !== undefined && s.value[k] !== null && s.value[k] !== '') {
+            typeMap[t].sampleValues[k] = s.value[k];
+          }
+        }
+      });
+    }
+  });
+  const types = Object.values(typeMap).sort((a, b) => b.count - a.count);
+  types.forEach((t, i) => {
+    t.color = REC_TYPE_COLORS[i % REC_TYPE_COLORS.length];
+    t.fields = [...t.fields].sort();
+  });
+  return { types, allCount };
+}
+
+// ── Filter Operators ────────────────────────────────────────────
+
+const FILTER_OPS = [
+  { value: 'eq', label: 'equals' },
+  { value: 'neq', label: 'not equals' },
+  { value: 'contains', label: 'contains' },
+  { value: 'gt', label: '>' },
+  { value: 'lt', label: '<' },
+  { value: 'empty', label: 'is empty' },
+  { value: 'not_empty', label: 'is not empty' },
+];
+const NO_VALUE_OPS = ['empty', 'not_empty'];
+
+// ── Block Editor Modal ───────────────────────────────────────────
+
+function ifaceOpenBlockEditor(block) {
+  const existing = document.getElementById('ifaceModalOverlay');
+  if (existing) existing.remove();
+
+  const cfg = JSON.parse(JSON.stringify(block));
+  if (!cfg.config) cfg.config = {};
+  if (!cfg.config.filters) cfg.config.filters = [];
+  if (!cfg.config.sort) cfg.config.sort = {};
+  if (!cfg.config.limit) cfg.config.limit = 0;
+
+  const { types: recTypes, allCount } = ifaceRecordTypeMeta();
+  const allTypes = ifaceAllTypes();
+
+  const overlay = document.createElement('div');
+  overlay.className = 'iface-modal-overlay';
+  overlay.id = 'ifaceModalOverlay';
+  overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+
+  const modal = document.createElement('div');
+  modal.className = 'iface-modal wide';
+  modal.onclick = e => e.stopPropagation();
+
+  // ── Header ──
+  const header = document.createElement('div');
+  header.className = 'iface-modal-header';
+  header.innerHTML = `<span class="iface-modal-title">Edit Block</span>
+    <div style="display:flex;gap:4px;margin-left:auto;" id="iface-type-btns-header"></div>`;
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'iface-sidebar-btn';
+  closeBtn.style.cssText = 'margin-left:12px;';
+  closeBtn.textContent = '\u00d7';
+  closeBtn.onclick = () => overlay.remove();
+  header.appendChild(closeBtn);
+  modal.appendChild(header);
+
+  // ── Split layout ──
+  const split = document.createElement('div');
+  split.className = 'iface-modal-split';
+
+  // ── Left sidebar: record type picker ──
+  const sidebar = document.createElement('div');
+  sidebar.className = 'iface-modal-sidebar';
+  sidebar.id = 'rec-type-sidebar';
+
+  // ── Main panel ──
+  const main = document.createElement('div');
+  main.className = 'iface-modal-main';
+
+  split.appendChild(sidebar);
+  split.appendChild(main);
+  modal.appendChild(split);
+
+  // ── Footer ──
+  const footer = document.createElement('div');
+  footer.style.cssText = 'display:flex;justify-content:space-between;padding:12px 16px;border-top:1px solid var(--border);';
+  footer.innerHTML = `<button class="iface-btn-danger" id="iface-delete-block">Delete</button>
+    <div style="display:flex;gap:6px;">
+      <button class="iface-btn" id="iface-cancel-block">Cancel</button>
+      <button class="iface-btn iface-btn-primary" id="iface-save-block">Save</button>
+    </div>`;
+  modal.appendChild(footer);
+
+  // ── State ──
+  let activeTab = 'config';
+
+  // ── Render type buttons in header ──
+  function renderTypeButtons() {
+    const btns = header.querySelector('#iface-type-btns-header');
+    btns.innerHTML = ['metric', 'table', 'list', 'text'].map(t =>
+      `<button class="iface-type-btn ${cfg.type === t ? 'active' : ''}" data-type="${t}">${t}</button>`
+    ).join('');
+    btns.querySelectorAll('[data-type]').forEach(btn => {
+      btn.onclick = () => {
+        const isDataType = ['metric', 'table', 'list'].includes(btn.dataset.type);
+        const wasDataType = ['metric', 'table', 'list'].includes(cfg.type);
+        cfg.type = btn.dataset.type;
+        if (cfg.type === 'text') {
+          cfg.config = { heading: cfg.config.title || '', body: '' };
+        } else if (!wasDataType) {
+          cfg.config = cfg.type === 'metric'
+            ? { title: '', formula: 'COUNT', seg: {}, color: '#4ade80', filters: [], sort: {}, limit: 0 }
+            : cfg.type === 'table'
+            ? { title: '', seg: {}, columns: [], filters: [], sort: {}, limit: 0 }
+            : { title: '', seg: {}, primary: 'name', secondary: '', filters: [], sort: {}, limit: 0 };
+        }
+        renderTypeButtons();
+        renderSidebar();
+        renderMain();
+      };
+    });
+  }
+
+  // ── Render record type sidebar ──
+  function renderSidebar() {
+    const isData = ['metric', 'table', 'list'].includes(cfg.type);
+    if (!isData) {
+      sidebar.style.display = 'none';
+      return;
+    }
+    sidebar.style.display = '';
+    const selectedType = cfg.config?.seg?._type || '';
+
+    let html = '<div class="rec-type-section-label">Data Source</div><div class="rec-type-list">';
+    // "All records" option
+    html += `<div class="rec-type-card ${!selectedType ? 'active' : ''}" data-rectype="">
+      <div class="rec-type-icon" style="background:var(--bg3);color:var(--text-dim);">*</div>
+      <div class="rec-type-info">
+        <div class="rec-type-name">All Records</div>
+        <div class="rec-type-count">${allCount} records</div>
+      </div>
+    </div>`;
+
+    recTypes.forEach(rt => {
+      if (rt.name === '(untyped)') return;
+      const initial = rt.name.charAt(0).toUpperCase();
+      html += `<div class="rec-type-card ${selectedType === rt.name ? 'active' : ''}" data-rectype="${escapeHtml(rt.name)}">
+        <div class="rec-type-icon" style="background:${rt.color.bg};color:${rt.color.fg};border:1px solid ${rt.color.border};">${initial}</div>
+        <div class="rec-type-info">
+          <div class="rec-type-name">${escapeHtml(rt.name)}</div>
+          <div class="rec-type-count">${rt.count} record${rt.count !== 1 ? 's' : ''} &middot; ${rt.fields.length} fields</div>
+        </div>
+      </div>`;
+    });
+
+    // Untyped if exists
+    const untyped = recTypes.find(r => r.name === '(untyped)');
+    if (untyped) {
+      html += `<div class="rec-type-card ${selectedType === '(untyped)' ? 'active' : ''}" data-rectype="(untyped)">
+        <div class="rec-type-icon" style="background:var(--bg3);color:var(--text-faint);">?</div>
+        <div class="rec-type-info">
+          <div class="rec-type-name">Untyped</div>
+          <div class="rec-type-count">${untyped.count} records</div>
+        </div>
+      </div>`;
+    }
+    html += '</div>';
+    sidebar.innerHTML = html;
+
+    // Click handlers
+    sidebar.querySelectorAll('.rec-type-card').forEach(card => {
+      card.onclick = () => {
+        const t = card.dataset.rectype;
+        if (!cfg.config.seg) cfg.config.seg = {};
+        cfg.config.seg._type = t || undefined;
+        // Reset columns when type changes (for table blocks)
+        if (cfg.type === 'table') cfg.config.columns = [];
+        renderSidebar();
+        renderMain();
+      };
+    });
+  }
+
+  // ── Render main panel ──
+  function renderMain() {
+    main.innerHTML = '';
+
+    if (cfg.type === 'text') {
+      // Simple text editor - no tabs needed
+      const edEl = BLOCK_TYPES.text.editor(cfg.config, [], allTypes, c => { cfg.config = c; });
+      main.appendChild(edEl);
+      return;
+    }
+
+    // Tabs: Config | Filters | Preview
+    const tabs = document.createElement('div');
+    tabs.className = 'rec-tabs';
+    tabs.innerHTML = `
+      <button class="rec-tab ${activeTab === 'config' ? 'active' : ''}" data-tab="config">Configure</button>
+      <button class="rec-tab ${activeTab === 'filters' ? 'active' : ''}" data-tab="filters">Filters${cfg.config.filters?.length ? ' (' + cfg.config.filters.length + ')' : ''}</button>
+      <button class="rec-tab ${activeTab === 'preview' ? 'active' : ''}" data-tab="preview">Preview</button>`;
+    tabs.querySelectorAll('.rec-tab').forEach(t => {
+      t.onclick = () => { activeTab = t.dataset.tab; renderMain(); };
+    });
+    main.appendChild(tabs);
+
+    const panel = document.createElement('div');
+    panel.className = 'rec-tab-panel active';
+
+    if (activeTab === 'config') {
+      renderConfigTab(panel);
+    } else if (activeTab === 'filters') {
+      renderFiltersTab(panel);
+    } else if (activeTab === 'preview') {
+      renderPreviewTab(panel);
+    }
+    main.appendChild(panel);
+  }
+
+  // ── Config tab ──
+  function renderConfigTab(panel) {
+    const fields = ifaceFieldsForType(cfg.config?.seg?._type);
+    const reg = BLOCK_TYPES[cfg.type];
+    if (!reg) return;
+
+    // Build a custom editor depending on block type
+    if (cfg.type === 'metric') {
+      panel.innerHTML = `
+        <div class="iface-field"><div class="iface-field-label">TITLE</div>
+          <input class="iface-input" value="${escapeHtml(cfg.config.title || '')}" data-key="title"></div>
+        <div style="display:flex;gap:6px;">
+          <div class="iface-field" style="flex:1;"><div class="iface-field-label">FORMULA</div>
+            <select class="iface-select" data-key="formula">
+              <option value="COUNT" ${cfg.config.formula === 'COUNT' ? 'selected' : ''}>COUNT</option>
+              <option value="SUM" ${cfg.config.formula === 'SUM' ? 'selected' : ''}>SUM</option>
+            </select></div>
+          <div class="iface-field" style="flex:1;"><div class="iface-field-label">SUM FIELD</div>
+            <select class="iface-select" data-key="field">
+              <option value="">Pick\u2026</option>
+              ${fields.map(f => `<option value="${f}" ${cfg.config.field === f ? 'selected' : ''}>${f}</option>`).join('')}
+            </select></div>
+          <div class="iface-field"><div class="iface-field-label">COLOR</div>
+            <input type="color" value="${cfg.config.color || '#4ade80'}" data-key="color" style="width:36px;height:30px;border:1px solid var(--border);border-radius:4px;background:var(--bg);cursor:pointer;"></div>
+        </div>
+        <div class="iface-field"><div class="iface-field-label">PREFIX</div>
+          <input class="iface-input" value="${escapeHtml(cfg.config.prefix || '')}" data-key="prefix" placeholder="e.g. $"></div>`;
+      panel.querySelectorAll('[data-key]').forEach(el => {
+        const handler = () => { cfg.config[el.dataset.key] = el.value; };
+        el.addEventListener('input', handler);
+        el.addEventListener('change', handler);
+      });
+
+    } else if (cfg.type === 'table') {
+      panel.innerHTML = `
+        <div class="iface-field"><div class="iface-field-label">TITLE</div>
+          <input class="iface-input" value="${escapeHtml(cfg.config.title || '')}" data-key="title"></div>
+        <div class="iface-field"><div class="iface-field-label">COLUMNS</div>
+          <div class="rec-field-chips" id="rec-col-chips"></div></div>
+        <div class="iface-field"><div class="iface-field-label">MAX ROWS (0 = all)</div>
+          <input class="iface-input" type="number" min="0" value="${cfg.config.limit || 0}" data-key="limit" style="width:80px;"></div>`;
+      panel.querySelector('[data-key="title"]').addEventListener('input', e => { cfg.config.title = e.target.value; });
+      panel.querySelector('[data-key="limit"]').addEventListener('input', e => { cfg.config.limit = parseInt(e.target.value) || 0; });
+      // Field chips
+      const chipsEl = panel.querySelector('#rec-col-chips');
+      fields.forEach(f => {
+        const chip = document.createElement('button');
+        chip.className = 'rec-field-chip' + ((cfg.config.columns || []).includes(f) ? ' on' : '');
+        chip.textContent = f;
+        chip.onclick = () => {
+          const cols = cfg.config.columns || [];
+          cfg.config.columns = cols.includes(f) ? cols.filter(x => x !== f) : [...cols, f];
+          chip.classList.toggle('on');
+        };
+        chipsEl.appendChild(chip);
+      });
+
+    } else if (cfg.type === 'list') {
+      panel.innerHTML = `
+        <div class="iface-field"><div class="iface-field-label">TITLE</div>
+          <input class="iface-input" value="${escapeHtml(cfg.config.title || '')}" data-key="title"></div>
+        <div style="display:flex;gap:6px;">
+          <div class="iface-field" style="flex:1;"><div class="iface-field-label">PRIMARY FIELD</div>
+            <select class="iface-select" data-key="primary">
+              ${fields.map(f => `<option value="${f}" ${cfg.config.primary === f ? 'selected' : ''}>${f}</option>`).join('')}
+            </select></div>
+          <div class="iface-field" style="flex:1;"><div class="iface-field-label">SECONDARY FIELD</div>
+            <select class="iface-select" data-key="secondary">
+              <option value="">None</option>
+              ${fields.map(f => `<option value="${f}" ${cfg.config.secondary === f ? 'selected' : ''}>${f}</option>`).join('')}
+            </select></div>
+        </div>
+        <div class="iface-field"><div class="iface-field-label">MAX ITEMS (0 = all)</div>
+          <input class="iface-input" type="number" min="0" value="${cfg.config.limit || 0}" data-key="limit" style="width:80px;"></div>`;
+      panel.querySelectorAll('[data-key]').forEach(el => {
+        const handler = () => { cfg.config[el.dataset.key] = el.value; };
+        el.addEventListener('input', handler);
+        el.addEventListener('change', handler);
+      });
+    }
+
+    // Sort controls (shared by all data block types)
+    const sortSection = document.createElement('div');
+    sortSection.style.cssText = 'margin-top:12px;';
+    sortSection.innerHTML = `
+      <div class="iface-field-label">SORT BY</div>
+      <div class="rec-sort-row">
+        <select class="iface-select" id="rec-sort-field" style="flex:1;">
+          <option value="">None</option>
+          ${fields.map(f => `<option value="${f}" ${cfg.config.sort?.field === f ? 'selected' : ''}>${f}</option>`).join('')}
+        </select>
+        <button class="rec-sort-dir" id="rec-sort-dir">${cfg.config.sort?.dir === 'desc' ? '\u2193 DESC' : '\u2191 ASC'}</button>
+      </div>`;
+    sortSection.querySelector('#rec-sort-field').addEventListener('change', e => {
+      if (!cfg.config.sort) cfg.config.sort = {};
+      cfg.config.sort.field = e.target.value || undefined;
+    });
+    sortSection.querySelector('#rec-sort-dir').addEventListener('click', e => {
+      if (!cfg.config.sort) cfg.config.sort = {};
+      cfg.config.sort.dir = cfg.config.sort.dir === 'desc' ? 'asc' : 'desc';
+      e.target.textContent = cfg.config.sort.dir === 'desc' ? '\u2193 DESC' : '\u2191 ASC';
+    });
+    panel.appendChild(sortSection);
+  }
+
+  // ── Filters tab ──
+  function renderFiltersTab(panel) {
+    const fields = ifaceFieldsForType(cfg.config?.seg?._type);
+    if (!cfg.config.filters) cfg.config.filters = [];
+
+    const container = document.createElement('div');
+
+    // Existing filters
+    cfg.config.filters.forEach((f, idx) => {
+      const row = document.createElement('div');
+      row.className = 'rec-filter-row';
+      row.innerHTML = `
+        <select data-role="field">
+          <option value="">Field\u2026</option>
+          ${fields.map(fld => `<option value="${fld}" ${f.field === fld ? 'selected' : ''}>${fld}</option>`).join('')}
+        </select>
+        <select data-role="op">
+          ${FILTER_OPS.map(o => `<option value="${o.value}" ${f.op === o.value ? 'selected' : ''}>${o.label}</option>`).join('')}
+        </select>
+        <input data-role="value" value="${escapeHtml(f.value || '')}" placeholder="value\u2026"
+          style="${NO_VALUE_OPS.includes(f.op) ? 'display:none;' : ''}">
+        <button class="rec-filter-remove" data-idx="${idx}">\u00d7</button>`;
+      row.querySelector('[data-role="field"]').onchange = e => { cfg.config.filters[idx].field = e.target.value; };
+      row.querySelector('[data-role="op"]').onchange = e => {
+        cfg.config.filters[idx].op = e.target.value;
+        const inp = row.querySelector('[data-role="value"]');
+        inp.style.display = NO_VALUE_OPS.includes(e.target.value) ? 'none' : '';
+      };
+      row.querySelector('[data-role="value"]').oninput = e => { cfg.config.filters[idx].value = e.target.value; };
+      row.querySelector('.rec-filter-remove').onclick = () => {
+        cfg.config.filters.splice(idx, 1);
+        renderFiltersTab(panel);
+      };
+      container.appendChild(row);
+    });
+
+    // Add filter button
+    const addBtn = document.createElement('button');
+    addBtn.className = 'rec-add-filter';
+    addBtn.textContent = '+ Add filter';
+    addBtn.onclick = () => {
+      cfg.config.filters.push({ field: '', op: 'eq', value: '' });
+      renderFiltersTab(panel);
+    };
+    container.appendChild(addBtn);
+
+    // Description
+    if (!cfg.config.filters.length) {
+      const hint = document.createElement('div');
+      hint.style.cssText = 'margin-top:12px;font-size:11px;color:var(--text-faint);font-family:"JetBrains Mono",monospace;';
+      hint.textContent = 'No filters applied. Add filters to narrow which records appear in this block.';
+      container.appendChild(hint);
+    }
+
+    panel.innerHTML = '';
+    panel.appendChild(container);
+  }
+
+  // ── Preview tab ──
+  function renderPreviewTab(panel) {
+    const items = ifaceQueryData(cfg.config?.seg || {}, cfg.config.filters, cfg.config.sort, cfg.config.limit);
+    const fields = ifaceFieldsForType(cfg.config?.seg?._type);
+    const displayFields = fields.slice(0, 5);
+
+    let html = `<div class="rec-preview">
+      <div class="rec-preview-header">
+        <span class="rec-preview-title">Matching Records</span>
+        <span class="rec-preview-count">${items.length} record${items.length !== 1 ? 's' : ''}</span>
+      </div>
+      <div class="rec-preview-rows">`;
+
+    if (items.length === 0) {
+      html += '<div class="rec-preview-empty">No records match the current selection and filters.</div>';
+    } else {
+      items.slice(0, 25).forEach(item => {
+        const target = item.target.split('.').pop() || item.target;
+        html += `<div class="rec-preview-row">
+          <span class="rec-preview-target" title="${escapeHtml(item.target)}">${escapeHtml(target)}</span>
+          <span class="rec-preview-fields">`;
+        displayFields.forEach(f => {
+          const v = item.value?.[f];
+          if (v !== undefined && v !== null && v !== '') {
+            html += `<span class="rec-preview-chip" title="${escapeHtml(f)}: ${escapeHtml(String(v))}">${escapeHtml(f)}: ${escapeHtml(String(v).slice(0, 30))}</span>`;
+          }
+        });
+        html += '</span></div>';
+      });
+      if (items.length > 25) {
+        html += `<div class="rec-preview-empty">+ ${items.length - 25} more records</div>`;
+      }
+    }
+    html += '</div></div>';
+
+    // Field summary
+    if (fields.length) {
+      html += `<div style="margin-top:12px;">
+        <div class="iface-field-label">AVAILABLE FIELDS (${fields.length})</div>
+        <div class="rec-field-chips">`;
+      fields.forEach(f => {
+        html += `<span class="rec-field-chip on" style="cursor:default;">${escapeHtml(f)}</span>`;
+      });
+      html += '</div></div>';
+    }
+
+    panel.innerHTML = html;
+  }
+
+  // ── Initial render ──
+  renderTypeButtons();
+  renderSidebar();
+  renderMain();
+
+  // ── Footer handlers ──
+  footer.querySelector('#iface-delete-block').onclick = () => { ifaceRemoveBlock(cfg.id); overlay.remove(); };
+  footer.querySelector('#iface-cancel-block').onclick = () => overlay.remove();
+  footer.querySelector('#iface-save-block').onclick = () => { ifaceSaveBlock(cfg); overlay.remove(); };
+
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+
+  // ESC to close
+  const escHandler = e => { if (e.key === 'Escape') { overlay.remove(); document.removeEventListener('keydown', escHandler); } };
+  document.addEventListener('keydown', escHandler);
+}
+
+// ── URL Sharing ──────────────────────────────────────────────────
+
+function ifaceShareView() {
+  if (!ifaceCurrentView) return;
+  const state = foldState(replayIndex);
+  const vs = state[ifaceCurrentView];
+  if (!vs) return;
+  const payload = { name: vs.value.name, sections: vs.value.sections };
+  const encoded = btoa(unescape(encodeURIComponent(JSON.stringify(payload))));
+  const url = window.location.origin + window.location.pathname + '#v=' + encoded;
+  navigator.clipboard.writeText(url).then(() => {
+    const btn = document.getElementById('ifaceShareBtn');
+    btn.textContent = 'copied!';
+    setTimeout(() => { btn.textContent = 'share'; }, 1500);
+  });
+}
+
+function ifaceLoadFromHash() {
+  const hash = window.location.hash;
+  if (!hash.startsWith('#v=')) return false;
+  try {
+    const json = decodeURIComponent(escape(atob(hash.slice(3))));
+    const payload = JSON.parse(json);
+    // Render as temporary read-only view
+    ifaceCurrentView = null;
+    ifaceEditMode = false;
+    switchTab('interface');
+    const pageEl = document.getElementById('ifacePage');
+    const emptyEl = document.getElementById('ifaceEmpty');
+    const nameEl = document.getElementById('ifaceViewName');
+    emptyEl.style.display = 'none';
+    nameEl.textContent = (payload.name || 'Shared View') + ' (shared)';
+    document.getElementById('ifaceEditBtn').style.display = 'none';
+    document.getElementById('ifaceShareBtn').style.display = 'none';
+    document.getElementById('ifaceHistoryBtn').style.display = 'none';
+    ifaceRenderSections(pageEl, payload.sections || []);
+
+    // Show "save to my views" button
+    const toolbar = document.getElementById('ifaceToolbar');
+    let saveBtn = document.getElementById('ifaceSaveSharedBtn');
+    if (!saveBtn) {
+      saveBtn = document.createElement('button');
+      saveBtn.id = 'ifaceSaveSharedBtn';
+      saveBtn.className = 'iface-btn iface-btn-primary';
+      saveBtn.textContent = 'save to my views';
+      saveBtn.onclick = async () => {
+        const id = ifaceNextId('v');
+        const target = 'views.' + id;
+        await appendEvent({
+          op: 'INS', target,
+          operand: { _type: 'view', name: payload.name || 'Imported View', hidden: false, sections: payload.sections },
+          agent: matrixUserId || 'local'
+        });
+        LOG = await loadAllEvents();
+        replayIndex = Math.max(0, LOG.length - 1);
+        window.location.hash = '';
+        ifaceCurrentView = target;
+        renderInterface();
+        saveBtn.remove();
+      };
+      toolbar.querySelector('div:last-child').appendChild(saveBtn);
+    }
+    return true;
+  } catch (e) {
+    console.error('Failed to decode shared view:', e);
+    return false;
+  }
+}
+
+// ── History ──────────────────────────────────────────────────────
+
+function ifaceToggleHistory() {
+  const el = document.getElementById('ifaceHistory');
+  const isOpen = el.style.display !== 'none';
+  el.style.display = isOpen ? 'none' : '';
+  if (!isOpen) ifaceRenderHistory();
+}
+
+function ifaceRenderHistory() {
+  if (!ifaceCurrentView) return;
+  const list = document.getElementById('ifaceHistoryList');
+  const events = LOG.filter(e => e.target === ifaceCurrentView).reverse();
+  list.innerHTML = events.map(e =>
+    `<div class="iface-history-item" onclick="ifaceRevertTo(${e.seq})">
+      <span><span class="op-badge op-${e.op}" style="font-size:9px;padding:1px 4px;">${e.op}</span> ${e.op === 'INS' ? 'created' : 'updated'}</span>
+      <span class="iface-history-ts">${formatTs(e.ts)}</span>
+    </div>`
+  ).join('');
+  if (!events.length) list.innerHTML = '<div class="iface-no-data">No history</div>';
+}
+
+async function ifaceRevertTo(seq) {
+  // Replay fold up to the target seq and extract view state
+  const state = foldState(LOG.findIndex(e => e.seq >= seq));
+  const vs = state[ifaceCurrentView];
+  if (!vs) return;
+  // Emit a DEF that restores to that state
+  await ifaceSaveView(ifaceCurrentView, { sections: vs.value.sections });
+  renderInterface();
+}
+
+// ── Rename View ──────────────────────────────────────────────────
+
+document.addEventListener('dblclick', async e => {
+  const nameEl = document.getElementById('ifaceViewName');
+  if (e.target !== nameEl || !ifaceCurrentView) return;
+  const input = document.createElement('input');
+  input.className = 'iface-input';
+  input.value = nameEl.textContent;
+  input.style.cssText = 'font-size:13px;font-weight:500;width:200px;';
+  nameEl.replaceWith(input);
+  input.focus();
+  input.select();
+  const finish = async () => {
+    const newName = input.value.trim() || 'Untitled';
+    await ifaceSaveView(ifaceCurrentView, { name: newName });
+    renderInterface();
+  };
+  input.onblur = finish;
+  input.onkeydown = e => { if (e.key === 'Enter') finish(); if (e.key === 'Escape') renderInterface(); };
+});
+
+// ── Init: Check URL hash on load ─────────────────────────────────
+window.addEventListener('hashchange', () => ifaceLoadFromHash());
+// Deferred check after DB is ready
+setTimeout(() => { if (window.location.hash.startsWith('#v=')) ifaceLoadFromHash(); }, 500);
+
 </script>
 </body>
 </html>
