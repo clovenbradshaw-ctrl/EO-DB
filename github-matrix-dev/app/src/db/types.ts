@@ -97,6 +97,12 @@ export interface HorizonResponse {
   governance?: GovernanceEntry[];
   trajectory?: TrajectoryEntry[];
   signals?: SignalEntry[];
+  // ─── Pattern Surfacing (cheap, auto-computed) ───
+  hashCohort?: string[];
+  trajectoryFingerprint?: TrajectoryFingerprint;
+  cadence?: CadenceInfo;
+  graphMetrics?: GraphMetrics;
+  recCycle?: RecCycleInfo;
 }
 
 export interface AncestryEntry {
@@ -137,4 +143,45 @@ export interface SignalEntry {
   predicate?: Record<string, any>;
   n: number;
   computed_at: string;
+}
+
+// ─── Pattern Surfacing ────────────────────────────────────────────────────
+
+/** Trajectory fingerprint — the operator sequence shape of a target's history. */
+export interface TrajectoryFingerprint {
+  /** The operator sequence as a dot-joined string, e.g. "INS.DEF.DEF.CON.DEF" */
+  sequence: string;
+  /** Hash of the sequence string for indexing */
+  fingerprint: string;
+  /** Count of each operator type (7-dimensional vector) */
+  opCounts: Record<LoggableOperator, number>;
+}
+
+/** Temporal cadence classification for a target's event rhythm. */
+export type CadenceClass = 'burst' | 'periodic' | 'dormant' | 'steady' | 'sparse';
+
+export interface CadenceInfo {
+  classification: CadenceClass;
+  lastEventTs: string;
+  eventCount: number;
+  description: string;
+}
+
+/** Graph role classification for a node in the CON graph. */
+export type GraphRole = 'hub' | 'bridge' | 'leaf' | 'isolated';
+
+export interface GraphMetrics {
+  role: GraphRole;
+  degree: number;
+  inDegree: number;
+  outDegree: number;
+  mutualCount: number;
+}
+
+/** REC cycle visualization data for UX surfacing. */
+export interface RecCycleInfo {
+  participants: string[];
+  triggeringSeq?: number;
+  result: RecResult;
+  edges: Array<{ source: string; dest: string }>;
 }

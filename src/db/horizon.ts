@@ -1,13 +1,17 @@
 import { EoDb, decode } from './level.js';
-import { getState, getStateByPrefix } from './state.js';
+import { getState, getStateByPrefix, getHashCohort } from './state.js';
 import { getEdgesFrom, getEdgesTo } from './graph.js';
+import { getDepEdgesFrom, getDepEdgesTo } from './dep-graph.js';
 import { resolveAlias } from './helpers.js';
 import { readLogForTarget } from './log.js';
 import type {
   EoState, EvaRegistration, HorizonResponse, GroundEntry, SignalEntry,
   NearbyEntry, GovernanceEntry, LoggableOperator, AncestryEntry, TrajectoryEntry,
+  TrajectoryFingerprint, CadenceInfo, CadenceClass, GraphMetrics, GraphRole,
+  RecResult, RecCycleInfo,
 } from './types.js';
 import { seedHash, chainHash } from './hash.js';
+import { createHash } from 'crypto';
 import { isEncryptedOperand } from './crypto-types.js';
 import type { LocalKeyring } from './crypto-types.js';
 import { decryptOperand, getKeyById } from '../crypto/segment-keys.js';
@@ -68,7 +72,35 @@ export async function horizonGet(
   // Layer 6: Signals (expensive, on-demand only)
   const signals = opts?.signals ? await detectSignals(db, resolved) : undefined;
 
-  return { target: resolved, figure, ancestry, grounds, nearby, governance, trajectory, signals };
+  // ─── Pattern Surfacing (cheap, auto-computed alongside existing layers) ───
+
+  // Hash cohort: structural twins sharing the same transformation hash
+  const hashCohort = figure?.hash
+    ? (await getHashCohort(db, figure.hash)).filter(t => t !== resolved)
+    : undefined;
+
+  // Trajectory fingerprint + cadence (derived from trajectory data, nearly free)
+  const trajectoryFingerprint = trajectory && trajectory.length > 0
+    ? computeTrajectoryFingerprint(trajectory)
+    : undefined;
+  const cadence = trajectory && trajectory.length > 0
+    ? await computeCadence(db, resolved)
+    : undefined;
+
+  // Graph metrics: CON graph role and degree
+  const graphMetrics = await computeGraphMetrics(db, resolved);
+
+  // REC cycle info: if this target participates in a dependency cycle
+  const recCycle = await getRecCycleInfo(db, resolved);
+
+  return {
+    target: resolved, figure, ancestry, grounds, nearby, governance, trajectory, signals,
+    hashCohort: hashCohort && hashCohort.length > 0 ? hashCohort : undefined,
+    trajectoryFingerprint,
+    cadence,
+    graphMetrics,
+    recCycle,
+  };
 }
 
 async function horizonGetByPrefix(db: EoDb, prefix: string, opts?: HorizonOpts): Promise<HorizonResponse[]> {
@@ -463,6 +495,191 @@ async function detectSignals(db: EoDb, target: string): Promise<SignalEntry[]> {
   });
 
   return signals;
+}
+
+// ─── Pattern Surfacing: Trajectory Fingerprint ───────────────────
+
+const ALL_LOGGABLE_OPS: LoggableOperator[] = ['NUL', 'INS', 'SEG', 'CON', 'SYN', 'DEF', 'EVA', 'REC'];
+
+function computeTrajectoryFingerprint(trajectory: TrajectoryEntry[]): TrajectoryFingerprint {
+  const sequence = trajectory.map(t => t.op).join('.');
+  const fingerprint = createHash('sha256').update(sequence).digest('hex').slice(0, 16);
+
+  const opCounts = {} as Record<LoggableOperator, number>;
+  for (const op of ALL_LOGGABLE_OPS) opCounts[op] = 0;
+  for (const t of trajectory) opCounts[t.op] = (opCounts[t.op] || 0) + 1;
+
+  return { sequence, fingerprint, opCounts };
+}
+
+// ─── Pattern Surfacing: Temporal Cadence ─────────────────────────
+
+async function computeCadence(db: EoDb, target: string): Promise<CadenceInfo> {
+  const events = await readLogForTarget(db, target);
+  if (events.length === 0) {
+    return { classification: 'sparse', lastEventTs: '', eventCount: 0, description: 'No events' };
+  }
+
+  const timestamps = events.map(e => new Date(e.ts).getTime()).sort((a, b) => a - b);
+  const lastTs = events[events.length - 1].ts;
+  const now = Date.now();
+  const daysSinceLast = (now - timestamps[timestamps.length - 1]) / (1000 * 60 * 60 * 24);
+
+  if (events.length < 2) {
+    return { classification: 'sparse', lastEventTs: lastTs, eventCount: 1, description: 'Single event' };
+  }
+
+  // Compute inter-event intervals
+  const intervals: number[] = [];
+  for (let i = 1; i < timestamps.length; i++) {
+    intervals.push(timestamps[i] - timestamps[i - 1]);
+  }
+
+  // Check for burst: >3 events within 1 hour window
+  let maxInHour = 0;
+  for (let i = 0; i < timestamps.length; i++) {
+    let count = 1;
+    for (let j = i + 1; j < timestamps.length && timestamps[j] - timestamps[i] <= 3600000; j++) {
+      count++;
+    }
+    maxInHour = Math.max(maxInHour, count);
+  }
+
+  let classification: CadenceClass;
+  let description: string;
+
+  if (daysSinceLast > 30) {
+    classification = 'dormant';
+    description = `Dormant — no activity for ${Math.round(daysSinceLast)} days`;
+  } else if (maxInHour > 3) {
+    classification = 'burst';
+    description = `Burst activity — ${maxInHour} events within one hour`;
+  } else if (intervals.length >= 3) {
+    // Check for periodicity: intervals within 20% tolerance of median
+    const sorted = [...intervals].sort((a, b) => a - b);
+    const median = sorted[Math.floor(sorted.length / 2)];
+    const periodic = intervals.filter(i => Math.abs(i - median) / median < 0.2).length;
+    if (periodic / intervals.length > 0.6) {
+      classification = 'periodic';
+      const periodHours = Math.round(median / 3600000);
+      description = `Periodic — roughly every ${periodHours > 24 ? Math.round(periodHours / 24) + ' days' : periodHours + ' hours'}`;
+    } else {
+      classification = 'steady';
+      description = `Steady — ${events.length} events over ${Math.round((timestamps[timestamps.length - 1] - timestamps[0]) / 86400000)} days`;
+    }
+  } else {
+    classification = 'sparse';
+    description = `Sparse — ${events.length} events total`;
+  }
+
+  return { classification, lastEventTs: lastTs, eventCount: events.length, description };
+}
+
+// ─── Pattern Surfacing: Graph Metrics ────────────────────────────
+
+async function computeGraphMetrics(db: EoDb, target: string): Promise<GraphMetrics | undefined> {
+  const outEdges = await getEdgesFrom(db, target);
+  const inEdges = await getEdgesTo(db, target);
+
+  const outDegree = outEdges.length;
+  const inDegree = inEdges.length;
+  const degree = outDegree + inDegree;
+
+  if (degree === 0) return undefined;
+
+  // Count mutual connections (A→B and B→A)
+  const outTargets = new Set(outEdges.map(e => e.dest));
+  const inSources = new Set(inEdges.map(e => e.source));
+  let mutualCount = 0;
+  for (const t of outTargets) {
+    if (inSources.has(t)) mutualCount++;
+  }
+
+  // Classify role
+  let role: GraphRole;
+  if (degree === 0) {
+    role = 'isolated';
+  } else if (degree === 1) {
+    role = 'leaf';
+  } else if (degree >= 6) {
+    role = 'hub';
+  } else {
+    // Check if bridge: connected to nodes in different collections
+    const connectedCollections = new Set<string>();
+    for (const e of outEdges) {
+      const parts = e.dest.split('.');
+      if (parts.length >= 2) connectedCollections.add(parts.slice(0, 2).join('.'));
+    }
+    for (const e of inEdges) {
+      const parts = e.source.split('.');
+      if (parts.length >= 2) connectedCollections.add(parts.slice(0, 2).join('.'));
+    }
+    role = connectedCollections.size >= 2 ? 'bridge' : 'leaf';
+  }
+
+  return { role, degree, inDegree, outDegree, mutualCount };
+}
+
+// ─── Pattern Surfacing: REC Cycle Info ───────────────────────────
+
+async function getRecCycleInfo(db: EoDb, target: string): Promise<RecCycleInfo | undefined> {
+  // Check if this target has an EVA registration (formula)
+  let registration: EvaRegistration | null = null;
+  try {
+    const buf = await db.get(`eva:${target}`);
+    registration = decode(buf) as EvaRegistration;
+  } catch (e: any) {
+    if (e.code !== 'LEVEL_NOT_FOUND') throw e;
+  }
+  if (!registration) return undefined;
+
+  // Check forward and reverse dep edges to find cycle
+  const fwd = await getDepEdgesFrom(db, target);
+  const rev = await getDepEdgesTo(db, target);
+  if (fwd.length === 0 && rev.length === 0) return undefined;
+
+  // Quick cycle detection: follow forward deps from this target
+  // and check if any path leads back to this target
+  const visited = new Set<string>();
+  const queue = fwd.map(e => e.dest);
+  const edges: Array<{ source: string; dest: string }> = fwd.map(e => ({ source: e.source, dest: e.dest }));
+
+  while (queue.length > 0) {
+    const current = queue.pop()!;
+    if (current === target) {
+      // Found a cycle — collect all participants
+      const participants = [target, ...visited];
+
+      // Look for the most recent REC event on this target
+      const events = await readLogForTarget(db, target);
+      const recEvent = [...events].reverse().find(e => e.op === 'REC');
+      const result: RecResult = recEvent?.operand
+        ? {
+          converged: recEvent.operand.converged ?? true,
+          iterations: recEvent.operand.iterations ?? 0,
+          cycle_length: recEvent.operand.cycle_length,
+          states: recEvent.operand.states,
+          stable_state: recEvent.operand.stable_state,
+        }
+        : { converged: true, iterations: 0 };
+
+      return {
+        participants,
+        triggeringSeq: recEvent?.triggered_by,
+        result,
+        edges,
+      };
+    }
+    if (visited.has(current)) continue;
+    visited.add(current);
+    const nextEdges = await getDepEdgesFrom(db, current);
+    for (const e of nextEdges) {
+      edges.push({ source: e.source, dest: e.dest });
+      queue.push(e.dest);
+    }
+  }
+
+  return undefined;
 }
 
 // ─── Decryption Wrapper ───────────────────────────────────────────

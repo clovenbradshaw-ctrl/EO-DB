@@ -122,35 +122,81 @@ export function GraphView() {
             );
           })}
 
-          {/* Nodes */}
+          {/* Nodes — sized by degree, colored by role */}
           {nodes.map((n, i) => {
             const p = positions[n];
             const c = NODE_COLORS[i % NODE_COLORS.length];
             const label = n.split('.').pop() || n;
             const isSelected = n === highlighted;
             const opacity = highlighted ? (isSelected ? 1 : 0.2) : 1;
-            const r = isSelected ? 32 : 28;
+
+            // Compute degree for sizing
+            const degree = edges.filter(e => e.source === n || e.dest === n).length;
+            const baseR = 28;
+            const r = isSelected ? baseR + 4 + degree : baseR + Math.min(degree * 2, 12);
+
+            // Detect role for coloring
+            const inDeg = edges.filter(e => e.dest === n).length;
+            const outDeg = edges.filter(e => e.source === n).length;
+            const connCollections = new Set<string>();
+            edges.filter(e => e.source === n).forEach(e => {
+              const ep = e.dest.split('.');
+              if (ep.length >= 2) connCollections.add(ep.slice(0, 2).join('.'));
+            });
+            edges.filter(e => e.dest === n).forEach(e => {
+              const ep = e.source.split('.');
+              if (ep.length >= 2) connCollections.add(ep.slice(0, 2).join('.'));
+            });
+            const isBridge = connCollections.size >= 2;
+            const isHub = degree >= 6;
+            const roleColor = isHub ? '#a855f7' : isBridge ? '#eab308' : c;
+
             return (
               <g key={n} onClick={() => toggleHighlight(n)} style={{ cursor: 'pointer' }}>
                 <circle
                   cx={p.x} cy={p.y} r={r}
-                  fill={`${c}15`}
-                  stroke={c}
-                  strokeWidth={isSelected ? 2.5 : 1.5}
+                  fill={`${roleColor}15`}
+                  stroke={roleColor}
+                  strokeWidth={isSelected ? 2.5 : isHub ? 2 : 1.5}
                   strokeOpacity={opacity}
                   fillOpacity={opacity}
                 />
+                {/* Role label for hubs and bridges */}
+                {(isHub || isBridge) && (
+                  <text
+                    x={p.x} y={p.y - r - 4}
+                    textAnchor="middle"
+                    fill={roleColor}
+                    fontFamily="JetBrains Mono, monospace"
+                    fontSize={7}
+                    fontWeight="600"
+                    fillOpacity={opacity * 0.7}
+                  >
+                    {isHub ? 'HUB' : 'BRIDGE'}
+                  </text>
+                )}
                 <text
                   x={p.x} y={p.y + 1}
                   textAnchor="middle"
                   dominantBaseline="middle"
-                  fill={c}
+                  fill={roleColor}
                   fontFamily="JetBrains Mono, monospace"
                   fontSize={isSelected ? 10 : 9}
                   fontWeight="600"
                   fillOpacity={opacity}
                 >
                   {label}
+                </text>
+                {/* Degree count */}
+                <text
+                  x={p.x} y={p.y + 12}
+                  textAnchor="middle"
+                  fill={roleColor}
+                  fontFamily="JetBrains Mono, monospace"
+                  fontSize={7}
+                  fillOpacity={opacity * 0.5}
+                >
+                  {degree}
                 </text>
               </g>
             );

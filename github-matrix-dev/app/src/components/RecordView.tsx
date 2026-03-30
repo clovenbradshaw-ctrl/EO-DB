@@ -12,6 +12,10 @@ import { Grounds } from './Grounds';
 import { Nearby } from './Nearby';
 import { Governance } from './Governance';
 import { Signals } from './Signals';
+import { HashCohort } from './HashCohort';
+import { RecCycleMap } from './RecCycleMap';
+import { CadenceBadge } from './CadenceBadge';
+import { GraphRoleBadge } from './GraphRoleBadge';
 import { useTheme, type Theme } from '../theme';
 
 interface RecordViewProps {
@@ -75,6 +79,38 @@ export function RecordView({ target, onNavigate }: RecordViewProps) {
           <span style={s.metaItem}>
             <span style={s.metaLabel}>Agent:</span> {data.figure.last_agent}
           </span>
+          {data.graphMetrics && <GraphRoleBadge metrics={data.graphMetrics} />}
+          {data.cadence && <CadenceBadge cadence={data.cadence} />}
+          {data.hashCohort && data.hashCohort.length > 0 && (
+            <span style={s.metaItem}>
+              <span style={{
+                fontSize: 10,
+                fontFamily: "'JetBrains Mono', monospace",
+                background: theme.purpleBg,
+                color: theme.purple,
+                border: `1px solid ${theme.purpleBorder}`,
+                borderRadius: 10,
+                padding: '2px 8px',
+              }}>
+                {data.hashCohort.length} twin{data.hashCohort.length !== 1 ? 's' : ''}
+              </span>
+            </span>
+          )}
+          {data.trajectoryFingerprint && (
+            <span style={s.metaItem}>
+              <span style={{
+                fontSize: 10,
+                fontFamily: "'JetBrains Mono', monospace",
+                background: theme.accentBg,
+                color: theme.accent,
+                border: `1px solid ${theme.accentBorder}`,
+                borderRadius: 10,
+                padding: '2px 8px',
+              }}>
+                {data.trajectoryFingerprint.fingerprint.slice(0, 8)}
+              </span>
+            </span>
+          )}
         </div>
       </div>
 
@@ -86,7 +122,7 @@ export function RecordView({ target, onNavigate }: RecordViewProps) {
       {/* Layer 5: Trajectory */}
       {data.trajectory && data.trajectory.length > 0 && (
         <Section title="Trajectory" subtitle="where this record has been" color={theme.textSecondary}>
-          <Trajectory entries={data.trajectory} />
+          <Trajectory entries={data.trajectory} fingerprint={data.trajectoryFingerprint} cadence={data.cadence} />
         </Section>
       )}
 
@@ -115,6 +151,20 @@ export function RecordView({ target, onNavigate }: RecordViewProps) {
       <Section title="Patterns" subtitle="what the database sees across similar records" color={theme.warning}>
         <Signals entries={data.signals || []} />
       </Section>
+
+      {/* Hash Cohort: Structural Twins */}
+      {data.hashCohort && data.hashCohort.length > 0 && (
+        <Section title="Structural Twins" subtitle="identical transformation journeys" color={theme.purple}>
+          <HashCohort targets={data.hashCohort} currentTarget={target} onNavigate={onNavigate} />
+        </Section>
+      )}
+
+      {/* REC Cycle: Dependency Cycle Visualization */}
+      {data.recCycle && (
+        <Section title="Dependency Cycle" subtitle="recursive formula resolution" color={theme.danger}>
+          <RecCycleMap cycle={data.recCycle} onNavigate={onNavigate} />
+        </Section>
+      )}
     </div>
   );
 }

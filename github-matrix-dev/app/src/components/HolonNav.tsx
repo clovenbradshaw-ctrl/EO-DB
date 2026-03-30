@@ -20,6 +20,7 @@ interface TreeNode {
   conCount: number;      // children whose last_op is CON
   segCount: number;      // children whose last_op is SEG
   recCount: number;      // children whose last_op is REC
+  derivedCount: number;  // children at INS level 2+ (system-discovered)
   segments?: Record<string, FilterDefinition>;
 }
 
@@ -66,10 +67,11 @@ function buildTree(states: EoState[]): TreeNode[] {
 
     const segments = entry.state?.value?._segments as Record<string, FilterDefinition> | undefined;
 
-    // Count children by operator type
+    // Count children by operator type and derived status
     let conCount = 0;
     let segCount = 0;
     let recCount = 0;
+    let derivedCount = 0;
     for (const cp of entry.childPaths) {
       const childEntry = pathSet.get(cp);
       if (childEntry?.state) {
@@ -77,6 +79,7 @@ function buildTree(states: EoState[]): TreeNode[] {
         if (op === 'CON') conCount++;
         else if (op === 'SEG') segCount++;
         else if (op === 'REC') recCount++;
+        if ((childEntry.state.level ?? 1) >= 2) derivedCount++;
       }
     }
 
@@ -88,6 +91,7 @@ function buildTree(states: EoState[]): TreeNode[] {
       conCount,
       segCount,
       recCount,
+      derivedCount,
       segments,
     };
   }
@@ -178,6 +182,9 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
           )}
           {node.recCount > 0 && (
             <span style={s.countRec}>{node.recCount} REC</span>
+          )}
+          {node.derivedCount > 0 && (
+            <span style={s.countDerived}>{node.derivedCount} L2+</span>
           )}
         </div>
 
@@ -307,6 +314,17 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       padding: '1px 5px',
       borderRadius: 8,
       flexShrink: 0,
+    },
+    countDerived: {
+      fontSize: 9,
+      color: '#0ea5e9',
+      fontFamily: "'JetBrains Mono', monospace",
+      background: 'rgba(14,165,233,0.12)',
+      padding: '1px 5px',
+      borderRadius: 8,
+      flexShrink: 0,
+      borderStyle: 'dashed' as const,
+      border: '1px dashed rgba(14,165,233,0.3)',
     },
     segItem: {
       display: 'flex',
