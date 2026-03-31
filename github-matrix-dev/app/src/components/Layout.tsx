@@ -610,6 +610,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
                   <TableView
                     scope={selectedScope}
                     onSelectRecord={(rec) => navigate({ record: rec })}
+                    onEmptyScope={(parentScope) => navigate({ scope: parentScope, record: null })}
                     activeRecord={selectedRecord}
                     session={{ userId: session.userId }}
                     timeScrubberFilter={timeScrubberFilter}

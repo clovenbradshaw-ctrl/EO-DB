@@ -13,6 +13,7 @@ interface TableViewProps {
   scope: string;
   onSelectRecord: (target: string) => void;
   onViewHistory?: (target: string) => void;
+  onEmptyScope?: (parentScope: string) => void;
   activeRecord?: string | null;
   session: { userId: string };
   timeScrubberFilter?: TimeScrubberFilter;
@@ -105,7 +106,7 @@ function renderCell(value: any, key: string, onNavigate: (t: string) => void, t:
   return <span>{String(value)}</span>;
 }
 
-export function TableView({ scope, onSelectRecord, onViewHistory, activeRecord, session, timeScrubberFilter, permissions }: TableViewProps) {
+export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, activeRecord, session, timeScrubberFilter, permissions }: TableViewProps) {
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
   const getState = useEoStore((s) => s.getState);
   const dispatch = useEoStore((s) => s.dispatch);
@@ -113,6 +114,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, activeRecord, 
   const lastSeq = useEoStore((s) => s.lastSeq);
 
   const [records, setRecords] = useState<EoState[]>([]);
+  const [recordsLoaded, setRecordsLoaded] = useState(false);
   const [fieldNameMap, setFieldNameMap] = useState<Map<string, string>>(new Map());
   const [scopeName, setScopeName] = useState<string | null>(null);
   const [filterText, setFilterText] = useState('');
@@ -155,6 +157,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, activeRecord, 
           return st;
         });
       setRecords(direct);
+      setRecordsLoaded(true);
     });
     // Fetch field metadata: prefer per-field schema entities, fall back to array on table state
     getStateByPrefix(scope + '._schema.').then((schemaStates) => {
@@ -183,9 +186,22 @@ export function TableView({ scope, onSelectRecord, onViewHistory, activeRecord, 
     });
   }, [ready, lastSeq, getStateByPrefix, getState, scope, scopeDepth]);
 
-  // Reset filter when scope changes
+  // When scope has no records, navigate up to parent scope
+  useEffect(() => {
+    if (!recordsLoaded) return;
+    if (records.length === 0 && onEmptyScope) {
+      const parts = scope.split('.');
+      if (parts.length > 1) {
+        const parentScope = parts.slice(0, -1).join('.');
+        onEmptyScope(parentScope);
+      }
+    }
+  }, [records, recordsLoaded, scope, onEmptyScope]);
+
+  // Reset filter and loaded state when scope changes
   useEffect(() => {
     setFilterText('');
+    setRecordsLoaded(false);
   }, [scope]);
 
   // Detect if records use the Airtable-style fields sub-object
