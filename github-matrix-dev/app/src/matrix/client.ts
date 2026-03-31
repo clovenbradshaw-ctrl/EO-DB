@@ -41,8 +41,8 @@ export async function login(homeserver: string, username: string, password: stri
   const baseUrl = normalizeHomeserver(homeserver);
   const client = sdk.createClient({ baseUrl });
 
-  // Reuse the persisted deviceId so the same encryption key is derived
-  // across re-logins, allowing IndexedDB data to survive logout cycles.
+  // Reuse the persisted deviceId if present (only survives within a session;
+  // cleared on sign-out so each login cycle gets a fresh encryption key).
   const persistedDeviceId = localStorage.getItem(DEVICE_ID_KEY);
 
   const loginBody: Record<string, string> = {
@@ -62,7 +62,7 @@ export async function login(homeserver: string, username: string, password: stri
     homeserver: baseUrl,
   };
 
-  // Persist deviceId separately — survives logout so encryption key stays stable
+  // Persist deviceId for the duration of this session
   localStorage.setItem(DEVICE_ID_KEY, session.deviceId);
   localStorage.setItem(SESSION_KEY, JSON.stringify(session));
   return session;
@@ -89,12 +89,14 @@ export function restoreSession(): MatrixSession | null {
 
 /**
  * Clear the session and discard all local auth state.
- * The deviceId is intentionally preserved so the same encryption key
- * can be derived on re-login, keeping IndexedDB data accessible.
+ *
+ * The deviceId is now removed so that a fresh encryption key is derived
+ * on the next login. This ensures no stale content is accessible after
+ * sign-out — the IndexedDB databases are deleted separately.
  */
 export function logout(): void {
   localStorage.removeItem(SESSION_KEY);
-  // NOTE: DEVICE_ID_KEY is NOT removed — it's needed for stable key derivation
+  localStorage.removeItem(DEVICE_ID_KEY);
 }
 
 /**

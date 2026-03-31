@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { logout, createMatrixClient, type MatrixSession } from '../matrix/client';
 import { useEoStore } from '../store/eo-store';
-import { createIdb } from '../db/idb';
+import { createIdb, deleteAllEoDatabases } from '../db/idb';
 import { createStore } from '../db/encrypted-store';
 import { deriveKey } from '../lib/crypto';
 import { SyncManager } from '../matrix/sync-manager';
@@ -335,6 +335,11 @@ export function Layout({ session, onLogout }: LayoutProps) {
 
     teardown();
     logout();
+
+    // Delete all eo-db IndexedDB databases so stale content doesn't
+    // persist across sign-out / account switches.
+    await deleteAllEoDatabases();
+
     onLogout();
   }
 
