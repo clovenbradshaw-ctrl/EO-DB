@@ -37,6 +37,7 @@ import { hasFieldsSubObject, buildFieldNameMap } from './filter-types';
 import { useHashRoute, type View } from '../lib/router';
 import { type AccessRole, powerLevelToRole, legacyAccessToRole } from '../permissions/types';
 import { resolvePermissionsFromSharing } from '../permissions/resolve';
+import { RecycleBin, addDeletedSpace, isSpaceDeleted, removeDeletedSpace, getDeletedSpaces } from './RecycleBin';
 
 function formatSpaceName(segment: string): string {
   // Strip common prefixes, replace underscores with spaces, capitalize
@@ -72,6 +73,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
   });
   const [spaceOpen, setSpaceOpen] = useState(false);
   const [showMembers, setShowMembers] = useState(false);
+  const [showRecycleBin, setShowRecycleBin] = useState(false);
   const [spaces, setSpaces] = useState<EoState[]>([]);
   const [spaceEntries, setSpaceEntries] = useState<SpaceEntry[]>([]);
   const [allStates, setAllStates] = useState<EoState[]>([]);
@@ -89,6 +91,55 @@ export function Layout({ session, onLogout }: LayoutProps) {
     // Clear route state when switching spaces
     navigate({ scope: null, record: null, view: 'horizon', builderViewId: null, customPageId: null });
   }
+  // Soft-delete a space: hide from list, track in recycle bin
+  function handleDeleteSpace(spaceTarget: string) {
+    const entry = mergedEntries.find((e) => e.spaceTarget === spaceTarget);
+    addDeletedSpace({
+      target: spaceTarget,
+      name: entry?.displayName || formatSpaceName(spaceTarget.split('.').pop() || ''),
+      deletedAt: Date.now(),
+      deletedBy: session.userId,
+      memberCount: entry?.memberCount || 0,
+    });
+    if (selectedSpace === spaceTarget) {
+      const remaining = mergedEntries.filter((e) => e.spaceTarget !== spaceTarget && !isSpaceDeleted(e.spaceTarget));
+      if (remaining.length > 0) {
+        selectSpace(remaining[0].spaceTarget);
+      } else {
+        setSelectedSpace(null);
+        localStorage.removeItem('eo-selected-space');
+      }
+    }
+    // Force re-render
+    setSpaces([...spaces]);
+    setSpaceEntries([...spaceEntries]);
+  }
+
+  // Restore a space from the recycle bin
+  function handleRestoreSpace(target: string) {
+    removeDeletedSpace(target);
+    setSpaces([...spaces]);
+    setSpaceEntries([...spaceEntries]);
+    selectSpace(target);
+    setShowRecycleBin(false);
+  }
+
+  // Permanently delete a space's local IndexedDB data
+  async function handlePermanentDelete(target: string) {
+    const cached = spaceCacheRef.current.get(target);
+    if (cached) {
+      cached.store.close();
+      spaceCacheRef.current.delete(target);
+    }
+    const dbName = `eo-db::${target}`;
+    await new Promise<void>((resolve) => {
+      const req = indexedDB.deleteDatabase(dbName);
+      req.onsuccess = () => resolve();
+      req.onerror = () => resolve();
+      req.onblocked = () => resolve();
+    });
+  }
+
   const { theme, toggleTheme } = useTheme();
   const spaceTint = spaceBackgroundTint(selectedSpace, theme.mode);
   const themedBg = spaceTint ? { ...theme, bg: spaceTint.bg, bgCard: spaceTint.bgCard, bgMuted: spaceTint.bgMuted } : theme;
@@ -279,6 +330,10 @@ export function Layout({ session, onLogout }: LayoutProps) {
     });
   }, [spaceEntries, spaces]);
 
+  // Filter out soft-deleted spaces from the browser entries
+  const activeEntries = useMemo(() => mergedEntries.filter((e) => !isSpaceDeleted(e.spaceTarget)), [mergedEntries, spaces, spaceEntries]);
+  const deletedSpaceCount = getDeletedSpaces().length;
+
   // --- Reset stale state when switching spaces ---
   const prevSpaceRef = useRef(selectedSpace);
   useEffect(() => {
@@ -295,6 +350,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
       setScopedRecords([]);
       setScopeFieldNameMap(new Map());
       setShowMembers(false);
+      setShowRecycleBin(false);
       // Reset builder store so old space's views don't persist
       useBuilderStore.getState().reset();
       // Reset sync store so old space's peer/snapshot data doesn't persist
@@ -496,13 +552,14 @@ export function Layout({ session, onLogout }: LayoutProps) {
 
           {spaceOpen && (
             <SpaceBrowser
-              entries={mergedEntries}
-              loading={!matrixReady && mergedEntries.length === 0}
+              entries={activeEntries}
+              loading={!matrixReady && activeEntries.length === 0}
               activeSpace={selectedSpace}
               onSelect={(target) => {
                 selectSpace(target);
                 setSpaceOpen(false);
                 setShowMembers(false);
+                setShowRecycleBin(false);
               }}
               onClose={() => setSpaceOpen(false)}
               onCreate={(name) => {
@@ -518,6 +575,9 @@ export function Layout({ session, onLogout }: LayoutProps) {
                 selectSpace(spaceTarget);
                 setSpaceOpen(false);
               }}
+              onDelete={handleDeleteSpace}
+              onOpenRecycleBin={() => { setShowRecycleBin(true); setSpaceOpen(false); setShowMembers(false); }}
+              deletedCount={deletedSpaceCount}
             />
           )}
 
@@ -666,7 +726,15 @@ export function Layout({ session, onLogout }: LayoutProps) {
             </div>
           )}
 
-          <ErrorBoundary>
+          {showRecycleBin && (
+            <RecycleBin
+              onRestore={handleRestoreSpace}
+              onPermanentDelete={handlePermanentDelete}
+              onBack={() => setShowRecycleBin(false)}
+            />
+          )}
+
+          {!showRecycleBin && <ErrorBoundary>
             {activeView === 'horizon' ? (
               <>
                 {selectedScope ? (
@@ -708,7 +776,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
             ) : activeView === 'settings' ? (
               <SettingsView session={session} />
             ) : null}
-          </ErrorBoundary>
+          </ErrorBoundary>}
         </main>
 
         {selectedRecord && activeView === 'horizon' && (

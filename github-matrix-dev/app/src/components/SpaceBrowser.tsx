@@ -20,6 +20,9 @@ interface SpaceBrowserProps {
   onSelect: (spaceTarget: string) => void;
   onClose: () => void;
   onCreate: (name: string) => void;
+  onDelete?: (spaceTarget: string) => void;
+  onOpenRecycleBin?: () => void;
+  deletedCount?: number;
 }
 
 function relativeTime(ts: number): string {
@@ -44,7 +47,7 @@ function formatDate(ts: number): string {
   });
 }
 
-export function SpaceBrowser({ entries, loading, activeSpace, onSelect, onClose, onCreate }: SpaceBrowserProps) {
+export function SpaceBrowser({ entries, loading, activeSpace, onSelect, onClose, onCreate, onDelete, onOpenRecycleBin, deletedCount = 0 }: SpaceBrowserProps) {
   const { theme } = useTheme();
   const s = makeStyles(theme);
 
@@ -128,6 +131,7 @@ export function SpaceBrowser({ entries, loading, activeSpace, onSelect, onClose,
           <button style={{ ...s.colHeader, width: 70, flexShrink: 0, textAlign: 'right' }} onClick={() => toggleSort('members')}>
             Members{sortArrow('members')}
           </button>
+          {onDelete && <div style={{ width: 36, flexShrink: 0 }} />}
         </div>
 
         {/* Rows */}
@@ -200,6 +204,35 @@ export function SpaceBrowser({ entries, loading, activeSpace, onSelect, onClose,
                   <div style={{ ...s.cell, width: 70, flexShrink: 0, textAlign: 'right', color: theme.textMuted }}>
                     {entry.memberCount}
                   </div>
+                  {onDelete && (
+                    <div
+                      style={{
+                        width: 36,
+                        flexShrink: 0,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                      }}
+                    >
+                      <span
+                        onClick={(e) => { e.stopPropagation(); onDelete(entry.spaceTarget); }}
+                        style={{
+                          fontSize: 11,
+                          color: theme.textMuted,
+                          cursor: 'pointer',
+                          padding: '4px 6px',
+                          borderRadius: 4,
+                          opacity: 0.4,
+                          transition: 'opacity 0.15s, color 0.15s',
+                        }}
+                        onMouseEnter={(e) => { (e.currentTarget).style.opacity = '1'; (e.currentTarget).style.color = theme.danger; }}
+                        onMouseLeave={(e) => { (e.currentTarget).style.opacity = '0.4'; (e.currentTarget).style.color = theme.textMuted; }}
+                        title="Delete space"
+                      >
+                        {'\u2715'}
+                      </span>
+                    </div>
+                  )}
                 </button>
               );
             })
@@ -230,6 +263,29 @@ export function SpaceBrowser({ entries, loading, activeSpace, onSelect, onClose,
                 Cancel
               </button>
             </div>
+          </div>
+        )}
+
+        {/* Recycle bin link */}
+        {onOpenRecycleBin && (
+          <div style={s.recycleBinFooter}>
+            <button onClick={onOpenRecycleBin} style={s.recycleBinButton}>
+              <span style={{ fontSize: 13, opacity: 0.5 }}>{'\u2672'}</span>
+              Recycle Bin
+              {deletedCount > 0 && (
+                <span style={{
+                  fontSize: 9,
+                  fontWeight: 600,
+                  background: theme.warningBg,
+                  color: theme.warning,
+                  padding: '1px 6px',
+                  borderRadius: 8,
+                  marginLeft: 'auto',
+                }}>
+                  {deletedCount}
+                </span>
+              )}
+            </button>
           </div>
         )}
       </div>
@@ -405,6 +461,25 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       color: t.text,
       outline: 'none',
       fontFamily: "'Outfit', system-ui, sans-serif",
+    },
+    recycleBinFooter: {
+      borderTop: `1px solid ${t.border}`,
+      padding: '6px 12px',
+    },
+    recycleBinButton: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6,
+      width: '100%',
+      background: 'transparent',
+      border: 'none',
+      padding: '6px 4px',
+      borderRadius: 6,
+      fontSize: 11,
+      fontWeight: 500,
+      color: t.textMuted,
+      cursor: 'pointer',
+      transition: 'background 0.1s',
     },
   };
 }
