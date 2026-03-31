@@ -460,15 +460,12 @@ export function applyFilters(
   records: EoState[],
   filters: FilterRule[],
   conjunction: 'AND' | 'OR',
+  useFieldsSub = false,
 ): EoState[] {
   if (filters.length === 0) return records;
 
   return records.filter((rec) => {
-    const val = rec.value || {};
-    if (conjunction === 'AND') {
-      return filters.every((f) => evaluateRule(val[f.field], f));
-    } else {
-      return filters.some((f) => evaluateRule(val[f.field], f));
-    }
+    const check = (f: FilterRule) => evaluateRule(getFieldValue(rec, f.field, useFieldsSub), f);
+    return conjunction === 'AND' ? filters.every(check) : filters.some(check);
   });
 }
