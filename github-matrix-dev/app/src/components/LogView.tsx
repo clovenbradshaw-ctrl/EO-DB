@@ -330,7 +330,7 @@ function tdStyle(t: { border: string; bgCard: string; borderLight: string }): Re
 }
 
 // --- Main LogView ---
-export function LogView({ targetFilter, spacePrefix }: { targetFilter?: string | null; spacePrefix?: string }) {
+export function LogView({ targetFilter }: { targetFilter?: string | null }) {
   const recentEvents = useEoStore((s) => s.recentEvents);
   const { theme: t } = useTheme();
   const [activeFilters, setActiveFilters] = useState<Set<string>>(new Set());
@@ -345,13 +345,12 @@ export function LogView({ targetFilter, spacePrefix }: { targetFilter?: string |
     const sorted = [...recentEvents].reverse();
     return sorted.filter((e) => {
       if (activeFilters.size > 0 && !activeFilters.has(e.op)) return false;
-      if (spacePrefix && !e.target.startsWith(spacePrefix)) return false;
       if (targetFilter && !e.target.startsWith(targetFilter)) return false;
       if (filterText && !e.target.toLowerCase().includes(filterText.toLowerCase())) return false;
       if (systemOnly && e.agent !== 'system' && (e.level ?? 1) < 2) return false;
       return true;
     });
-  }, [recentEvents, activeFilters, filterText, targetFilter, spacePrefix, systemOnly]);
+  }, [recentEvents, activeFilters, filterText, targetFilter, systemOnly]);
 
   const visible = filtered.slice(0, visibleCount);
 

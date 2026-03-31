@@ -10,9 +10,8 @@ const VIEWS = new Set<string>(['horizon', 'log', 'graph', 'import', 'compose', '
 
 export interface AppRoute {
   view: View;
-  space: string | null;          // full target e.g. 'space_amino'
-  scope: string | null;          // full dot-path e.g. 'space_amino.tblClients'
-  record: string | null;         // full dot-path e.g. 'space_amino.tblClients.rec123'
+  scope: string | null;          // full dot-path e.g. 'tblClients'
+  record: string | null;         // full dot-path e.g. 'tblClients.rec123'
   builderViewId: string | null;  // UUID when editing a builder view
   customPageId: string | null;   // slug or ID when viewing a custom page live
   query: Record<string, string>;
@@ -20,7 +19,6 @@ export interface AppRoute {
 
 const DEFAULT_ROUTE: AppRoute = {
   view: 'horizon',
-  space: null,
   scope: null,
   record: null,
   builderViewId: null,
@@ -29,18 +27,8 @@ const DEFAULT_ROUTE: AppRoute = {
 };
 
 // ---------------------------------------------------------------------------
-// Slug <-> target helpers
+// Slug helpers
 // ---------------------------------------------------------------------------
-
-/** space_amino -> amino */
-export function spaceToSlug(spaceTarget: string): string {
-  return spaceTarget.replace(/^space_/, '');
-}
-
-/** amino -> space_amino */
-export function slugToSpace(slug: string): string {
-  return `space_${slug}`;
-}
 
 /** "Client Intake Form" -> "client-intake-form" */
 export function slugify(name: string): string {
@@ -81,17 +69,9 @@ export function parseHash(hash: string): AppRoute {
   while (i < segments.length) {
     const seg = segments[i];
 
-    if (seg === 's' && i + 1 < segments.length) {
-      // Space: /s/{slug}
-      route.space = slugToSpace(segments[i + 1]);
-      i += 2;
-      continue;
-    }
-
     if (seg === 't' && i + 1 < segments.length) {
       // Scope: /t/{scope}
-      const scopeSeg = segments[i + 1];
-      route.scope = route.space ? `${route.space}.${scopeSeg}` : scopeSeg;
+      route.scope = segments[i + 1];
       i += 2;
       continue;
     }
@@ -115,7 +95,7 @@ export function parseHash(hash: string): AppRoute {
     if (seg === 'builder') {
       route.view = 'builder';
       // Optional: /builder/{viewId}
-      if (i + 1 < segments.length && !['s', 't', 'r', 'p'].includes(segments[i + 1])) {
+      if (i + 1 < segments.length && !['t', 'r', 'p'].includes(segments[i + 1])) {
         route.builderViewId = segments[i + 1];
         i += 2;
       } else {
@@ -145,10 +125,6 @@ export function parseHash(hash: string): AppRoute {
 export function serializeRoute(route: AppRoute): string {
   const ordered: string[] = [];
 
-  if (route.space) {
-    ordered.push('s', spaceToSlug(route.space));
-  }
-
   if (route.customPageId) {
     ordered.push('p', route.customPageId);
   } else if (route.builderViewId) {
@@ -162,10 +138,7 @@ export function serializeRoute(route: AppRoute): string {
     }
 
     if (route.scope) {
-      const scopeSeg = route.space
-        ? route.scope.replace(`${route.space}.`, '')
-        : route.scope;
-      ordered.push('t', scopeSeg);
+      ordered.push('t', route.scope);
     }
 
     if (route.record && route.scope) {
@@ -214,13 +187,6 @@ export function useHashRoute() {
     const next: AppRoute = { ...current, ...partial };
 
     // Clear downstream state when changing upstream context
-    if ('space' in partial && partial.space !== current.space) {
-      if (!('scope' in partial)) next.scope = null;
-      if (!('record' in partial)) next.record = null;
-      if (!('view' in partial)) next.view = 'horizon';
-      if (!('builderViewId' in partial)) next.builderViewId = null;
-      if (!('customPageId' in partial)) next.customPageId = null;
-    }
     if ('scope' in partial && partial.scope !== current.scope) {
       if (!('record' in partial)) next.record = null;
     }

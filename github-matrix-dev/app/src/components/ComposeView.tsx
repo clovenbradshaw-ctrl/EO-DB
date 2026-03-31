@@ -35,7 +35,7 @@ const OP_COLORS: Record<string, string> = {
 
 interface KvRow { key: string; value: string }
 
-export function ComposeView({ spacePrefix, permissions }: { spacePrefix?: string; permissions?: ResolvedPermissions | null }) {
+export function ComposeView({ permissions }: { permissions?: ResolvedPermissions | null }) {
   const { theme } = useTheme();
   const dispatch = useEoStore((s) => s.dispatch);
   const ready = useEoStore((s) => s.ready);
@@ -78,11 +78,10 @@ export function ComposeView({ spacePrefix, permissions }: { spacePrefix?: string
 
   useEffect(() => {
     if (!ready) return;
-    const prefix = spacePrefix || '';
-    getStateByPrefix(prefix).then((states: EoState[]) => {
+    getStateByPrefix('').then((states: EoState[]) => {
       setAllTargets(states.map((s) => s.target));
     });
-  }, [ready, getStateByPrefix, spacePrefix]);
+  }, [ready, getStateByPrefix]);
 
   function onTargetChange(val: string) {
     setTarget(val);

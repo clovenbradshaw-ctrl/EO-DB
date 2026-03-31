@@ -56,9 +56,6 @@ export class SyncManager {
   private roomId: string;
   private store: EoStore;
   private onEvent?: (event: any) => void;
-  /** When set, only events whose target starts with this prefix are folded. */
-  private spacePrefix?: string;
-
   /** Additional room IDs to listen to (restricted, governance). */
   private additionalRoomIds: string[] = [];
 
@@ -67,13 +64,11 @@ export class SyncManager {
     roomId: string,
     store: EoStore,
     onEvent?: (event: any) => void,
-    spacePrefix?: string,
   ) {
     this.client = client;
     this.roomId = roomId;
     this.store = store;
     this.onEvent = onEvent;
-    this.spacePrefix = spacePrefix;
   }
 
   /**
@@ -138,7 +133,7 @@ export class SyncManager {
     const snap = await findLatestSnapshot(this.client, this.roomId);
     if (!snap) return;
     const restoredSeq = await restoreFromDeltaChain(
-      this.client, this.store, snap.mxc, this.onEvent, this.spacePrefix,
+      this.client, this.store, snap.mxc, this.onEvent,
     );
     await this.store.put('meta:snapshot_seq', restoredSeq);
   }
@@ -325,7 +320,7 @@ export class SyncManager {
     const eoEvent = matrixEventToEo(matrixEvent);
 
     // Skip events outside this space's scope
-    if (this.spacePrefix && !eoEvent.target.startsWith(this.spacePrefix)) return;
+    // All events in the room belong to this space (IDB is isolated per space)
 
     // Fast path: if we have a client_event_id, check locally before entering
     // the fold mutex. This avoids queueing behind the mutex for events we
