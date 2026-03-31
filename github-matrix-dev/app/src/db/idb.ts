@@ -81,6 +81,33 @@ export async function idbIterator(
   return results;
 }
 
+// --- Cleanup helpers ---
+
+/**
+ * Delete all eo-db IndexedDB databases (root + per-space + auth).
+ *
+ * Called on sign-out so that stale content from the previous session
+ * doesn't leak to the next user who logs in on this device.
+ */
+export async function deleteAllEoDatabases(): Promise<void> {
+  const dbs = await indexedDB.databases();
+  const eoDbNames = dbs
+    .map((d) => d.name)
+    .filter((n): n is string => typeof n === 'string' && n.startsWith('eo-db'));
+
+  await Promise.all(
+    eoDbNames.map(
+      (name) =>
+        new Promise<void>((resolve) => {
+          const req = indexedDB.deleteDatabase(name);
+          req.onsuccess = () => resolve();
+          req.onerror = () => resolve(); // best-effort
+          req.onblocked = () => resolve();
+        }),
+    ),
+  );
+}
+
 // --- Sequence helpers (same semantics as level.ts) ---
 
 export function padSeq(seq: number): string {
