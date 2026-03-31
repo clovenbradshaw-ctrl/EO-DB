@@ -2192,11 +2192,32 @@ body {
   margin-top: 12px;
 }
 
-.space-detail {
+/* ── Space Detail Side Modal ── */
+.space-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.35);
+  z-index: 300;
+  transition: opacity 0.2s;
+}
+
+.space-modal-panel {
+  position: fixed;
+  top: 0;
+  right: -440px;
+  width: 440px;
+  height: 100vh;
   background: var(--bg1);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 20px;
+  border-left: 1px solid var(--border);
+  z-index: 301;
+  display: flex;
+  flex-direction: column;
+  transition: right 0.25s cubic-bezier(0.4,0,0.2,1);
+  box-shadow: -8px 0 32px rgba(0,0,0,0.3);
+}
+
+.space-modal-panel.open {
+  right: 0;
 }
 
 .space-sharing-header {
@@ -3056,45 +3077,49 @@ body {
           </div>
         </div>
 
-        <!-- Space Detail (shown when a space is selected) -->
-        <div id="spaceDetailSection" class="space-detail" style="display:none;">
-          <div class="settings-section-title" id="spaceDetailTitle">Space Detail</div>
+      </div>
+    </div>
+  </div>
 
-          <div style="margin-bottom:16px;">
-            <div class="settings-session-field"><span class="settings-session-key">ID</span><span class="settings-session-val" id="spaceDetailId">—</span></div>
-            <div class="settings-session-field"><span class="settings-session-key">Target Prefix</span><span class="settings-session-val" id="spaceDetailPrefix">—</span></div>
-            <div class="settings-session-field"><span class="settings-session-key">Owner</span><span class="settings-session-val" id="spaceDetailOwner">—</span></div>
-            <div class="settings-session-field"><span class="settings-session-key">Created</span><span class="settings-session-val" id="spaceDetailCreated">—</span></div>
-          </div>
+  <!-- ═══ Space Detail Side Modal ═══ -->
+  <div id="spaceDetailOverlay" class="space-modal-overlay" onclick="hideSpaceDetail()" style="display:none;"></div>
+  <div id="spaceDetailSection" class="space-modal-panel">
+    <div class="iface-panel-header">
+      <span class="iface-panel-title" id="spaceDetailTitle">Space Detail</span>
+      <button class="iface-panel-close" onclick="hideSpaceDetail()">&times;</button>
+    </div>
+    <div class="iface-panel-body">
+      <div class="iface-panel-section">
+        <div class="iface-panel-section-title">Details</div>
+        <div class="settings-session-field"><span class="settings-session-key">ID</span><span class="settings-session-val" id="spaceDetailId">—</span></div>
+        <div class="settings-session-field"><span class="settings-session-key">Target Prefix</span><span class="settings-session-val" id="spaceDetailPrefix">—</span></div>
+        <div class="settings-session-field"><span class="settings-session-key">Owner</span><span class="settings-session-val" id="spaceDetailOwner">—</span></div>
+        <div class="settings-session-field"><span class="settings-session-key">Created</span><span class="settings-session-val" id="spaceDetailCreated">—</span></div>
+      </div>
 
-          <!-- Sharing -->
-          <div class="space-sharing-header">
-            <span style="font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:600;color:var(--text-faint);text-transform:uppercase;letter-spacing:0.5px;">Sharing</span>
-          </div>
-
-          <div id="spaceShareList" class="settings-list" style="margin-bottom:12px;">
-            <div class="settings-empty">Not shared with anyone</div>
-          </div>
-
-          <!-- Add share (owner only) -->
-          <div id="spaceShareAddRow" style="display:none;">
-            <div class="settings-add-row">
-              <input class="settings-add-input" id="shareUserId" placeholder="@user:homeserver.com">
-              <select class="access-select" id="shareAccess">
-                <option value="read">Read</option>
-                <option value="write">Write</option>
-                <option value="read_write">Read+Write</option>
-              </select>
-              <button class="settings-add-btn" onclick="addShareToSpace()">+ Share</button>
-            </div>
-          </div>
-
-          <!-- Delete space (owner only) -->
-          <div id="spaceDeleteRow" style="display:none;margin-top:16px;">
-            <button class="settings-delete-btn" onclick="deleteSelectedSpace()" style="padding:6px 16px;">Delete Space</button>
-          </div>
+      <div class="iface-panel-section">
+        <div class="iface-panel-section-title">Sharing</div>
+        <div id="spaceShareList" class="settings-list" style="margin-bottom:12px;">
+          <div class="settings-empty">Not shared with anyone</div>
         </div>
 
+        <!-- Add share (owner only) -->
+        <div id="spaceShareAddRow" style="display:none;">
+          <div class="settings-add-row">
+            <input class="settings-add-input" id="shareUserId" placeholder="@user:homeserver.com">
+            <select class="access-select" id="shareAccess">
+              <option value="read">Read</option>
+              <option value="write">Write</option>
+              <option value="read_write">Read+Write</option>
+            </select>
+            <button class="settings-add-btn" onclick="addShareToSpace()">+ Share</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Delete space (owner only) -->
+      <div id="spaceDeleteRow" class="iface-panel-section" style="display:none;">
+        <button class="settings-delete-btn" onclick="deleteSelectedSpace()" style="padding:8px 16px;width:100%;">Delete Space</button>
       </div>
     </div>
   </div>
@@ -9958,7 +9983,11 @@ async function selectSpace(id) {
 
 function renderSpaceDetail(space) {
   const section = document.getElementById('spaceDetailSection');
-  section.style.display = '';
+  const overlay = document.getElementById('spaceDetailOverlay');
+  overlay.style.display = '';
+  // Trigger reflow so the transition animates
+  section.offsetHeight;
+  section.classList.add('open');
 
   document.getElementById('spaceDetailTitle').textContent = space.name;
   document.getElementById('spaceDetailId').textContent = space.id;
@@ -10005,7 +10034,12 @@ function escAttr(s) {
 
 function hideSpaceDetail() {
   selectedSpaceId = null;
-  document.getElementById('spaceDetailSection').style.display = 'none';
+  const section = document.getElementById('spaceDetailSection');
+  const overlay = document.getElementById('spaceDetailOverlay');
+  section.classList.remove('open');
+  overlay.style.display = 'none';
+  // Re-render list to remove active state
+  loadSpaces();
 }
 
 async function addShareToSpace() {
