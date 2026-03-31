@@ -63,9 +63,13 @@ export function Layout({ session, onLogout }: LayoutProps) {
   const recentEvents = useEoStore((s) => s.recentEvents);
   const { route, navigate } = useHashRoute();
   const activeView = route.view;
-  const selectedSpace = route.space;
   const selectedScope = route.scope;
   const selectedRecord = route.record;
+  const [selectedSpace, setSelectedSpace] = useState<string | null>(() => {
+    // Restore last selected space from localStorage
+    const saved = localStorage.getItem('eo-selected-space');
+    return saved || null;
+  });
   const [spaceOpen, setSpaceOpen] = useState(false);
   const [showMembers, setShowMembers] = useState(false);
   const [spaces, setSpaces] = useState<EoState[]>([]);
@@ -77,19 +81,24 @@ export function Layout({ session, onLogout }: LayoutProps) {
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
   const getState = useEoStore((s) => s.getState);
   const connectionState = useConnectionState();
+
+  // Helper to select a space and persist the choice
+  function selectSpace(target: string) {
+    setSelectedSpace(target);
+    localStorage.setItem('eo-selected-space', target);
+    // Clear route state when switching spaces
+    navigate({ scope: null, record: null, view: 'horizon', builderViewId: null, customPageId: null });
+  }
   const { theme, toggleTheme } = useTheme();
   const spaceTint = spaceBackgroundTint(selectedSpace, theme.mode);
   const themedBg = spaceTint ? { ...theme, bg: spaceTint.bg, bgCard: spaceTint.bgCard, bgMuted: spaceTint.bgMuted } : theme;
   const s = makeStyles(themedBg);
 
-  // The prefix to query — scoped to selected space
-  const statePrefix = selectedSpace ? `${selectedSpace}.` : '';
-
-  // Load states scoped to selected space for query bar autofill
+  // Load all states — each space has its own isolated IDB, no prefix needed
   useEffect(() => {
     if (!ready) return;
-    getStateByPrefix(statePrefix).then(setAllStates);
-  }, [ready, lastSeq, getStateByPrefix, statePrefix]);
+    getStateByPrefix('').then(setAllStates);
+  }, [ready, lastSeq, getStateByPrefix]);
 
   // Load records scoped to selected scope for the time scrubber
   useEffect(() => {
@@ -193,7 +202,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
           const parsed = JSON.parse(cached) as EoState[];
           if (parsed.length > 0) {
             setSpaces(parsed);
-            if (selectedSpace === null) navigate({ space: parsed[0].target });
+            if (selectedSpace === null) selectSpace(parsed[0].target);
           }
         } catch { /* ignore bad cache */ }
       }
@@ -228,7 +237,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
       if (spaceRoots.length > 0) {
         setSpaces(spaceRoots);
         localStorage.setItem('eo-spaces', JSON.stringify(spaceRoots));
-        if (selectedSpace === null) navigate({ space: spaceRoots[0].target });
+        if (selectedSpace === null) selectSpace(spaceRoots[0].target);
       }
 
       rootStore.close();
@@ -314,7 +323,6 @@ export function Layout({ session, onLogout }: LayoutProps) {
         // Always create a fresh SyncManager (the old one was destroyed on space switch)
         if (matrixReady && matrixClientRef.current && roomIdRef.current) {
           try {
-            const spacePrefix = `${selectedSpace}.`;
             const freshSync = new SyncManager(
               matrixClientRef.current, roomIdRef.current, existing.store,
               (event) => {
@@ -323,7 +331,6 @@ export function Layout({ session, onLogout }: LayoutProps) {
                   lastSeq: event.seq,
                 }));
               },
-              spacePrefix,
             );
             await freshSync.initialize();
             if (!mounted) return;
@@ -344,10 +351,9 @@ export function Layout({ session, onLogout }: LayoutProps) {
 
       let syncManager: SyncManager | null = null;
 
-      // Set up sync manager scoped to this space
+      // Set up sync manager for this space (no prefix needed — IDB is isolated)
       if (matrixReady && matrixClientRef.current && roomIdRef.current) {
         try {
-          const spacePrefix = `${selectedSpace}.`;
           syncManager = new SyncManager(
             matrixClientRef.current, roomIdRef.current, store,
             (event) => {
@@ -356,7 +362,6 @@ export function Layout({ session, onLogout }: LayoutProps) {
                 lastSeq: event.seq,
               }));
             },
-            spacePrefix,
           );
           await syncManager.initialize();
           if (!mounted) return;
@@ -495,7 +500,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
               loading={!matrixReady && mergedEntries.length === 0}
               activeSpace={selectedSpace}
               onSelect={(target) => {
-                navigate({ space: target, scope: null, record: null, view: 'horizon' });
+                selectSpace(target);
                 setSpaceOpen(false);
                 setShowMembers(false);
               }}
@@ -510,8 +515,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
                   agent: session.userId,
                   ts: new Date().toISOString(),
                 });
-                // Navigate to the new space
-                navigate({ space: spaceTarget, scope: null, record: null, view: 'horizon' });
+                selectSpace(spaceTarget);
                 setSpaceOpen(false);
               }}
             />
@@ -644,7 +648,6 @@ export function Layout({ session, onLogout }: LayoutProps) {
               selectedScope={selectedScope}
               onSelectScope={(scope) => { navigate({ scope, record: null }); }}
               onSelectSegment={(_scope, _seg) => { navigate({ scope: _scope }); }}
-              statePrefix={statePrefix}
             />
           ) : (
             <SyncProgress message="Initializing store..." detail="Deriving encryption key" />
@@ -687,9 +690,9 @@ export function Layout({ session, onLogout }: LayoutProps) {
                 )}
               </>
             ) : activeView === 'log' ? (
-              <LogView targetFilter={selectedScope} spacePrefix={statePrefix || undefined} />
+              <LogView targetFilter={selectedScope} />
             ) : activeView === 'graph' ? (
-              <GraphView spacePrefix={statePrefix || undefined} allStates={allStates} />
+              <GraphView allStates={allStates} />
             ) : activeView === 'import' ? (
               <div style={s.importPage}>
                 <div style={s.importHeader}>
@@ -699,7 +702,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
                 <AirtableSettingsSection session={session} />
               </div>
             ) : activeView === 'compose' ? (
-              <ComposeView spacePrefix={statePrefix || undefined} permissions={currentPermissions} />
+              <ComposeView permissions={currentPermissions} />
             ) : activeView === 'builder' ? (
               <BuilderView />
             ) : activeView === 'settings' ? (

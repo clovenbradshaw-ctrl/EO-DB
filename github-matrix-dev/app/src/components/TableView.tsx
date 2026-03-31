@@ -1,12 +1,14 @@
 import { useEffect, useState, useMemo } from 'react';
 import type { EoState } from '../db/types';
 import { useEoStore } from '../store/eo-store';
-import { deriveColumns, buildFieldNameMap, buildFieldNameMapFromSchema, hasFieldsSubObject, getFieldValue, type ColumnDef } from './filter-types';
+import { deriveColumns, buildFieldNameMap, buildFieldNameMapFromSchema, hasFieldsSubObject, getFieldValue, applyFilters, type ColumnDef, type FilterRule } from './filter-types';
 import { type TimeScrubberFilter, applyTimeScrubber } from './time-scrubber-utils';
 import { useTheme, type Theme } from '../theme';
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 import { TypeSelector, TypeBadge } from './TypeSelector';
 import { RedactedCell, LockIcon, LockedCell } from './RedactedCell';
+import { FilterBar } from './FilterBar';
+import { SortPanel, type SortRule } from './SortPanel';
 import type { ResolvedPermissions } from '../permissions/types';
 
 interface TableViewProps {
@@ -121,7 +123,9 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; target: string } | null>(null);
   const [columnMenu, setColumnMenu] = useState<{ x: number; y: number; key: string; label: string } | null>(null);
   const [renameCol, setRenameCol] = useState<{ key: string; value: string } | null>(null);
-  const [sortConfig, setSortConfig] = useState<{ key: string; direction: 'asc' | 'desc' } | null>(null);
+  const [sorts, setSorts] = useState<SortRule[]>([]);
+  const [advancedFilters, setAdvancedFilters] = useState<FilterRule[]>([]);
+  const [filterConjunction, setFilterConjunction] = useState<'AND' | 'OR'>('AND');
   const [hiddenColumns, setHiddenColumns] = useState<Set<string>>(new Set());
   const [typeSelector, setTypeSelector] = useState<{ x: number; y: number; target: string; currentType?: string } | null>(null);
   const [showLastUpdated, setShowLastUpdated] = useState(true);
@@ -238,31 +242,40 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
         return false;
       });
     }
+    // Advanced filters (FilterBar)
+    if (advancedFilters.length > 0) {
+      result = applyFilters(result, advancedFilters, filterConjunction, useFieldsSub);
+    }
     // Time scrubber filter
     if (timeScrubberFilter) {
       result = applyTimeScrubber(result, timeScrubberFilter, useFieldsSub);
     }
 
-    if (sortConfig) {
+    // Multi-column sort
+    if (sorts.length > 0) {
       result = [...result].sort((a, b) => {
-        const aVal = sortConfig.key === '_record'
-          ? (a.value?.name || a.target.split('.').pop() || '')
-          : getFieldValue(a, sortConfig.key, useFieldsSub);
-        const bVal = sortConfig.key === '_record'
-          ? (b.value?.name || b.target.split('.').pop() || '')
-          : getFieldValue(b, sortConfig.key, useFieldsSub);
-        const aStr = aVal != null ? String(aVal) : '';
-        const bStr = bVal != null ? String(bVal) : '';
-        const aNum = Number(aStr);
-        const bNum = Number(bStr);
-        const cmp = (!isNaN(aNum) && !isNaN(bNum) && aStr !== '' && bStr !== '')
-          ? aNum - bNum
-          : aStr.localeCompare(bStr);
-        return sortConfig.direction === 'asc' ? cmp : -cmp;
+        for (const sort of sorts) {
+          const aVal = sort.field === '_record'
+            ? (a.value?.name || a.target.split('.').pop() || '')
+            : getFieldValue(a, sort.field, useFieldsSub);
+          const bVal = sort.field === '_record'
+            ? (b.value?.name || b.target.split('.').pop() || '')
+            : getFieldValue(b, sort.field, useFieldsSub);
+          const aStr = aVal != null ? String(aVal) : '';
+          const bStr = bVal != null ? String(bVal) : '';
+          const aNum = Number(aStr);
+          const bNum = Number(bStr);
+          const cmp = (!isNaN(aNum) && !isNaN(bNum) && aStr !== '' && bStr !== '')
+            ? aNum - bNum
+            : aStr.localeCompare(bStr);
+          const directed = sort.direction === 'asc' ? cmp : -cmp;
+          if (directed !== 0) return directed;
+        }
+        return 0;
       });
     }
     return result;
-  }, [records, filterText, useFieldsSub, timeScrubberFilter, sortConfig]);
+  }, [records, filterText, useFieldsSub, advancedFilters, filterConjunction, timeScrubberFilter, sorts]);
 
   function handleColumnContextMenu(e: React.MouseEvent, col: ColumnDef) {
     e.preventDefault();
@@ -272,7 +285,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   }
 
   function getColumnMenuItems(colKey: string, colLabel: string): ContextMenuItem[] {
-    const isSorted = sortConfig?.key === colKey;
+    const activeSort = sorts.find((s) => s.field === colKey);
     const items: ContextMenuItem[] = [
       {
         label: 'Rename column',
@@ -283,21 +296,27 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
       },
       { label: '', onClick: () => {}, separator: true },
       {
-        label: `Sort ascending${isSorted && sortConfig?.direction === 'asc' ? ' (active)' : ''}`,
-        onClick: () => setSortConfig({ key: colKey, direction: 'asc' }),
+        label: `Sort ascending${activeSort?.direction === 'asc' ? ' (active)' : ''}`,
+        onClick: () => setSorts([{ id: crypto.randomUUID(), field: colKey, direction: 'asc' }]),
       },
       {
-        label: `Sort descending${isSorted && sortConfig?.direction === 'desc' ? ' (active)' : ''}`,
-        onClick: () => setSortConfig({ key: colKey, direction: 'desc' }),
+        label: `Sort descending${activeSort?.direction === 'desc' ? ' (active)' : ''}`,
+        onClick: () => setSorts([{ id: crypto.randomUUID(), field: colKey, direction: 'desc' }]),
       },
-      ...(isSorted ? [{
+      ...(activeSort ? [{
         label: 'Remove sort',
-        onClick: () => setSortConfig(null),
+        onClick: () => setSorts(sorts.filter((s) => s.field !== colKey)),
       }] : []),
       { label: '', onClick: () => {}, separator: true },
       {
         label: 'Filter by this column',
-        onClick: () => setFilterText(`${colLabel}:`),
+        onClick: () => {
+          const col = entityColumns.find((c) => c.key === colKey);
+          setAdvancedFilters((prev) => [
+            ...prev,
+            { id: crypto.randomUUID(), field: colKey, operator: col?.type === 'number' ? 'gt' : 'contains', value: '' },
+          ]);
+        },
       },
       { label: '', onClick: () => {}, separator: true },
       {
@@ -379,6 +398,41 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     return items;
   }
 
+  async function handleAddRecord() {
+    const shortId = crypto.randomUUID().replace(/-/g, '').slice(0, 8);
+    const recordTarget = `${scope}.rec${shortId}`;
+    try {
+      await dispatch({
+        op: 'INS',
+        target: recordTarget,
+        operand: {},
+        agent: `user:${session.userId}`,
+        ts: new Date().toISOString(),
+        acquired_ts: new Date().toISOString(),
+        client_event_id: crypto.randomUUID(),
+      });
+      onSelectRecord(recordTarget);
+    } catch { /* ignore */ }
+  }
+
+  async function handleSaveSegment(name: string) {
+    try {
+      await dispatch({
+        op: 'SEG',
+        target: `${scope}._segments.${name.replace(/\s+/g, '_').toLowerCase()}`,
+        operand: {
+          name,
+          filters: advancedFilters,
+          conjunction: filterConjunction,
+          created_at: new Date().toISOString(),
+        },
+        agent: `user:${session.userId}`,
+        ts: new Date().toISOString(),
+        acquired_ts: new Date().toISOString(),
+      });
+    } catch { /* ignore */ }
+  }
+
   async function handleTypeChange(target: string, type: string) {
     try {
       await dispatch({
@@ -400,8 +454,27 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
         <div style={s.toolbarLeft}>
           <div style={s.scopeName}>{scopeName || formatScopeName(scope)}</div>
           <span style={s.recordCount}>{filtered.length} records</span>
+          {(permissions?.can_add_records !== false) && (
+            <button onClick={handleAddRecord} style={s.addRecordBtn}>
+              + New
+            </button>
+          )}
         </div>
         <div style={s.toolbarRight}>
+          <FilterBar
+            columns={entityColumns}
+            filters={advancedFilters}
+            onFiltersChange={setAdvancedFilters}
+            conjunction={filterConjunction}
+            onConjunctionChange={setFilterConjunction}
+            onSaveSegment={handleSaveSegment}
+            scope={scope}
+          />
+          <SortPanel
+            columns={columns}
+            sorts={sorts}
+            onSortsChange={setSorts}
+          />
           <button
             onClick={() => setShowLastUpdated(!showLastUpdated)}
             style={{
@@ -417,7 +490,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
           <input
             value={filterText}
             onChange={(e) => setFilterText(e.target.value)}
-            placeholder="Filter\u2026"
+            placeholder="Search\u2026"
             style={s.filterInput}
           />
         </div>
@@ -457,9 +530,9 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                       <span>
                         {isLocked && <LockIcon />}
                         {col.label}
-                        {sortConfig?.key === col.key && (
+                        {sorts.find((s) => s.field === col.key) && (
                           <span style={{ marginLeft: 4, fontSize: 10 }}>
-                            {sortConfig.direction === 'asc' ? '\u25B4' : '\u25BE'}
+                            {sorts.find((s) => s.field === col.key)!.direction === 'asc' ? '\u25B4' : '\u25BE'}
                           </span>
                         )}
                       </span>
@@ -615,6 +688,20 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       background: t.bgMuted,
       padding: '1px 6px',
       borderRadius: 4,
+    },
+    addRecordBtn: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 4,
+      padding: '5px 12px',
+      fontSize: 12,
+      fontWeight: 600,
+      border: `1px solid ${t.accent}`,
+      borderRadius: 6,
+      background: t.accent,
+      color: '#fff',
+      cursor: 'pointer',
+      whiteSpace: 'nowrap' as const,
     },
     toggleBtn: {
       height: 28,

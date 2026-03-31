@@ -23,10 +23,10 @@ const LANG_PLACEHOLDERS: Record<string, string> = {
 interface Edge { source: string; dest: string }
 interface NodePos { x: number; y: number }
 
-function extractEdgesFromEvents(events: EoEvent[], spacePrefix?: string): Edge[] {
+function extractEdgesFromEvents(events: EoEvent[]): Edge[] {
   const edgeList: Edge[] = [];
   events
-    .filter((e) => e.op === 'CON' && (!spacePrefix || e.target.startsWith(spacePrefix)))
+    .filter((e) => e.op === 'CON')
     .forEach((e) => {
       const source = e.target.split('.').slice(0, 3).join('.');
       if (e.operand?.added) {
@@ -38,7 +38,7 @@ function extractEdgesFromEvents(events: EoEvent[], spacePrefix?: string): Edge[]
   return edgeList;
 }
 
-export function GraphView({ spacePrefix, allStates }: { spacePrefix?: string; allStates?: EoState[] }) {
+export function GraphView({ allStates }: { allStates?: EoState[] }) {
   const { theme } = useTheme();
   const recentEvents = useEoStore((s) => s.recentEvents);
   const store = useEoStore((s) => s.store);
@@ -82,15 +82,12 @@ export function GraphView({ spacePrefix, allStates }: { spacePrefix?: string; al
         const ge = value as GraphEdge;
         return { source: ge.source, dest: ge.dest };
       });
-      const filtered = spacePrefix
-        ? edges.filter(e => e.source.startsWith(spacePrefix) || e.dest.startsWith(spacePrefix))
-        : edges;
-      setFullGraphEdges(filtered);
+      setFullGraphEdges(edges);
       setFullGraphLoading(false);
     });
 
     return () => { cancelled = true; };
-  }, [dataSource, store, spacePrefix]);
+  }, [dataSource, store]);
 
   // Get suggestions
   const suggestions = useMemo(() => {
@@ -218,8 +215,8 @@ export function GraphView({ spacePrefix, allStates }: { spacePrefix?: string; al
   const allEdges = useMemo(() => {
     return dataSource === 'full'
       ? fullGraphEdges
-      : extractEdgesFromEvents(recentEvents, spacePrefix);
-  }, [dataSource, recentEvents, fullGraphEdges, spacePrefix]);
+      : extractEdgesFromEvents(recentEvents);
+  }, [dataSource, recentEvents, fullGraphEdges]);
 
   // Compute all nodes from unfiltered edges
   const allNodesSet = useMemo(() => {

@@ -942,6 +942,62 @@ body {
   flex-shrink: 0;
 }
 
+.graph-controls {
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.graph-control-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.graph-control-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  color: var(--text-faint);
+  min-width: 62px;
+  flex-shrink: 0;
+}
+
+.graph-control-val {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--accent);
+  min-width: 14px;
+  text-align: center;
+}
+
+.graph-slider {
+  flex: 1;
+  height: 4px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.graph-select {
+  flex: 1;
+  background: var(--bg1);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 3px 6px;
+  color: var(--text-dim);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  outline: none;
+  cursor: pointer;
+}
+
+.graph-select:focus { border-color: var(--accent); }
+
 .graph-canvas {
   flex: 1;
   display: flex;
@@ -2856,6 +2912,30 @@ body {
   <div id="panel-graph" class="panel graph-panel">
     <div class="graph-sidebar">
       <div class="graph-sidebar-header">CON Edges — Targets</div>
+      <div class="graph-controls">
+        <input class="horizon-search" id="graphFilter" placeholder="Filter nodes..." oninput="renderGraph()" style="width:100%;">
+        <div class="graph-control-row">
+          <label class="graph-control-label">Depth</label>
+          <input type="range" id="graphDepth" min="1" max="6" value="6" class="graph-slider" oninput="document.getElementById('graphDepthVal').textContent=this.value; renderGraph();">
+          <span id="graphDepthVal" class="graph-control-val">6</span>
+        </div>
+        <div class="graph-control-row">
+          <label class="graph-control-label">Holon level</label>
+          <select id="graphHolonLevel" class="graph-select" onchange="renderGraph()">
+            <option value="0">All (full target)</option>
+            <option value="1">Scope</option>
+            <option value="2">Table</option>
+            <option value="3" selected>Record</option>
+            <option value="4">Field</option>
+          </select>
+        </div>
+        <div class="graph-control-row">
+          <label class="graph-control-label">Root</label>
+          <select id="graphRootNode" class="graph-select" onchange="renderGraph()">
+            <option value="">— show all —</option>
+          </select>
+        </div>
+      </div>
       <div id="graphNodes"></div>
     </div>
     <div class="graph-canvas">
@@ -9239,192 +9319,178 @@ document.addEventListener('click', function(e) {
 });
 
 // ── Graph ──
-function renderGraph() {
-  const spacePrefix = activeNulspaceId ? `space.${activeNulspaceId}` : null;
-  const conEvents = LOG.filter((e, i) => i <= replayIndex && e.op === 'CON')
-    .filter(e => !spacePrefix || e.target.startsWith(spacePrefix + '.'));
-  const nodesSet = new Set();
-  const edges = [];
-
-  conEvents.forEach(e => {
-    const source = e.target.split('.').slice(0, 3).join('.');
-    if (e.operand.added) {
-      e.operand.added.forEach(dest => {
-        nodesSet.add(source);
-        nodesSet.add(dest);
-        edges.push({ source, dest });
-      });
-    }
-  });
-
-  const nodes = Array.from(nodesSet);
-  const sidebar = document.getElementById('graphNodes');
-  sidebar.innerHTML = nodes.map((n, i) => {
-    const colors = ['var(--ins)', 'var(--def)', 'var(--con)', 'var(--eva)', 'var(--rec)', 'var(--seg)'];
-    return `<div class="graph-node-item" onclick="highlightNode('${n}')">
-      <div class="node-dot" style="background:${colors[i % colors.length]}"></div>
-      ${n.split('.').pop()}
-    </div>`;
-  }).join('');
-
-  // SVG graph
-  const svg = document.getElementById('graphSvg');
-  const cx = 400, cy = 250;
-  const radius = 160;
-  const nodePositions = {};
-
-  nodes.forEach((n, i) => {
-    const angle = (i / nodes.length) * Math.PI * 2 - Math.PI / 2;
-    nodePositions[n] = {
-      x: cx + Math.cos(angle) * radius,
-      y: cy + Math.sin(angle) * radius
-    };
-  });
-
-  let svgContent = '';
-
-  // Draw edges
-  edges.forEach(e => {
-    const s = nodePositions[e.source];
-    const d = nodePositions[e.dest];
-    if (s && d) {
-      const midX = (s.x + d.x) / 2;
-      const midY = (s.y + d.y) / 2 - 20;
-      svgContent += `<path d="M${s.x},${s.y} Q${midX},${midY} ${d.x},${d.y}" fill="none" stroke="#a78bfa" stroke-width="1.5" stroke-opacity="0.5" marker-end="url(#arrow)"/>`;
-    }
-  });
-
-  // Draw nodes
-  nodes.forEach((n, i) => {
-    const p = nodePositions[n];
-    const colors = ['#4ade80', '#38bdf8', '#a78bfa', '#34d399', '#fb923c', '#f472b6'];
-    const c = colors[i % colors.length];
-    const label = n.split('.').pop();
-    svgContent += `
-      <circle cx="${p.x}" cy="${p.y}" r="28" fill="${c}15" stroke="${c}" stroke-width="1.5"/>
-      <text x="${p.x}" y="${p.y + 1}" text-anchor="middle" dominant-baseline="middle" fill="${c}" font-family="JetBrains Mono, monospace" font-size="9" font-weight="600">${label}</text>
-    `;
-  });
-
-  svg.innerHTML = `
-    <defs>
-      <marker id="arrow" viewBox="0 0 10 10" refX="35" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-        <path d="M 0 0 L 10 5 L 0 10 z" fill="#a78bfa" fill-opacity="0.6"/>
-      </marker>
-    </defs>
-    ${svgContent}
-  `;
-}
-
+// ── Graph state ──
 let highlightedNode = null;
 
-function highlightNode(name) {
-  highlightedNode = (highlightedNode === name) ? null : name;
-
-  // Update sidebar selection
-  document.querySelectorAll('.graph-node-item').forEach(el => {
-    const label = el.textContent.trim();
-    const nodeName = name.split('.').pop();
-    el.style.background = (label === nodeName && highlightedNode) ? 'var(--bg3)' : '';
-  });
-
-  // Update SVG: dim non-selected nodes and edges
-  const svg = document.getElementById('graphSvg');
-  svg.querySelectorAll('circle').forEach(circle => {
-    const text = circle.nextElementSibling;
-    if (!highlightedNode) {
-      circle.setAttribute('stroke-opacity', '1');
-      circle.setAttribute('fill-opacity', '1');
-      if (text && text.tagName === 'text') text.setAttribute('fill-opacity', '1');
-    } else {
-      const label = text && text.tagName === 'text' ? text.textContent : '';
-      const isSelected = label === name.split('.').pop();
-      circle.setAttribute('stroke-opacity', isSelected ? '1' : '0.2');
-      circle.setAttribute('fill-opacity', isSelected ? '1' : '0.2');
-      if (text && text.tagName === 'text') text.setAttribute('fill-opacity', isSelected ? '1' : '0.2');
-    }
-  });
-
-  svg.querySelectorAll('path:not([d^="M 0"])').forEach(path => {
-    if (!highlightedNode) {
-      path.setAttribute('stroke-opacity', '0.5');
-    } else {
-      // Check if this edge connects to the highlighted node by position proximity
-      const d = path.getAttribute('d') || '';
-      path.setAttribute('stroke-opacity', '0.1');
-    }
-  });
-
-  // Re-highlight edges connected to the selected node
-  if (highlightedNode) {
-    const conEvents = LOG.filter((e, i) => i <= replayIndex && e.op === 'CON');
-    conEvents.forEach(e => {
-      const source = e.target.split('.').slice(0, 3).join('.');
-      if (e.operand.added) {
-        e.operand.added.forEach(dest => {
-          if (source === highlightedNode || dest === highlightedNode) {
-            // Find matching path and highlight it
-            svg.querySelectorAll('path:not([d^="M 0"])').forEach(path => {
-              path.setAttribute('stroke-opacity', '0.1');
-            });
-          }
-        });
-      }
-    });
-    // Simpler approach: re-render with highlight
-    renderGraphWithHighlight(highlightedNode);
-  }
+// Truncate a dotted target to the chosen holon level (0 = full path)
+function truncateHolon(target, level) {
+  if (level === 0) return target;
+  return target.split('.').slice(0, level).join('.');
 }
 
-function renderGraphWithHighlight(selectedNode) {
-  const svg = document.getElementById('graphSvg');
-  const conEvents = LOG.filter((e, i) => i <= replayIndex && e.op === 'CON');
+// BFS traversal from a root node up to maxDepth hops
+function bfsDepth(adjMap, root, maxDepth) {
+  const visited = new Set([root]);
+  let frontier = [root];
+  for (let d = 0; d < maxDepth && frontier.length; d++) {
+    const next = [];
+    for (const n of frontier) {
+      for (const nb of (adjMap.get(n) || [])) {
+        if (!visited.has(nb)) { visited.add(nb); next.push(nb); }
+      }
+    }
+    frontier = next;
+  }
+  return visited;
+}
+
+function buildGraphData() {
+  const spacePrefix = activeNulspaceId ? `space.${activeNulspaceId}` : null;
+  const holonLevel = parseInt(document.getElementById('graphHolonLevel').value, 10);
+  const maxDepth = parseInt(document.getElementById('graphDepth').value, 10);
+  const filterText = (document.getElementById('graphFilter').value || '').toLowerCase();
+  const rootNode = document.getElementById('graphRootNode').value;
+
+  const conEvents = LOG.filter((e, i) => i <= replayIndex && e.op === 'CON')
+    .filter(e => !spacePrefix || e.target.startsWith(spacePrefix + '.'));
+
+  // Build raw edges at chosen holon level
   const nodesSet = new Set();
-  const edges = [];
+  const edgesRaw = [];
+  const edgeKeys = new Set(); // dedup
 
   conEvents.forEach(e => {
-    const source = e.target.split('.').slice(0, 3).join('.');
+    const source = holonLevel === 0 ? e.target : truncateHolon(e.target, holonLevel);
     if (e.operand.added) {
       e.operand.added.forEach(dest => {
+        const d = holonLevel === 0 ? dest : truncateHolon(dest, holonLevel);
+        if (source === d) return; // skip self-loops from truncation
+        const key = source + '→' + d;
+        if (!edgeKeys.has(key)) {
+          edgeKeys.add(key);
+          edgesRaw.push({ source, dest: d });
+        }
         nodesSet.add(source);
-        nodesSet.add(dest);
-        edges.push({ source, dest });
+        nodesSet.add(d);
       });
     }
   });
 
-  const nodes = Array.from(nodesSet);
-  const cx = 400, cy = 250, radius = 160;
+  // Build adjacency map (bidirectional for depth traversal)
+  const adjMap = new Map();
+  for (const e of edgesRaw) {
+    if (!adjMap.has(e.source)) adjMap.set(e.source, new Set());
+    if (!adjMap.has(e.dest)) adjMap.set(e.dest, new Set());
+    adjMap.get(e.source).add(e.dest);
+    adjMap.get(e.dest).add(e.source);
+  }
+
+  // Populate root node selector with all available nodes
+  const rootSelect = document.getElementById('graphRootNode');
+  const prevRoot = rootSelect.value;
+  const allNodesSorted = Array.from(nodesSet).sort();
+  const optionsHtml = '<option value="">— show all —</option>' +
+    allNodesSorted.map(n => `<option value="${n}"${n === prevRoot ? ' selected' : ''}>${n.split('.').pop()} (${n})</option>`).join('');
+  if (rootSelect.innerHTML !== optionsHtml) rootSelect.innerHTML = optionsHtml;
+
+  // Depth traversal: if a root is selected, BFS from it
+  let reachable = null;
+  if (rootNode && nodesSet.has(rootNode)) {
+    reachable = bfsDepth(adjMap, rootNode, maxDepth);
+  }
+
+  // Apply reachable filter
+  let nodes = allNodesSorted;
+  let edges = edgesRaw;
+  if (reachable) {
+    nodes = nodes.filter(n => reachable.has(n));
+    edges = edges.filter(e => reachable.has(e.source) && reachable.has(e.dest));
+  }
+
+  // Apply text filter
+  if (filterText) {
+    const matchingNodes = new Set(nodes.filter(n => n.toLowerCase().includes(filterText)));
+    // Also keep nodes connected to matching nodes
+    const expanded = new Set(matchingNodes);
+    for (const e of edges) {
+      if (matchingNodes.has(e.source)) expanded.add(e.dest);
+      if (matchingNodes.has(e.dest)) expanded.add(e.source);
+    }
+    nodes = nodes.filter(n => expanded.has(n));
+    edges = edges.filter(e => expanded.has(e.source) && expanded.has(e.dest));
+  }
+
+  return { nodes, edges };
+}
+
+function renderGraph() {
+  const { nodes, edges } = buildGraphData();
+  const selectedNode = highlightedNode;
+
+  // Sidebar
+  const sidebar = document.getElementById('graphNodes');
+  const colors = ['var(--ins)', 'var(--def)', 'var(--con)', 'var(--eva)', 'var(--rec)', 'var(--seg)'];
+  sidebar.innerHTML = nodes.map((n, i) => {
+    const label = n.split('.').pop();
+    const isActive = n === selectedNode;
+    return `<div class="graph-node-item${isActive ? ' active' : ''}" onclick="highlightNode('${n}')">
+      <div class="node-dot" style="background:${colors[i % colors.length]}"></div>
+      ${label}
+    </div>`;
+  }).join('') || '<div style="padding:12px;color:var(--text-faint);font-size:10px;">No connections yet</div>';
+
+  // SVG
+  const svg = document.getElementById('graphSvg');
+  const cx = 400, cy = 250;
+  const radius = Math.min(160, 40 + nodes.length * 12);
   const nodePositions = {};
+
   nodes.forEach((n, i) => {
     const angle = (i / nodes.length) * Math.PI * 2 - Math.PI / 2;
     nodePositions[n] = { x: cx + Math.cos(angle) * radius, y: cy + Math.sin(angle) * radius };
   });
 
-  let svgContent = '';
+  // Compute connected set for highlight
+  const connectedToSelected = new Set();
+  if (selectedNode) {
+    connectedToSelected.add(selectedNode);
+    edges.forEach(e => {
+      if (e.source === selectedNode) connectedToSelected.add(e.dest);
+      if (e.dest === selectedNode) connectedToSelected.add(e.source);
+    });
+  }
 
+  let svgContent = '';
+  const paletteHex = ['#4ade80', '#38bdf8', '#a78bfa', '#34d399', '#fb923c', '#f472b6'];
+
+  // Edges
   edges.forEach(e => {
     const s = nodePositions[e.source];
     const d = nodePositions[e.dest];
     if (s && d) {
       const midX = (s.x + d.x) / 2;
       const midY = (s.y + d.y) / 2 - 20;
-      const connected = (e.source === selectedNode || e.dest === selectedNode);
+      const connected = selectedNode ? (e.source === selectedNode || e.dest === selectedNode) : false;
       const opacity = selectedNode ? (connected ? '0.8' : '0.08') : '0.5';
-      svgContent += `<path d="M${s.x},${s.y} Q${midX},${midY} ${d.x},${d.y}" fill="none" stroke="#a78bfa" stroke-width="${connected ? '2' : '1.5'}" stroke-opacity="${opacity}" marker-end="url(#arrow)"/>`;
+      const width = connected ? '2' : '1.5';
+      svgContent += `<path d="M${s.x},${s.y} Q${midX},${midY} ${d.x},${d.y}" fill="none" stroke="#a78bfa" stroke-width="${width}" stroke-opacity="${opacity}" marker-end="url(#arrow)"/>`;
     }
   });
 
+  // Nodes
   nodes.forEach((n, i) => {
     const p = nodePositions[n];
-    const colors = ['#4ade80', '#38bdf8', '#a78bfa', '#34d399', '#fb923c', '#f472b6'];
-    const c = colors[i % colors.length];
+    const c = paletteHex[i % paletteHex.length];
     const label = n.split('.').pop();
-    const isSelected = (n === selectedNode);
-    const opacity = selectedNode ? (isSelected ? '1' : '0.2') : '1';
+    const isSelected = n === selectedNode;
+    const dimmed = selectedNode && !connectedToSelected.has(n);
+    const opacity = dimmed ? '0.2' : '1';
+    const r = isSelected ? 32 : 28;
+    const sw = isSelected ? 2.5 : 1.5;
+    const fs = isSelected ? 10 : 9;
     svgContent += `
-      <circle cx="${p.x}" cy="${p.y}" r="${isSelected ? '32' : '28'}" fill="${c}15" stroke="${c}" stroke-width="${isSelected ? '2.5' : '1.5'}" stroke-opacity="${opacity}" fill-opacity="${opacity}"/>
-      <text x="${p.x}" y="${p.y + 1}" text-anchor="middle" dominant-baseline="middle" fill="${c}" font-family="JetBrains Mono, monospace" font-size="${isSelected ? '10' : '9'}" font-weight="600" fill-opacity="${opacity}">${label}</text>
+      <circle cx="${p.x}" cy="${p.y}" r="${r}" fill="${c}15" stroke="${c}" stroke-width="${sw}" stroke-opacity="${opacity}" fill-opacity="${opacity}" style="cursor:pointer" onclick="highlightNode('${n}')"/>
+      <text x="${p.x}" y="${p.y + 1}" text-anchor="middle" dominant-baseline="middle" fill="${c}" font-family="JetBrains Mono, monospace" font-size="${fs}" font-weight="600" fill-opacity="${opacity}" style="cursor:pointer;pointer-events:none">${label}</text>
     `;
   });
 
@@ -9436,6 +9502,11 @@ function renderGraphWithHighlight(selectedNode) {
     </defs>
     ${svgContent}
   `;
+}
+
+function highlightNode(name) {
+  highlightedNode = (highlightedNode === name) ? null : name;
+  renderGraph();
 }
 
 // ── Replay ──

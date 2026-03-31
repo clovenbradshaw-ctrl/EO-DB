@@ -235,7 +235,6 @@ export async function restoreFromDeltaChain(
   store: EoStore,
   latestMxc: string,
   onEvent?: (event: any) => void,
-  spacePrefix?: string,
 ): Promise<number> {
   const localSeq = await store.getCurrentSeq();
   const deltas: DeltaSnapshot[] = [];
@@ -284,7 +283,6 @@ export async function restoreFromDeltaChain(
   for (const delta of deltas) {
     for (const event of delta.events) {
       if (event.seq <= localSeq) continue;
-      if (spacePrefix && !event.target.startsWith(spacePrefix)) continue;
       const seq = await processEvent(store, event, onEvent);
       lastAppliedSeq = Math.max(lastAppliedSeq, seq);
     }
