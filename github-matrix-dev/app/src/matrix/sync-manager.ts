@@ -62,6 +62,12 @@ export class SyncManager {
   /** Additional room IDs to listen to (restricted, governance). */
   private additionalRoomIds: string[] = [];
 
+  /** Bound listener reference for cleanup. */
+  private handleTimelineEvent: ((event: MatrixEvent) => void) | null = null;
+
+  /** Whether this manager has been destroyed. */
+  private destroyed = false;
+
   constructor(
     client: MatrixClient,
     roomId: string,
@@ -102,6 +108,18 @@ export class SyncManager {
   }
 
   /**
+   * Remove the timeline listener and mark this manager as inactive.
+   * Must be called before switching spaces to prevent stale event injection.
+   */
+  destroy(): void {
+    this.destroyed = true;
+    if (this.handleTimelineEvent) {
+      this.client.off('Room.timeline' as any, this.handleTimelineEvent);
+      this.handleTimelineEvent = null;
+    }
+  }
+
+  /**
    * Initialize sync — call after login and store setup.
    *
    * On a fresh device (seq === 0), hydrates from the latest snapshot stored
@@ -116,12 +134,14 @@ export class SyncManager {
     }
 
     // Listen for new room events in real-time (main + additional rooms)
-    this.client.on('Room.timeline' as any, (event: MatrixEvent) => {
+    this.handleTimelineEvent = (event: MatrixEvent) => {
+      if (this.destroyed) return;
       const eventRoomId = event.getRoomId();
       if (eventRoomId !== this.roomId && !this.additionalRoomIds.includes(eventRoomId!)) return;
       if (event.getType() !== EO_EVENT_TYPE) return;
       this.processIncomingEvent(event);
-    });
+    };
+    this.client.on('Room.timeline' as any, this.handleTimelineEvent);
 
     // Flush any unsynced local events
     await this.flushUnsyncedEvents();

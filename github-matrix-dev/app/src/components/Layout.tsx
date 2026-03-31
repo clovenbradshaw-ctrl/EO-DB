@@ -25,9 +25,12 @@ import { RecordPageView } from './builder/RecordPageView';
 import { PermissionBadge } from './PermissionBadge';
 import { ViewOnlyBanner } from './ViewOnlyBanner';
 import { useBuilderStore } from '../store/builder-store';
+import { useSyncStore } from '../store/sync-store';
 import { useTheme, spaceBackgroundTint, type Theme } from '../theme';
 import type { EoState } from '../db/types';
 import type { ViewDefinition } from '../blocks/types';
+import { discoverSpacesFromMatrix, type SpaceEntry } from '../matrix/space-discovery';
+import { SpaceBrowser } from './SpaceBrowser';
 import { TimeScrubber } from './TimeScrubber';
 import { type TimeScrubberFilter, type DateColumnOption, DEFAULT_FILTER, detectDateColumns } from './time-scrubber-utils';
 import { hasFieldsSubObject, buildFieldNameMap } from './filter-types';
@@ -66,6 +69,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
   const [spaceOpen, setSpaceOpen] = useState(false);
   const [showMembers, setShowMembers] = useState(false);
   const [spaces, setSpaces] = useState<EoState[]>([]);
+  const [spaceEntries, setSpaceEntries] = useState<SpaceEntry[]>([]);
   const [allStates, setAllStates] = useState<EoState[]>([]);
   const [timeScrubberFilter, setTimeScrubberFilter] = useState<TimeScrubberFilter>(DEFAULT_FILTER);
   const [scopedRecords, setScopedRecords] = useState<EoState[]>([]);
@@ -234,10 +238,48 @@ export function Layout({ session, onLogout }: LayoutProps) {
     return () => { mounted = false; };
   }, [session, matrixReady]);
 
+  // --- Matrix room-based space discovery (supplements IDB) ---
+  useEffect(() => {
+    if (!matrixReady || !matrixClientRef.current) return;
+    try {
+      const entries = discoverSpacesFromMatrix(matrixClientRef.current);
+      if (entries.length > 0) {
+        setSpaceEntries(entries);
+      }
+    } catch { /* best effort */ }
+  }, [matrixReady]);
+
+  // Build merged entries: Matrix-sourced entries + IDB fallback for spaces not found in Matrix
+  const mergedEntries = useMemo<SpaceEntry[]>(() => {
+    if (spaceEntries.length > 0) return spaceEntries;
+    // Offline fallback: adapt IDB-sourced spaces to SpaceEntry shape
+    return spaces.map((sp) => {
+      const name = sp.value?.name || formatSpaceName(sp.target.split('.').pop() || '');
+      return {
+        spaceTarget: sp.target,
+        displayName: name,
+        mainRoomId: '',
+        createdAt: sp.last_ts ? new Date(sp.last_ts).getTime() : 0,
+        lastActivity: sp.last_ts ? new Date(sp.last_ts).getTime() : 0,
+        ownerUserId: sp.last_agent || '',
+        ownerDisplayName: sp.last_agent
+          ? (sp.last_agent.startsWith('@') ? sp.last_agent.slice(1).split(':')[0] : sp.last_agent)
+          : 'Unknown',
+        memberCount: (sp.value?._sharing || []).length + 1,
+      };
+    });
+  }, [spaceEntries, spaces]);
+
   // --- Reset stale state when switching spaces ---
   const prevSpaceRef = useRef(selectedSpace);
   useEffect(() => {
     if (prevSpaceRef.current !== selectedSpace) {
+      // Destroy old SyncManager listener before switching
+      const oldSyncManager = useEoStore.getState().syncManager;
+      if (oldSyncManager) {
+        oldSyncManager.destroy();
+      }
+
       prevSpaceRef.current = selectedSpace;
       // Clear Layout-level state so old space data doesn't flash
       setAllStates([]);
@@ -246,6 +288,8 @@ export function Layout({ session, onLogout }: LayoutProps) {
       setShowMembers(false);
       // Reset builder store so old space's views don't persist
       useBuilderStore.getState().reset();
+      // Reset sync store so old space's peer/snapshot data doesn't persist
+      useSyncStore.getState().reset();
     }
   }, [selectedSpace]);
 
@@ -266,8 +310,26 @@ export function Layout({ session, onLogout }: LayoutProps) {
         // Reuse cached store — no IDB open, no key derivation, no Matrix hydration
         if (!mounted) return;
         await init(existing.store);
-        if (existing.syncManager) {
-          useEoStore.getState().setSyncManager(existing.syncManager);
+
+        // Always create a fresh SyncManager (the old one was destroyed on space switch)
+        if (matrixReady && matrixClientRef.current && roomIdRef.current) {
+          try {
+            const spacePrefix = `${selectedSpace}.`;
+            const freshSync = new SyncManager(
+              matrixClientRef.current, roomIdRef.current, existing.store,
+              (event) => {
+                useEoStore.setState((st) => ({
+                  recentEvents: [...st.recentEvents.slice(-99), event],
+                  lastSeq: event.seq,
+                }));
+              },
+              spacePrefix,
+            );
+            await freshSync.initialize();
+            if (!mounted) return;
+            existing.syncManager = freshSync;
+            useEoStore.getState().setSyncManager(freshSync);
+          } catch { /* offline */ }
         }
         return;
       }
@@ -415,52 +477,45 @@ export function Layout({ session, onLogout }: LayoutProps) {
 
           <div style={s.divider} />
 
-          {/* Space selector */}
-          <div style={{ position: 'relative' as const }}>
-            <button
-              onClick={() => setSpaceOpen(!spaceOpen)}
-              style={s.spaceBadge}
-            >
-              <span style={{ width: 6, height: 6, borderRadius: '50%', background: theme.accent, flexShrink: 0 }} />
-              {selectedSpace
-                ? formatSpaceName(selectedSpace.split('.').pop() || '')
-                : 'All Spaces'}
-              <span style={{ fontSize: 8, opacity: 0.5, marginLeft: 2 }}>{spaceOpen ? '\u25B4' : '\u25BE'}</span>
-            </button>
+          {/* Space selector — opens file-browser panel */}
+          <button
+            onClick={() => setSpaceOpen(!spaceOpen)}
+            style={s.spaceBadge}
+          >
+            <span style={{ width: 6, height: 6, borderRadius: '50%', background: theme.accent, flexShrink: 0 }} />
+            {selectedSpace
+              ? formatSpaceName(selectedSpace.split('.').pop() || '')
+              : 'All Spaces'}
+            <span style={{ fontSize: 8, opacity: 0.5, marginLeft: 2 }}>{spaceOpen ? '\u25B4' : '\u25BE'}</span>
+          </button>
 
-            {spaceOpen && (
-              <>
-                <div style={{ position: 'fixed', inset: 0, zIndex: 99 }} onClick={() => setSpaceOpen(false)} />
-                <div style={s.spaceDropdown}>
-                  <div style={s.spaceDropdownLabel}>SPACES</div>
-                  {spaces.map((sp) => {
-                    const name = sp.target.split('.').pop() || sp.target;
-                    const displayName = sp.value?.name || formatSpaceName(name);
-                    const isActive = selectedSpace === sp.target;
-                    const memberCount = (sp.value?._sharing || []).length;
-                    return (
-                      <button
-                        key={sp.target}
-                        onClick={() => { navigate({ space: sp.target, scope: null, record: null, view: 'horizon' }); setSpaceOpen(false); setShowMembers(false); }}
-                        style={{ ...s.spaceDropdownItem, ...(isActive ? s.spaceDropdownItemActive : {}) }}
-                      >
-                        <span style={{ width: 6, height: 6, borderRadius: '50%', background: isActive ? theme.accent : theme.textMuted, flexShrink: 0 }} />
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{ fontSize: 13, fontWeight: isActive ? 500 : 400, color: isActive ? theme.text : theme.textSecondary }}>{displayName}</div>
-                          {memberCount > 0 && (
-                            <div style={{ fontSize: 10, color: theme.textMuted, marginTop: 1 }}>
-                              {memberCount + 1} members
-                            </div>
-                          )}
-                        </div>
-                        {isActive && <span style={{ fontSize: 11, color: theme.accent }}>{'\u2713'}</span>}
-                      </button>
-                    );
-                  })}
-                </div>
-              </>
-            )}
-          </div>
+          {spaceOpen && (
+            <SpaceBrowser
+              entries={mergedEntries}
+              loading={!matrixReady && mergedEntries.length === 0}
+              activeSpace={selectedSpace}
+              onSelect={(target) => {
+                navigate({ space: target, scope: null, record: null, view: 'horizon' });
+                setSpaceOpen(false);
+                setShowMembers(false);
+              }}
+              onClose={() => setSpaceOpen(false)}
+              onCreate={(name) => {
+                const spaceTarget = `space_${name.toLowerCase().replace(/\s+/g, '_')}`;
+                const dispatch = useEoStore.getState().dispatch;
+                dispatch({
+                  op: 'INS',
+                  target: spaceTarget,
+                  operand: { name },
+                  agent: session.userId,
+                  ts: new Date().toISOString(),
+                });
+                // Navigate to the new space
+                navigate({ space: spaceTarget, scope: null, record: null, view: 'horizon' });
+                setSpaceOpen(false);
+              }}
+            />
+          )}
 
           {/* Members button */}
           {selectedSpace && (
@@ -788,43 +843,6 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       cursor: 'pointer',
       transition: 'all 0.15s ease',
     },
-    spaceDropdown: {
-      position: 'absolute',
-      top: 'calc(100% + 8px)',
-      left: 0,
-      background: t.bgCard,
-      border: `1px solid ${t.border}`,
-      borderRadius: 10,
-      padding: 6,
-      minWidth: 240,
-      boxShadow: `0 12px 40px ${t.shadow}, 0 2px 8px ${t.shadow}`,
-      zIndex: 100,
-    } as React.CSSProperties,
-    spaceDropdownLabel: {
-      fontSize: 10,
-      fontWeight: 600,
-      color: t.textMuted,
-      letterSpacing: '0.5px',
-      padding: '8px 10px 4px',
-    },
-    spaceDropdownItem: {
-      display: 'flex',
-      alignItems: 'center',
-      gap: 8,
-      width: '100%',
-      padding: '8px 10px',
-      background: 'transparent',
-      border: 'none',
-      borderRadius: 6,
-      cursor: 'pointer',
-      color: t.text,
-      textAlign: 'left' as const,
-      transition: 'background 0.1s',
-    },
-    spaceDropdownItemActive: {
-      background: t.accentBg,
-    },
-
     // Header buttons
     headerButton: {
       display: 'inline-flex',
