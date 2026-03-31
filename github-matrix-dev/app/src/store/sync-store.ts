@@ -83,6 +83,9 @@ interface SyncStoreState {
 
   /** Update last snapshot seq and optional mxc URI */
   setLastSnapshotSeq: (seq: number, mxc?: string) => void;
+
+  /** Reset all state (called on space switch) */
+  reset: () => void;
 }
 
 export const useSyncStore = create<SyncStoreState>((set, get) => ({
@@ -204,5 +207,18 @@ export const useSyncStore = create<SyncStoreState>((set, get) => ({
           : loc,
       ),
     }));
+  },
+
+  reset() {
+    set({
+      localPeer: null,
+      peers: [],
+      storageLocations: [],
+      syncPairs: [],
+      syncRoomId: null,
+      offlineQueueSize: 0,
+      lastSnapshotSeq: 0,
+      lastSnapshotMxc: null,
+    });
   },
 }));
