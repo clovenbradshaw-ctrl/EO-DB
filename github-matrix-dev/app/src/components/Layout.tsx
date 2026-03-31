@@ -234,6 +234,21 @@ export function Layout({ session, onLogout }: LayoutProps) {
     return () => { mounted = false; };
   }, [session, matrixReady]);
 
+  // --- Reset stale state when switching spaces ---
+  const prevSpaceRef = useRef(selectedSpace);
+  useEffect(() => {
+    if (prevSpaceRef.current !== selectedSpace) {
+      prevSpaceRef.current = selectedSpace;
+      // Clear Layout-level state so old space data doesn't flash
+      setAllStates([]);
+      setScopedRecords([]);
+      setScopeFieldNameMap(new Map());
+      setShowMembers(false);
+      // Reset builder store so old space's views don't persist
+      useBuilderStore.getState().reset();
+    }
+  }, [selectedSpace]);
+
   // --- Cached space stores (survive space switches, avoid re-init) ---
   const spaceCacheRef = useRef<Map<string, CachedSpace>>(new Map());
 

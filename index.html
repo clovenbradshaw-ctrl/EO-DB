@@ -3588,6 +3588,12 @@ async function selectNulspace(id, e) {
   localStorage.setItem('eo-active-nulspace', id);
   document.getElementById('nulspaceDropdown').classList.remove('open');
   await updateNulspaceLabel();
+  // Reset scope and interface view — they belong to the previous space
+  selectedScope = null;
+  ifaceCurrentView = null;
+  // Re-render all panels so they reflect the new space
+  refreshAll();
+  if (currentTab === 'interface') renderInterface();
   // Re-check admin status and room backup config for new space
   if (typeof checkBackupAdminAndAutoLoad === 'function') checkBackupAdminAndAutoLoad();
 }
@@ -7437,7 +7443,9 @@ function refreshAll() {
 // ── Autocomplete ──
 function getKnownTargets() {
   const targets = new Set();
+  const spacePrefix = activeNulspaceId ? `space.${activeNulspaceId}` : null;
   LOG.forEach(e => {
+    if (spacePrefix && !(e.target === spacePrefix || e.target.startsWith(spacePrefix + '.'))) return;
     targets.add(e.target);
     // Also add parent paths for prefix suggestions
     const parts = e.target.split('.');
@@ -9156,9 +9164,11 @@ function selectTarget(target) {
 function renderLog() {
   const filter = document.getElementById('logFilter').value.toLowerCase();
   const body = document.getElementById('logBody');
+  const spacePrefix = activeNulspaceId ? `space.${activeNulspaceId}` : null;
 
   const events = LOG.filter((e, i) => i <= replayIndex)
     .filter(e => activeOps.has(e.op))
+    .filter(e => !spacePrefix || e.target === spacePrefix || e.target.startsWith(spacePrefix + '.'))
     .filter(e => !filter || e.target.toLowerCase().includes(filter))
     .reverse();
 
@@ -9205,7 +9215,9 @@ document.addEventListener('click', function(e) {
 
 // ── Graph ──
 function renderGraph() {
-  const conEvents = LOG.filter((e, i) => i <= replayIndex && e.op === 'CON');
+  const spacePrefix = activeNulspaceId ? `space.${activeNulspaceId}` : null;
+  const conEvents = LOG.filter((e, i) => i <= replayIndex && e.op === 'CON')
+    .filter(e => !spacePrefix || e.target.startsWith(spacePrefix + '.'));
   const nodesSet = new Set();
   const edges = [];
 
@@ -10806,9 +10818,11 @@ function ifaceFieldsForType(type) {
 
 async function ifaceListViews() {
   const state = foldState(replayIndex);
+  const spacePrefix = activeNulspaceId ? `space.${activeNulspaceId}.` : null;
   return Object.values(state)
     .filter(s => s.target.startsWith('views.') && s.value && !s.value._nul)
     .filter(s => !s.value.hidden)
+    .filter(s => !spacePrefix || !s.value._space || s.value._space === activeNulspaceId)
     .sort((a, b) => (b.last_ts || '').localeCompare(a.last_ts || ''));
 }
 
