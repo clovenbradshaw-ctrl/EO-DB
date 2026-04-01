@@ -5,7 +5,7 @@ export default defineConfig({
   plugins: [
     react(),
   ],
-  base: './',
+  base: '/EO-DB/',
   build: {
     outDir: '../../docs',
     emptyOutDir: true,
