@@ -7,8 +7,8 @@ export default defineConfig({
   ],
   base: '/EO-DB/',
   build: {
-    outDir: '../../docs',
-    emptyOutDir: true,
+    outDir: '../..',
+    emptyOutDir: false,
     rollupOptions: {
       output: {
         manualChunks: {
