@@ -222,7 +222,13 @@ export function Layout({ session, onLogout }: LayoutProps) {
 
         if (!mounted) { client.stopClient(); return; }
 
-        roomIdRef.current = await resolveDataRoom(client);
+        // Room resolution is best-effort — app works without it
+        try {
+          roomIdRef.current = await resolveDataRoom(client);
+        } catch {
+          // Room alias not found (404) — sync disabled, local store still works
+        }
+
         setMatrixReady(true);
       } catch {
         // Offline — local store is still available
@@ -513,14 +519,24 @@ export function Layout({ session, onLogout }: LayoutProps) {
   };
 
   // --- Permission resolution ---
-  const currentSpaceState = useMemo(() => spaces.find(s => s.target === selectedSpace), [spaces, selectedSpace]);
+  const currentSpaceState = useMemo(() => {
+    // Match against both 'space.foo' (IDB format) and 'space_foo' (raw target)
+    return spaces.find(s => s.target === selectedSpace || s.target === `space.${selectedSpace}`);
+  }, [spaces, selectedSpace]);
   const currentPermissions = useMemo(() => {
-    if (!currentSpaceState) return null;
+    if (!currentSpaceState) {
+      // No space state found — if a space is selected, treat current user as owner
+      // (new space created locally, or offline with no cached state)
+      if (selectedSpace) {
+        return resolvePermissionsFromSharing(session.userId, session.userId, [], []);
+      }
+      return null;
+    }
     const owner = currentSpaceState.last_agent;
     const sharing = currentSpaceState.value?._sharing || [];
     const fieldAssignments = currentSpaceState.value?._field_assignments || [];
     return resolvePermissionsFromSharing(session.userId, owner, sharing, fieldAssignments);
-  }, [currentSpaceState, session.userId]);
+  }, [currentSpaceState, session.userId, selectedSpace]);
   const currentRole: AccessRole = currentPermissions?.role ?? 'viewer';
   const isViewer = currentRole === 'viewer';
 
@@ -561,16 +577,38 @@ export function Layout({ session, onLogout }: LayoutProps) {
                 setShowRecycleBin(false);
               }}
               onClose={() => setSpaceOpen(false)}
-              onCreate={(name) => {
+              onCreate={async (name) => {
                 const spaceTarget = `space_${name.toLowerCase().replace(/\s+/g, '_')}`;
+
+                // Initialize the space store before dispatching so store is not null
+                const idb = await createIdb(spaceTarget);
+                const key = await deriveKey(session.userId, session.deviceId);
+                const spaceStore = createStore(idb, key);
+                await init(spaceStore);
+
+                // Cache it so setupSpaceStore reuses it instead of re-opening
+                spaceCacheRef.current.set(spaceTarget, { store: spaceStore, syncManager: null });
+
+                // Now dispatch is safe — store is initialized
                 const dispatch = useEoStore.getState().dispatch;
-                dispatch({
+                await dispatch({
                   op: 'INS',
                   target: spaceTarget,
                   operand: { name },
                   agent: session.userId,
                   ts: new Date().toISOString(),
                 });
+
+                // Add to spaces list with correct owner so permissions resolve
+                const now = new Date().toISOString();
+                setSpaces((prev) => [...prev, {
+                  target: `space.${spaceTarget}`,
+                  value: { name },
+                  last_agent: session.userId,
+                  last_ts: now,
+                  seq: 1,
+                } as EoState]);
+
                 selectSpace(spaceTarget);
                 setSpaceOpen(false);
               }}
@@ -708,6 +746,10 @@ export function Layout({ session, onLogout }: LayoutProps) {
               onSelectScope={(scope) => { navigate({ scope, record: null }); }}
               onSelectSegment={(_scope, _seg) => { navigate({ scope: _scope }); }}
             />
+          ) : !selectedSpace ? (
+            <div style={{ padding: '16px 12px', fontSize: 13, color: theme.textMuted }}>
+              No space selected. Open the space browser above to create or select a space.
+            </div>
           ) : (
             <SyncProgress message="Initializing store..." detail="Deriving encryption key" />
           )}
