@@ -339,8 +339,10 @@ export class SyncManager {
   private async processIncomingEvent(matrixEvent: MatrixEvent): Promise<void> {
     const eoEvent = matrixEventToEo(matrixEvent);
 
-    // Skip events outside this space's scope
-    // All events in the room belong to this space (IDB is isolated per space)
+    // Skip space-level config events — space discovery uses Matrix state events
+    // and the root IDB, not per-space IDBs. Writing other spaces' events here
+    // just pollutes the store.
+    if (eoEvent.target.startsWith('space')) return;
 
     // Fast path: if we have a client_event_id, check locally before entering
     // the fold mutex. This avoids queueing behind the mutex for events we

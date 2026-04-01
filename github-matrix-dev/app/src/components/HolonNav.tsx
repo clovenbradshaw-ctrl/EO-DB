@@ -39,13 +39,7 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
     setExpanded(new Set());
   }, [statePrefix]);
 
-  // Filter out space-level entries — space navigation is handled by the space selector dropdown
-  const filteredStates = useMemo(
-    () => allStates.filter((s) => !s.target.startsWith('space')),
-    [allStates],
-  );
-
-  const tree = useMemo(() => buildTree(filteredStates, statePrefix), [filteredStates, statePrefix]);
+  const tree = useMemo(() => buildTree(allStates, statePrefix), [allStates, statePrefix]);
 
   // Auto-expand root on first load
   useEffect(() => {
