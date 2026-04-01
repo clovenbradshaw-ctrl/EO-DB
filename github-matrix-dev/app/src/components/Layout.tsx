@@ -38,6 +38,12 @@ import { type AccessRole, powerLevelToRole, legacyAccessToRole } from '../permis
 import { resolvePermissionsFromSharing } from '../permissions/resolve';
 import { RecycleBin, addDeletedSpace, isSpaceDeleted, removeDeletedSpace, getDeletedSpaces } from './RecycleBin';
 
+/** Normalize any space target to canonical "space_foo" format (strips IDB "space." prefix) */
+function normalizeSpaceTarget(target: string): string {
+  if (target.startsWith('space.')) return `space_${target.slice(6)}`;
+  return target;
+}
+
 function formatSpaceName(segment: string): string {
   // Strip common prefixes, replace underscores with spaces, capitalize
   let name = segment.replace(/^space_/, '');
@@ -68,7 +74,9 @@ export function Layout({ session, onLogout }: LayoutProps) {
   const [selectedSpace, setSelectedSpace] = useState<string | null>(() => {
     // Restore last selected space from localStorage
     const saved = localStorage.getItem('eo-selected-space');
-    return saved || null;
+    if (!saved) return null;
+    // Normalize legacy "space.foo" format to canonical "space_foo"
+    return normalizeSpaceTarget(saved);
   });
   const [spaceOpen, setSpaceOpen] = useState(false);
   const [showMembers, setShowMembers] = useState(false);
@@ -85,8 +93,9 @@ export function Layout({ session, onLogout }: LayoutProps) {
 
   // Helper to select a space and persist the choice
   function selectSpace(target: string) {
-    setSelectedSpace(target);
-    localStorage.setItem('eo-selected-space', target);
+    const canonical = normalizeSpaceTarget(target);
+    setSelectedSpace(canonical);
+    localStorage.setItem('eo-selected-space', canonical);
     // Clear route state when switching spaces
     navigate({ scope: null, record: null, view: 'horizon', builderViewId: null, customPageId: null });
   }
@@ -321,7 +330,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
     return spaces.map((sp) => {
       const name = sp.value?.name || formatSpaceName(sp.target.split('.').pop() || '');
       return {
-        spaceTarget: sp.target,
+        spaceTarget: normalizeSpaceTarget(sp.target),
         displayName: name,
         mainRoomId: '',
         createdAt: sp.last_ts ? new Date(sp.last_ts).getTime() : 0,
@@ -520,8 +529,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
 
   // --- Permission resolution ---
   const currentSpaceState = useMemo(() => {
-    // Match against both 'space.foo' (IDB format) and 'space_foo' (raw target)
-    return spaces.find(s => s.target === selectedSpace || s.target === `space.${selectedSpace}`);
+    return spaces.find(s => normalizeSpaceTarget(s.target) === selectedSpace);
   }, [spaces, selectedSpace]);
   const currentPermissions = useMemo(() => {
     if (!currentSpaceState) {
@@ -601,13 +609,28 @@ export function Layout({ session, onLogout }: LayoutProps) {
 
                 // Add to spaces list with correct owner so permissions resolve
                 const now = new Date().toISOString();
+                const idbTarget = `space.${name.toLowerCase().replace(/\s+/g, '_')}`;
                 setSpaces((prev) => [...prev, {
-                  target: `space.${spaceTarget}`,
+                  target: idbTarget,
                   value: { name },
                   last_agent: session.userId,
                   last_ts: now,
                   seq: 1,
                 } as EoState]);
+
+                // Register space in root IDB so it survives page reload without Matrix
+                const rootIdb = await createIdb();
+                const rootKey = await deriveKey(session.userId, session.deviceId);
+                const rootSt = createStore(rootIdb, rootKey);
+                const { setState: setRootState } = await import('../db/state');
+                await setRootState(rootSt, {
+                  target: idbTarget,
+                  value: { name },
+                  last_agent: session.userId,
+                  last_ts: now,
+                  seq: 1,
+                } as EoState);
+                rootSt.close();
 
                 selectSpace(spaceTarget);
                 setSpaceOpen(false);
