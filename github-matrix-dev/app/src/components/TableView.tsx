@@ -759,7 +759,8 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       maxWidth: 300,
       overflow: 'hidden',
       textOverflow: 'ellipsis',
-      whiteSpace: 'nowrap' as const,
+      whiteSpace: 'normal' as const,
+      wordBreak: 'break-word' as const,
     },
     rowActive: {
       background: t.accentBg,
