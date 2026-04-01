@@ -73,14 +73,21 @@ export function buildTree(states: EoState[], statePrefix: string): TreeNode[] {
     const entry = pathSet.get(fullPath)!;
     const segment = fullPath.split('.').pop()!;
     const childPaths = [...entry.childPaths].sort();
-    const children = childPaths
-      .filter(cp => {
-        if (!pathSet.has(cp)) return false;
-        // Hide internal entities (e.g. _schema) from the tree
-        const seg = cp.split('.').pop();
-        return !seg || !seg.startsWith('_');
-      })
-      .map(cp => buildNode(cp));
+    const visibleChildPaths = childPaths.filter(cp => {
+      if (!pathSet.has(cp)) return false;
+      // Hide internal entities (e.g. _schema) from the tree
+      const seg = cp.split('.').pop();
+      return !seg || !seg.startsWith('_');
+    });
+
+    const allChildren = visibleChildPaths.map(cp => buildNode(cp));
+
+    // If every child is a leaf (no grandchildren), they are records that belong
+    // IN this node's table view — not navigable tree nodes. Stop the tree here
+    // at n-1 so the lowest nav level shows its records in the table, not the tree.
+    const children = allChildren.some(c => c.children.length > 0 || c.childCount > 0)
+      ? allChildren
+      : [];
 
     const segments = entry.state?.value?._segments as Record<string, FilterDefinition> | undefined;
 
@@ -131,6 +138,14 @@ export function buildTree(states: EoState[], statePrefix: string): TreeNode[] {
       roots.push(buildNode(path));
     }
   }
+
+  // If there's exactly one root node, skip down a level and show its children
+  // directly. Since each space has its own isolated IDB, the single root
+  // (typically "spaces") is redundant — the user is already scoped to one space.
+  if (roots.length === 1 && roots[0].children.length > 0) {
+    return roots[0].children;
+  }
+
   return roots;
 }
 
