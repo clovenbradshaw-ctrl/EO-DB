@@ -792,6 +792,55 @@ body {
 .val-str { color: var(--def); }
 .val-obj { color: var(--text-dim); font-size: 10px; }
 .val-formula { color: var(--eva); font-style: italic; }
+
+/* Column context menu */
+.col-ctx-menu {
+  position: fixed;
+  z-index: 10000;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 30px rgba(0,0,0,0.35);
+  min-width: 200px;
+  padding: 4px 0;
+  font-family: 'DM Sans', sans-serif;
+  font-size: 12px;
+  color: var(--text);
+}
+.col-ctx-item {
+  padding: 7px 14px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+.col-ctx-item:hover { background: var(--bg2); }
+.col-ctx-item.active { color: var(--accent); }
+.col-ctx-separator {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 0;
+}
+.col-ctx-item.disabled {
+  opacity: 0.4;
+  pointer-events: none;
+}
+.col-rename-input {
+  font-size: 11px;
+  font-weight: 400;
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  padding: 2px 4px;
+  background: var(--bg);
+  color: var(--text);
+  outline: none;
+  width: 100%;
+  text-transform: none;
+  font-family: 'JetBrains Mono', monospace;
+}
+.state-table th[data-col] { cursor: context-menu; user-select: none; }
+.sort-arrow { margin-left: 4px; font-size: 10px; opacity: 0.7; }
 .val-null { color: var(--text-faint); }
 
 .op-badge {
@@ -8628,6 +8677,9 @@ function toggleExpandNode(path) {
 let horizonOpFilter = 'all'; // 'all', 'ins', 'def', 'con', 'seg', 'eva'
 let filterRules = []; // [{id, field, operator, value}]
 let filterConjunction = 'and'; // 'and' | 'or'
+let columnSorts = []; // [{field, direction}]
+let hiddenColumns = new Set();
+let renameColumnKey = null; // key of column currently being renamed
 let savedSegments = []; // [{name, rules, conjunction}]
 let activeSegmentName = null;
 
@@ -8768,6 +8820,19 @@ function renderHorizon() {
     }
   }
 
+  // Load _schema display name overrides (from DEF events on scope._schema.fieldKey)
+  if (selectedScope) {
+    const schemaPrefix = selectedScope + '._schema.';
+    for (const [target, s] of Object.entries(state)) {
+      if (target.startsWith(schemaPrefix) && s.value?._label) {
+        const fieldKey = target.slice(schemaPrefix.length);
+        if (!fieldKey.includes('.')) {
+          columnDisplayNames.set(fieldKey, s.value._label);
+        }
+      }
+    }
+  }
+
   // Text search filter — also search inside fields sub-object
   if (search) {
     entries = entries.filter(s => {
@@ -8829,14 +8894,68 @@ function renderHorizon() {
     return `<span class="target-path">${formatTarget(target)}</span>`;
   }
 
+  // Apply column sorts
+  if (columnSorts.length > 0) {
+    entries = [...entries].sort((a, b) => {
+      for (const sort of columnSorts) {
+        let aVal, bVal;
+        if (sort.field === '_record') {
+          aVal = a.value?.name || a.target.split('.').pop() || '';
+          bVal = b.value?.name || b.target.split('.').pop() || '';
+        } else if (sort.field === '_last_op') {
+          aVal = a.last_op || ''; bVal = b.last_op || '';
+        } else if (sort.field === '_agent') {
+          aVal = a.last_agent || ''; bVal = b.last_agent || '';
+        } else if (sort.field === '_updated') {
+          aVal = a.last_ts || ''; bVal = b.last_ts || '';
+        } else {
+          const aSource = useFieldsSub ? (a.value?.fields || {}) : (a.value || {});
+          const bSource = useFieldsSub ? (b.value?.fields || {}) : (b.value || {});
+          aVal = aSource[sort.field]; bVal = bSource[sort.field];
+        }
+        const aStr = aVal != null ? String(aVal) : '';
+        const bStr = bVal != null ? String(bVal) : '';
+        const aNum = Number(aStr), bNum = Number(bStr);
+        const cmp = (!isNaN(aNum) && !isNaN(bNum) && aStr !== '' && bStr !== '')
+          ? aNum - bNum : aStr.localeCompare(bStr);
+        const directed = sort.direction === 'asc' ? cmp : -cmp;
+        if (directed !== 0) return directed;
+      }
+      return 0;
+    });
+  }
+
+  // Helper to render a <th> with context menu and optional sort arrow
+  function renderTh(colKey, label, extraStyle) {
+    if (hiddenColumns.has(colKey)) return '';
+    const sortEntry = columnSorts.find(s => s.field === colKey);
+    const arrow = sortEntry ? `<span class="sort-arrow">${sortEntry.direction === 'asc' ? '▴' : '▾'}</span>` : '';
+    const safeLabel = escapeHtml(label);
+
+    // Inline rename mode
+    if (renameColumnKey === colKey) {
+      return `<th data-col="${colKey}" ${extraStyle ? `style="${extraStyle}"` : ''}>
+        <input id="colRenameInput" class="col-rename-input" value="${safeLabel}"
+          onkeydown="if(event.key==='Enter'){finishColumnRename('${colKey}',this.value)}else if(event.key==='Escape'){renameColumnKey=null;renderHorizon()}"
+          onblur="finishColumnRename('${colKey}',this.value)">
+      </th>`;
+    }
+    return `<th data-col="${colKey}" oncontextmenu="showColumnContextMenu(event,'${colKey}','${safeLabel.replace(/'/g, "\\'")}')" ${extraStyle ? `style="${extraStyle}"` : ''}>
+      ${safeLabel}${arrow}
+    </th>`;
+  }
+
   // Always pivot when there are object values (airtable-style)
   if (hasObjectValues && valueKeys.length > 0) {
+    // Filter hidden value keys
+    const visibleKeys = valueKeys.filter(k => !hiddenColumns.has(k));
+
     thead.innerHTML = `<tr>
-      <th style="position:sticky;left:0;background:var(--bg);z-index:2;">${selectedScope ? 'Record' : 'Target'}</th>
-      ${valueKeys.map(k => `<th>${escapeHtml(fieldNameMap.get(k) || k)}</th>`).join('')}
-      <th>Op</th>
-      <th>Agent</th>
-      <th>Updated</th>
+      ${renderTh('_record', selectedScope ? 'Record' : 'Target', 'position:sticky;left:0;background:var(--bg);z-index:2;')}
+      ${visibleKeys.map(k => renderTh(k, columnDisplayNames.get(k) || fieldNameMap.get(k) || k)).join('')}
+      ${renderTh('_last_op', 'Op')}
+      ${renderTh('_agent', 'Agent')}
+      ${renderTh('_updated', 'Updated')}
     </tr>`;
 
     tbody.innerHTML = entries.map(s => {
@@ -8845,29 +8964,29 @@ function renderHorizon() {
         ? (val.fields && typeof val.fields === 'object' && !Array.isArray(val.fields) ? val.fields : {})
         : val;
       return `<tr onclick="selectTarget('${s.target}')">
-        <td style="position:sticky;left:0;background:var(--bg);z-index:1;">${displayTarget(s.target)}</td>
-        ${valueKeys.map(k => `<td>${formatCellValue(source[k])}</td>`).join('')}
-        <td><span class="op-badge op-${s.last_op}">${s.last_op}</span></td>
-        <td><span class="agent-tag">${s.last_agent.replace(':amino','')}</span></td>
-        <td><span class="ts-tag">${formatTs(s.last_ts)}</span></td>
+        ${hiddenColumns.has('_record') ? '' : `<td style="position:sticky;left:0;background:var(--bg);z-index:1;">${displayTarget(s.target)}</td>`}
+        ${visibleKeys.map(k => `<td>${formatCellValue(source[k])}</td>`).join('')}
+        ${hiddenColumns.has('_last_op') ? '' : `<td><span class="op-badge op-${s.last_op}">${s.last_op}</span></td>`}
+        ${hiddenColumns.has('_agent') ? '' : `<td><span class="agent-tag">${s.last_agent.replace(':amino','')}</span></td>`}
+        ${hiddenColumns.has('_updated') ? '' : `<td><span class="ts-tag">${formatTs(s.last_ts)}</span></td>`}
       </tr>`;
     }).join('');
   } else {
     thead.innerHTML = `<tr>
-      <th>Target</th>
-      <th>Value</th>
-      <th>Last Op</th>
-      <th>Agent</th>
-      <th>Updated</th>
+      ${renderTh('_record', 'Target')}
+      ${renderTh('_value', 'Value')}
+      ${renderTh('_last_op', 'Last Op')}
+      ${renderTh('_agent', 'Agent')}
+      ${renderTh('_updated', 'Updated')}
     </tr>`;
 
     tbody.innerHTML = entries.map(s => `
       <tr onclick="selectTarget('${s.target}')">
-        <td>${displayTarget(s.target)}</td>
-        <td>${formatValue(s.value)}</td>
-        <td><span class="op-badge op-${s.last_op}">${s.last_op}</span></td>
-        <td><span class="agent-tag">${s.last_agent.replace(':amino','')}</span></td>
-        <td><span class="ts-tag">${formatTs(s.last_ts)}</span></td>
+        ${hiddenColumns.has('_record') ? '' : `<td>${displayTarget(s.target)}</td>`}
+        ${hiddenColumns.has('_value') ? '' : `<td>${formatValue(s.value)}</td>`}
+        ${hiddenColumns.has('_last_op') ? '' : `<td><span class="op-badge op-${s.last_op}">${s.last_op}</span></td>`}
+        ${hiddenColumns.has('_agent') ? '' : `<td><span class="agent-tag">${s.last_agent.replace(':amino','')}</span></td>`}
+        ${hiddenColumns.has('_updated') ? '' : `<td><span class="ts-tag">${formatTs(s.last_ts)}</span></td>`}
       </tr>
     `).join('');
   }
@@ -8940,6 +9059,142 @@ function filterHorizon() {
   }
   renderHorizon();
 }
+
+// ── Column context menu ──
+function showColumnContextMenu(e, colKey, colLabel) {
+  e.preventDefault();
+  e.stopPropagation();
+  closeColumnContextMenu();
+
+  const activeSort = columnSorts.find(s => s.field === colKey);
+  const isRecord = colKey === '_record';
+
+  let html = '';
+  if (!isRecord) {
+    html += `<div class="col-ctx-item" onclick="startColumnRename('${colKey}','${escapeHtml(colLabel)}')">Rename column</div>`;
+    html += `<div class="col-ctx-separator"></div>`;
+  }
+  html += `<div class="col-ctx-item${activeSort?.direction === 'asc' ? ' active' : ''}" onclick="setColumnSort('${colKey}','asc')">Sort ascending${activeSort?.direction === 'asc' ? ' ✓' : ''}</div>`;
+  html += `<div class="col-ctx-item${activeSort?.direction === 'desc' ? ' active' : ''}" onclick="setColumnSort('${colKey}','desc')">Sort descending${activeSort?.direction === 'desc' ? ' ✓' : ''}</div>`;
+  if (activeSort) {
+    html += `<div class="col-ctx-item" onclick="removeColumnSort('${colKey}')">Remove sort</div>`;
+  }
+  html += `<div class="col-ctx-separator"></div>`;
+  html += `<div class="col-ctx-item" onclick="addFilterForColumn('${colKey}')">Filter by this column</div>`;
+  html += `<div class="col-ctx-separator"></div>`;
+  html += `<div class="col-ctx-item${isRecord ? ' disabled' : ''}" onclick="hideColumn('${colKey}')">Hide column</div>`;
+  if (hiddenColumns.size > 0) {
+    html += `<div class="col-ctx-item" onclick="showAllColumns()">Show all columns (${hiddenColumns.size} hidden)</div>`;
+  }
+
+  const menu = document.createElement('div');
+  menu.className = 'col-ctx-menu';
+  menu.id = 'colCtxMenu';
+  menu.innerHTML = html;
+  document.body.appendChild(menu);
+
+  // Position within viewport
+  const rect = menu.getBoundingClientRect();
+  let x = e.clientX, y = e.clientY;
+  if (x + rect.width > window.innerWidth) x = window.innerWidth - rect.width - 8;
+  if (y + rect.height > window.innerHeight) y = window.innerHeight - rect.height - 8;
+  menu.style.left = x + 'px';
+  menu.style.top = y + 'px';
+
+  // Close on click outside or Escape
+  setTimeout(() => {
+    document.addEventListener('click', closeColumnContextMenu, { once: true });
+    document.addEventListener('keydown', function handler(ev) {
+      if (ev.key === 'Escape') { closeColumnContextMenu(); document.removeEventListener('keydown', handler); }
+    });
+  }, 0);
+}
+
+function closeColumnContextMenu() {
+  const m = document.getElementById('colCtxMenu');
+  if (m) m.remove();
+}
+
+function setColumnSort(field, direction) {
+  columnSorts = [{ field, direction }];
+  closeColumnContextMenu();
+  renderHorizon();
+}
+
+function removeColumnSort(field) {
+  columnSorts = columnSorts.filter(s => s.field !== field);
+  closeColumnContextMenu();
+  renderHorizon();
+}
+
+function hideColumn(key) {
+  hiddenColumns.add(key);
+  closeColumnContextMenu();
+  renderHorizon();
+}
+
+function showAllColumns() {
+  hiddenColumns.clear();
+  closeColumnContextMenu();
+  renderHorizon();
+}
+
+function addFilterForColumn(colKey) {
+  closeColumnContextMenu();
+  // Map column key to filter field path
+  let filterField = colKey;
+  if (colKey !== 'target' && colKey !== 'last_op' && colKey !== 'last_agent' && colKey !== '_record') {
+    // Determine if Airtable-style
+    const state = foldState(replayIndex);
+    let useFields = false;
+    for (const s of Object.values(state)) {
+      const f = s.value?.fields;
+      if (f && typeof f === 'object' && !Array.isArray(f)) { useFields = true; break; }
+    }
+    filterField = useFields ? 'value.fields.' + colKey : 'value.' + colKey;
+  }
+  filterRules.push({ id: 'fr_' + Date.now(), field: filterField, operator: 'contains', value: '' });
+  renderFilterRules();
+  // Open filter panel
+  const panel = document.getElementById('filterPanel');
+  if (!panel.classList.contains('open')) panel.classList.add('open');
+  renderHorizon();
+}
+
+function startColumnRename(colKey, currentLabel) {
+  closeColumnContextMenu();
+  renameColumnKey = colKey;
+  renderHorizon();
+  // Focus the rename input after render
+  setTimeout(() => {
+    const inp = document.getElementById('colRenameInput');
+    if (inp) { inp.focus(); inp.select(); }
+  }, 0);
+}
+
+function finishColumnRename(colKey, newLabel) {
+  renameColumnKey = null;
+  if (newLabel && newLabel.trim()) {
+    // Save display name override via DEF event on _schema
+    if (selectedScope) {
+      const schemaTarget = selectedScope + '._schema.' + colKey;
+      appendEvent({
+        op: 'DEF',
+        target: schemaTarget,
+        operand: { _label: newLabel.trim() },
+        agent: matrixUserId || 'local',
+        ts: new Date().toISOString(),
+        acquired_ts: new Date().toISOString(),
+      });
+    }
+    // Update local field name map cache
+    columnDisplayNames.set(colKey, newLabel.trim());
+  }
+  renderHorizon();
+}
+
+// Local column display name overrides
+const columnDisplayNames = new Map();
 
 // ── Filter panel ──
 function toggleFilterPanel() {
