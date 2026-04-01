@@ -44,6 +44,10 @@ export function buildTree(states: EoState[], statePrefix: string): TreeNode[] {
 
   for (const s of states) {
     if (s.value?._alias) continue;
+    // Skip space-level entries — space navigation is handled by the space selector,
+    // not the objects tree. Each space has its own isolated IDB so showing the
+    // "space" category is redundant.
+    if (s.target.startsWith('space')) continue;
     const parts = s.target.split('.');
 
     // Register every prefix level
