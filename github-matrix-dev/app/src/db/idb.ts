@@ -11,7 +11,7 @@
 import { openDB, type IDBPDatabase } from 'idb';
 
 const DB_NAME = 'eo-db';
-const DB_VERSION = 2;
+const DB_VERSION = 5;
 const STORE_NAME = 'kv';
 
 export type EoIdb = IDBPDatabase;
