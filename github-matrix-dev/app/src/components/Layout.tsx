@@ -97,7 +97,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
     setSelectedSpace(canonical);
     localStorage.setItem('eo-selected-space', canonical);
     // Clear route state when switching spaces
-    navigate({ scope: null, record: null, view: 'horizon', builderViewId: null, customPageId: null });
+    navigate({ scope: null, record: null, view: 'records', builderViewId: null, customPageId: null });
   }
   // Soft-delete a space: hide from list, track in recycle bin
   function handleDeleteSpace(spaceTarget: string) {
@@ -518,7 +518,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
     : session.userId;
 
   const NAV_ICONS: Record<string, string> = {
-    horizon: '\u25A6',  // grid icon
+    records: '\u25A6',  // grid icon
     log: '\u2630',      // list icon
     graph: '\u2B21',    // hexagon
     compose: '\u270E',  // pencil
@@ -691,7 +691,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
       {selectedSpace && isViewer && <ViewOnlyBanner />}
 
       {/* Time scrubber — full width, under header */}
-      {activeView === 'horizon' && (
+      {activeView === 'records' && (
         <TimeScrubber
           records={scopedRecords}
           dateColumns={dateColumns}
@@ -706,7 +706,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
           {/* View navigation */}
           <nav style={s.sidebarNav}>
             <div style={s.navGroupLabel}>Views</div>
-            {(['horizon', 'log', 'graph'] as View[]).map((view) => (
+            {(['records', 'log', 'graph'] as View[]).map((view) => (
               <button
                 key={view}
                 onClick={() => navigate({ view })}
@@ -799,7 +799,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
           )}
 
           {!showRecycleBin && <ErrorBoundary>
-            {activeView === 'horizon' ? (
+            {activeView === 'records' ? (
               <>
                 {selectedScope ? (
                   <TableView
@@ -837,7 +837,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
           </ErrorBoundary>}
         </main>
 
-        {selectedRecord && activeView === 'horizon' && (
+        {selectedRecord && activeView === 'records' && (
           <RecordPageOrDrawer
             recordTarget={selectedRecord}
             allStates={allStates}
@@ -891,24 +891,19 @@ function RecordPageOrDrawer({ recordTarget, allStates, onClose, onNavigate }: {
     }
   }, [recordPageView, loadView]);
 
-  // If we have a matching record page, render RecordPageView in a panel
+  // If we have a matching record page, render RecordPageView in an inline panel
   if (recordPageView) {
     return (
       <div style={{
-        position: 'fixed', inset: 0, display: 'flex',
-        justifyContent: 'flex-end', zIndex: 1000,
-        background: 'rgba(0,0,0,0.3)',
-      }} onClick={onClose}>
-        <div style={{
-          width: 720, maxWidth: '100vw', height: '100vh',
-          background: 'var(--bg, #fff)',
-        }} onClick={e => e.stopPropagation()}>
-          <RecordPageView
-            recordTarget={recordTarget}
-            onNavigate={onNavigate}
-            onBack={onClose}
-          />
-        </div>
+        width: 720, maxWidth: '50vw', height: '100%',
+        flexShrink: 0, borderLeft: '1px solid var(--border, #e0e0e0)',
+        background: 'var(--bg, #fff)', display: 'flex', flexDirection: 'column',
+      }}>
+        <RecordPageView
+          recordTarget={recordTarget}
+          onNavigate={onNavigate}
+          onBack={onClose}
+        />
       </div>
     );
   }

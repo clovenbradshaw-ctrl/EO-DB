@@ -168,6 +168,7 @@ export class SyncManager {
     if (seq === 0 || seq === lastSnapshotSeq) return; // nothing new to snapshot
     const delta = await createDeltaSnapshot(this.store, this.client.getUserId()!);
     const mxc = await uploadDeltaSnapshot(this.client, this.roomId, delta);
+    await setSnapshotStateEvent(this.client, this.roomId, mxc, seq);
     await this.store.put('meta:snapshot_seq', seq);
     await this.store.put('meta:snapshot_mxc', mxc);
     const prevMxcs: string[] = (await this.store.get('meta:snapshot_prev_mxcs')) || [];

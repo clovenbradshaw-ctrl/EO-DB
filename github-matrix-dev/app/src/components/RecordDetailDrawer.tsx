@@ -12,15 +12,13 @@ export function RecordDetailDrawer({ target, onClose, onNavigate }: RecordDetail
   const s = makeStyles(theme);
 
   return (
-    <div style={s.overlay} onClick={onClose}>
-      <div style={s.panel} onClick={(e) => e.stopPropagation()}>
-        <div style={s.header}>
-          <div style={s.headerTarget}>{target}</div>
-          <button onClick={onClose} style={s.closeBtn}>&times;</button>
-        </div>
-        <div style={s.body}>
-          <RecordView target={target} onNavigate={onNavigate} />
-        </div>
+    <div style={s.panel}>
+      <div style={s.header}>
+        <div style={s.headerTarget}>{target}</div>
+        <button onClick={onClose} style={s.closeBtn}>&times;</button>
+      </div>
+      <div style={s.body}>
+        <RecordView target={target} onNavigate={onNavigate} />
       </div>
     </div>
   );
@@ -28,23 +26,15 @@ export function RecordDetailDrawer({ target, onClose, onNavigate }: RecordDetail
 
 function makeStyles(t: Theme): Record<string, React.CSSProperties> {
   return {
-    overlay: {
-      position: 'fixed',
-      inset: 0,
-      background: t.shadowOverlay,
-      display: 'flex',
-      justifyContent: 'flex-end',
-      zIndex: 1000,
-    },
     panel: {
       width: 640,
-      maxWidth: '100vw',
-      height: '100vh',
+      maxWidth: '50vw',
+      height: '100%',
+      flexShrink: 0,
       background: t.bg,
       borderLeft: `1px solid ${t.border}`,
       display: 'flex',
       flexDirection: 'column',
-      boxShadow: t.shadowPanel,
     },
     header: {
       display: 'flex',
