@@ -131,6 +131,14 @@ export function buildTree(states: EoState[], statePrefix: string): TreeNode[] {
       roots.push(buildNode(path));
     }
   }
+
+  // If there's exactly one root node, skip down a level and show its children
+  // directly. Since each space has its own isolated IDB, the single root
+  // (typically "spaces") is redundant — the user is already scoped to one space.
+  if (roots.length === 1 && roots[0].children.length > 0) {
+    return roots[0].children;
+  }
+
   return roots;
 }
 
