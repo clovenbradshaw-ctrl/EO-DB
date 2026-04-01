@@ -367,74 +367,43 @@ export function Layout({ session, onLogout }: LayoutProps) {
   const spaceCacheRef = useRef<Map<string, CachedSpace>>(new Map());
 
   // --- Per-space store init (re-runs when selectedSpace changes) ---
+  // Split into two effects: one for store init (stable), one for sync manager (depends on matrixReady)
+
   useEffect(() => {
     if (!selectedSpace) return;
 
     let mounted = true;
 
     async function setupSpaceStore() {
-      const cache = spaceCacheRef.current;
-      const existing = cache.get(selectedSpace!);
+      try {
+        const cache = spaceCacheRef.current;
+        const existing = cache.get(selectedSpace!);
 
-      if (existing) {
-        // Reuse cached store — no IDB open, no key derivation, no Matrix hydration
-        if (!mounted) return;
-        await init(existing.store);
-
-        // Always create a fresh SyncManager (the old one was destroyed on space switch)
-        if (matrixReady && matrixClientRef.current && roomIdRef.current) {
-          try {
-            const freshSync = new SyncManager(
-              matrixClientRef.current, roomIdRef.current, existing.store,
-              (event) => {
-                useEoStore.setState((st) => ({
-                  recentEvents: [...st.recentEvents.slice(-99), event],
-                  lastSeq: event.seq,
-                }));
-              },
-            );
-            await freshSync.initialize();
-            if (!mounted) return;
-            existing.syncManager = freshSync;
-            useEoStore.getState().setSyncManager(freshSync);
-          } catch { /* offline */ }
-        }
-        return;
-      }
-
-      // Open space-scoped IDB with stable key (userId + deviceId, no accessToken)
-      const idb = await createIdb(selectedSpace!);
-      const key = await deriveKey(session.userId, session.deviceId);
-      const store = createStore(idb, key);
-      if (!mounted) { store.close(); return; }
-
-      await init(store);
-
-      let syncManager: SyncManager | null = null;
-
-      // Set up sync manager for this space (no prefix needed — IDB is isolated)
-      if (matrixReady && matrixClientRef.current && roomIdRef.current) {
-        try {
-          syncManager = new SyncManager(
-            matrixClientRef.current, roomIdRef.current, store,
-            (event) => {
-              useEoStore.setState((st) => ({
-                recentEvents: [...st.recentEvents.slice(-99), event],
-                lastSeq: event.seq,
-              }));
-            },
-          );
-          await syncManager.initialize();
+        if (existing) {
+          // Reuse cached store — no IDB open, no key derivation
           if (!mounted) return;
-
-          useEoStore.getState().setSyncManager(syncManager);
-        } catch {
-          // Offline — local store is still available
+          await init(existing.store);
+          return;
         }
-      }
 
-      // Cache this space's store + sync manager for fast re-access
-      cache.set(selectedSpace!, { store, syncManager });
+        // Open space-scoped IDB with stable key (userId + deviceId, no accessToken)
+        const idb = await createIdb(selectedSpace!);
+        if (!mounted) return;
+        const key = await deriveKey(session.userId, session.deviceId);
+        if (!mounted) return;
+        const store = createStore(idb, key);
+        if (!mounted) { store.close(); return; }
+
+        await init(store);
+
+        // Cache this space's store for fast re-access
+        cache.set(selectedSpace!, { store, syncManager: null });
+      } catch (err) {
+        // If store init fails (corrupted IDB, stale key, etc.), still mark ready
+        // so the UI is usable — user can create new spaces or retry
+        console.error('Failed to initialize space store:', err);
+        useEoStore.setState({ ready: true });
+      }
     }
 
     setupSpaceStore();
@@ -442,7 +411,44 @@ export function Layout({ session, onLogout }: LayoutProps) {
     return () => {
       mounted = false;
     };
-  }, [selectedSpace, session, init, matrixReady]);
+  }, [selectedSpace, session, init]);
+
+  // --- Sync manager setup (re-runs when matrixReady changes or space changes) ---
+  useEffect(() => {
+    if (!selectedSpace || !matrixReady || !matrixClientRef.current || !roomIdRef.current) return;
+
+    let mounted = true;
+
+    async function setupSyncManager() {
+      try {
+        const cache = spaceCacheRef.current;
+        const cached = cache.get(selectedSpace!);
+        const store = cached?.store ?? useEoStore.getState().store;
+        if (!store) return; // Store not ready yet — will be set up when store init completes
+
+        const syncManager = new SyncManager(
+          matrixClientRef.current!, roomIdRef.current!, store,
+          (event) => {
+            useEoStore.setState((st) => ({
+              recentEvents: [...st.recentEvents.slice(-99), event],
+              lastSeq: event.seq,
+            }));
+          },
+        );
+        await syncManager.initialize();
+        if (!mounted) return;
+
+        if (cached) cached.syncManager = syncManager;
+        useEoStore.getState().setSyncManager(syncManager);
+      } catch {
+        // Offline — local store is still available
+      }
+    }
+
+    setupSyncManager();
+
+    return () => { mounted = false; };
+  }, [selectedSpace, matrixReady]);
 
   async function handleLogout() {
     // Save snapshots for ALL cached spaces before clearing state

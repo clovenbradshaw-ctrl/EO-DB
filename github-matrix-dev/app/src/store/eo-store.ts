@@ -61,7 +61,12 @@ export const useEoStore = create<EoDbState>((set, get) => ({
   async init(store: EoStore) {
     // Immediately mark not-ready so components show loading during the transition
     set({ ready: false, recentEvents: [], lastSeq: 0 });
-    const lastSeq = await store.getCurrentSeq();
+    let lastSeq = 0;
+    try {
+      lastSeq = await store.getCurrentSeq();
+    } catch {
+      // Corrupted/stale encrypted data — start fresh (seq 0)
+    }
     set({ store, lastSeq, ready: true });
   },
 
