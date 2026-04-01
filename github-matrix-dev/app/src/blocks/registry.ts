@@ -109,6 +109,39 @@ register({
   acceptsSlots: null,
 });
 
+register({
+  type: 'metric',
+  category: 'data',
+  label: 'Metric',
+  icon: '#',
+  defaultProps: () => ({
+    title: 'Metric',
+    formula: 'COUNT',
+    field: '',
+    color: '',
+    prefix: '',
+    scope: '',
+  }),
+  acceptsChildren: false,
+  acceptsSlots: null,
+});
+
+register({
+  type: 'list',
+  category: 'data',
+  label: 'List',
+  icon: '☰',
+  defaultProps: () => ({
+    title: 'List',
+    primary: 'name',
+    secondary: '',
+    scope: '',
+    emptyText: 'No data',
+  }),
+  acceptsChildren: false,
+  acceptsSlots: null,
+});
+
 // --- Record ---
 
 register({
