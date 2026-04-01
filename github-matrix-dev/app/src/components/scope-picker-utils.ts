@@ -50,23 +50,22 @@ export function buildTree(states: EoState[], statePrefix: string): TreeNode[] {
     if (s.target.startsWith('space')) continue;
     const parts = s.target.split('.');
 
-    // Register every prefix level
+    // Register every prefix level and link each to its parent
     for (let i = 1; i <= parts.length; i++) {
       const path = parts.slice(0, i).join('.');
       if (!pathSet.has(path)) {
         pathSet.set(path, { childPaths: new Set() });
+      }
+      // Register intermediate path as child of its parent
+      if (i > 1) {
+        const parentPath = parts.slice(0, i - 1).join('.');
+        pathSet.get(parentPath)!.childPaths.add(path);
       }
     }
 
     // Register this target's state at its path
     const entry = pathSet.get(s.target)!;
     entry.state = s;
-
-    // Register as child of parent
-    if (parts.length > 1) {
-      const parentPath = parts.slice(0, -1).join('.');
-      pathSet.get(parentPath)!.childPaths.add(s.target);
-    }
   }
 
   function buildNode(fullPath: string): TreeNode {
