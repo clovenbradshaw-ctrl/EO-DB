@@ -4,13 +4,11 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta http-equiv="Content-Security-Policy"
-          content="default-src 'self'; connect-src 'self' https: wss:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com;" />
+          content="default-src 'self'; connect-src 'self' https: wss:; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; worker-src 'self';" />
     <title>EO///DB</title>
     <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+    <link rel="apple-touch-icon" href="./pwa-192.png" />
     <meta name="theme-color" content="#1a1a2e" />
-    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
-    <meta http-equiv="Pragma" content="no-cache" />
-    <meta http-equiv="Expires" content="0" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600&family=Source+Serif+4:opsz,wght@8..60,300;8..60,400;8..60,600&family=Outfit:wght@200;300;400;500;600;700&display=swap" rel="stylesheet" />
@@ -34,19 +32,11 @@
       ::selection { background: rgba(26, 109, 212, 0.15); }
       [data-theme="dark"] ::selection { background: rgba(88, 166, 255, 0.2); }
     </style>
-    <script type="module" crossorigin src="./assets/index-YUUdNLu_.js"></script>
+    <script type="module" crossorigin src="./assets/index-bqRs_1g2.js"></script>
     <link rel="modulepreload" crossorigin href="./assets/matrix-sdk-BxdHBrJm.js">
     <link rel="modulepreload" crossorigin href="./assets/react-vendor-QnXRpWzj.js">
-</head>
+  </head>
   <body>
     <div id="root"></div>
-    <script>
-      // Unregister old service workers so cached content doesn't block updates
-      if ('serviceWorker' in navigator) {
-        navigator.serviceWorker.getRegistrations().then(function(registrations) {
-          registrations.forEach(function(r) { r.unregister(); });
-        });
-      }
-    </script>
   </body>
 </html>

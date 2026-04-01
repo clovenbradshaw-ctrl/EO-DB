@@ -60,7 +60,7 @@ export type BlockType =
   // Media
   | 'image' | 'file' | 'embed' | 'web-bookmark'
   // Data
-  | 'table' | 'list' | 'cards-grid' | 'detail' | 'kanban' | 'calendar'
+  | 'table' | 'list' | 'metric' | 'cards-grid' | 'detail' | 'kanban' | 'calendar'
   | 'chart' | 'summary-kpi' | 'timeline' | 'map' | 'gallery'
   // Record context
   | 'record'
@@ -186,6 +186,27 @@ export interface TableBlockProps {
   pageSize?: number;
   rowClickAction?: 'none' | 'detail' | 'url';
   rowClickTarget?: string;
+  emptyText?: string;
+  /** Data binding — replaces scope when present */
+  binding?: DataBinding;
+}
+
+export interface MetricBlockProps {
+  title?: string;
+  formula: 'COUNT' | 'SUM';
+  field?: string;
+  color?: string;
+  prefix?: string;
+  scope?: string;
+  /** Data binding — selects items to aggregate */
+  binding?: DataBinding;
+}
+
+export interface ListBlockProps {
+  title?: string;
+  primary?: string;
+  secondary?: string;
+  scope?: string;
   emptyText?: string;
   /** Data binding — replaces scope when present */
   binding?: DataBinding;

@@ -13,13 +13,12 @@ import { RecordDetailDrawer } from './RecordDetailDrawer';
 import { ConnectionStatus, useConnectionState } from './ConnectionStatus';
 import { ErrorBoundary } from './ErrorBoundary';
 import { SyncProgress } from './SyncProgress';
-import { AirtableSettingsSection } from './AirtableSettings';
-import { DataSyncDashboard } from './DataSyncDashboard';
 import { LogView } from './LogView';
 import { ComposeView } from './ComposeView';
 import { GraphView } from './GraphView';
 import { SettingsView } from './SettingsView';
 import { SpaceMembers } from './SpaceMembers';
+import { ImportView } from './ImportView';
 import { BuilderView } from './builder/BuilderView';
 import { RecordPageView } from './builder/RecordPageView';
 import { PermissionBadge } from './PermissionBadge';
@@ -762,13 +761,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
             ) : activeView === 'graph' ? (
               <GraphView allStates={allStates} />
             ) : activeView === 'import' ? (
-              <div style={s.importPage}>
-                <div style={s.importHeader}>
-                  <div style={s.importTitle}>Import Data</div>
-                  <div style={s.importSubtitle}>Connect external data sources and sync records into EO-DB</div>
-                </div>
-                <AirtableSettingsSection session={session} />
-              </div>
+              <ImportView />
             ) : activeView === 'compose' ? (
               <ComposeView permissions={currentPermissions} />
             ) : activeView === 'builder' ? (
@@ -1049,32 +1042,6 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       flexDirection: 'column' as const,
       background: t.bg,
       transition: 'background 0.25s ease',
-    },
-
-    // Import page
-    importPage: {
-      flex: 1,
-      overflowY: 'auto' as const,
-      maxWidth: 640,
-      margin: '0 auto',
-      padding: '0 28px 48px',
-    },
-    importHeader: {
-      padding: '32px 0 12px',
-      borderBottom: `1px solid ${t.border}`,
-      marginBottom: 8,
-    },
-    importTitle: {
-      fontFamily: "'Source Serif 4', Georgia, serif",
-      fontSize: 22,
-      fontWeight: 600,
-      color: t.textHeading,
-    },
-    importSubtitle: {
-      fontSize: 13,
-      color: t.textSecondary,
-      marginTop: 4,
-      lineHeight: 1.4,
     },
 
     // Empty states — centered with icon
