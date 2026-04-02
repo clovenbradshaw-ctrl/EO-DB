@@ -1,15 +1,18 @@
 import { useState, useEffect } from 'react';
+import type { MatrixClient } from 'matrix-js-sdk';
 import { useEoStore } from '../store/eo-store';
 import { useTheme, type Theme } from '../theme';
 import type { MatrixSession } from '../matrix/client';
 import { RoomDataViewer } from './RoomDataViewer';
+import { MatrixRoomsViewer } from './MatrixRoomsViewer';
 import { FilenStorageWidget } from './FilenStorageWidget';
 
 interface SettingsViewProps {
   session: MatrixSession;
+  matrixClient?: MatrixClient | null;
 }
 
-export function SettingsView({ session }: SettingsViewProps) {
+export function SettingsView({ session, matrixClient }: SettingsViewProps) {
   const { theme } = useTheme();
   const lastSeq = useEoStore((s) => s.lastSeq);
   const recentEvents = useEoStore((s) => s.recentEvents);
@@ -17,6 +20,7 @@ export function SettingsView({ session }: SettingsViewProps) {
   const syncManager = useEoStore((s) => s.syncManager);
   const manualSnapshot = useEoStore((s) => s.manualSnapshot);
   const [showRoomData, setShowRoomData] = useState(false);
+  const [showAllRooms, setShowAllRooms] = useState(false);
   const s = styles(theme);
 
   const [eventCount, setEventCount] = useState<number | null>(null);
@@ -71,6 +75,10 @@ export function SettingsView({ session }: SettingsViewProps) {
     ? session.userId.split(':')[1]
     : 'unknown';
 
+  if (showAllRooms && matrixClient) {
+    return <MatrixRoomsViewer client={matrixClient} onBack={() => setShowAllRooms(false)} />;
+  }
+
   if (showRoomData) {
     return <RoomDataViewer onBack={() => setShowRoomData(false)} />;
   }
@@ -114,6 +122,13 @@ export function SettingsView({ session }: SettingsViewProps) {
               onClick={() => setShowRoomData(true)}
             >
               View Room Data
+            </button>
+            <button
+              style={{ ...s.actionBtn, background: 'transparent', color: theme.accent, border: `1px solid ${theme.accent}` }}
+              onClick={() => setShowAllRooms(true)}
+              disabled={!matrixClient}
+            >
+              All Rooms
             </button>
             {snapshotStatus && (
               <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: snapshotStatus.startsWith('Error') ? theme.danger : theme.success }}>
