@@ -980,7 +980,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
             ) : activeView === 'builder' ? (
               <BuilderView />
             ) : activeView === 'settings' ? (
-              <SettingsView session={session} />
+              <SettingsView session={session} matrixClient={matrixClientRef.current} />
             ) : null}
           </ErrorBoundary>}
         </main>

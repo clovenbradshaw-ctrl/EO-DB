@@ -104,10 +104,22 @@ export function logout(): void {
  * Used by sync and event bridge modules.
  */
 export function createMatrixClient(session: MatrixSession): sdk.MatrixClient {
-  return sdk.createClient({
+  const client = sdk.createClient({
     baseUrl: session.homeserver,
     userId: session.userId,
     deviceId: session.deviceId,
     accessToken: session.accessToken,
   });
+
+  // EO-DB does not use MatrixRTC (VoIP/call features). The SDK's internal
+  // MatrixRTCSessionManager logs noisy warnings ("Got room state event for
+  // unknown room") during sync for rooms not yet in the client's room list.
+  // Stop it immediately to silence those warnings.
+  try {
+    client.matrixRTC?.stop();
+  } catch {
+    // Older SDK versions may not expose matrixRTC — safe to ignore.
+  }
+
+  return client;
 }
