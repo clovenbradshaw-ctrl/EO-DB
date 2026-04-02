@@ -118,7 +118,8 @@ export class SyncManager {
    * Initialize sync — call after login and store setup.
    *
    * On a fresh device (seq === 0), hydrates from the latest snapshot stored
-   * in Matrix media. This is the primary data recovery path.
+   * in Matrix media, then replays any EO events already present in the room
+   * timeline (from the initial sync) that the snapshot didn't cover.
    */
   async initialize(): Promise<void> {
     const currentSeq = await this.store.getCurrentSeq();
@@ -127,6 +128,12 @@ export class SyncManager {
     if (currentSeq === 0) {
       await this.hydrateFromSnapshot();
     }
+
+    // Replay EO events already in the room timeline (from initial sync).
+    // The snapshot may not exist or may be stale — the room timeline is the
+    // source of truth. The fold engine deduplicates via client_event_id so
+    // replaying events already covered by the snapshot is harmless.
+    await this.replayTimelineEvents();
 
     // Listen for new room events in real-time (main + additional rooms)
     this.handleTimelineEvent = (event: MatrixEvent) => {
@@ -159,6 +166,30 @@ export class SyncManager {
   }
 
   /**
+   * Replay EO events already present in the room timeline.
+   *
+   * After the initial Matrix sync, the room object contains timeline events
+   * that were fetched as part of the sync response. These are NOT emitted
+   * through the Room.timeline listener (which only fires for new events).
+   * Walk them here so a fresh device without a snapshot can still recover
+   * data from the room timeline.
+   *
+   * The fold engine deduplicates via client_event_id, so replaying events
+   * already covered by a snapshot is a no-op.
+   */
+  private async replayTimelineEvents(): Promise<void> {
+    const room = this.client.getRoom(this.roomId);
+    if (!room) return;
+
+    const timeline = room.getLiveTimeline().getEvents();
+    for (const event of timeline) {
+      if (this.destroyed) return;
+      if (event.getType() !== EO_EVENT_TYPE) continue;
+      await this.processIncomingEvent(event);
+    }
+  }
+
+  /**
    * Force-save a delta snapshot to Matrix media right now.
    * Called on beforeunload / logout so data is always persisted.
    */
@@ -168,6 +199,7 @@ export class SyncManager {
     if (seq === 0 || seq === lastSnapshotSeq) return; // nothing new to snapshot
     const delta = await createDeltaSnapshot(this.store, this.client.getUserId()!);
     const mxc = await uploadDeltaSnapshot(this.client, this.roomId, delta);
+    await setSnapshotStateEvent(this.client, this.roomId, mxc, seq);
     await this.store.put('meta:snapshot_seq', seq);
     await this.store.put('meta:snapshot_mxc', mxc);
     const prevMxcs: string[] = (await this.store.get('meta:snapshot_prev_mxcs')) || [];

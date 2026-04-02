@@ -4,9 +4,9 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 // Types
 // ---------------------------------------------------------------------------
 
-export type View = 'horizon' | 'log' | 'graph' | 'import' | 'compose' | 'settings' | 'builder';
+export type View = 'records' | 'log' | 'graph' | 'import' | 'compose' | 'settings' | 'builder';
 
-const VIEWS = new Set<string>(['horizon', 'log', 'graph', 'import', 'compose', 'settings', 'builder']);
+const VIEWS = new Set<string>(['records', 'log', 'graph', 'import', 'compose', 'settings', 'builder']);
 
 export interface AppRoute {
   view: View;
@@ -18,7 +18,7 @@ export interface AppRoute {
 }
 
 const DEFAULT_ROUTE: AppRoute = {
-  view: 'horizon',
+  view: 'records',
   scope: null,
   record: null,
   builderViewId: null,
@@ -132,8 +132,8 @@ export function serializeRoute(route: AppRoute): string {
   } else if (route.view === 'builder') {
     ordered.push('builder');
   } else {
-    // System view (omit 'horizon' as default)
-    if (route.view !== 'horizon') {
+    // System view (omit 'records' as default)
+    if (route.view !== 'records') {
       ordered.push(route.view);
     }
 
