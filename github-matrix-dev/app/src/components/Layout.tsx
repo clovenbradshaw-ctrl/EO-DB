@@ -11,7 +11,7 @@ import { HolonNav } from './HolonNav';
 import { TableView } from './TableView';
 import { RecordDetailDrawer } from './RecordDetailDrawer';
 import { RecordView } from './RecordView';
-import { ConnectionStatus, useConnectionState } from './ConnectionStatus';
+import { ConnectionStatus, useConnectionState, type ConnectionState } from './ConnectionStatus';
 import { ErrorBoundary } from './ErrorBoundary';
 import { SyncProgress } from './SyncProgress';
 import { LogView } from './LogView';
@@ -141,7 +141,16 @@ export function Layout({ session, onLogout }: LayoutProps) {
   const [scopeFieldNameMap, setScopeFieldNameMap] = useState<Map<string, string>>(new Map());
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
   const getState = useEoStore((s) => s.getState);
-  const connectionState = useConnectionState();
+  const _browserOnline = useConnectionState(); // triggers re-render on network change
+  const syncManager = useEoStore((s) => s.syncManager);
+  // Show actual sync status: "online" only when Matrix sync is connected
+  const connectionState: ConnectionState = !navigator.onLine
+    ? 'offline'
+    : syncManager
+      ? 'online'
+      : matrixReady
+        ? 'syncing' // Matrix client ready but no sync manager yet
+        : 'offline';
 
   // Helper to select a space and persist the choice
   function selectSpace(target: string) {
