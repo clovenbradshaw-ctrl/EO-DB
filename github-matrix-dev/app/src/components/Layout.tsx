@@ -31,7 +31,7 @@ import type { EoState } from '../db/types';
 import type { ViewDefinition } from '../blocks/types';
 import { discoverSpacesFromMatrix, type SpaceEntry } from '../matrix/space-discovery';
 import { SpaceBrowser } from './SpaceBrowser';
-import { TimeScrubber } from './TimeScrubber';
+import { Horizon } from './Horizon';
 import { type TimeScrubberFilter, type DateColumnOption, DEFAULT_FILTER, detectDateColumns } from './time-scrubber-utils';
 import { hasFieldsSubObject, buildFieldNameMap } from './filter-types';
 import { useHashRoute, type View } from '../lib/router';
@@ -833,9 +833,9 @@ export function Layout({ session, onLogout }: LayoutProps) {
       {/* View-only banner for Viewer role */}
       {selectedSpace && isViewer && <ViewOnlyBanner />}
 
-      {/* Time scrubber — full width, under header */}
+      {/* Horizon — full width, under header */}
       {activeView === 'records' && (
-        <TimeScrubber
+        <Horizon
           records={scopedRecords}
           dateColumns={dateColumns}
           filter={timeScrubberFilter}
