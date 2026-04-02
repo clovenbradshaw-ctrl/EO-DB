@@ -824,7 +824,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
           {/* User */}
           <div style={s.userArea}>
             <div style={s.avatar}>{displayName.charAt(0).toUpperCase()}</div>
-            <span style={{ fontSize: 12, color: theme.textSecondary }}>{displayName}</span>
+            <span style={{ fontSize: 12, color: theme.textSecondary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{displayName}</span>
           </div>
           <button onClick={handleLogout} style={s.logoutButton}>Log out</button>
         </div>
@@ -1090,8 +1090,8 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       flexShrink: 0,
       transition: 'background 0.25s ease',
     },
-    topBarLeft: { display: 'flex', alignItems: 'center', gap: 14 },
-    topBarRight: { display: 'flex', alignItems: 'center', gap: 10 },
+    topBarLeft: { display: 'flex', alignItems: 'center', gap: 14, minWidth: 0, overflow: 'hidden' },
+    topBarRight: { display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, flexShrink: 1 },
     logo: {
       fontFamily: "'JetBrains Mono', monospace",
       fontWeight: 600,
@@ -1114,6 +1114,11 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       fontWeight: 500,
       cursor: 'pointer',
       transition: 'all 0.15s ease',
+      maxWidth: 180,
+      overflow: 'hidden',
+      whiteSpace: 'nowrap' as const,
+      textOverflow: 'ellipsis',
+      flexShrink: 1,
     },
     // Header buttons
     headerButton: {
@@ -1129,6 +1134,8 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       fontWeight: 500,
       cursor: 'pointer',
       transition: 'all 0.15s ease',
+      flexShrink: 0,
+      whiteSpace: 'nowrap' as const,
     },
     headerIconButton: {
       display: 'flex',
@@ -1158,6 +1165,9 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       display: 'flex',
       alignItems: 'center',
       gap: 6,
+      minWidth: 0,
+      flexShrink: 1,
+      overflow: 'hidden',
     },
     avatar: {
       width: 24,
@@ -1180,6 +1190,9 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       fontSize: 10,
       color: t.textMuted,
       fontFamily: "'JetBrains Mono', monospace",
+      whiteSpace: 'nowrap' as const,
+      flexShrink: 1,
+      overflow: 'hidden',
     },
     statSep: {
       opacity: 0.3,
@@ -1235,12 +1248,13 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
     body: { display: 'flex', flex: 1, overflow: 'hidden' },
     sidebar: {
       width: 220,
+      minWidth: 160,
       borderRight: `1px solid ${t.border}`,
       background: t.bgCard,
       display: 'flex',
       flexDirection: 'column' as const,
       transition: 'background 0.25s ease',
-      flexShrink: 0,
+      flexShrink: 1,
     },
     main: {
       flex: 1,
