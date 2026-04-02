@@ -98,6 +98,10 @@ export function SpaceMembers({ spaceTarget, currentUserId, onClose }: SpaceMembe
     setLoading(false);
   }
 
+  // Field assignments state (stored in space value)
+  const [fieldAssignments, setFieldAssignments] = useState<FieldAssignment[]>([]);
+  const [availableFields, setAvailableFields] = useState<string[]>([]);
+
   const currentUserAccess = getAccessLevel(currentUserId);
   const currentUserRole = getCurrentUserRole();
   const currentPermissions = resolvePermissionsFromSharing(
@@ -106,10 +110,6 @@ export function SpaceMembers({ spaceTarget, currentUserId, onClose }: SpaceMembe
     members,
     fieldAssignments,
   );
-
-  // Field assignments state (stored in space value)
-  const [fieldAssignments, setFieldAssignments] = useState<FieldAssignment[]>([]);
-  const [availableFields, setAvailableFields] = useState<string[]>([]);
 
   // Load field assignments from space state
   useEffect(() => {
@@ -428,7 +428,7 @@ function RolePicker({
           whiteSpace: 'nowrap' as const,
         }}
       >
-        {ROLE_LABELS[value]}
+        {LEGACY_ROLE_LABELS[value]}
         <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
           <path d="M2.5 4L5 6.5L7.5 4" stroke={theme.textMuted} strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
         </svg>
