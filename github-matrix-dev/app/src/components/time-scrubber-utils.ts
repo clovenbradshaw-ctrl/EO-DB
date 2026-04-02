@@ -197,14 +197,79 @@ export function applyTimeScrubber(
   return filter.emptyHandling === 'end' ? [...dated, ...empty] : dated;
 }
 
-// --- Formatting ---
+// --- Adaptive formatting ---
 
-const compactFmt = new Intl.DateTimeFormat(undefined, {
-  month: 'short',
-  day: 'numeric',
-  year: 'numeric',
-});
+const MS_SECOND = 1_000;
+const MS_MINUTE = 60_000;
+const MS_HOUR = 3_600_000;
+const MS_DAY = 86_400_000;
+const MS_MONTH = 30 * MS_DAY;
+const MS_YEAR = 365 * MS_DAY;
 
-export function formatDateLabel(epochMs: number): string {
-  return compactFmt.format(new Date(epochMs));
+type ScaleTier =
+  | 'sub-second'   // < 1s
+  | 'seconds'      // < 1min
+  | 'minutes'      // < 1hr
+  | 'hours'        // < 1day
+  | 'days'         // < ~1month
+  | 'months'       // < ~1year
+  | 'years'        // < ~10yr
+  | 'decades';     // >= ~10yr
+
+function detectScaleTier(rangeMs: number): ScaleTier {
+  if (rangeMs < MS_SECOND) return 'sub-second';
+  if (rangeMs < MS_MINUTE) return 'seconds';
+  if (rangeMs < MS_HOUR) return 'minutes';
+  if (rangeMs < MS_DAY) return 'hours';
+  if (rangeMs < MS_MONTH) return 'days';
+  if (rangeMs < MS_YEAR) return 'months';
+  if (rangeMs < 10 * MS_YEAR) return 'years';
+  return 'decades';
+}
+
+const tierFormatters: Record<ScaleTier, (d: Date) => string> = {
+  'sub-second': (d) => {
+    const hms = d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    return `${hms}.${String(d.getMilliseconds()).padStart(3, '0')}`;
+  },
+  'seconds': (d) =>
+    d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+  'minutes': (d) =>
+    d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }),
+  'hours': (d) => {
+    const day = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    const time = d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+    return `${day} ${time}`;
+  },
+  'days': (d) =>
+    d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
+  'months': (d) =>
+    d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }),
+  'years': (d) =>
+    d.toLocaleDateString(undefined, { month: 'short', year: 'numeric' }),
+  'decades': (d) =>
+    d.toLocaleDateString(undefined, { year: 'numeric' }),
+};
+
+/**
+ * Build a formatter tuned to the data's actual time span.
+ * Call once when the range changes, then reuse for all labels.
+ */
+export function buildAdaptiveFormatter(rangeMs: number): (epochMs: number) => string {
+  const tier = detectScaleTier(Math.abs(rangeMs));
+  const fmt = tierFormatters[tier];
+  return (epochMs: number) => fmt(new Date(epochMs));
+}
+
+/** Convenience: format a single label with a known range span. */
+export function formatDateLabel(epochMs: number, rangeMs?: number): string {
+  if (rangeMs != null) {
+    return buildAdaptiveFormatter(rangeMs)(epochMs);
+  }
+  // fallback – no range context
+  return new Date(epochMs).toLocaleDateString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  });
 }
