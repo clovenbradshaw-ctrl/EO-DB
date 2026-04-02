@@ -63,3 +63,18 @@ export function eventHash(event: EoEventInput | EoEvent): string {
   const input = event.op + '\0' + event.target + '\0' + deepSerialize(event.operand) + '\0' + event.agent + '\0' + event.ts;
   return 'ev:' + createHash('sha256').update(input).digest('hex');
 }
+
+/**
+ * Store fingerprint — lightweight digest of the full projected state.
+ *
+ * Computes a rolling hash over all state keys + transformation hashes.
+ * Two stores with identical projected state produce the same fingerprint,
+ * even if local seq numbers differ. Used by peer sync to detect divergence.
+ */
+export function storeFingerprint(
+  stateEntries: Array<{ target: string; last_seq: number; hash?: string }>,
+): string {
+  const sorted = [...stateEntries].sort((a, b) => a.target.localeCompare(b.target));
+  const parts = sorted.map((s) => `${s.target}:${s.hash || s.last_seq}`);
+  return createHash('sha256').update(parts.join('|')).digest('hex');
+}
