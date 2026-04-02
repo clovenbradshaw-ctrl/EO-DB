@@ -44,8 +44,8 @@ export function resolvePermissions(
 
   // 2. Check room membership
   const inMain = mainRoom.getMember(userId)?.membership === 'join';
-  const inRestricted = restrictedRoom?.getMember(userId)?.membership === 'join' ?? false;
-  const inGovernance = governanceRoom?.getMember(userId)?.membership === 'join' ?? false;
+  const inRestricted = (restrictedRoom?.getMember(userId)?.membership ?? null) === 'join';
+  const inGovernance = (governanceRoom?.getMember(userId)?.membership ?? null) === 'join';
 
   // 3. Compute field access from field_assignments + room membership
   const fieldAssignments = spaceConfig?.field_assignments ?? [];
