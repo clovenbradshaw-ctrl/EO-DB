@@ -62,7 +62,7 @@ export interface IMatrixClient {
   sendToDevice(eventType: string, contentMap: Map<string, Map<string, Record<string, any>>>): Promise<void>;
 
   // Media
-  uploadContent(data: Buffer | Uint8Array, opts: { name: string; type: string }): Promise<IUploadResult>;
+  uploadContent(data: Uint8Array, opts: { name: string; type: string }): Promise<IUploadResult>;
   mxcUrlToHttp(mxcUrl: string): string | null;
 
   // Room management

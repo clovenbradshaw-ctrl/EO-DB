@@ -13,6 +13,7 @@ import type { EoDb } from '../db/level.js';
 import { getCurrentSeq, encode, decode } from '../db/level.js';
 import { readLogSince } from '../db/log.js';
 import { processEvent } from '../db/fold.js';
+import type { Feed } from '../db/feed.js';
 import type { IMatrixClient } from './types.js';
 import type { DeltaSnapshot } from './types.js';
 import { EO_SNAPSHOT_TYPE, EO_SNAPSHOT_STATE_TYPE } from './event-bridge.js';
@@ -237,7 +238,7 @@ export async function restoreFromDeltaChain(
   client: IMatrixClient,
   db: EoDb,
   latestMxc: string,
-  onEvent?: (event: any) => void,
+  feed?: Feed,
 ): Promise<number> {
   const localSeq = await getCurrentSeq(db);
   const deltas: DeltaSnapshot[] = [];
@@ -279,7 +280,7 @@ export async function restoreFromDeltaChain(
   for (const delta of deltas) {
     for (const event of delta.events) {
       if (event.seq <= localSeq) continue;
-      const seq = await processEvent(db, event);
+      const seq = await processEvent(db, event, feed);
       lastAppliedSeq = Math.max(lastAppliedSeq, seq);
     }
   }
