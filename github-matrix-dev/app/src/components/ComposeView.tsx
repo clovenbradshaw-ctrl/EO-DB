@@ -6,6 +6,16 @@ import type { ResolvedPermissions } from '../permissions/types';
 
 const OPERATORS: ExternalOperator[] = ['INS', 'DEF', 'CON', 'SEG', 'SYN', 'EVA', 'NUL'];
 
+const OP_DESCRIPTIONS: Record<string, string> = {
+  INS: 'INS — Insert a new record with fields',
+  DEF: 'DEF — Define/update fields on an existing target',
+  CON: 'CON — Connect targets with graph edges',
+  SEG: 'SEG — Segment: mark a boundary (archive, exclude)',
+  SYN: 'SYN — Synonymize: merge multiple targets into one',
+  EVA: 'EVA — Evaluate: set a computation strategy',
+  NUL: 'NUL — Null marker (checkpoint/snapshot)',
+};
+
 /**
  * Filter available operators by user's power level.
  * - Viewer (PL 0): No operators (can't submit events)
@@ -166,6 +176,7 @@ export function ComposeView({ permissions }: { permissions?: ResolvedPermissions
               <button
                 key={o}
                 onClick={() => setOp(o)}
+                title={OP_DESCRIPTIONS[o]}
                 style={{
                   ...s.opBtn,
                   background: op === o ? `${OP_COLORS[o]}18` : 'transparent',
@@ -206,8 +217,8 @@ export function ComposeView({ permissions }: { permissions?: ResolvedPermissions
             </div>
             <div style={s.hint}>
               {conDirection === 'two-way'
-                ? 'All targets are mutually connected'
-                : 'Source → added targets (directional)'}
+                ? 'All listed targets will be mutually connected (A\u2194B\u2194C)'
+                : 'Source target connects to added targets directionally (A\u2192B, A\u2192C)'}
             </div>
           </div>
         )}
@@ -221,7 +232,8 @@ export function ComposeView({ permissions }: { permissions?: ResolvedPermissions
                 style={s.input}
                 value={target}
                 onChange={(e) => onTargetChange(e.target.value)}
-                placeholder="app.tblClients.rec001.fldEmail"
+                placeholder="e.g. myApp.tableName.record001"
+                aria-label="Target path"
                 onBlur={() => setTimeout(() => setSuggestions([]), 200)}
               />
               {suggestions.length > 0 && (
@@ -275,6 +287,7 @@ export function ComposeView({ permissions }: { permissions?: ResolvedPermissions
                   <input
                     style={{ ...s.input, flex: 1 }}
                     placeholder={op === 'DEF' ? 'key (blank for raw)' : 'key'}
+                    aria-label={`Field ${i + 1} key`}
                     value={row.key}
                     onChange={(e) => {
                       const next = [...kvFields];
@@ -285,6 +298,7 @@ export function ComposeView({ permissions }: { permissions?: ResolvedPermissions
                   <input
                     style={{ ...s.input, flex: 1 }}
                     placeholder="value"
+                    aria-label={`Field ${i + 1} value`}
                     value={row.value}
                     onChange={(e) => {
                       const next = [...kvFields];
@@ -295,6 +309,7 @@ export function ComposeView({ permissions }: { permissions?: ResolvedPermissions
                   {kvFields.length > 1 && (
                     <button
                       style={s.removeBtn}
+                      aria-label="Remove field"
                       onClick={() => setKvFields(kvFields.filter((_, j) => j !== i))}
                     >
                       ×

@@ -92,6 +92,7 @@ export function Login({ onLogin }: LoginProps) {
           <input
             type="text"
             placeholder="Homeserver (e.g. matrix.org)"
+            aria-label="Homeserver"
             value={homeserver}
             onChange={(e) => setHomeserver(e.target.value)}
             disabled={loading}
@@ -100,6 +101,7 @@ export function Login({ onLogin }: LoginProps) {
           <input
             type="text"
             placeholder="Matrix username"
+            aria-label="Matrix username"
             value={username}
             onChange={(e) => setUsername(e.target.value)}
             disabled={loading}
@@ -109,14 +111,22 @@ export function Login({ onLogin }: LoginProps) {
           <input
             type="password"
             placeholder="Password"
+            aria-label="Password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             disabled={loading}
             style={s.input}
             autoComplete="current-password"
           />
-          {error && <div style={s.error}>{error}</div>}
-          <button type="submit" disabled={loading || !homeserver || !username || !password} style={s.button}>
+          {error && <div style={s.error} role="alert">{error}</div>}
+          <button
+            type="submit"
+            disabled={loading || !homeserver || !username || !password}
+            style={{
+              ...s.button,
+              ...((loading || !homeserver || !username || !password) ? { opacity: 0.5, cursor: 'not-allowed' } : {}),
+            }}
+          >
             {loading ? 'Signing in...' : isOffline ? 'Sign in offline' : 'Sign in'}
           </button>
         </form>
@@ -149,7 +159,8 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       background: t.loginCard,
       borderRadius: 12,
       padding: '48px 40px',
-      width: 360,
+      maxWidth: 360,
+      width: '100%',
       boxShadow: `0 8px 32px ${t.shadow}`,
     },
     title: {
@@ -179,7 +190,7 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       outline: 'none',
     },
     error: {
-      color: '#f44',
+      color: t.danger,
       fontSize: 13,
       padding: '4px 0',
     },
