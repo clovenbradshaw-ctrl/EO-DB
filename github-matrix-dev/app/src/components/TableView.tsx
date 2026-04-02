@@ -494,7 +494,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
           <input
             value={filterText}
             onChange={(e) => setFilterText(e.target.value)}
-            placeholder="Search\u2026"
+            placeholder="Search…"
             style={s.filterInput}
           />
         </div>
