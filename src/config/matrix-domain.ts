@@ -64,6 +64,15 @@ export function eoEventTypes(prefix?: string) {
   } as const;
 }
 
+/** Encryption rule event types (governance room state). */
+export function encryptionEventTypes(prefix?: string) {
+  const p = prefix ?? _eventPrefix;
+  return {
+    /** Room state event for encryption rules. State key = data target path. */
+    rule: `${p}.encryption.rule`,
+  } as const;
+}
+
 /** Peer sync event types (browser-side device-to-device). */
 export function peerSyncEventTypes(prefix?: string) {
   const p = prefix ?? _eventPrefix;
