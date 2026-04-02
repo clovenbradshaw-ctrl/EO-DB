@@ -62,7 +62,18 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     // Immediately mark not-ready so components show loading during the transition
     set({ ready: false, recentEvents: [], lastSeq: 0 });
     const lastSeq = await store.getCurrentSeq();
-    set({ store, lastSeq, ready: true });
+
+    // Hydrate recentEvents from the persistent log so Log/Graph views
+    // display existing data immediately (not just newly-arrived events).
+    let hydrated: EoEvent[] = [];
+    try {
+      const all = await readLogSince(store, 0);
+      hydrated = all.slice(-100);
+    } catch {
+      // Log read may fail on a brand-new store — that's fine
+    }
+
+    set({ store, lastSeq, ready: true, recentEvents: hydrated });
   },
 
   setSyncManager(syncManager: SyncManager) {
