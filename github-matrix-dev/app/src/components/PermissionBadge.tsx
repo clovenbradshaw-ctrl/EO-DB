@@ -41,9 +41,15 @@ function makeStyles(t: Theme, role: AccessRole): Record<string, React.CSSPropert
       gap: 6,
       fontFamily: "'JetBrains Mono', monospace",
       fontSize: 11,
+      whiteSpace: 'nowrap' as const,
+      overflow: 'hidden',
+      flexShrink: 1,
+      minWidth: 0,
     },
     name: {
       color: t.textSecondary,
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
     },
     dot: {
       color: t.textMuted,

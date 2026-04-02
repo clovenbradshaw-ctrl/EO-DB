@@ -33,6 +33,8 @@ export function ConnectionStatus({ state }: ConnectionStatusProps) {
       background: config.bg,
       fontSize: 10,
       fontWeight: 500,
+      flexShrink: 0,
+      whiteSpace: 'nowrap' as const,
     }}>
       <div style={{
         width: 6,
