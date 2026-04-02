@@ -190,17 +190,21 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     });
   }, [ready, lastSeq, getStateByPrefix, getState, scope, scopeDepth]);
 
-  // When scope has no records, navigate up to parent scope
+  // When scope has no records and no state of its own, navigate up to parent scope
   useEffect(() => {
     if (!recordsLoaded) return;
     if (records.length === 0 && onEmptyScope) {
-      const parts = scope.split('.');
-      if (parts.length > 1) {
-        const parentScope = parts.slice(0, -1).join('.');
-        onEmptyScope(parentScope);
-      }
+      // Don't navigate away if the scope itself has state — it's a leaf record
+      getState(scope).then((scopeState) => {
+        if (scopeState?.value && !scopeState.value._alias) return;
+        const parts = scope.split('.');
+        if (parts.length > 1) {
+          const parentScope = parts.slice(0, -1).join('.');
+          onEmptyScope(parentScope);
+        }
+      });
     }
-  }, [records, recordsLoaded, scope, onEmptyScope]);
+  }, [records, recordsLoaded, scope, onEmptyScope, getState]);
 
   // Reset filter and loaded state when scope changes
   useEffect(() => {
