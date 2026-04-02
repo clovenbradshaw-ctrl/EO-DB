@@ -185,7 +185,11 @@ function parseCsv(text: string, forceTsv: boolean): { rows: ParsedRow[]; isGener
 // Component
 // ---------------------------------------------------------------------------
 
-export function ImportView() {
+interface ImportViewProps {
+  onImportComplete?: (scope: string) => void;
+}
+
+export function ImportView({ onImportComplete }: ImportViewProps) {
   const { theme: t } = useTheme();
   const dispatch = useEoStore((s) => s.dispatch);
 
@@ -285,6 +289,21 @@ export function ImportView() {
         ? `Imported ${rows.length - errors} of ${rows.length} events (${errors} errors)`
         : `Successfully imported ${rows.length} event${rows.length !== 1 ? 's' : ''}`,
     });
+
+    // Auto-navigate to the imported scope so the user sees their records immediately
+    if (errors === 0 && onImportComplete) {
+      if (isGeneric && targetPrefix.trim()) {
+        // Generic imports: navigate to the target prefix scope (e.g. "import.my_data")
+        onImportComplete(targetPrefix.trim());
+      } else if (!isGeneric && rows.length > 0 && rows[0].target) {
+        // Event-format imports: derive the common parent scope from event targets
+        const firstTarget = rows[0].target!;
+        const parts = firstTarget.split('.');
+        if (parts.length >= 2) {
+          onImportComplete(parts.slice(0, -1).join('.'));
+        }
+      }
+    }
   };
 
   const preview = rows.slice(0, 5);
