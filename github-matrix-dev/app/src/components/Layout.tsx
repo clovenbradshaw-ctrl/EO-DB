@@ -38,6 +38,57 @@ import { useHashRoute, type View } from '../lib/router';
 import { type AccessRole, powerLevelToRole, legacyAccessToRole } from '../permissions/types';
 import { resolvePermissionsFromSharing } from '../permissions/resolve';
 import { RecycleBin, addDeletedSpace, isSpaceDeleted, removeDeletedSpace, getDeletedSpaces } from './RecycleBin';
+import { setSpaceConfig, applyEoPowerLevels } from '../permissions/room-topology';
+import { EO_POWER_LEVEL_CONTENT } from '../permissions/types';
+
+/**
+ * Create a Matrix room for a space and publish the space config state event.
+ * Returns the new room ID, or null if creation fails.
+ */
+async function createSpaceRoom(
+  client: ReturnType<typeof createMatrixClient>,
+  spaceName: string,
+  ownerUserId: string,
+): Promise<string | null> {
+  try {
+    const result = await client.createRoom({
+      name: spaceName,
+      visibility: 'private' as any,
+      preset: 'private_chat' as any,
+      initial_state: [
+        {
+          type: 'm.room.history_visibility',
+          state_key: '',
+          content: { history_visibility: 'shared' },
+        },
+        {
+          type: 'm.room.power_levels',
+          state_key: '',
+          content: {
+            ...EO_POWER_LEVEL_CONTENT,
+            users: { [ownerUserId]: 100 },
+          },
+        },
+      ],
+    });
+
+    const roomId = result.room_id;
+
+    // Publish space config so discoverSpacesFromMatrix() can find this room
+    await setSpaceConfig(client, roomId, {
+      name: spaceName,
+      rooms: { main: roomId },
+      field_assignments: [],
+      space_settings: {},
+    });
+
+    console.info('[EO-DB] Created Matrix room for space', spaceName, '→', roomId);
+    return roomId;
+  } catch (e) {
+    console.warn('[EO-DB] Failed to create Matrix room for space', spaceName, e);
+    return null;
+  }
+}
 
 /** Normalize any space target to canonical "space_foo" format (strips IDB "space." prefix) */
 function normalizeSpaceTarget(target: string): string {
@@ -401,21 +452,46 @@ export function Layout({ session, onLogout }: LayoutProps) {
 
     let mounted = true;
 
-    // Resolve the Matrix room ID for this space: prefer the space's own
-    // mainRoomId from discovery, fall back to the root data room alias.
-    const spaceEntry = mergedEntries.find((e) => e.spaceTarget === selectedSpace);
-    const spaceRoomId = spaceEntry?.mainRoomId || roomIdRef.current;
+    async function resolveOrCreateRoom(): Promise<string | null> {
+      // 1. Try the space's own mainRoomId from discovery
+      const spaceEntry = mergedEntries.find((e) => e.spaceTarget === selectedSpace);
+      if (spaceEntry?.mainRoomId) return spaceEntry.mainRoomId;
 
-    if (!spaceRoomId && matrixReady) {
-      console.warn('[EO-DB] No room ID for space', selectedSpace,
-        '— spaceEntry.mainRoomId:', spaceEntry?.mainRoomId,
-        ', rootRoomId:', roomIdRef.current,
-        '. Matrix sync will be disabled.');
+      // 2. Fall back to the root data room alias
+      if (roomIdRef.current) return roomIdRef.current;
+
+      // 3. Create a new Matrix room for this space if client is ready
+      if (matrixReady && matrixClientRef.current) {
+        const displayName = formatSpaceName(selectedSpace!.replace(/^space_/, ''));
+        const newRoomId = await createSpaceRoom(
+          matrixClientRef.current, displayName, session.userId,
+        );
+        if (newRoomId) {
+          // Re-run space discovery so the new room appears in the browser
+          try {
+            const entries = discoverSpacesFromMatrix(matrixClientRef.current);
+            if (entries.length > 0) setSpaceEntries(entries);
+          } catch { /* best effort */ }
+          return newRoomId;
+        }
+      }
+
+      console.warn('[EO-DB] No room ID for space', selectedSpace, '— Matrix sync disabled.');
+      return null;
     }
+
+    const onFoldEvent = (event: any) => {
+      useEoStore.setState((st) => ({
+        recentEvents: [...st.recentEvents.slice(-99), event],
+        lastSeq: event.seq,
+      }));
+    };
 
     async function setupSpaceStore() {
       const cache = spaceCacheRef.current;
       const existing = cache.get(selectedSpace!);
+
+      const spaceRoomId = await resolveOrCreateRoom();
 
       if (existing) {
         // Reuse cached store — no IDB open, no key derivation, no Matrix hydration
@@ -426,13 +502,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
         if (matrixReady && matrixClientRef.current && spaceRoomId) {
           try {
             const freshSync = new SyncManager(
-              matrixClientRef.current, spaceRoomId, existing.store,
-              (event) => {
-                useEoStore.setState((st) => ({
-                  recentEvents: [...st.recentEvents.slice(-99), event],
-                  lastSeq: event.seq,
-                }));
-              },
+              matrixClientRef.current, spaceRoomId, existing.store, onFoldEvent,
             );
             await freshSync.initialize();
             if (!mounted) return;
@@ -455,17 +525,11 @@ export function Layout({ session, onLogout }: LayoutProps) {
 
       let syncManager: SyncManager | null = null;
 
-      // Set up sync manager for this space (use space's own room, not root alias)
+      // Set up sync manager for this space
       if (matrixReady && matrixClientRef.current && spaceRoomId) {
         try {
           syncManager = new SyncManager(
-            matrixClientRef.current, spaceRoomId, store,
-            (event) => {
-              useEoStore.setState((st) => ({
-                recentEvents: [...st.recentEvents.slice(-99), event],
-                lastSeq: event.seq,
-              }));
-            },
+            matrixClientRef.current, spaceRoomId, store, onFoldEvent,
           );
           await syncManager.initialize();
           if (!mounted) return;
@@ -622,16 +686,52 @@ export function Layout({ session, onLogout }: LayoutProps) {
               onCreate={async (name) => {
                 const spaceTarget = `space_${name.toLowerCase().replace(/\s+/g, '_')}`;
 
+                // Create Matrix room first (if client is ready) so sync works immediately
+                let mainRoomId: string | null = null;
+                if (matrixReady && matrixClientRef.current) {
+                  mainRoomId = await createSpaceRoom(
+                    matrixClientRef.current, name, session.userId,
+                  );
+                  // Refresh space entries so the new room is discoverable
+                  if (mainRoomId) {
+                    try {
+                      const entries = discoverSpacesFromMatrix(matrixClientRef.current);
+                      if (entries.length > 0) setSpaceEntries(entries);
+                    } catch { /* best effort */ }
+                  }
+                }
+
                 // Initialize the space store before dispatching so store is not null
                 const idb = await createIdb(spaceTarget);
                 const key = await deriveKey(session.userId, session.deviceId);
                 const spaceStore = createStore(idb, key);
                 await init(spaceStore);
 
-                // Cache it so setupSpaceStore reuses it instead of re-opening
-                spaceCacheRef.current.set(spaceTarget, { store: spaceStore, syncManager: null });
+                // Set up SyncManager immediately if we have a room
+                let syncManager: SyncManager | null = null;
+                if (mainRoomId && matrixClientRef.current) {
+                  try {
+                    syncManager = new SyncManager(
+                      matrixClientRef.current, mainRoomId, spaceStore,
+                      (event) => {
+                        useEoStore.setState((st) => ({
+                          recentEvents: [...st.recentEvents.slice(-99), event],
+                          lastSeq: event.seq,
+                        }));
+                      },
+                    );
+                    await syncManager.initialize();
+                    useEoStore.getState().setSyncManager(syncManager);
+                  } catch (e) {
+                    console.warn('[EO-DB] SyncManager init failed for new space', name, e);
+                    syncManager = null;
+                  }
+                }
 
-                // Now dispatch is safe — store is initialized
+                // Cache it so setupSpaceStore reuses it instead of re-opening
+                spaceCacheRef.current.set(spaceTarget, { store: spaceStore, syncManager });
+
+                // Now dispatch is safe — store is initialized (and sync will send to Matrix)
                 const dispatch = useEoStore.getState().dispatch;
                 await dispatch({
                   op: 'INS',
