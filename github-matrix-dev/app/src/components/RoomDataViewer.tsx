@@ -20,6 +20,7 @@ const OP_COLORS: Record<string, string> = {
 export function RoomDataViewer({ onBack }: RoomDataViewerProps) {
   const { theme } = useTheme();
   const syncManager = useEoStore((s) => s.syncManager);
+  const lastSeq = useEoStore((s) => s.lastSeq);
   const [data, setData] = useState<RoomDataSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState('');
@@ -34,7 +35,7 @@ export function RoomDataViewer({ onBack }: RoomDataViewerProps) {
 
   useEffect(() => {
     if (!syncManager) {
-      setError('Sync manager not connected');
+      setError('No Matrix connection — running in local-only mode. Room data is only available when connected to a Matrix homeserver. Local store has ' + lastSeq + ' event(s).');
       return;
     }
     try {
@@ -47,7 +48,7 @@ export function RoomDataViewer({ onBack }: RoomDataViewerProps) {
     } catch (e: any) {
       setError(e.message);
     }
-  }, [syncManager]);
+  }, [syncManager, lastSeq]);
 
   const { eoEvents, systemEvents } = useMemo(() => {
     if (!data) return { eoEvents: [], systemEvents: [] };
