@@ -5,6 +5,7 @@ import type { EoEventInput } from '../src/db/types.js';
 import {
   type EncryptionRule,
   type EncryptionRuleAccessEntry,
+  type EncryptionRuleClient,
   isEncryptionRule,
   encryptionRuleTarget,
   dataTargetFromRule,
@@ -15,6 +16,9 @@ import {
   changeRuleAccessRole,
   buildRuleAccessView,
   buildFullAccessView,
+  publishEncryptionRule,
+  syncEncryptionRules,
+  ENCRYPTION_RULE_EVENT_TYPE,
 } from '../src/crypto/encryption-access-resolver.js';
 import { rmSync, mkdtempSync } from 'fs';
 import { tmpdir } from 'os';
@@ -507,5 +511,96 @@ describe('evaluated rules for debugging', () => {
     expect(recordEval.role).toBeNull();
 
     expect(access.denied_by!.scope).toBe('record');
+  });
+});
+
+// ─── Matrix Event Flow (source of truth) ────────────────────────────────────
+
+describe('Matrix event flow', () => {
+  /** Mock Matrix client that stores state events in memory. */
+  function mockClient(): EncryptionRuleClient & { _state: Map<string, Map<string, any>> } {
+    const _state = new Map<string, Map<string, any>>();
+    return {
+      _state,
+      getUserId: () => ALICE,
+      async sendStateEvent(roomId: string, eventType: string, content: any, stateKey: string) {
+        const roomState = _state.get(roomId) ?? new Map();
+        roomState.set(`${eventType}:${stateKey}`, { content, state_key: stateKey });
+        _state.set(roomId, roomState);
+      },
+      async getStateEvents(roomId: string, eventType: string) {
+        const roomState = _state.get(roomId) ?? new Map();
+        const events: any[] = [];
+        for (const [key, event] of roomState) {
+          if (key.startsWith(`${eventType}:`)) {
+            events.push(event);
+          }
+        }
+        return events;
+      },
+    };
+  }
+
+  it('publishes encryption rule as Matrix state event with target as state_key', async () => {
+    const client = mockClient();
+    const govRoom = '!governance:matrix.example.com';
+    const rule = makeRule('record', [entry(ALICE, 'owner'), entry(BOB, 'editor')]);
+
+    await publishEncryptionRule(client, govRoom, 'app.tblClients.rec001', rule);
+
+    // Verify it was stored with the data target as state_key
+    const roomState = client._state.get(govRoom)!;
+    const stateEvent = roomState.get(`${ENCRYPTION_RULE_EVENT_TYPE}:app.tblClients.rec001`);
+    expect(stateEvent).toBeDefined();
+    expect(stateEvent.state_key).toBe('app.tblClients.rec001');
+    expect(stateEvent.content.scope).toBe('record');
+    expect(stateEvent.content.access_list).toHaveLength(2);
+  });
+
+  it('syncEncryptionRules rebuilds all rules from governance room state', async () => {
+    const client = mockClient();
+    const govRoom = '!governance:matrix.example.com';
+
+    // Publish rules at different levels
+    await publishEncryptionRule(client, govRoom, 'app.tblClients',
+      makeRule('table', [entry(ALICE, 'owner')]));
+    await publishEncryptionRule(client, govRoom, 'app.tblClients.rec001',
+      makeRule('record', [entry(ALICE, 'owner'), entry(BOB, 'editor')]));
+    await publishEncryptionRule(client, govRoom, 'app.tblClients.rec001.fldSSN',
+      makeRule('field', [entry(ALICE, 'owner'), entry(DAVE, 'viewer')]));
+
+    // Sync — as if a new device is recovering
+    const rules = await syncEncryptionRules(client, govRoom);
+
+    expect(rules.size).toBe(3);
+    expect(rules.get('app.tblClients')!.scope).toBe('table');
+    expect(rules.get('app.tblClients.rec001')!.scope).toBe('record');
+    expect(rules.get('app.tblClients.rec001.fldSSN')!.scope).toBe('field');
+    expect(rules.get('app.tblClients.rec001')!.access_list).toHaveLength(2);
+  });
+
+  it('updating a rule replaces the state event (same state_key)', async () => {
+    const client = mockClient();
+    const govRoom = '!governance:matrix.example.com';
+
+    // Initial rule: just Alice
+    await publishEncryptionRule(client, govRoom, 'app.tblClients',
+      makeRule('table', [entry(ALICE, 'owner')]));
+
+    // Update: add Bob
+    const updated = addRuleAccess(
+      makeRule('table', [entry(ALICE, 'owner')]),
+      BOB, 'admin', ALICE,
+    );
+    await publishEncryptionRule(client, govRoom, 'app.tblClients', updated);
+
+    // Sync should show the updated version
+    const rules = await syncEncryptionRules(client, govRoom);
+    expect(rules.size).toBe(1); // Same state_key, so only one entry
+    expect(rules.get('app.tblClients')!.access_list).toHaveLength(2);
+  });
+
+  it('ENCRYPTION_RULE_EVENT_TYPE follows com.eo-db namespace', () => {
+    expect(ENCRYPTION_RULE_EVENT_TYPE).toBe('com.eo-db.encryption.rule');
   });
 });

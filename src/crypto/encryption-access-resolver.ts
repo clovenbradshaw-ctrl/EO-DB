@@ -1,18 +1,23 @@
 /**
  * Encryption access resolver — unified permission resolution for encrypted content.
  *
- * Handles the intersection of three scopes of encryption rules:
- *   1. TABLE-level: "encrypt everything in this table" (waterfall SEG boundary)
- *   2. RECORD-level: "encrypt this specific record" (DEF on record target)
- *   3. FIELD-level: "encrypt this specific field" (DEF on field target)
+ * SOURCE OF TRUTH: Matrix room state events.
+ * The EO log is a record — Matrix events are the authority.
  *
- * All encryption rules are tracked as DEFs on a dedicated governance subtree:
- *   - app.tblClients._encryption           → table encryption config
- *   - app.tblClients.rec001._encryption    → record encryption override
- *   - app.tblClients.rec001.fldSSN._encryption → field encryption override
+ * Encryption rules are published as Matrix room state events in the governance room:
+ *   Event type: com.eo-db.encryption.rule
+ *   State key:  the data target (e.g., "app.tblClients", "app.tblClients.rec001.fldSSN")
  *
- * The _encryption suffix keeps rules in the same target namespace as the data
- * they protect, making them discoverable via standard horizon reads.
+ * When a rule state event arrives via Matrix sync, it gets recorded into the EO log
+ * as a DEF at {target}._encryption — this is the local materialized view.
+ *
+ * Three scopes:
+ *   1. TABLE-level:  state_key = "app.tblClients"
+ *   2. RECORD-level: state_key = "app.tblClients.rec001"
+ *   3. FIELD-level:  state_key = "app.tblClients.rec001.fldSSN"
+ *
+ * The _encryption suffix in the EO log keeps rules in the same target namespace
+ * as the data they protect, making them discoverable via standard horizon reads.
  *
  * ─── Permission Crossing Rules ─────────────────────────────────────────────
  *
@@ -59,8 +64,83 @@ import type { EoDb } from '../db/level.js';
 import { getState } from '../db/state.js';
 import type { FieldAccessRole } from './field-access-control.js';
 import { FIELD_ACCESS_POWER_LEVELS, powerLevelToFieldRole } from './field-access-control.js';
+import { encryptionEventTypes } from '../config/matrix-domain.js';
 
-// ─── Encryption Rule (stored as DEF operand at target._encryption) ──────────
+// ─── Matrix Event Type ──────────────────────────────────────────────────────
+
+/**
+ * Matrix room state event type for encryption rules.
+ * Published to the governance room. State key = data target path.
+ *
+ * Follows the same pattern as:
+ *   - com.eo-db.key.announce (state_key = key_id) in key room
+ *   - com.eo-db.space.config (state_key = '') in governance room
+ *   - com.eo-db.schema.manifest (state_key = '') in main room
+ */
+export const ENCRYPTION_RULE_EVENT_TYPE = encryptionEventTypes().rule;
+
+// ─── Matrix Client Interface (for publishing/syncing rules) ─────────────────
+
+/** Minimal Matrix client interface for encryption rule management. */
+export interface EncryptionRuleClient {
+  /** Send a state event to a room. */
+  sendStateEvent(roomId: string, eventType: string, content: any, stateKey: string): Promise<void>;
+  /** Get all state events of a given type from a room. */
+  getStateEvents(roomId: string, eventType: string): Promise<any[]>;
+  /** Get own user ID. */
+  getUserId(): string | null;
+}
+
+// ─── Publish / Sync (Matrix ↔ EO Log) ──────────────────────────────────────
+
+/**
+ * Publish an encryption rule to the governance room as a Matrix state event.
+ * This is the authoritative action — the EO log DEF happens when sync picks it up.
+ *
+ * State key = the data target, so each target has exactly one rule state event
+ * (updating the same state_key replaces the old rule, like key rotation).
+ */
+export async function publishEncryptionRule(
+  client: EncryptionRuleClient,
+  governanceRoomId: string,
+  dataTarget: string,
+  rule: EncryptionRule,
+): Promise<void> {
+  await client.sendStateEvent(
+    governanceRoomId,
+    ENCRYPTION_RULE_EVENT_TYPE,
+    rule,
+    dataTarget, // state_key = the data target path
+  );
+}
+
+/**
+ * Sync all encryption rules from the governance room into the local EO state.
+ * Called on first login, new device setup, or manual resync.
+ *
+ * Reads all encryption.rule state events and returns them keyed by data target.
+ * The caller is responsible for recording them into the EO log as DEFs.
+ */
+export async function syncEncryptionRules(
+  client: EncryptionRuleClient,
+  governanceRoomId: string,
+): Promise<Map<string, EncryptionRule>> {
+  const rules = new Map<string, EncryptionRule>();
+  const stateEvents = await client.getStateEvents(governanceRoomId, ENCRYPTION_RULE_EVENT_TYPE);
+
+  for (const event of stateEvents) {
+    const content = (event.getContent ? event.getContent() : event.content ?? event) as any;
+    const stateKey = (event.getStateKey ? event.getStateKey() : event.state_key ?? '') as string;
+
+    if (!stateKey || !isEncryptionRule(content)) continue;
+
+    rules.set(stateKey, content);
+  }
+
+  return rules;
+}
+
+// ─── Encryption Rule (source of truth: Matrix state event, materialized as DEF) ──
 
 /** Scope of the encryption rule. */
 export type EncryptionRuleScope = 'table' | 'record' | 'field';
@@ -75,12 +155,19 @@ export interface EncryptionRuleAccessEntry {
 }
 
 /**
- * Encryption rule — stored as a DEF operand at `{target}._encryption`.
+ * Encryption rule — published as Matrix room state event, recorded locally as DEF.
+ *
+ * Source of truth: Matrix governance room state event
+ *   Event type: com.eo-db.encryption.rule
+ *   State key:  data target path
+ *
+ * Local materialization: DEF at {target}._encryption
+ *   (written by sync when the Matrix event is received)
  *
  * Examples:
- *   DEF target:"app.tblClients._encryption" operand:{...}           → table rule
- *   DEF target:"app.tblClients.rec001._encryption" operand:{...}    → record rule
- *   DEF target:"app.tblClients.rec001.fldSSN._encryption" operand:{...} → field rule
+ *   Matrix state_key "app.tblClients"           → table rule
+ *   Matrix state_key "app.tblClients.rec001"    → record rule
+ *   Matrix state_key "app.tblClients.rec001.fldSSN" → field rule
  */
 export interface EncryptionRule {
   /** What level this rule applies to */
