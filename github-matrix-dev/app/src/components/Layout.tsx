@@ -974,7 +974,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
             ) : activeView === 'graph' ? (
               <GraphView allStates={allStates} />
             ) : activeView === 'import' ? (
-              <ImportView />
+              <ImportView onImportComplete={(scope) => navigate({ view: 'records', scope, record: null })} />
             ) : activeView === 'compose' ? (
               <ComposeView permissions={currentPermissions} />
             ) : activeView === 'builder' ? (
