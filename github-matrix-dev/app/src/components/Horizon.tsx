@@ -6,7 +6,7 @@ import {
   type TimeScrubberFilter,
   DEFAULT_FILTER,
   computeDateRange,
-  formatDateLabel,
+  buildAdaptiveFormatter,
 } from './time-scrubber-utils';
 import { hasFieldsSubObject } from './filter-types';
 
@@ -69,6 +69,12 @@ export function Horizon({ records, dateColumns, filter, onFilterChange }: Horizo
 
   const currentMin = filter.rangeMin ?? trackMin;
   const currentMax = filter.rangeMax ?? trackMax;
+
+  // Adaptive date formatter based on actual data span
+  const formatDate = useMemo(
+    () => buildAdaptiveFormatter(trackRange),
+    [trackRange],
+  );
 
   const isActive =
     filter.rangeMin != null ||
@@ -306,7 +312,7 @@ export function Horizon({ records, dateColumns, filter, onFilterChange }: Horizo
             {/* Date tooltip */}
             {(dragging && dragRef.current?.handle === 'min') && (
               <div style={s.tooltip}>
-                {formatDateLabel(vizMin)}
+                {formatDate(vizMin)}
                 {precisionPct && (
                   <span style={s.precisionBadge}>{precisionPct}</span>
                 )}
@@ -326,7 +332,7 @@ export function Horizon({ records, dateColumns, filter, onFilterChange }: Horizo
           >
             {(dragging && dragRef.current?.handle === 'max') && (
               <div style={s.tooltip}>
-                {formatDateLabel(vizMax)}
+                {formatDate(vizMax)}
                 {precisionPct && (
                   <span style={s.precisionBadge}>{precisionPct}</span>
                 )}
@@ -339,10 +345,10 @@ export function Horizon({ records, dateColumns, filter, onFilterChange }: Horizo
         {range && !dragging && (
           <>
             <span style={{ ...s.rangeLabel, left: `${pctMin}%` }}>
-              {formatDateLabel(filter.rangeMin ?? sliderMin)}
+              {formatDate(filter.rangeMin ?? sliderMin)}
             </span>
             <span style={{ ...s.rangeLabel, left: `${pctMax}%`, transform: 'translateX(-100%)' }}>
-              {formatDateLabel(filter.rangeMax ?? sliderMax)}
+              {formatDate(filter.rangeMax ?? sliderMax)}
             </span>
           </>
         )}
