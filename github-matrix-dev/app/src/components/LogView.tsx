@@ -60,22 +60,58 @@ function getAgentName(agent: string): string {
   return agent;
 }
 
-// --- Time formatting (HH:MM:SS) ---
+// --- Time formatting ---
 function formatTime(ts: string): string {
   const d = new Date(ts);
   return d.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
+function formatFullTime(ts: string): string {
+  const d = new Date(ts);
+  return d.toLocaleString('en-US', { hour12: false, year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+function formatRelativeTime(ts: string): string {
+  const now = Date.now();
+  const then = new Date(ts).getTime();
+  const diff = now - then;
+  if (diff < 0) return 'just now';
+  if (diff < 5000) return 'just now';
+  if (diff < 60000) return `${Math.floor(diff / 1000)}s ago`;
+  if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
+  if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`;
+  if (diff < 172800000) return 'yesterday';
+  return `${Math.floor(diff / 86400000)}d ago`;
+}
+
+function getTimeGroup(ts: string): string {
+  const now = Date.now();
+  const then = new Date(ts).getTime();
+  const diff = now - then;
+  if (diff < 60000) return 'Just now';
+  if (diff < 600000) return 'Last few minutes';
+  if (diff < 3600000) return 'Last hour';
+  const todayStart = new Date();
+  todayStart.setHours(0, 0, 0, 0);
+  if (then >= todayStart.getTime()) return 'Earlier today';
+  const yesterdayStart = new Date(todayStart);
+  yesterdayStart.setDate(yesterdayStart.getDate() - 1);
+  if (then >= yesterdayStart.getTime()) return 'Yesterday';
+  return 'Older';
+}
+
 // --- OpBadge ---
-function OpBadge({ op }: { op: string }) {
+function OpBadge({ op, size = 'normal' }: { op: string; size?: 'normal' | 'small' }) {
   const c = OP_COLORS[op] || OP_COLORS.NUL;
   return (
     <span style={{
       display: 'inline-block',
       background: c.bg, color: c.text,
-      borderRadius: 3, fontSize: 10, fontWeight: 500,
-      padding: '1px 6px',
+      borderRadius: 3, fontSize: size === 'small' ? 9 : 10, fontWeight: 600,
+      padding: size === 'small' ? '0px 4px' : '1px 6px',
       lineHeight: 1.4, textAlign: 'center' as const,
+      fontFamily: "'JetBrains Mono', monospace",
+      letterSpacing: '0.02em',
     }}>
       {op}
     </span>
@@ -91,14 +127,41 @@ function LevelBadge({ level }: { level: number }) {
       color: level >= 3 ? '#ef4444' : '#eab308',
       background: level >= 3 ? 'rgba(239,68,68,0.1)' : 'rgba(234,179,8,0.1)',
       border: `1px solid ${level >= 3 ? 'rgba(239,68,68,0.2)' : 'rgba(234,179,8,0.2)'}`,
-      borderRadius: 3, padding: '1px 4px', marginLeft: 6,
+      borderRadius: 3, padding: '1px 4px', marginLeft: 4,
     }}>
       L{level}
     </span>
   );
 }
 
-// --- Operand formatting ---
+// --- Operand summary (short inline preview) ---
+function operandSummary(op: string, operand: any): string | null {
+  if (!operand || (typeof operand === 'object' && Object.keys(operand).length === 0)) return null;
+
+  if (op === 'DEF') {
+    const field = operand.field || '';
+    const from = operand.from ?? operand.old_value;
+    const to = operand.to ?? operand.new_value;
+    return `${field ? field + ': ' : ''}${JSON.stringify(from)} \u2192 ${JSON.stringify(to)}`;
+  }
+  if (op === 'CON') {
+    const dest = operand.link_to ?? operand.dest;
+    const edgeType = operand.type ?? operand.edge_type;
+    return `\u2192 ${dest}${edgeType ? ' (' + edgeType + ')' : ''}`;
+  }
+  if (op === 'REC') {
+    const status = operand.converged ? 'converged' : 'oscillation';
+    return `${status} | ${operand.iterations} iterations${operand.cycle_length ? ' | cycle: ' + operand.cycle_length : ''}`;
+  }
+  if (op === 'NUL') {
+    return `nullified${operand.reason ? ' \u2014 ' + operand.reason : ''}`;
+  }
+  const entries = Object.entries(operand).filter(([k]) => !['type'].includes(k)).slice(0, 2);
+  if (entries.length === 0) return null;
+  return entries.map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`).join(' | ');
+}
+
+// --- Operand formatting (rich, for detail panel) ---
 function formatOperand(op: string, operand: any, t: { textSecondary: string; textMuted: string; text: string; border: string; success: string; purple: string; warning: string }): JSX.Element | null {
   if (!operand || (typeof operand === 'object' && Object.keys(operand).length === 0)) return null;
 
@@ -149,7 +212,6 @@ function formatOperand(op: string, operand: any, t: { textSecondary: string; tex
     );
   }
 
-  // Default: key-value pairs
   const entries = Object.entries(operand).filter(([k]) => !['type'].includes(k)).slice(0, 3);
   if (entries.length === 0) return null;
   return (
@@ -165,6 +227,82 @@ function formatOperand(op: string, operand: any, t: { textSecondary: string; tex
   );
 }
 
+
+// --- Stats Bar ---
+function StatsBar({ events, activeFilters, onToggleFilter }: {
+  events: EoEvent[];
+  activeFilters: Set<string>;
+  onToggleFilter: (op: string) => void;
+}) {
+  const { theme: t } = useTheme();
+  const counts = useMemo(() => {
+    const c: Record<string, number> = {};
+    for (const e of events) c[e.op] = (c[e.op] || 0) + 1;
+    return c;
+  }, [events]);
+  const total = events.length;
+  if (total === 0) return null;
+
+  return (
+    <div style={{ padding: '0 20px 0 20px' }}>
+      {/* Stacked bar */}
+      <div style={{
+        display: 'flex', height: 4, borderRadius: 2, overflow: 'hidden',
+        background: t.bgMuted, marginBottom: 10,
+      }}>
+        {ALL_OPS.map((op) => {
+          const count = counts[op] || 0;
+          if (count === 0) return null;
+          const c = OP_COLORS[op];
+          return (
+            <div key={op} style={{
+              width: `${(count / total) * 100}%`, background: c.text,
+              opacity: activeFilters.size === 0 || activeFilters.has(op) ? 0.7 : 0.15,
+              transition: 'opacity 0.15s',
+            }} title={`${op}: ${count}`} />
+          );
+        })}
+      </div>
+
+      {/* Op filter chips */}
+      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' as const }}>
+        {ALL_OPS.map((op) => {
+          const count = counts[op] || 0;
+          const active = activeFilters.has(op);
+          const c = OP_COLORS[op];
+          return (
+            <button
+              key={op}
+              onClick={() => onToggleFilter(op)}
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 4,
+                padding: '3px 8px', borderRadius: 4, cursor: 'pointer',
+                fontSize: 10, fontWeight: 600,
+                fontFamily: "'JetBrains Mono', monospace",
+                border: `1px solid ${active ? c.text + '40' : t.border}`,
+                background: active ? c.bg : 'transparent',
+                color: active ? c.text : count > 0 ? t.textSecondary : t.textMuted,
+                opacity: count === 0 ? 0.4 : 1,
+                transition: 'all 0.1s',
+              }}
+            >
+              {op}
+              {count > 0 && (
+                <span style={{
+                  fontSize: 9, color: active ? c.text : t.textMuted,
+                  fontWeight: 400, opacity: 0.8,
+                }}>
+                  {count}
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 // --- Detail Panel ---
 function DetailPanel({ event, onClose }: { event: EoEvent; onClose: () => void }) {
   const { theme: t } = useTheme();
@@ -172,32 +310,33 @@ function DetailPanel({ event, onClose }: { event: EoEvent; onClose: () => void }
   const agentName = getAgentName(event.agent);
   const level = event.level ?? 1;
 
-  const rows: { label: string; value: JSX.Element }[] = [
+  const sections: { label: string; value: JSX.Element }[] = [
     {
       label: 'TARGET',
-      value: <span style={{ color: t.textSecondary }}>{event.target}</span>,
+      value: <span style={{ color: t.accent, wordBreak: 'break-all' as const }}>{event.target}</span>,
     },
     {
       label: 'AGENT',
       value: (
-        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-          <span style={{ color: agentType === 'system' ? t.warning : t.textSecondary }}>
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+          <span style={{ color: agentType === 'system' ? t.warning : t.textSecondary, display: 'flex' }}>
             {AGENT_ICONS[agentType]}
           </span>
           <span style={{ color: t.text }}>{agentName}</span>
           <span style={{
             fontSize: 8, color: t.textMuted, background: t.bgMuted,
-            borderRadius: 2, padding: '1px 4px', border: `1px solid ${t.border}`,
+            borderRadius: 3, padding: '1px 5px', border: `1px solid ${t.border}`,
           }}>{agentType}</span>
         </span>
       ),
     },
     {
-      label: 'HASH',
+      label: 'TIMESTAMP',
       value: (
-        <span style={{ color: t.textMuted, letterSpacing: '0.05em' }}>
-          {event.meta?.hash || `t_${event.seq}`}
-        </span>
+        <div>
+          <div style={{ color: t.textSecondary }}>{formatFullTime(event.ts)}</div>
+          <div style={{ fontSize: 10, color: t.textMuted, marginTop: 2 }}>{formatRelativeTime(event.ts)}</div>
+        </div>
       ),
     },
     {
@@ -210,73 +349,96 @@ function DetailPanel({ event, onClose }: { event: EoEvent; onClose: () => void }
       ),
     },
     {
-      label: 'TIME',
-      value: <span style={{ color: t.textSecondary }}>{new Date(event.ts).toLocaleString()}</span>,
+      label: 'HASH',
+      value: (
+        <span style={{ color: t.textMuted, letterSpacing: '0.05em', fontSize: 10 }}>
+          {event.meta?.hash || `t_${event.seq}`}
+        </span>
+      ),
     },
   ];
 
+  if (event.triggered_by) {
+    sections.push({
+      label: 'TRIGGERED BY',
+      value: <span style={{ color: t.accent }}>#{event.triggered_by}</span>,
+    });
+  }
+
   return (
     <div style={{
-      width: 300, borderLeft: `1px solid ${t.border}`,
+      width: 360, borderLeft: `1px solid ${t.border}`,
       background: t.bgCard, overflowY: 'auto' as const,
+      display: 'flex', flexDirection: 'column' as const,
     }}>
       {/* Header */}
       <div style={{
-        padding: '10px 14px', borderBottom: `1px solid ${t.border}`,
+        padding: '14px 18px', borderBottom: `1px solid ${t.border}`,
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        flexShrink: 0,
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <OpBadge op={event.op} />
-          <span style={{ fontSize: 10, color: t.textMuted, fontFamily: "'JetBrains Mono', monospace" }}>
+          <span style={{ fontSize: 12, color: t.textMuted, fontFamily: "'JetBrains Mono', monospace" }}>
             #{event.seq}
           </span>
           <LevelBadge level={level} />
         </div>
         <button onClick={onClose} style={{
           background: t.bgMuted, border: `1px solid ${t.border}`,
-          borderRadius: 3, color: t.textMuted, cursor: 'pointer',
-          width: 20, height: 20, display: 'flex', alignItems: 'center',
-          justifyContent: 'center', fontSize: 11,
-        }}>x</button>
+          borderRadius: 4, color: t.textMuted, cursor: 'pointer',
+          width: 24, height: 24, display: 'flex', alignItems: 'center',
+          justifyContent: 'center', fontSize: 12, lineHeight: 1,
+        }}>{'\u00d7'}</button>
       </div>
 
       {/* Body */}
-      <div style={{ padding: '10px 14px' }}>
-        {rows.map(({ label, value }) => (
-          <div key={label} style={{ marginBottom: 12 }}>
+      <div style={{ padding: '14px 18px', flex: 1, overflowY: 'auto' as const }}>
+        {/* Operand preview */}
+        {event.operand && Object.keys(event.operand).length > 0 && (
+          <div style={{
+            marginBottom: 16, padding: '10px 12px', borderRadius: 6,
+            background: t.bgMuted, border: `1px solid ${t.borderLight}`,
+          }}>
             <div style={{
               fontSize: 8, fontWeight: 700, color: t.textMuted,
-              letterSpacing: '0.1em', marginBottom: 3, fontFamily: "'JetBrains Mono', monospace",
+              letterSpacing: '0.1em', marginBottom: 6, fontFamily: "'JetBrains Mono', monospace",
+            }}>OPERAND</div>
+            <div style={{ marginBottom: 8 }}>
+              {formatOperand(event.op, event.operand, t)}
+            </div>
+            <pre style={{
+              fontSize: 10, color: t.textSecondary, fontFamily: "'JetBrains Mono', monospace",
+              background: t.bg, borderRadius: 4, padding: 8, margin: 0,
+              border: `1px solid ${t.border}`,
+              whiteSpace: 'pre-wrap' as const, wordBreak: 'break-all' as const, lineHeight: 1.6,
+              maxHeight: 200, overflowY: 'auto' as const,
+            }}>
+              {JSON.stringify(event.operand, null, 2)}
+            </pre>
+          </div>
+        )}
+
+        {/* Meta fields */}
+        {sections.map(({ label, value }) => (
+          <div key={label} style={{ marginBottom: 14 }}>
+            <div style={{
+              fontSize: 8, fontWeight: 700, color: t.textMuted,
+              letterSpacing: '0.1em', marginBottom: 4, fontFamily: "'JetBrains Mono', monospace",
             }}>{label}</div>
             <div style={{
               fontSize: 11.5, fontFamily: "'JetBrains Mono', monospace",
-              wordBreak: 'break-all' as const, lineHeight: 1.5,
+              lineHeight: 1.5,
             }}>{value}</div>
           </div>
         ))}
 
-        {/* Operand */}
-        <div style={{ marginBottom: 12 }}>
-          <div style={{
-            fontSize: 8, fontWeight: 700, color: t.textMuted,
-            letterSpacing: '0.1em', marginBottom: 3, fontFamily: "'JetBrains Mono', monospace",
-          }}>OPERAND</div>
-          <pre style={{
-            fontSize: 10.5, color: t.textSecondary, fontFamily: "'JetBrains Mono', monospace",
-            background: t.bg, borderRadius: 4, padding: 8, margin: 0,
-            border: `1px solid ${t.border}`,
-            whiteSpace: 'pre-wrap' as const, wordBreak: 'break-all' as const, lineHeight: 1.6,
-          }}>
-            {JSON.stringify(event.operand, null, 2)}
-          </pre>
-        </div>
-
         {/* Constituents for REC/derived events */}
         {level > 1 && event.operand?.constituents && (
-          <div style={{ marginBottom: 12 }}>
+          <div style={{ marginBottom: 14 }}>
             <div style={{
               fontSize: 8, fontWeight: 700, color: t.textMuted,
-              letterSpacing: '0.1em', marginBottom: 3, fontFamily: "'JetBrains Mono', monospace",
+              letterSpacing: '0.1em', marginBottom: 4, fontFamily: "'JetBrains Mono', monospace",
             }}>CONSTITUENTS</div>
             {(event.operand.constituents as string[]).map((c: string, i: number) => (
               <div key={i} style={{
@@ -288,7 +450,7 @@ function DetailPanel({ event, onClose }: { event: EoEvent; onClose: () => void }
         )}
 
         {/* Footer links */}
-        <div style={{ borderTop: `1px solid ${t.border}`, paddingTop: 10, marginTop: 4 }}>
+        <div style={{ borderTop: `1px solid ${t.border}`, paddingTop: 12, marginTop: 4 }}>
           <div style={{
             fontSize: 10.5, color: t.accent, cursor: 'pointer',
             fontFamily: "'JetBrains Mono', monospace", padding: '4px 0',
@@ -311,22 +473,128 @@ function DetailPanel({ event, onClose }: { event: EoEvent; onClose: () => void }
   );
 }
 
-// --- Table cell styles ---
-function thStyle(t: { bg: string; textMuted: string; border: string; bgCard: string }): React.CSSProperties {
-  return {
-    position: 'sticky' as const, top: 0, background: t.bgCard,
-    padding: '10px 8px 10px 0', textAlign: 'left' as const,
-    fontSize: 11, fontWeight: 400, textTransform: 'uppercase' as const,
-    letterSpacing: '0.3px', color: t.textMuted,
-    borderBottom: `0.5px solid ${t.border}`, whiteSpace: 'nowrap' as const, zIndex: 2,
-  };
+
+// --- Time group divider ---
+function TimeGroupDivider({ label }: { label: string }) {
+  const { theme: t } = useTheme();
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 10,
+      padding: '12px 20px 6px 20px',
+    }}>
+      <span style={{
+        fontSize: 9, fontWeight: 600, color: t.textMuted,
+        letterSpacing: '0.08em', textTransform: 'uppercase' as const,
+        fontFamily: "'JetBrains Mono', monospace",
+        whiteSpace: 'nowrap' as const,
+      }}>{label}</span>
+      <div style={{ flex: 1, height: 1, background: t.borderLight }} />
+    </div>
+  );
 }
 
-function tdStyle(t: { border: string; bgCard: string; borderLight: string }): React.CSSProperties {
-  return {
-    padding: '10px 8px 10px 0', borderBottom: `0.5px solid ${t.borderLight}`,
-    verticalAlign: 'middle' as const, background: t.bgCard,
-  };
+// --- Event Row ---
+function EventRow({ event, isSelected, onSelect }: {
+  event: EoEvent;
+  isSelected: boolean;
+  onSelect: () => void;
+}) {
+  const { theme: t } = useTheme();
+  const agentType = getAgentType(event.agent);
+  const agentName = getAgentName(event.agent);
+  const level = event.level ?? 1;
+  const summary = operandSummary(event.op, event.operand);
+  const opColor = OP_COLORS[event.op] || OP_COLORS.NUL;
+  const [hovered, setHovered] = useState(false);
+
+  return (
+    <div
+      onClick={onSelect}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: 'flex', alignItems: 'stretch', cursor: 'pointer',
+        background: isSelected ? t.bgActive : hovered ? t.bgHover : 'transparent',
+        borderBottom: `1px solid ${t.borderLight}`,
+        transition: 'background 0.1s',
+        position: 'relative' as const,
+      }}
+    >
+      {/* Left color accent */}
+      <div style={{
+        width: 3, flexShrink: 0,
+        background: opColor.text,
+        opacity: isSelected ? 1 : 0.5,
+        borderRadius: '0 2px 2px 0',
+      }} />
+
+      {/* Main content */}
+      <div style={{
+        flex: 1, padding: '10px 16px 10px 14px',
+        display: 'flex', flexDirection: 'column' as const, gap: 3,
+        minWidth: 0,
+      }}>
+        {/* Top row: seq, op, target */}
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 8, minWidth: 0,
+        }}>
+          <span style={{
+            fontSize: 10, color: t.textMuted, fontFamily: "'JetBrains Mono', monospace",
+            flexShrink: 0, width: 32, textAlign: 'right' as const,
+          }}>{event.seq}</span>
+          <OpBadge op={event.op} />
+          <LevelBadge level={level} />
+          <span style={{
+            fontFamily: "'JetBrains Mono', monospace", fontSize: 11.5,
+            color: t.accent, overflow: 'hidden' as const,
+            textOverflow: 'ellipsis' as const, whiteSpace: 'nowrap' as const,
+            flex: 1, minWidth: 0,
+          }}>
+            {event.target}
+          </span>
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0,
+            marginLeft: 8,
+          }}>
+            <span style={{
+              display: 'inline-flex', alignItems: 'center', gap: 4,
+              color: agentType === 'system' ? t.warning : t.textSecondary,
+              fontSize: 11, fontFamily: "'JetBrains Mono', monospace",
+            }}>
+              {AGENT_ICONS[agentType]}
+              <span>{agentName}</span>
+            </span>
+            <span
+              title={formatFullTime(event.ts)}
+              style={{
+                fontSize: 10, color: t.textMuted,
+                fontFamily: "'JetBrains Mono', monospace",
+                whiteSpace: 'nowrap' as const,
+                minWidth: 48, textAlign: 'right' as const,
+              }}
+            >
+              {formatRelativeTime(event.ts)}
+            </span>
+          </div>
+        </div>
+
+        {/* Bottom row: operand summary */}
+        {summary && (
+          <div style={{
+            fontSize: 10.5, color: t.textMuted,
+            fontFamily: "'JetBrains Mono', monospace",
+            overflow: 'hidden' as const,
+            textOverflow: 'ellipsis' as const,
+            whiteSpace: 'nowrap' as const,
+            paddingLeft: 40,
+            lineHeight: 1.3,
+          }}>
+            {summary}
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }
 
 // --- Main LogView ---
@@ -335,10 +603,17 @@ export function LogView({ targetFilter }: { targetFilter?: string | null }) {
   const { theme: t } = useTheme();
   const [activeFilters, setActiveFilters] = useState<Set<string>>(new Set());
   const [selectedEvent, setSelectedEvent] = useState<EoEvent | null>(null);
-  const [filterText, setFilterText] = useState('');
-  const [opMenuOpen, setOpMenuOpen] = useState(false);
+  const [searchText, setSearchText] = useState('');
   const [visibleCount, setVisibleCount] = useState(50);
   const [systemOnly, setSystemOnly] = useState(false);
+  const [agentFilter, setAgentFilter] = useState<string>('');
+
+  // Unique agents for the agent filter dropdown
+  const uniqueAgents = useMemo(() => {
+    const agents = new Set<string>();
+    for (const e of recentEvents) agents.add(getAgentName(e.agent));
+    return Array.from(agents).sort();
+  }, [recentEvents]);
 
   // Filtered events (newest first)
   const filtered = useMemo(() => {
@@ -346,11 +621,19 @@ export function LogView({ targetFilter }: { targetFilter?: string | null }) {
     return sorted.filter((e) => {
       if (activeFilters.size > 0 && !activeFilters.has(e.op)) return false;
       if (targetFilter && !e.target.startsWith(targetFilter)) return false;
-      if (filterText && !e.target.toLowerCase().includes(filterText.toLowerCase())) return false;
       if (systemOnly && e.agent !== 'system' && (e.level ?? 1) < 2) return false;
+      if (agentFilter && getAgentName(e.agent) !== agentFilter) return false;
+      if (searchText) {
+        const q = searchText.toLowerCase();
+        const inTarget = e.target.toLowerCase().includes(q);
+        const inAgent = getAgentName(e.agent).toLowerCase().includes(q);
+        const inOp = e.op.toLowerCase().includes(q);
+        const inOperand = e.operand ? JSON.stringify(e.operand).toLowerCase().includes(q) : false;
+        if (!inTarget && !inAgent && !inOp && !inOperand) return false;
+      }
       return true;
     });
-  }, [recentEvents, activeFilters, filterText, targetFilter, systemOnly]);
+  }, [recentEvents, activeFilters, searchText, targetFilter, systemOnly, agentFilter]);
 
   const visible = filtered.slice(0, visibleCount);
 
@@ -363,196 +646,215 @@ export function LogView({ targetFilter }: { targetFilter?: string | null }) {
     });
   }
 
+  // Group visible events by time
+  const groupedEvents = useMemo(() => {
+    const groups: { label: string; events: EoEvent[] }[] = [];
+    let currentLabel = '';
+    for (const e of visible) {
+      const label = getTimeGroup(e.ts);
+      if (label !== currentLabel) {
+        groups.push({ label, events: [e] });
+        currentLabel = label;
+      } else {
+        groups[groups.length - 1].events.push(e);
+      }
+    }
+    return groups;
+  }, [visible]);
+
   return (
     <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column' as const, minWidth: 0, background: t.bgCard }}>
         {/* Header */}
         <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          padding: '12px 20px', borderBottom: `0.5px solid ${t.border}`, flexShrink: 0,
+          padding: '14px 20px 0 20px', flexShrink: 0,
+          borderBottom: `1px solid ${t.border}`,
         }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{
-              fontSize: 14, fontWeight: 500, color: t.textHeading,
-            }}>Event log</span>
-            <span style={{
-              fontSize: 12, color: t.textMuted,
-              background: t.bgMuted, padding: '1px 6px', borderRadius: 4,
-            }}>{filtered.length} events</span>
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <input
-              value={filterText}
-              onChange={(e) => setFilterText(e.target.value)}
-              placeholder="Filter by target\u2026"
-              style={{
-                width: 140, height: 28, fontSize: 12,
-                padding: '0 8px', color: t.text,
-                border: `0.5px solid ${t.border}`,
-                borderRadius: 4, background: t.bgCard,
-                outline: 'none',
-              }}
-            />
-            <div style={{ position: 'relative' as const }}>
-              <button
-                onClick={() => setOpMenuOpen(!opMenuOpen)}
+          {/* Title row */}
+          <div style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            marginBottom: 12,
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ fontSize: 14, fontWeight: 500, color: t.textHeading }}>Event log</span>
+              <span style={{
+                fontSize: 11, color: t.textMuted, background: t.bgMuted,
+                padding: '2px 8px', borderRadius: 10,
+                fontFamily: "'JetBrains Mono', monospace",
+              }}>
+                {filtered.length}{filtered.length !== recentEvents.length ? ` / ${recentEvents.length}` : ''}
+              </span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              {/* Search */}
+              <div style={{ position: 'relative' as const }}>
+                <input
+                  value={searchText}
+                  onChange={(e) => setSearchText(e.target.value)}
+                  placeholder="Search events\u2026"
+                  style={{
+                    width: 180, height: 28, fontSize: 11,
+                    padding: '0 8px 0 28px', color: t.text,
+                    border: `1px solid ${searchText ? t.accent + '60' : t.border}`,
+                    borderRadius: 6, background: t.bg,
+                    outline: 'none', fontFamily: "'JetBrains Mono', monospace",
+                    transition: 'border-color 0.15s',
+                  }}
+                />
+                <svg width="13" height="13" viewBox="0 0 14 14" fill="none" style={{
+                  position: 'absolute' as const, left: 8, top: 7.5,
+                  color: searchText ? t.accent : t.textMuted,
+                }}>
+                  <circle cx="6" cy="6" r="4" stroke="currentColor" strokeWidth="1.3"/>
+                  <path d="M9 9l3 3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+                </svg>
+              </div>
+
+              {/* Agent filter */}
+              <select
+                value={agentFilter}
+                onChange={(e) => setAgentFilter(e.target.value)}
                 style={{
-                  padding: '4px 10px', fontSize: 12,
-                  border: `0.5px solid ${t.border}`, borderRadius: 4,
-                  background: activeFilters.size > 0 ? t.accentBg : t.bgCard,
-                  color: t.textSecondary, cursor: 'pointer',
+                  height: 28, fontSize: 11, padding: '0 6px',
+                  color: agentFilter ? t.text : t.textMuted,
+                  border: `1px solid ${agentFilter ? t.accent + '60' : t.border}`,
+                  borderRadius: 6, background: t.bg,
+                  fontFamily: "'JetBrains Mono', monospace",
+                  cursor: 'pointer', outline: 'none',
                 }}
               >
-                Op{activeFilters.size > 0 ? ` (${activeFilters.size})` : ''}
+                <option value="">All agents</option>
+                {uniqueAgents.map((a) => (
+                  <option key={a} value={a}>{a}</option>
+                ))}
+              </select>
+
+              {/* System toggle */}
+              <button
+                onClick={() => setSystemOnly(!systemOnly)}
+                style={{
+                  padding: '4px 10px', height: 28, fontSize: 10, fontWeight: 600,
+                  border: `1px solid ${systemOnly ? 'rgba(239,68,68,0.3)' : t.border}`,
+                  borderRadius: 6,
+                  background: systemOnly ? 'rgba(239,68,68,0.1)' : t.bg,
+                  color: systemOnly ? '#ef4444' : t.textMuted,
+                  cursor: 'pointer',
+                  fontFamily: "'JetBrains Mono', monospace",
+                  transition: 'all 0.1s',
+                }}
+              >
+                SYS
               </button>
-              {opMenuOpen && (
+
+              {/* Clear filters */}
+              {(activeFilters.size > 0 || searchText || agentFilter || systemOnly) && (
+                <button
+                  onClick={() => {
+                    setActiveFilters(new Set());
+                    setSearchText('');
+                    setAgentFilter('');
+                    setSystemOnly(false);
+                  }}
+                  style={{
+                    padding: '4px 8px', height: 28, fontSize: 10,
+                    border: `1px solid ${t.border}`, borderRadius: 6,
+                    background: 'transparent', color: t.textMuted,
+                    cursor: 'pointer', fontFamily: "'JetBrains Mono', monospace",
+                  }}
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Stats bar + op chips */}
+          <StatsBar
+            events={recentEvents}
+            activeFilters={activeFilters}
+            onToggleFilter={toggleFilter}
+          />
+          <div style={{ height: 12 }} />
+        </div>
+
+        {/* Event list */}
+        <div style={{ flex: 1, overflowY: 'auto' as const }}>
+          {visible.length === 0 ? (
+            <div style={{
+              padding: '60px 20px', textAlign: 'center' as const,
+              display: 'flex', flexDirection: 'column' as const,
+              alignItems: 'center', gap: 8,
+            }}>
+              {recentEvents.length === 0 ? (
                 <>
-                  <div style={{ position: 'fixed' as const, inset: 0, zIndex: 99 }} onClick={() => setOpMenuOpen(false)} />
-                  <div style={{
-                    position: 'absolute' as const, right: 0, top: '100%', marginTop: 4,
-                    background: t.bgCard, border: `1px solid ${t.border}`,
-                    borderRadius: 6, padding: 6, zIndex: 100, minWidth: 100,
-                    boxShadow: `0 4px 16px ${t.shadow}`,
-                  }}>
-                    {ALL_OPS.map((op) => {
-                      const c = OP_COLORS[op];
-                      const active = activeFilters.has(op);
-                      return (
-                        <button key={op} onClick={() => toggleFilter(op)} style={{
-                          display: 'flex', alignItems: 'center', gap: 8, width: '100%',
-                          padding: '5px 8px', border: 'none', borderRadius: 3,
-                          background: active ? c.bg : 'transparent',
-                          color: active ? c.text : t.textSecondary,
-                          cursor: 'pointer', fontSize: 11, fontWeight: 600,
-                          fontFamily: "'JetBrains Mono', monospace",
-                        }}>
-                          <OpBadge op={op} />
-                        </button>
-                      );
-                    })}
+                  <svg width="32" height="32" viewBox="0 0 24 24" fill="none" style={{ color: t.textMuted, opacity: 0.4 }}>
+                    <rect x="3" y="3" width="18" height="18" rx="3" stroke="currentColor" strokeWidth="1.5"/>
+                    <path d="M8 12h8M12 8v8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+                  </svg>
+                  <div style={{ fontSize: 12, color: t.textMuted, fontWeight: 500 }}>No events yet</div>
+                  <div style={{ fontSize: 11, color: t.textMuted, opacity: 0.7, maxWidth: 260, lineHeight: 1.5 }}>
+                    Use <span style={{ color: t.accent }}>Compose</span> to create your first event, or <span style={{ color: t.accent }}>Import</span> to load data.
+                  </div>
+                </>
+              ) : (
+                <>
+                  <svg width="32" height="32" viewBox="0 0 24 24" fill="none" style={{ color: t.textMuted, opacity: 0.4 }}>
+                    <circle cx="11" cy="11" r="7" stroke="currentColor" strokeWidth="1.5"/>
+                    <path d="M16 16l4 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+                  </svg>
+                  <div style={{ fontSize: 12, color: t.textMuted, fontWeight: 500 }}>No matching events</div>
+                  <div style={{ fontSize: 11, color: t.textMuted, opacity: 0.7, lineHeight: 1.5 }}>
+                    Try adjusting your filters or search query.
                   </div>
                 </>
               )}
             </div>
-            <button
-              onClick={() => setSystemOnly(!systemOnly)}
-              style={{
-                padding: '6px 12px', fontSize: 11, fontWeight: 600,
-                border: `1px solid ${systemOnly ? 'rgba(239,68,68,0.25)' : t.border}`,
-                borderRadius: 4,
-                background: systemOnly ? 'rgba(239,68,68,0.12)' : t.bgCard,
-                color: systemOnly ? '#ef4444' : t.textMuted,
-                cursor: 'pointer',
-                fontFamily: "'JetBrains Mono', monospace",
-                transition: 'all 0.1s',
-              }}
-            >
-              SYS
-            </button>
-          </div>
-        </div>
+          ) : (
+            <>
+              {groupedEvents.map((group) => (
+                <div key={group.label}>
+                  <TimeGroupDivider label={group.label} />
+                  {group.events.map((event) => (
+                    <EventRow
+                      key={event.seq}
+                      event={event}
+                      isSelected={selectedEvent?.seq === event.seq}
+                      onSelect={() => setSelectedEvent(
+                        selectedEvent?.seq === event.seq ? null : event
+                      )}
+                    />
+                  ))}
+                </div>
+              ))}
 
-        {/* Table */}
-        <div style={{ flex: 1, overflowY: 'auto' as const, overflowX: 'auto' as const }}>
-          <table style={{ borderCollapse: 'collapse' as const, fontSize: 13, color: t.textHeading }}>
-            <thead>
-              <tr>
-                <th style={{ ...thStyle(t), width: 44, paddingLeft: 20 }}>seq</th>
-                <th style={{ ...thStyle(t), width: 48 }}>op</th>
-                <th style={{ ...thStyle(t), maxWidth: 360 }}>target</th>
-                <th style={{ ...thStyle(t), maxWidth: 180 }}>agent</th>
-                <th style={{ ...thStyle(t), textAlign: 'right' as const, paddingRight: 20 }}>time</th>
-              </tr>
-            </thead>
-            <tbody>
-              {visible.length === 0 && (
-                <tr>
-                  <td colSpan={5} style={{
-                    padding: 48, textAlign: 'center' as const, color: t.textMuted,
-                    fontSize: 11, fontFamily: "'JetBrains Mono', monospace",
-                  }}>
-                    {recentEvents.length === 0 ? (
-                      <>
-                        <div>No events yet</div>
-                        <div style={{ marginTop: 6, fontSize: 10, color: t.textSecondary }}>
-                          Use the Compose tab to create your first event, or Import to load data.
-                        </div>
-                      </>
-                    ) : (
-                      <>
-                        <div>No events match</div>
-                        <div style={{ marginTop: 6, fontSize: 10, color: t.textSecondary }}>
-                          Try adjusting your filters or clearing the target filter.
-                        </div>
-                      </>
-                    )}
-                  </td>
-                </tr>
-              )}
-              {visible.map((event) => {
-                const sel = selectedEvent?.seq === event.seq;
-                const agentName = getAgentName(event.agent);
-                return (
-                  <tr
-                    key={event.seq}
-                    onClick={() => setSelectedEvent(sel ? null : event)}
-                    style={{
-                      cursor: 'pointer',
-                      background: sel ? t.bgHover : 'transparent',
-                    }}
-                    onMouseEnter={(e) => { if (!sel) (e.currentTarget as HTMLElement).style.background = t.bgHover; }}
-                    onMouseLeave={(e) => { if (!sel) (e.currentTarget as HTMLElement).style.background = sel ? t.bgHover : 'transparent'; }}
-                  >
-                    <td style={{
-                      ...tdStyle(t), paddingLeft: 20,
-                      fontFamily: "'JetBrains Mono', monospace", fontSize: 11,
-                      color: t.textMuted,
-                    }}>{event.seq}</td>
-                    <td style={tdStyle(t)}><OpBadge op={event.op} /></td>
-                    <td style={{
-                      ...tdStyle(t), fontFamily: "'JetBrains Mono', monospace",
-                      fontSize: 11, color: t.accent,
-                      maxWidth: 360, overflow: 'hidden' as const,
-                      textOverflow: 'ellipsis' as const, whiteSpace: 'nowrap' as const,
-                    }}>{event.target}</td>
-                    <td style={{
-                      ...tdStyle(t), fontFamily: "'JetBrains Mono', monospace",
-                      fontSize: 11, color: t.textSecondary,
-                      maxWidth: 180, overflow: 'hidden' as const,
-                      textOverflow: 'ellipsis' as const, whiteSpace: 'nowrap' as const,
-                    }}>{agentName}</td>
-                    <td style={{
-                      ...tdStyle(t), textAlign: 'right' as const, paddingRight: 20,
-                      fontSize: 11, color: t.textMuted,
-                      whiteSpace: 'nowrap' as const,
-                    }}>{formatTime(event.ts)}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-
-          {/* Pagination footer */}
-          {filtered.length > 0 && (
-            <div style={{
-              padding: '12px 20px', textAlign: 'center' as const, fontSize: 11,
-              color: t.textMuted,
-            }}>
-              Showing {Math.min(visibleCount, filtered.length)} of {filtered.length} events
+              {/* Pagination */}
               {filtered.length > visibleCount && (
-                <button
-                  onClick={() => setVisibleCount((c) => c + 50)}
-                  style={{
-                    marginLeft: 12, padding: '2px 10px', fontSize: 10,
-                    border: `1px solid ${t.border}`, borderRadius: 3,
-                    background: 'transparent', color: t.accent, cursor: 'pointer',
-                    fontFamily: "'JetBrains Mono', monospace",
-                  }}
-                >
-                  show more
-                </button>
+                <div style={{
+                  padding: '16px 20px', textAlign: 'center' as const,
+                }}>
+                  <button
+                    onClick={() => setVisibleCount((c) => c + 50)}
+                    style={{
+                      padding: '6px 16px', fontSize: 11,
+                      border: `1px solid ${t.border}`, borderRadius: 6,
+                      background: 'transparent', color: t.accent, cursor: 'pointer',
+                      fontFamily: "'JetBrains Mono', monospace", fontWeight: 500,
+                    }}
+                  >
+                    Load more ({filtered.length - visibleCount} remaining)
+                  </button>
+                </div>
               )}
-            </div>
+
+              {/* Footer count */}
+              <div style={{
+                padding: '8px 20px 16px', textAlign: 'center' as const,
+                fontSize: 10, color: t.textMuted,
+                fontFamily: "'JetBrains Mono', monospace",
+              }}>
+                {Math.min(visibleCount, filtered.length)} of {filtered.length} events
+              </div>
+            </>
           )}
         </div>
       </div>
