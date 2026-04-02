@@ -10,6 +10,7 @@ import { configureMatrixDomain } from '../lib/matrix-domain';
 import { HolonNav } from './HolonNav';
 import { TableView } from './TableView';
 import { RecordDetailDrawer } from './RecordDetailDrawer';
+import { RecordView } from './RecordView';
 import { ConnectionStatus, useConnectionState } from './ConnectionStatus';
 import { ErrorBoundary } from './ErrorBoundary';
 import { SyncProgress } from './SyncProgress';
@@ -183,6 +184,25 @@ export function Layout({ session, onLogout }: LayoutProps) {
       }
     });
   }, [ready, lastSeq, getStateByPrefix, getState, selectedScope]);
+
+  // Detect leaf scope: scope has its own state but no child records.
+  // In this case we show the scope itself as a record instead of an empty table.
+  const isLeafScope = useMemo(() => {
+    if (!selectedScope) return false;
+    // A leaf scope has no direct children in allStates
+    const prefix = selectedScope + '.';
+    const scopeDepth = selectedScope.split('.').length;
+    const hasChildren = allStates.some((st) => {
+      if (!st.target.startsWith(prefix)) return false;
+      if (st.value?._alias) return false;
+      const seg = st.target.split('.').pop();
+      if (seg?.startsWith('_')) return false;
+      return st.target.split('.').length === scopeDepth + 1;
+    });
+    if (hasChildren) return false;
+    // Check that the scope itself has state data
+    return allStates.some((st) => st.target === selectedScope && st.value && !st.value._alias);
+  }, [selectedScope, allStates]);
 
   // Reset scrubber when scope changes
   useEffect(() => {
@@ -801,7 +821,12 @@ export function Layout({ session, onLogout }: LayoutProps) {
           {!showRecycleBin && <ErrorBoundary>
             {activeView === 'records' ? (
               <>
-                {selectedScope ? (
+                {selectedScope && isLeafScope ? (
+                  <RecordView
+                    target={selectedScope}
+                    onNavigate={(t) => navigate({ scope: t, record: null })}
+                  />
+                ) : selectedScope ? (
                   <TableView
                     scope={selectedScope}
                     onSelectRecord={(rec) => navigate({ record: rec })}
