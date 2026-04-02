@@ -254,8 +254,8 @@ export function Layout({ session, onLogout }: LayoutProps) {
         // Room resolution is best-effort — app works without it
         try {
           roomIdRef.current = await resolveDataRoom(client);
-        } catch {
-          // Room alias not found (404) — sync disabled, local store still works
+        } catch (e) {
+          console.warn('[EO-DB] Root data room alias not found — per-space room IDs will be used instead:', e);
         }
 
         setMatrixReady(true);
@@ -401,6 +401,18 @@ export function Layout({ session, onLogout }: LayoutProps) {
 
     let mounted = true;
 
+    // Resolve the Matrix room ID for this space: prefer the space's own
+    // mainRoomId from discovery, fall back to the root data room alias.
+    const spaceEntry = mergedEntries.find((e) => e.spaceTarget === selectedSpace);
+    const spaceRoomId = spaceEntry?.mainRoomId || roomIdRef.current;
+
+    if (!spaceRoomId && matrixReady) {
+      console.warn('[EO-DB] No room ID for space', selectedSpace,
+        '— spaceEntry.mainRoomId:', spaceEntry?.mainRoomId,
+        ', rootRoomId:', roomIdRef.current,
+        '. Matrix sync will be disabled.');
+    }
+
     async function setupSpaceStore() {
       const cache = spaceCacheRef.current;
       const existing = cache.get(selectedSpace!);
@@ -411,10 +423,10 @@ export function Layout({ session, onLogout }: LayoutProps) {
         await init(existing.store);
 
         // Always create a fresh SyncManager (the old one was destroyed on space switch)
-        if (matrixReady && matrixClientRef.current && roomIdRef.current) {
+        if (matrixReady && matrixClientRef.current && spaceRoomId) {
           try {
             const freshSync = new SyncManager(
-              matrixClientRef.current, roomIdRef.current, existing.store,
+              matrixClientRef.current, spaceRoomId, existing.store,
               (event) => {
                 useEoStore.setState((st) => ({
                   recentEvents: [...st.recentEvents.slice(-99), event],
@@ -426,7 +438,9 @@ export function Layout({ session, onLogout }: LayoutProps) {
             if (!mounted) return;
             existing.syncManager = freshSync;
             useEoStore.getState().setSyncManager(freshSync);
-          } catch { /* offline */ }
+          } catch (e) {
+            console.warn('[EO-DB] SyncManager init failed for cached space', selectedSpace, e);
+          }
         }
         return;
       }
@@ -441,11 +455,11 @@ export function Layout({ session, onLogout }: LayoutProps) {
 
       let syncManager: SyncManager | null = null;
 
-      // Set up sync manager for this space (no prefix needed — IDB is isolated)
-      if (matrixReady && matrixClientRef.current && roomIdRef.current) {
+      // Set up sync manager for this space (use space's own room, not root alias)
+      if (matrixReady && matrixClientRef.current && spaceRoomId) {
         try {
           syncManager = new SyncManager(
-            matrixClientRef.current, roomIdRef.current, store,
+            matrixClientRef.current, spaceRoomId, store,
             (event) => {
               useEoStore.setState((st) => ({
                 recentEvents: [...st.recentEvents.slice(-99), event],
@@ -457,8 +471,8 @@ export function Layout({ session, onLogout }: LayoutProps) {
           if (!mounted) return;
 
           useEoStore.getState().setSyncManager(syncManager);
-        } catch {
-          // Offline — local store is still available
+        } catch (e) {
+          console.warn('[EO-DB] SyncManager init failed for space', selectedSpace, e);
         }
       }
 
@@ -471,7 +485,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
     return () => {
       mounted = false;
     };
-  }, [selectedSpace, session, init, matrixReady]);
+  }, [selectedSpace, session, init, matrixReady, mergedEntries]);
 
   async function handleLogout() {
     // Save snapshots for ALL cached spaces before clearing state
