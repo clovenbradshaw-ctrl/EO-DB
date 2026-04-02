@@ -23,6 +23,7 @@ export function SettingsView({ session }: SettingsViewProps) {
   const [snapshotStatus, setSnapshotStatus] = useState('');
   const [deleteConfirm, setDeleteConfirm] = useState('');
   const [deleteError, setDeleteError] = useState('');
+  const [showEraseConfirm, setShowEraseConfirm] = useState(false);
 
 
 
@@ -40,16 +41,22 @@ export function SettingsView({ session }: SettingsViewProps) {
     }
   }
 
-  async function handleDeleteAll() {
-    if (deleteConfirm !== 'DELETE') {
+  function handleDeleteAll() {
+    if (deleteConfirm.toUpperCase() !== 'DELETE') {
       setDeleteError('Type DELETE to confirm');
       return;
     }
+    setDeleteError('');
+    setShowEraseConfirm(true);
+  }
+
+  async function handleEraseConfirmed() {
     try {
       const { teardown } = useEoStore.getState();
       teardown();
       setDeleteError('');
       setDeleteConfirm('');
+      setShowEraseConfirm(false);
       window.location.reload();
     } catch (e: any) {
       setDeleteError(e.message);
@@ -125,21 +132,46 @@ export function SettingsView({ session }: SettingsViewProps) {
         <Section title="Danger Zone" theme={theme} danger>
           <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 8 }}>
             <div style={{ fontSize: 11, color: theme.textSecondary }}>
-              Permanently erase all events, state, and graph data from IndexedDB.
+              Permanently erase all events, state, and graph data from this browser's IndexedDB. Matrix room data is not affected.
             </div>
-            <input
-              style={s.input}
-              value={deleteConfirm}
-              onChange={(e) => setDeleteConfirm(e.target.value)}
-              placeholder='Type "DELETE" to confirm'
-            />
-            <button
-              style={{ ...s.actionBtn, background: theme.danger, borderColor: theme.danger, color: '#fff' }}
-              onClick={handleDeleteAll}
-            >
-              Erase Database
-            </button>
-            {deleteError && <div style={{ color: theme.danger, fontFamily: "'JetBrains Mono', monospace", fontSize: 10 }}>{deleteError}</div>}
+            {showEraseConfirm ? (
+              <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 8, padding: '8px 0' }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: theme.danger }}>
+                  This will permanently erase ALL local data. Are you sure?
+                </div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button
+                    style={{ ...s.actionBtn, background: theme.danger, borderColor: theme.danger, color: '#fff' }}
+                    onClick={handleEraseConfirmed}
+                  >
+                    Yes, erase everything
+                  </button>
+                  <button
+                    style={{ ...s.actionBtn, background: 'transparent', color: theme.textSecondary, borderColor: theme.border }}
+                    onClick={() => { setShowEraseConfirm(false); setDeleteConfirm(''); }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <>
+                <input
+                  style={s.input}
+                  value={deleteConfirm}
+                  onChange={(e) => setDeleteConfirm(e.target.value)}
+                  placeholder='Type "DELETE" to confirm'
+                  aria-label="Type DELETE to confirm database erasure"
+                />
+                <button
+                  style={{ ...s.actionBtn, background: theme.danger, borderColor: theme.danger, color: '#fff' }}
+                  onClick={handleDeleteAll}
+                >
+                  Erase Database
+                </button>
+              </>
+            )}
+            {deleteError && <div style={{ color: theme.danger, fontFamily: "'JetBrains Mono', monospace", fontSize: 10 }} role="alert">{deleteError}</div>}
           </div>
         </Section>
       </div>

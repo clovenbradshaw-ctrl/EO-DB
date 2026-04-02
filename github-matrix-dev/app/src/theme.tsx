@@ -103,8 +103,8 @@ export const lightTheme: Theme = {
 
   text: '#2c2a26',
   textHeading: '#1a1816',
-  textSecondary: '#7a756d',
-  textMuted: '#aba69e',
+  textSecondary: '#635e56',
+  textMuted: '#857f77',
 
   border: '#e5e2dd',
   borderLight: '#f0eeeb',
@@ -180,7 +180,7 @@ export const darkTheme: Theme = {
   text: '#c9d1d9',
   textHeading: '#e6edf3',
   textSecondary: '#8b949e',
-  textMuted: '#5a6370',
+  textMuted: '#6e7681',
 
   border: '#30363d',
   borderLight: '#21262d',

@@ -471,7 +471,21 @@ export function LogView({ targetFilter }: { targetFilter?: string | null }) {
                     padding: 48, textAlign: 'center' as const, color: t.textMuted,
                     fontSize: 11, fontFamily: "'JetBrains Mono', monospace",
                   }}>
-                    {recentEvents.length === 0 ? 'no events yet' : 'no events match'}
+                    {recentEvents.length === 0 ? (
+                      <>
+                        <div>No events yet</div>
+                        <div style={{ marginTop: 6, fontSize: 10, color: t.textSecondary }}>
+                          Use the Compose tab to create your first event, or Import to load data.
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <div>No events match</div>
+                        <div style={{ marginTop: 6, fontSize: 10, color: t.textSecondary }}>
+                          Try adjusting your filters or clearing the target filter.
+                        </div>
+                      </>
+                    )}
                   </td>
                 </tr>
               )}

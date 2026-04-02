@@ -125,7 +125,7 @@ export function FilterBar({
                 >
                   EO / SQL
                 </button>
-                <button style={s.closeBtn} onClick={() => setOpen(false)}>&times;</button>
+                <button style={s.closeBtn} onClick={() => setOpen(false)} aria-label="Close filter panel">&times;</button>
               </div>
             </div>
 
@@ -171,6 +171,7 @@ export function FilterBar({
                     value={filter.field}
                     onChange={(e) => updateFilter(filter.id, { field: e.target.value })}
                     style={s.select}
+                    aria-label="Filter field"
                   >
                     {columns.map((c) => (
                       <option key={c.key} value={c.key}>{c.label}</option>
@@ -182,6 +183,7 @@ export function FilterBar({
                     value={filter.operator}
                     onChange={(e) => updateFilter(filter.id, { operator: e.target.value as FilterOperator })}
                     style={s.select}
+                    aria-label="Filter operator"
                   >
                     {ops.map((op) => (
                       <option key={op} value={op}>{OPERATOR_LABELS[op]}</option>
@@ -207,6 +209,7 @@ export function FilterBar({
                         value={filter.value}
                         onChange={(e) => updateFilter(filter.id, { value: e.target.value })}
                         placeholder="value"
+                        aria-label="Filter value"
                         style={s.input}
                       />
                     )
@@ -216,6 +219,7 @@ export function FilterBar({
                   <button
                     style={s.removeBtn}
                     onClick={() => removeFilter(filter.id)}
+                    aria-label="Remove filter"
                   >
                     &times;
                   </button>
@@ -245,6 +249,7 @@ export function FilterBar({
                         value={saveName}
                         onChange={(e) => setSaveName(e.target.value)}
                         placeholder="Segment name"
+                        aria-label="Segment name"
                         style={s.saveInput}
                         autoFocus
                         onKeyDown={(e) => { if (e.key === 'Enter') handleSave(); }}
