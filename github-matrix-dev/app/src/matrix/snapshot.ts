@@ -214,6 +214,9 @@ export async function downloadDeltaSnapshot(
   if (!httpUrl) throw new Error('Cannot resolve mxc URL');
 
   const response = await fetch(httpUrl);
+  if (!response.ok) {
+    throw new Error(`Snapshot download failed: ${response.status} ${response.statusText} (${httpUrl})`);
+  }
   const buffer = await response.arrayBuffer();
   return unpack(new Uint8Array(buffer)) as DeltaSnapshot;
 }
