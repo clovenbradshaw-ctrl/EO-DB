@@ -143,6 +143,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
   const getState = useEoStore((s) => s.getState);
   const _browserOnline = useConnectionState(); // triggers re-render on network change
   const syncManager = useEoStore((s) => s.syncManager);
+  const [matrixReady, setMatrixReady] = useState(false);
   // Show actual sync status: "online" only when Matrix sync is connected
   const connectionState: ConnectionState = !navigator.onLine
     ? 'offline'
@@ -283,7 +284,6 @@ export function Layout({ session, onLogout }: LayoutProps) {
   // --- Matrix client (lives for the entire session, not per-space) ---
   const matrixClientRef = useRef<ReturnType<typeof createMatrixClient> | null>(null);
   const roomIdRef = useRef<string | null>(null);
-  const [matrixReady, setMatrixReady] = useState(false);
 
   useEffect(() => {
     let mounted = true;
