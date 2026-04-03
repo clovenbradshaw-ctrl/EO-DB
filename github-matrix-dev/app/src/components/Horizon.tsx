@@ -248,46 +248,6 @@ export function Horizon({ records, dateColumns, filter, onFilterChange }: Horizo
 
   return (
     <div className="eo-horizon" style={s.bar}>
-      {/* Settings area */}
-      <div ref={settingsRef} style={s.settingsWrap}>
-        <button
-          style={s.settingsBtn}
-          onClick={() => setShowSettings((v) => !v)}
-          title="Horizon settings"
-        >
-          <span style={{ fontSize: 10, opacity: 0.7 }}>{dateFieldLabel}</span>
-          <span style={{ fontSize: 8, marginLeft: 4, opacity: 0.4 }}>&#9662;</span>
-        </button>
-
-        {showSettings && (
-          <div style={s.popover}>
-            <label style={s.popLabel}>Date field</label>
-            <select
-              value={filter.dateField}
-              onChange={handleDateFieldChange}
-              style={s.popSelect}
-            >
-              {dateColumns.map((col) => (
-                <option key={col.key} value={col.key}>
-                  {col.label}
-                </option>
-              ))}
-            </select>
-
-            <label style={{ ...s.popLabel, marginTop: 6 }}>Empty records</label>
-            <select
-              value={filter.emptyHandling}
-              onChange={handleEmptyChange}
-              style={s.popSelect}
-            >
-              <option value="show">Show</option>
-              <option value="hide">Hide</option>
-              <option value="end">At end</option>
-            </select>
-          </div>
-        )}
-      </div>
-
       {/* Track area */}
       <div
         ref={trackRef}
@@ -354,12 +314,54 @@ export function Horizon({ records, dateColumns, filter, onFilterChange }: Horizo
         )}
       </div>
 
-      {/* Reset */}
-      {isActive && (
-        <button onClick={handleReset} style={s.resetBtn} title="Reset horizon">
-          &times;
+      {/* Single settings/reset button */}
+      <div ref={settingsRef} style={s.settingsWrap}>
+        <button
+          style={{
+            ...s.settingsBtn,
+            ...(isActive ? { borderColor: theme.accent, color: theme.accent } : {}),
+          }}
+          onClick={() => setShowSettings((v) => !v)}
+          title="Horizon settings"
+        >
+          <span style={{ fontSize: 10, opacity: 0.7 }}>{dateFieldLabel}</span>
+          <span style={{ fontSize: 8, marginLeft: 4, opacity: 0.4 }}>&#9662;</span>
         </button>
-      )}
+
+        {showSettings && (
+          <div style={s.popover}>
+            <label style={s.popLabel}>Date field</label>
+            <select
+              value={filter.dateField}
+              onChange={handleDateFieldChange}
+              style={s.popSelect}
+            >
+              {dateColumns.map((col) => (
+                <option key={col.key} value={col.key}>
+                  {col.label}
+                </option>
+              ))}
+            </select>
+
+            <label style={{ ...s.popLabel, marginTop: 6 }}>Empty records</label>
+            <select
+              value={filter.emptyHandling}
+              onChange={handleEmptyChange}
+              style={s.popSelect}
+            >
+              <option value="show">Show</option>
+              <option value="hide">Hide</option>
+              <option value="end">At end</option>
+            </select>
+
+            {isActive && (
+              <button onClick={handleReset} style={s.resetInPopover}>
+                Reset
+              </button>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -405,7 +407,7 @@ function styles(t: Theme): Record<string, React.CSSProperties> {
     popover: {
       position: 'absolute',
       top: 24,
-      left: 0,
+      right: 0,
       zIndex: 100,
       background: t.bgCard,
       border: `1px solid ${t.border}`,
@@ -511,21 +513,20 @@ function styles(t: Theme): Record<string, React.CSSProperties> {
       whiteSpace: 'nowrap',
     } as React.CSSProperties,
 
-    // ---- Reset ----
-    resetBtn: {
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      width: 18,
-      height: 18,
+    // ---- Reset (inside popover) ----
+    resetInPopover: {
+      display: 'block',
+      width: '100%',
+      marginTop: 8,
+      padding: '4px 0',
       background: 'transparent',
-      border: 'none',
-      borderRadius: 4,
+      border: `0.5px solid ${t.border}`,
+      borderRadius: 3,
       color: t.textMuted,
-      fontSize: 13,
+      fontSize: 10,
+      fontFamily: "'JetBrains Mono', monospace",
       cursor: 'pointer',
-      flexShrink: 0,
-      lineHeight: 1,
+      textAlign: 'center' as const,
     },
   };
 }
