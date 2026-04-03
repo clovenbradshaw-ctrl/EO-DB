@@ -111,6 +111,9 @@ export class SyncManager {
   /** Timestamp (ms) until which sends should be skipped due to rate limiting. */
   private rateLimitedUntil: number = 0;
 
+  /** Optional callback for sync status changes (confirmed, queued, rate-limited). */
+  onSyncStatus?: (status: 'confirmed' | 'queued' | 'rate-limited') => void;
+
   constructor(
     client: IMatrixClient,
     roomId: string,
@@ -221,16 +224,47 @@ export class SyncManager {
    * After the initial Matrix sync, the room object contains timeline events
    * from the sync response. Walk them here so a fresh device without a
    * snapshot can still recover data from the room timeline.
+   *
+   * When the local DB is empty (seq === 0, e.g. after IDB wipe), the live
+   * timeline may also be empty due to initialSyncLimit: 0. In that case,
+   * paginate backwards to fetch historical events from the server.
    */
   private async replayTimelineEvents(): Promise<void> {
     const room = this.client.getRoom(this.roomId);
     if (!room) return;
 
-    const timeline = room.getLiveTimeline().getEvents();
-    for (const event of timeline) {
+    const timeline = room.getLiveTimeline();
+
+    // If the local DB is still empty after snapshot hydration, paginate
+    // backwards to fetch events that initialSyncLimit: 0 excluded.
+    const currentSeq = await getCurrentSeq(this.db);
+    if (currentSeq === 0) {
+      const MAX_PAGES = 20; // safety bound — at 100 events/page = 2000 events max
+      for (let page = 0; page < MAX_PAGES; page++) {
+        if (this.destroyed) return;
+        try {
+          const hasMore = await this.client.paginateEventTimeline(timeline, {
+            backwards: true,
+            limit: 100,
+          });
+          if (!hasMore) break;
+        } catch {
+          break;
+        }
+      }
+    }
+
+    const events = timeline.getEvents();
+    let replayed = 0;
+    for (const event of events) {
       if (this.destroyed) return;
       if (event.getType() !== EO_EVENT_TYPE) continue;
       await this.processIncomingEvent(event);
+      replayed++;
+    }
+
+    if (replayed > 0) {
+      console.info('[EO-DB] Replayed', replayed, 'events from room timeline');
     }
   }
 
@@ -456,11 +490,24 @@ export class SyncManager {
     // Send to room (best-effort, skip if rate-limited)
     if (Date.now() < this.rateLimitedUntil) {
       await this.enqueueOfflineEvent(localEvent);
+      this.onSyncStatus?.('queued');
     } else {
       try {
         await sendEoEvent(this.client, this.roomId, localEvent);
-      } catch {
-        // Offline — queue for later sync (mutex-protected append)
+        this.onSyncStatus?.('confirmed');
+      } catch (err) {
+        // If rate-limited, set the flag so subsequent sends skip the network
+        const retryDelay = SyncManager.getRetryDelay(err);
+        if (retryDelay !== null) {
+          this.rateLimitedUntil = Date.now() + retryDelay;
+          this.onSyncStatus?.('rate-limited');
+          // Schedule a flush to drain the queue after the backoff period
+          if (!this.destroyed) {
+            setTimeout(() => { if (!this.destroyed) this.flushUnsyncedEvents(); }, retryDelay);
+          }
+        } else {
+          this.onSyncStatus?.('queued');
+        }
         await this.enqueueOfflineEvent(localEvent);
       }
     }
@@ -544,10 +591,12 @@ export class SyncManager {
       );
 
       const remaining: Array<{ event: EoEventInput; attempts: number }> = [];
+      let flushedCount = 0;
       for (let i = 0; i < queue.length; i++) {
         const entry = queue[i];
         try {
           await sendEoEvent(this.client, this.roomId, entry.event);
+          flushedCount++;
         } catch (err) {
           // On rate-limit, stop immediately — re-queue this + all remaining events
           const retryDelay = SyncManager.getRetryDelay(err);
@@ -577,6 +626,13 @@ export class SyncManager {
       }
 
       await setMeta(this.db, 'meta:offline_queue', remaining);
+
+      // Notify after queue is saved
+      if (flushedCount > 0 && remaining.length === 0) {
+        this.onSyncStatus?.('confirmed');
+      } else if (remaining.length > 0) {
+        this.onSyncStatus?.('queued');
+      }
     });
   }
 }
