@@ -459,8 +459,16 @@ export class SyncManager {
     } else {
       try {
         await sendEoEvent(this.client, this.roomId, localEvent);
-      } catch {
-        // Offline — queue for later sync (mutex-protected append)
+      } catch (err) {
+        // If rate-limited, set the flag so subsequent sends skip the network
+        const retryDelay = SyncManager.getRetryDelay(err);
+        if (retryDelay !== null) {
+          this.rateLimitedUntil = Date.now() + retryDelay;
+          // Schedule a flush to drain the queue after the backoff period
+          if (!this.destroyed) {
+            setTimeout(() => { if (!this.destroyed) this.flushUnsyncedEvents(); }, retryDelay);
+          }
+        }
         await this.enqueueOfflineEvent(localEvent);
       }
     }
