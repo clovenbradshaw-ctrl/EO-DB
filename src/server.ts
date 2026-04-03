@@ -54,18 +54,24 @@ async function start(): Promise<void> {
   // Room sync coordinator — manages continuous Airtable sync per room
   const coordinator = new RoomSyncCoordinator(db, feed);
 
+  // SyncManager (requires Matrix client) — when available, batch operations
+  // use the media store instead of posting individual timeline events.
+  // Set via coordinator.setSyncManager() and passed to routes below.
+  // Currently undefined on the server; browser-side provides one.
+  const syncManager = undefined;
+
   // WebSocket sync (has its own auth via query param)
   registerSyncRoute(app, db, feed, coordinator);
 
   // Auth-protected routes
   app.register(async (protectedApp) => {
     protectedApp.addHook('preHandler', authMiddleware);
-    registerWebhookRoutes(protectedApp, db, feed);
+    registerWebhookRoutes(protectedApp, db, feed, syncManager);
     registerOpsRoutes(protectedApp, db, feed);
     registerQueryRoutes(protectedApp, db);
     registerAdminRoutes(protectedApp, db);
-    registerIngestionRoutes(protectedApp, db, feed);
-    registerLogImportRoutes(protectedApp, db, feed);
+    registerIngestionRoutes(protectedApp, db, feed, syncManager);
+    registerLogImportRoutes(protectedApp, db, feed, syncManager);
     registerRoomSyncRoutes(protectedApp, db, coordinator);
     registerDedupRoutes(protectedApp, db, feed);
   });
