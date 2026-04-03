@@ -108,6 +108,9 @@ export class SyncManager {
   /** Whether this manager has been destroyed. */
   private destroyed = false;
 
+  /** Timestamp (ms) until which sends should be skipped due to rate limiting. */
+  private rateLimitedUntil: number = 0;
+
   constructor(
     client: IMatrixClient,
     roomId: string,
@@ -450,12 +453,16 @@ export class SyncManager {
     // Fold immediately — UI sees the change instantly
     const seq = await processEvent(this.db, localEvent, this.feed);
 
-    // Send to room (best-effort)
-    try {
-      await sendEoEvent(this.client, this.roomId, localEvent);
-    } catch {
-      // Offline — queue for later sync (mutex-protected append)
+    // Send to room (best-effort, skip if rate-limited)
+    if (Date.now() < this.rateLimitedUntil) {
       await this.enqueueOfflineEvent(localEvent);
+    } else {
+      try {
+        await sendEoEvent(this.client, this.roomId, localEvent);
+      } catch {
+        // Offline — queue for later sync (mutex-protected append)
+        await this.enqueueOfflineEvent(localEvent);
+      }
     }
 
     // Auto-snapshot to Matrix media every 500 log entries
@@ -498,6 +505,19 @@ export class SyncManager {
   /** Max retry attempts before dropping a permanently-failing queued event. */
   private static readonly MAX_QUEUE_ATTEMPTS = 5;
 
+  /** Extract retry delay from a Matrix 429 response, or null if not rate-limited. */
+  private static getRetryDelay(error: unknown): number | null {
+    const isRateLimit =
+      error instanceof Error &&
+      (('errcode' in error && (error as any).errcode === 'M_LIMIT_EXCEEDED') ||
+       ('httpStatus' in error && (error as any).httpStatus === 429));
+    if (!isRateLimit) return null;
+    const retryAfter = (error as any)?.data?.retry_after_ms;
+    return typeof retryAfter === 'number' && retryAfter > 0
+      ? retryAfter + 100
+      : 2000;
+  }
+
   /**
    * Flush queued offline events to the room.
    *
@@ -524,10 +544,26 @@ export class SyncManager {
       );
 
       const remaining: Array<{ event: EoEventInput; attempts: number }> = [];
-      for (const entry of queue) {
+      for (let i = 0; i < queue.length; i++) {
+        const entry = queue[i];
         try {
           await sendEoEvent(this.client, this.roomId, entry.event);
-        } catch {
+        } catch (err) {
+          // On rate-limit, stop immediately — re-queue this + all remaining events
+          const retryDelay = SyncManager.getRetryDelay(err);
+          if (retryDelay !== null) {
+            this.rateLimitedUntil = Date.now() + retryDelay;
+            // Re-queue from current index onward (don't increment attempts for rate limits)
+            for (let j = i; j < queue.length; j++) {
+              remaining.push(queue[j]);
+            }
+            // Schedule a deferred retry
+            if (!this.destroyed) {
+              setTimeout(() => { if (!this.destroyed) this.flushUnsyncedEvents(); }, retryDelay);
+            }
+            break;
+          }
+
           const attempts = entry.attempts + 1;
           if (attempts < SyncManager.MAX_QUEUE_ATTEMPTS) {
             remaining.push({ event: entry.event, attempts });
