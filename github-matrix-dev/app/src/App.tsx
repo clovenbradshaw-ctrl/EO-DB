@@ -4,6 +4,7 @@ import { Layout } from './components/Layout';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { restoreSession, type MatrixSession } from './matrix/client';
 import { useEoStore } from './store/eo-store';
+import { useFilenStore } from './filen/filen-store';
 import { ThemeProvider, useTheme } from './theme';
 
 function AppInner() {
@@ -20,6 +21,8 @@ function AppInner() {
     if (saved) {
       setSession(saved);
     }
+    // Restore Filen session from localStorage (no-op if not previously logged in)
+    useFilenStore.getState().restore();
     setLoading(false);
   }, []);
 
