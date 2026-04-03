@@ -16,25 +16,15 @@ const OP_DESCRIPTIONS: Record<string, string> = {
   NUL: 'NUL — Null marker (checkpoint/snapshot)',
 };
 
-/**
- * Filter available operators by user's power level.
- * - Viewer (PL 0): No operators (can't submit events)
- * - Creator (PL 10): INS, DEF (own), NUL
- * - Editor (PL 25): All external operators
- * - Admin+ (PL 50): All operators + schema/governance
- */
 function filterOperatorsByPermissions(
   operators: ExternalOperator[],
   permissions?: ResolvedPermissions | null,
 ): ExternalOperator[] {
-  if (!permissions) return operators; // no restrictions when permissions unavailable
-
-  if (permissions.powerLevel < 10) return []; // Viewer can't compose
+  if (!permissions) return operators;
+  if (permissions.powerLevel < 10) return [];
   if (permissions.powerLevel < 25) {
-    // Creator: can INS (add records), DEF (own records), NUL
     return operators.filter(op => ['INS', 'DEF', 'NUL'].includes(op));
   }
-  // Editor+: all external operators
   return operators;
 }
 
@@ -45,22 +35,40 @@ const OP_COLORS: Record<string, string> = {
 
 interface KvRow { key: string; value: string }
 
+/** Parse an EoState.value into user-visible fields, filtering _ prefixed system keys */
+function extractFields(state: EoState | null): Record<string, any> {
+  if (!state?.value || typeof state.value !== 'object') return {};
+  const out: Record<string, any> = {};
+  for (const [k, v] of Object.entries(state.value)) {
+    if (!k.startsWith('_')) out[k] = v;
+  }
+  return out;
+}
+
 export function ComposeView({ permissions }: { permissions?: ResolvedPermissions | null }) {
   const { theme } = useTheme();
   const dispatch = useEoStore((s) => s.dispatch);
   const ready = useEoStore((s) => s.ready);
+  const getStateFn = useEoStore((s) => s.getState);
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
   const s = styles(theme);
 
   const [op, setOp] = useState<ExternalOperator>('INS');
-  const [target, setTarget] = useState('');
   const [logging, setLogging] = useState(true);
   const [result, setResult] = useState<{ type: 'ok' | 'err'; msg: string } | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
-  // Autocomplete
-  const [suggestions, setSuggestions] = useState<string[]>([]);
+  // Target — breadcrumb segments + picker
+  const [targetSegments, setTargetSegments] = useState<string[]>([]);
+  const [pickerQuery, setPickerQuery] = useState('');
+  const [pickerOpen, setPickerOpen] = useState(false);
+
+  // All known targets for the picker
   const [allTargets, setAllTargets] = useState<string[]>([]);
+
+  // Existing fields for current target
+  const [existingFields, setExistingFields] = useState<Record<string, any>>({});
+  const [loadingFields, setLoadingFields] = useState(false);
 
   // INS/DEF fields
   const [kvFields, setKvFields] = useState<KvRow[]>([{ key: '', value: '' }]);
@@ -86,6 +94,9 @@ export function ComposeView({ permissions }: { permissions?: ResolvedPermissions
   // NUL
   const [nulLabel, setNulLabel] = useState('');
 
+  const targetPath = targetSegments.join('.');
+
+  // Load all targets for picker
   useEffect(() => {
     if (!ready) return;
     getStateByPrefix('').then((states: EoState[]) => {
@@ -93,12 +104,80 @@ export function ComposeView({ permissions }: { permissions?: ResolvedPermissions
     });
   }, [ready, getStateByPrefix]);
 
-  function onTargetChange(val: string) {
-    setTarget(val);
-    if (val.length > 1) {
-      setSuggestions(allTargets.filter((t) => t.toLowerCase().includes(val.toLowerCase())).slice(0, 8));
-    } else {
-      setSuggestions([]);
+  // Load existing fields when target changes
+  useEffect(() => {
+    if (!ready || !targetPath) {
+      setExistingFields({});
+      return;
+    }
+    let cancelled = false;
+    setLoadingFields(true);
+    getStateFn(targetPath).then((state) => {
+      if (!cancelled) {
+        setExistingFields(extractFields(state));
+        setLoadingFields(false);
+      }
+    });
+    return () => { cancelled = true; };
+  }, [ready, targetPath, getStateFn]);
+
+  // Children of current path for the picker
+  const pickerItems = useMemo(() => {
+    const prefix = targetPath ? targetPath + '.' : '';
+    const children = new Set<string>();
+    for (const t of allTargets) {
+      if (prefix && !t.startsWith(prefix)) continue;
+      const rest = prefix ? t.slice(prefix.length) : t;
+      const segment = rest.split('.')[0];
+      if (segment) children.add(segment);
+    }
+    let items = Array.from(children).sort();
+    if (pickerQuery) {
+      const q = pickerQuery.toLowerCase();
+      items = items.filter((item) => item.toLowerCase().includes(q));
+    }
+    return items;
+  }, [allTargets, targetPath, pickerQuery]);
+
+  function handlePickerSelect(segment: string) {
+    setTargetSegments([...targetSegments, segment]);
+    setPickerQuery('');
+    setPickerOpen(false);
+  }
+
+  function handleBreadcrumbClick(index: number) {
+    setTargetSegments(targetSegments.slice(0, index + 1));
+    setPickerQuery('');
+  }
+
+  function handlePickerInputChange(val: string) {
+    setPickerQuery(val);
+    if (!pickerOpen && val.length > 0) setPickerOpen(true);
+  }
+
+  function handlePickerFocus() {
+    setPickerOpen(true);
+  }
+
+  function handlePickerKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    // Allow typing a full dot-path directly
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (pickerQuery.includes('.')) {
+        // User typed a full path — set it directly
+        setTargetSegments(pickerQuery.split('.').filter(Boolean));
+        setPickerQuery('');
+        setPickerOpen(false);
+      } else if (pickerQuery) {
+        handlePickerSelect(pickerQuery);
+      }
+    }
+    if (e.key === 'Escape') {
+      setPickerOpen(false);
+    }
+    // Backspace on empty clears last segment
+    if (e.key === 'Backspace' && !pickerQuery && targetSegments.length > 0) {
+      setTargetSegments(targetSegments.slice(0, -1));
     }
   }
 
@@ -108,15 +187,17 @@ export function ComposeView({ permissions }: { permissions?: ResolvedPermissions
       case 'DEF': {
         const fields: Record<string, any> = {};
         for (const row of kvFields) {
-          if (row.key) fields[row.key] = row.value;
-          else if (row.value) return row.value; // raw value
+          if (row.key) {
+            let parsed: any = row.value;
+            try { parsed = JSON.parse(row.value); } catch { /* keep as string */ }
+            fields[row.key] = parsed;
+          } else if (row.value) return row.value; // raw value
         }
         return fields;
       }
       case 'CON': {
         if (conDirection === 'two-way') {
-          const targets = conTargets.filter(Boolean);
-          return { added: targets };
+          return { added: conTargets.filter(Boolean) };
         }
         return {
           added: conAdded.filter(Boolean),
@@ -139,7 +220,7 @@ export function ComposeView({ permissions }: { permissions?: ResolvedPermissions
   }
 
   async function handleSubmit() {
-    if (!target && op !== 'NUL') {
+    if (!targetPath && op !== 'NUL') {
       setResult({ type: 'err', msg: 'Target is required' });
       return;
     }
@@ -149,15 +230,16 @@ export function ComposeView({ permissions }: { permissions?: ResolvedPermissions
       const actualOp = logging ? op : 'SIG';
       const seq = await dispatch({
         op: actualOp as any,
-        target: op === 'NUL' ? `nul.${Date.now()}` : target,
+        target: op === 'NUL' ? `nul.${Date.now()}` : targetPath,
         operand: buildOperand(),
         agent: 'user',
         ts: new Date().toISOString(),
         acquired_ts: new Date().toISOString(),
       });
       setResult({ type: 'ok', msg: `Event sent — seq ${seq}` });
-      setTarget('');
+      setTargetSegments([]);
       setKvFields([{ key: '', value: '' }]);
+      setExistingFields({});
     } catch (e: any) {
       setResult({ type: 'err', msg: e.message || 'Failed to send event' });
     } finally {
@@ -165,12 +247,14 @@ export function ComposeView({ permissions }: { permissions?: ResolvedPermissions
     }
   }
 
+  const hasExistingFields = Object.keys(existingFields).length > 0;
+
   return (
     <div style={s.container}>
       <div style={s.form}>
-        {/* Operator selector — filtered by power level */}
-        <div style={s.row}>
-          <div style={s.label}>Operator</div>
+        {/* Operator selector */}
+        <div style={s.section}>
+          <div style={s.sectionLabel}>OPERATOR</div>
           <div style={s.opGroup}>
             {filterOperatorsByPermissions(OPERATORS, permissions).map((o) => (
               <button
@@ -195,10 +279,69 @@ export function ComposeView({ permissions }: { permissions?: ResolvedPermissions
           </div>
         </div>
 
+        {/* Target with breadcrumb + picker */}
+        {!(op === 'CON' && conDirection === 'two-way') && (
+          <div style={s.section}>
+            <div style={s.sectionLabel}>TARGET</div>
+
+            {/* Breadcrumb */}
+            {targetSegments.length > 0 && (
+              <div style={s.breadcrumb}>
+                {targetSegments.map((seg, i) => (
+                  <span key={i} style={{ display: 'inline-flex', alignItems: 'center' }}>
+                    {i > 0 && <span style={s.breadcrumbSep}>&rsaquo;</span>}
+                    <span
+                      style={{
+                        ...s.breadcrumbItem,
+                        ...(i < targetSegments.length - 1 ? s.breadcrumbClickable : s.breadcrumbCurrent),
+                      }}
+                      onClick={i < targetSegments.length - 1 ? () => handleBreadcrumbClick(i) : undefined}
+                    >
+                      {seg}
+                    </span>
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {/* Picker input */}
+            <div style={{ position: 'relative' as const }}>
+              <input
+                style={s.input}
+                value={pickerQuery}
+                onChange={(e) => handlePickerInputChange(e.target.value)}
+                onFocus={handlePickerFocus}
+                onBlur={() => setTimeout(() => setPickerOpen(false), 200)}
+                onKeyDown={handlePickerKeyDown}
+                placeholder="Search or pick a target..."
+                aria-label="Target picker"
+              />
+              {pickerOpen && pickerItems.length > 0 && (
+                <div style={s.dropdown}>
+                  {pickerItems.map((item) => (
+                    <div
+                      key={item}
+                      style={s.dropdownItem}
+                      onMouseDown={() => handlePickerSelect(item)}
+                    >
+                      {item}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Dot notation path */}
+            {targetPath && (
+              <div style={s.dotPath}>{targetPath}</div>
+            )}
+          </div>
+        )}
+
         {/* CON Direction */}
         {op === 'CON' && (
-          <div style={s.row}>
-            <div style={s.label}>Direction</div>
+          <div style={s.section}>
+            <div style={s.sectionLabel}>DIRECTION</div>
             <div style={{ display: 'flex', gap: 6 }}>
               {(['two-way', 'one-way'] as const).map((d) => (
                 <button
@@ -223,40 +366,10 @@ export function ComposeView({ permissions }: { permissions?: ResolvedPermissions
           </div>
         )}
 
-        {/* Target (single) — hidden for CON two-way */}
-        {!(op === 'CON' && conDirection === 'two-way') && (
-          <div style={s.row}>
-            <div style={s.label}>Target</div>
-            <div style={{ position: 'relative' as const }}>
-              <input
-                style={s.input}
-                value={target}
-                onChange={(e) => onTargetChange(e.target.value)}
-                placeholder="e.g. myApp.tableName.record001"
-                aria-label="Target path"
-                onBlur={() => setTimeout(() => setSuggestions([]), 200)}
-              />
-              {suggestions.length > 0 && (
-                <div style={s.autocomplete}>
-                  {suggestions.map((sg) => (
-                    <div
-                      key={sg}
-                      style={s.autocompleteItem}
-                      onMouseDown={() => { setTarget(sg); setSuggestions([]); }}
-                    >
-                      {sg}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-
         {/* CON Two-way targets */}
         {op === 'CON' && conDirection === 'two-way' && (
-          <div style={s.row}>
-            <div style={s.label}>Targets</div>
+          <div style={s.section}>
+            <div style={s.sectionLabel}>TARGETS</div>
             {conTargets.map((t, i) => (
               <input
                 key={i}
@@ -274,18 +387,34 @@ export function ComposeView({ permissions }: { permissions?: ResolvedPermissions
           </div>
         )}
 
+        {/* Existing fields preview */}
+        {hasExistingFields && (op === 'INS' || op === 'DEF') && (
+          <div style={s.section}>
+            <div style={s.sectionLabel}>EXISTING FIELDS</div>
+            <div style={s.existingFieldsContainer}>
+              {Object.entries(existingFields).map(([k, v]) => (
+                <div key={k} style={s.existingFieldRow}>
+                  <span style={s.existingFieldKey}>{k}</span>
+                  <span style={s.existingFieldValue}>
+                    {typeof v === 'object' ? JSON.stringify(v) : String(v)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Operand fields per operator */}
-        <div style={s.row}>
-          <div style={s.label}>Operand</div>
+        <div style={s.section}>
+          <div style={s.sectionLabel}>OPERAND FIELDS</div>
 
           {/* INS / DEF: key-value fields */}
           {(op === 'INS' || op === 'DEF') && (
             <div>
-              <div style={s.subLabel}>Fields</div>
               {kvFields.map((row, i) => (
-                <div key={i} style={{ display: 'flex', gap: 6, marginBottom: 4 }}>
+                <div key={i} style={s.fieldRow}>
                   <input
-                    style={{ ...s.input, flex: 1 }}
+                    style={{ ...s.fieldInput, flex: 1 }}
                     placeholder={op === 'DEF' ? 'key (blank for raw)' : 'key'}
                     aria-label={`Field ${i + 1} key`}
                     value={row.key}
@@ -296,7 +425,7 @@ export function ComposeView({ permissions }: { permissions?: ResolvedPermissions
                     }}
                   />
                   <input
-                    style={{ ...s.input, flex: 1 }}
+                    style={{ ...s.fieldInput, flex: 1 }}
                     placeholder="value"
                     aria-label={`Field ${i + 1} value`}
                     value={row.value}
@@ -306,15 +435,19 @@ export function ComposeView({ permissions }: { permissions?: ResolvedPermissions
                       setKvFields(next);
                     }}
                   />
-                  {kvFields.length > 1 && (
-                    <button
-                      style={s.removeBtn}
-                      aria-label="Remove field"
-                      onClick={() => setKvFields(kvFields.filter((_, j) => j !== i))}
-                    >
-                      ×
-                    </button>
-                  )}
+                  <button
+                    style={s.removeBtn}
+                    aria-label="Remove field"
+                    onClick={() => {
+                      if (kvFields.length > 1) {
+                        setKvFields(kvFields.filter((_, j) => j !== i));
+                      } else {
+                        setKvFields([{ key: '', value: '' }]);
+                      }
+                    }}
+                  >
+                    &times;
+                  </button>
                 </div>
               ))}
               <button style={s.addBtn} onClick={() => setKvFields([...kvFields, { key: '', value: '' }])}>
@@ -328,9 +461,9 @@ export function ComposeView({ permissions }: { permissions?: ResolvedPermissions
             <div>
               <div style={s.subLabel}>Added</div>
               {conAdded.map((t, i) => (
-                <div key={i} style={{ display: 'flex', gap: 6, marginBottom: 4 }}>
+                <div key={i} style={s.fieldRow}>
                   <input
-                    style={{ ...s.input, flex: 1 }}
+                    style={{ ...s.fieldInput, flex: 1 }}
                     value={t}
                     onChange={(e) => {
                       const next = [...conAdded];
@@ -344,9 +477,9 @@ export function ComposeView({ permissions }: { permissions?: ResolvedPermissions
               <button style={s.addBtn} onClick={() => setConAdded([...conAdded, ''])}>+ Add</button>
               <div style={{ ...s.subLabel, marginTop: 8 }}>Removed</div>
               {conRemoved.map((t, i) => (
-                <div key={i} style={{ display: 'flex', gap: 6, marginBottom: 4 }}>
+                <div key={i} style={s.fieldRow}>
                   <input
-                    style={{ ...s.input, flex: 1 }}
+                    style={{ ...s.fieldInput, flex: 1 }}
                     value={t}
                     onChange={(e) => {
                       const next = [...conRemoved];
@@ -423,44 +556,38 @@ export function ComposeView({ permissions }: { permissions?: ResolvedPermissions
           )}
         </div>
 
-        {/* Logging toggle */}
-        <div style={s.row}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <label style={s.toggle}>
-              <input type="checkbox" checked={logging} onChange={(e) => setLogging(e.target.checked)} style={{ display: 'none' }} />
-              <div style={{
-                ...s.toggleTrack,
-                background: logging ? theme.success : theme.bgMuted,
-              }}>
-                <div style={{
-                  ...s.toggleKnob,
-                  transform: logging ? 'translateX(16px)' : 'translateX(0)',
-                }} />
-              </div>
-            </label>
-            <div>
-              <div style={{ fontSize: 11, color: theme.text }}>
-                Logging {logging ? 'ON' : 'OFF'} — event {logging ? 'will be persisted to log' : 'sent as SIG (ephemeral)'}
-              </div>
-              <div style={s.hint}>When OFF, event is sent as SIG (ephemeral, not logged)</div>
-            </div>
-          </div>
-        </div>
-
-        {/* Submit */}
-        <div style={{ ...s.row, flexDirection: 'row' as const, gap: 12, alignItems: 'center' }}>
-          <button style={s.submitBtn} onClick={handleSubmit} disabled={submitting}>
-            {submitting ? 'Sending...' : 'Send Event'}
-          </button>
-          {result && (
+        {/* Bottom bar: Persisted toggle + Send */}
+        <div style={s.bottomBar}>
+          <label style={s.toggle}>
+            <input type="checkbox" checked={logging} onChange={(e) => setLogging(e.target.checked)} style={{ display: 'none' }} />
             <div style={{
-              fontSize: 11,
-              fontFamily: "'JetBrains Mono', monospace",
-              color: result.type === 'ok' ? theme.success : theme.danger,
+              ...s.toggleTrack,
+              background: logging ? theme.success : theme.bgMuted,
             }}>
-              {result.msg}
+              <div style={{
+                ...s.toggleKnob,
+                transform: logging ? 'translateX(16px)' : 'translateX(0)',
+              }} />
             </div>
-          )}
+            <span style={{ marginLeft: 8, fontSize: 12, color: theme.text }}>
+              {logging ? 'Persisted' : 'Ephemeral (SIG)'}
+            </span>
+          </label>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            {result && (
+              <div style={{
+                fontSize: 11,
+                fontFamily: "'JetBrains Mono', monospace",
+                color: result.type === 'ok' ? theme.success : theme.danger,
+              }}>
+                {result.msg}
+              </div>
+            )}
+            <button style={s.submitBtn} onClick={handleSubmit} disabled={submitting}>
+              {submitting ? 'Sending...' : 'Send event'}
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -483,14 +610,14 @@ function styles(t: Theme): Record<string, React.CSSProperties> {
       flexDirection: 'column',
       gap: 0,
     },
-    row: {
+    section: {
       display: 'flex',
       flexDirection: 'column',
-      gap: 6,
-      padding: '14px 0',
+      gap: 8,
+      padding: '16px 0',
       borderBottom: `1px solid ${t.border}`,
     },
-    label: {
+    sectionLabel: {
       fontFamily: "'JetBrains Mono', monospace",
       fontSize: 9,
       fontWeight: 700,
@@ -528,6 +655,45 @@ function styles(t: Theme): Record<string, React.CSSProperties> {
       background: 'transparent',
       transition: 'all 0.1s',
     },
+
+    // Breadcrumb
+    breadcrumb: {
+      display: 'flex',
+      alignItems: 'center',
+      flexWrap: 'wrap' as const,
+      gap: 2,
+      marginBottom: 4,
+    },
+    breadcrumbItem: {
+      fontFamily: "'JetBrains Mono', monospace",
+      fontSize: 13,
+      fontWeight: 600,
+      padding: '2px 4px',
+      borderRadius: 3,
+    },
+    breadcrumbClickable: {
+      color: t.accent,
+      cursor: 'pointer',
+    },
+    breadcrumbCurrent: {
+      color: t.text,
+    },
+    breadcrumbSep: {
+      color: t.textMuted,
+      fontSize: 14,
+      margin: '0 4px',
+      userSelect: 'none' as const,
+    },
+
+    // Dot path
+    dotPath: {
+      fontFamily: "'JetBrains Mono', monospace",
+      fontSize: 10,
+      color: t.textMuted,
+      marginTop: 4,
+    },
+
+    // Input
     input: {
       width: '100%',
       padding: '8px 10px',
@@ -538,6 +704,7 @@ function styles(t: Theme): Record<string, React.CSSProperties> {
       fontFamily: "'JetBrains Mono', monospace",
       fontSize: 11,
       outline: 'none',
+      boxSizing: 'border-box' as const,
     },
     select: {
       padding: '8px 10px',
@@ -549,6 +716,80 @@ function styles(t: Theme): Record<string, React.CSSProperties> {
       fontSize: 11,
       outline: 'none',
     },
+
+    // Dropdown picker
+    dropdown: {
+      position: 'absolute' as const,
+      top: 'calc(100% + 2px)',
+      left: 0,
+      right: 0,
+      background: t.bgCard,
+      border: `1px solid ${t.border}`,
+      borderRadius: 6,
+      zIndex: 50,
+      maxHeight: 200,
+      overflowY: 'auto' as const,
+      boxShadow: `0 4px 16px ${t.shadow}`,
+    },
+    dropdownItem: {
+      padding: '7px 12px',
+      fontFamily: "'JetBrains Mono', monospace",
+      fontSize: 11,
+      color: t.text,
+      cursor: 'pointer',
+    },
+
+    // Existing fields
+    existingFieldsContainer: {
+      background: t.bgMuted,
+      borderRadius: 6,
+      padding: '8px 12px',
+      display: 'flex',
+      flexDirection: 'column' as const,
+      gap: 4,
+    },
+    existingFieldRow: {
+      display: 'flex',
+      alignItems: 'baseline',
+      gap: 8,
+      padding: '3px 0',
+    },
+    existingFieldKey: {
+      fontFamily: "'JetBrains Mono', monospace",
+      fontSize: 11,
+      fontWeight: 600,
+      color: t.textSecondary,
+      minWidth: 80,
+      flexShrink: 0,
+    },
+    existingFieldValue: {
+      fontFamily: "'JetBrains Mono', monospace",
+      fontSize: 11,
+      color: t.text,
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+      whiteSpace: 'nowrap' as const,
+    },
+
+    // Field rows (key-value)
+    fieldRow: {
+      display: 'flex',
+      gap: 6,
+      marginBottom: 4,
+      alignItems: 'center',
+    },
+    fieldInput: {
+      padding: '8px 10px',
+      background: t.bgMuted,
+      border: `1px solid ${t.border}`,
+      borderRadius: 4,
+      color: t.text,
+      fontFamily: "'JetBrains Mono', monospace",
+      fontSize: 11,
+      outline: 'none',
+      boxSizing: 'border-box' as const,
+    },
+
     addBtn: {
       padding: '4px 10px',
       background: 'transparent',
@@ -566,35 +807,28 @@ function styles(t: Theme): Record<string, React.CSSProperties> {
       background: 'transparent',
       border: `1px solid ${t.border}`,
       borderRadius: 4,
-      color: t.danger,
+      color: t.textMuted,
       cursor: 'pointer',
-      fontSize: 14,
+      fontSize: 16,
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'center',
       flexShrink: 0,
     },
-    autocomplete: {
-      position: 'absolute' as const,
-      top: 'calc(100% + 2px)',
-      left: 0,
-      right: 0,
-      background: t.bgCard,
-      border: `1px solid ${t.border}`,
-      borderRadius: 6,
-      zIndex: 50,
-      maxHeight: 200,
-      overflowY: 'auto' as const,
-      boxShadow: `0 4px 16px ${t.shadow}`,
+
+    // Bottom bar
+    bottomBar: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      padding: '16px 0',
+      marginTop: 4,
     },
-    autocompleteItem: {
-      padding: '6px 10px',
-      fontFamily: "'JetBrains Mono', monospace",
-      fontSize: 10,
-      color: t.text,
+    toggle: {
       cursor: 'pointer',
+      display: 'flex',
+      alignItems: 'center',
     },
-    toggle: { cursor: 'pointer', display: 'flex', alignItems: 'center' },
     toggleTrack: {
       width: 36,
       height: 20,
@@ -610,16 +844,16 @@ function styles(t: Theme): Record<string, React.CSSProperties> {
       transition: 'transform 0.15s',
     },
     submitBtn: {
-      padding: '8px 24px',
+      padding: '10px 28px',
       background: t.success,
       color: '#fff',
       border: 'none',
       borderRadius: 6,
       fontFamily: "'JetBrains Mono', monospace",
-      fontSize: 11,
+      fontSize: 12,
       fontWeight: 700,
       cursor: 'pointer',
-      letterSpacing: '0.05em',
+      letterSpacing: '0.03em',
     },
   };
 }
