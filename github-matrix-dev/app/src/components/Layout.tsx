@@ -314,11 +314,19 @@ export function Layout({ session, onLogout }: LayoutProps) {
 
         if (!mounted) { client.stopClient(); return; }
 
+        // MatrixRTC (VoIP/calls) is not used by EO-DB. Stop it *after* initial
+        // sync — stopping before startClient() is ineffective because the sync
+        // loop re-registers its listeners during processSyncResponse.
+        try {
+          client.matrixRTC?.stop();
+        } catch { /* older SDK — safe to ignore */ }
+
         // Room resolution is best-effort — app works without it
         try {
           roomIdRef.current = await resolveDataRoom(client);
         } catch (e) {
-          console.warn('[EO-DB] Root data room alias not found — per-space room IDs will be used instead:', e);
+          // Expected when no root data room exists — per-space rooms are used instead.
+          // Debug-level only to avoid console noise on every startup.
         }
 
         setMatrixReady(true);
