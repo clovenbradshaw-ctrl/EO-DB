@@ -55,6 +55,31 @@ export async function sendEoEvent(
 }
 
 /**
+ * Send a batch of EO events as a single Matrix room event.
+ * The receiver unpacks the `events` array and folds each one.
+ * This avoids rate-limiting when importing many records at once.
+ */
+export async function sendEoBatchEvent(
+  client: IMatrixClient,
+  roomId: string,
+  events: EoEventInput[],
+): Promise<string> {
+  const result = await client.sendEvent(roomId, EO_IMPORT_TYPE, {
+    events: events.map(e => ({
+      op: e.op,
+      target: e.target,
+      operand: e.operand,
+      client_event_id: e.client_event_id,
+      ts: e.ts,
+      meta: e.meta,
+    })),
+    count: events.length,
+    ts: new Date().toISOString(),
+  });
+  return result.event_id;
+}
+
+/**
  * Convert a Matrix room event back to an EO event input.
  * The agent comes from the Matrix event sender field — never from content.
  */
