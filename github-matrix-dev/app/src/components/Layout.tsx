@@ -5,6 +5,8 @@ import { createIdb, deleteAllEoDatabases } from '../db/idb';
 import { createStore } from '../db/encrypted-store';
 import { deriveKey } from '../lib/crypto';
 import { SyncManager } from '../matrix/sync-manager';
+import { FilenSyncService } from '../filen/filen-sync';
+import { useFilenStore } from '../filen/filen-store';
 import { resolveDataRoom } from '../matrix/event-bridge';
 import { configureMatrixDomain } from '../lib/matrix-domain';
 import { HolonNav } from './HolonNav';
@@ -113,6 +115,7 @@ interface LayoutProps {
 interface CachedSpace {
   store: ReturnType<typeof createStore>;
   syncManager: SyncManager | null;
+  filenSync: FilenSyncService | null;
   mainRoomId: string | null;
 }
 
@@ -450,6 +453,14 @@ export function Layout({ session, onLogout }: LayoutProps) {
         oldSyncManager.destroy();
       }
 
+      // Stop old Filen sync
+      if (prevSpaceRef.current) {
+        const oldCached = spaceCacheRef.current.get(prevSpaceRef.current);
+        if (oldCached?.filenSync) {
+          oldCached.filenSync.stop();
+        }
+      }
+
       prevSpaceRef.current = selectedSpace;
       // Clear Layout-level state so old space data doesn't flash
       setAllStates([]);
@@ -539,6 +550,13 @@ export function Layout({ session, onLogout }: LayoutProps) {
             console.warn('[EO-DB] SyncManager init failed for cached space', selectedSpace, e);
           }
         }
+
+        // Restart Filen sync for cached space
+        if (existing.filenSync) {
+          existing.filenSync.start().catch(e =>
+            console.warn('[EO-DB] Filen sync restart failed for cached space', selectedSpace, e),
+          );
+        }
         return;
       }
 
@@ -568,8 +586,35 @@ export function Layout({ session, onLogout }: LayoutProps) {
         }
       }
 
+      // Start Filen backup sync if connected
+      let filenSync: FilenSyncService | null = null;
+      const filenState = useFilenStore.getState();
+      if (filenState.connected && selectedSpace) {
+        try {
+          // Find the space name from the merged entries
+          const spaceEntry = mergedEntries.find(e => {
+            const target = 'canonical' in e ? (e as any).canonical : (e as any).target;
+            return target === selectedSpace;
+          });
+          const spaceName = spaceEntry ? ((spaceEntry as any).name || selectedSpace) : selectedSpace;
+
+          const spaceFolderUuid = await filenState.ensureSpaceFolder(selectedSpace, spaceName);
+          filenSync = new FilenSyncService({
+            store,
+            spaceId: selectedSpace,
+            spaceName,
+            spaceFolderUuid,
+            userId: session.userId,
+          });
+          await filenSync.start();
+        } catch (e) {
+          console.warn('[EO-DB] Filen sync start failed for space', selectedSpace, e);
+          filenSync = null;
+        }
+      }
+
       // Cache this space's store + sync manager for fast re-access
-      cache.set(selectedSpace!, { store, syncManager, mainRoomId: spaceRoomId });
+      cache.set(selectedSpace!, { store, syncManager, filenSync, mainRoomId: spaceRoomId });
     }
 
     setupSpaceStore();
@@ -589,11 +634,17 @@ export function Layout({ session, onLogout }: LayoutProps) {
               console.warn('[EO-DB] Snapshot save failed:', err);
             }));
       }
+      if (cached.filenSync) {
+        savePromises.push(cached.filenSync.forceSave().catch((err) => {
+              console.warn('[EO-DB] Filen save failed:', err);
+            }));
+      }
     }
     await Promise.all(savePromises);
 
-    // Close all cached stores
+    // Stop all Filen sync and close all cached stores
     for (const [, cached] of cache) {
+      if (cached.filenSync) cached.filenSync.stop();
       cached.store.close();
     }
     cache.clear();
@@ -623,6 +674,11 @@ export function Layout({ session, onLogout }: LayoutProps) {
           if (cached.syncManager) {
             promises.push(cached.syncManager.saveSnapshot().catch((err) => {
               console.warn('[EO-DB] Snapshot save failed:', err);
+            }));
+          }
+          if (cached.filenSync) {
+            promises.push(cached.filenSync.forceSave().catch((err) => {
+              console.warn('[EO-DB] Filen save failed:', err);
             }));
           }
         }
@@ -767,7 +823,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
                 }
 
                 // Cache it so setupSpaceStore reuses it instead of re-opening
-                spaceCacheRef.current.set(spaceTarget, { store: spaceStore, syncManager, mainRoomId });
+                spaceCacheRef.current.set(spaceTarget, { store: spaceStore, syncManager, filenSync: null, mainRoomId });
 
                 // Now dispatch is safe — store is initialized (and sync will send to Matrix)
                 const dispatch = useEoStore.getState().dispatch;
