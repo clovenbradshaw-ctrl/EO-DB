@@ -31,10 +31,10 @@ interface EoDbState {
   /** Set resolved permissions for the current space */
   setPermissions: (permissions: ResolvedPermissions | null) => void;
 
-  /** Process an event through the fold and sync to Matrix */
+  /** Process an event through the fold and sync to Filen (batched) */
   dispatch: (event: EoEventInput) => Promise<number>;
 
-  /** Import a batch of events — fold locally, send as single Matrix message */
+  /** Import a batch of events — fold locally, upload to Filen as one batch */
   batchImport: (events: EoEventInput[], onProgress?: (current: number, total: number) => void) => Promise<number>;
 
   /** Read the Horizon for a target */
@@ -46,8 +46,8 @@ interface EoDbState {
   /** Get all states under a prefix */
   getStateByPrefix: (prefix: string) => Promise<EoState[]>;
 
-  /** Take a manual delta snapshot and record its URI in a NUL event */
-  manualSnapshot: () => Promise<{ mxc: string; seq: number }>;
+  /** Take a manual snapshot and save to Filen */
+  manualSnapshot: () => Promise<{ seq: number }>;
 
   /** Tear down the store (logout) */
   teardown: () => void;
@@ -91,13 +91,15 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     const { store, syncManager } = get();
     if (!store) throw new Error('Store not initialized');
 
-    // If sync manager is available, route through it (fold + send to Matrix)
+    // If sync manager is available, route through it (fold locally, Filen batches later)
     if (syncManager) {
       const seq = await syncManager.processLocalEvent(event);
+      // Update UI state
+      set((state) => ({ lastSeq: seq }));
       return seq;
     }
 
-    // Fallback: fold locally only (no Matrix sync)
+    // Fallback: fold locally only (no sync)
     const seq = await processEvent(store, event, (fullEvent) => {
       set((state) => ({
         recentEvents: [...state.recentEvents.slice(-99), fullEvent],
@@ -113,9 +115,10 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     if (!store) throw new Error('Store not initialized');
 
     if (syncManager) {
+      // Route through sync manager — folds all locally, then uploads ONE
+      // batch to Filen and posts ONE room notification. No 429 spam.
       const seq = await syncManager.processBatchImport(events, onProgress);
-      // Update store state with final seq
-      set((state) => ({ lastSeq: seq }));
+      set({ lastSeq: seq });
       return seq;
     }
 
@@ -158,7 +161,8 @@ export const useEoStore = create<EoDbState>((set, get) => ({
   },
 
   teardown() {
-    const { store } = get();
+    const { store, syncManager } = get();
+    if (syncManager) syncManager.destroy();
     if (store) store.close();
     set({ store: null, syncManager: null, ready: false, recentEvents: [], lastSeq: 0, resolvedPermissions: null });
   },

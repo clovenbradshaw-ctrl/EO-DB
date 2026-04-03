@@ -117,6 +117,9 @@ export class FilenSyncService {
   /** Callback for UI status updates. */
   onStatus?: (status: 'syncing' | 'synced' | 'error', detail?: string) => void;
 
+  /** Callback to post a room notification after successful sync. */
+  onSynced?: (seq: number, eventCount: number) => void;
+
   constructor(opts: {
     store: EoStore;
     spaceId: string;
@@ -129,6 +132,11 @@ export class FilenSyncService {
     this.spaceName = opts.spaceName;
     this.spaceFolderUuid = opts.spaceFolderUuid;
     this.userId = opts.userId;
+  }
+
+  /** Get the Filen space folder UUID. */
+  getSpaceFolderUuid(): string {
+    return this.spaceFolderUuid;
   }
 
   /** Start the 30-second sync timer. */
@@ -257,6 +265,7 @@ export class FilenSyncService {
       this.currentFileKey = uploaded.fileKey;
 
       // Update bookkeeping
+      const eventCount = events.length;
       this.lastSyncedSeq = currentSeq;
       await this.store.put('meta:filen_synced_seq', currentSeq);
 
@@ -268,6 +277,9 @@ export class FilenSyncService {
 
       useFilenStore.getState().recordSync(this.spaceId);
       this.onStatus?.('synced');
+
+      // Notify — SyncManager posts a single room message so other devices know to fetch
+      this.onSynced?.(currentSeq, eventCount);
     } catch (e: any) {
       console.warn('[EO-DB] Filen sync cycle failed:', e);
       this.onStatus?.('error', e.message);

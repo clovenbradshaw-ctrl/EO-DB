@@ -1,14 +1,17 @@
 /**
- * Sync manager — orchestrates snapshot persistence, offline queue, and deduplication.
+ * Sync manager — Filen-first architecture.
  *
- * Data is persisted as delta snapshots in Matrix media — each snapshot
- * contains only the events since the last one, plus up to 25 previous
- * snapshot URIs for fast chain traversal. Below 500 log entries the
- * hydration state lives in room data only.
+ * Events are folded locally (instant UI), then batched to Filen every 30
+ * seconds. A single lightweight Matrix room message notifies other devices
+ * to fetch the update from Filen. No individual events are sent to Matrix.
  *
- * Offline queue is append-only via atomic read-modify-write through the
- * queue mutex. Events that fail to send are retried individually on reconnect;
- * idempotency hashing on the receiver side handles duplicates naturally.
+ * Flow:
+ *   User action → fold locally → queue for batch
+ *   Every 30s   → upload current.eodb to Filen → post ONE room notification
+ *   Other device → sees notification → downloads from Filen → folds
+ *
+ * This eliminates the 429 rate-limit spam that happened when sending each
+ * event as an individual Matrix message.
  */
 
 import type { MatrixClient, MatrixEvent } from 'matrix-js-sdk';
@@ -18,8 +21,14 @@ import type { LocalKeyring } from '../db/crypto-types';
 import { processEvent } from '../db/fold';
 import { eventHash } from '../db/hash';
 import { AsyncMutex } from '../db/mutex';
-import { EO_EVENT_TYPE, getDataRoom, matrixEventToEo, sendEoEvent } from './event-bridge';
-import { findLatestSnapshot, maybeCreateSnapshot, createDeltaSnapshot, uploadDeltaSnapshot, setSnapshotStateEvent, restoreFromDeltaChain } from './snapshot';
+import {
+  EO_FILEN_SYNC_TYPE,
+  sendFilenSyncNotification,
+  getDataRoom,
+} from './event-bridge';
+import { FilenSyncService, unpackEodb } from '../filen/filen-sync';
+import { useFilenStore } from '../filen/filen-store';
+import { filenDownloadFile, filenListFolder } from '../filen/filen-api';
 
 /** Mutex protecting the offline queue from concurrent read-modify-write. */
 const queueMutex = new AsyncMutex();
@@ -67,10 +76,22 @@ export class SyncManager {
   /** Reconnection listener references for cleanup. */
   private onlineHandler: (() => void) | null = null;
   private syncStateHandler: ((state: string, prevState: string | null) => void) | null = null;
-  private flushTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** Whether this manager has been destroyed. */
   private destroyed = false;
+
+  /** Filen sync service — handles batched uploads. */
+  private filenSync: FilenSyncService | null = null;
+
+  /** Space info for Filen sync notifications. */
+  private spaceId = '';
+  private spaceFolderUuid = '';
+
+  /** Debounce timer for Filen fetch after receiving room notification. */
+  private fetchTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** UI sync status callback (drives the sync toast). */
+  onSyncStatus?: (status: 'confirmed' | 'queued' | 'rate-limited') => void;
 
   constructor(
     client: MatrixClient,
@@ -89,6 +110,16 @@ export class SyncManager {
   /** Allow updating keyring after construction (e.g., after key heal). */
   setKeyring(keyring: LocalKeyring): void {
     this.keyring = keyring;
+  }
+
+  /**
+   * Attach the Filen sync service for batched uploads.
+   * Must be called after login and space selection.
+   */
+  setFilenSync(filenSync: FilenSyncService, spaceId: string, spaceFolderUuid: string): void {
+    this.filenSync = filenSync;
+    this.spaceId = spaceId;
+    this.spaceFolderUuid = spaceFolderUuid;
   }
 
   /**
@@ -134,9 +165,13 @@ export class SyncManager {
       this.client.off('sync' as any, this.syncStateHandler);
       this.syncStateHandler = null;
     }
-    if (this.flushTimer) {
-      clearTimeout(this.flushTimer);
-      this.flushTimer = null;
+    if (this.fetchTimer) {
+      clearTimeout(this.fetchTimer);
+      this.fetchTimer = null;
+    }
+    if (this.filenSync) {
+      this.filenSync.stop();
+      this.filenSync = null;
     }
   }
 
@@ -161,9 +196,8 @@ export class SyncManager {
   /**
    * Initialize sync — call after login and store setup.
    *
-   * On a fresh device (seq === 0), hydrates from the latest snapshot stored
-   * in Matrix media, then replays any EO events already present in the room
-   * timeline (from the initial sync) that the snapshot didn't covered.
+   * On a fresh device (seq === 0), hydrates from Filen (preferred) or
+   * falls back to Matrix snapshots.
    */
   async initialize(): Promise<void> {
     // Wait for the room to be available in the SDK store before hydrating
@@ -171,167 +205,244 @@ export class SyncManager {
 
     const currentSeq = await this.store.getCurrentSeq();
 
-    // On a fresh device, restore from the latest Matrix media snapshot
+    // On a fresh device, restore from Filen first (preferred), then Matrix fallback
     if (currentSeq === 0) {
-      await this.hydrateFromSnapshot();
+      await this.hydrateFromFilen();
     }
 
-    // Replay EO events already in the room timeline (from initial sync).
-    // The snapshot may not exist or may be stale — the room timeline is the
-    // source of truth. The fold engine deduplicates via client_event_id so
-    // replaying events already covered by the snapshot is harmless.
-    await this.replayTimelineEvents();
-
-    // Flush unsynced events BEFORE attaching the live listener — if flush
-    // fails, no dangling listener is left behind for the caller to clean up.
-    await this.flushUnsyncedEvents();
-
-    // Listen for new room events in real-time (main + additional rooms).
-    // Attached last so a failure in any earlier step doesn't leak a listener.
+    // Listen for Filen sync notifications from other devices.
+    // When another device uploads to Filen, it posts a single notification.
+    // We detect that and download the update.
     this.handleTimelineEvent = (event: MatrixEvent) => {
       if (this.destroyed) return;
       const eventRoomId = event.getRoomId();
-      if (!eventRoomId) return; // guard null from getRoomId()
+      if (!eventRoomId) return;
       if (eventRoomId !== this.roomId && !this.additionalRoomIds.includes(eventRoomId)) return;
-      if (event.getType() !== EO_EVENT_TYPE) return;
-      this.processIncomingEvent(event);
+
+      if (event.getType() === EO_FILEN_SYNC_TYPE) {
+        // Another device uploaded to Filen — debounce-fetch the update
+        const sender = event.getSender();
+        if (sender === this.client.getUserId()) return; // ignore our own notifications
+        this.debouncedFetchFromFilen();
+      }
     };
     this.client.on('Room.timeline' as any, this.handleTimelineEvent);
 
-    // Auto-flush offline queue when connectivity returns
-    this.onlineHandler = () => { this.debouncedFlush(); };
-    window.addEventListener('online', this.onlineHandler);
-
-    this.syncStateHandler = (state: string, prevState: string | null) => {
-      if (state === 'SYNCING' && (prevState === 'CATCHUP' || prevState === 'ERROR')) {
-        this.debouncedFlush();
-      }
-    };
-    this.client.on('sync' as any, this.syncStateHandler);
-  }
-
-  /**
-   * Debounced flush — prevents hammering on rapid online/offline toggling.
-   * Collapses multiple reconnection signals within 2 s into a single flush.
-   */
-  private debouncedFlush(): void {
-    if (this.destroyed) return;
-    if (this.flushTimer) clearTimeout(this.flushTimer);
-    this.flushTimer = setTimeout(() => {
-      this.flushTimer = null;
-      this.flushUnsyncedEvents().catch((err) => {
-        console.warn('[EO-DB] Reconnection flush failed:', err);
-      });
-    }, 2_000);
-  }
-
-  /**
-   * Hydrate the local store from the latest snapshot in room state.
-   *
-   * Reads the latest URI from room state (O(1)), downloads the blob,
-   * and applies it. The blob's `prev_mxcs` array allows jumping backwards
-   * through history if the client needs to walk further.
-   */
-  private async hydrateFromSnapshot(): Promise<void> {
-    const snap = await findLatestSnapshot(this.client, this.roomId);
-    if (!snap) return;
-    const restoredSeq = await restoreFromDeltaChain(
-      this.client, this.store, snap.mxc, this.onEvent, this.keyring,
-    );
-    await this.store.put('meta:snapshot_seq', restoredSeq);
-  }
-
-  /**
-   * Replay EO events already present in the room timeline.
-   *
-   * After the initial Matrix sync, the room object contains timeline events
-   * that were fetched as part of the sync response. These are NOT emitted
-   * through the Room.timeline listener (which only fires for new events).
-   * Walk them here so a fresh device without a snapshot can still recover
-   * data from the room timeline.
-   *
-   * The fold engine deduplicates via client_event_id, so replaying events
-   * already covered by a snapshot is a no-op.
-   */
-  private async replayTimelineEvents(): Promise<void> {
-    const room = this.client.getRoom(this.roomId);
-    if (!room) return;
-
-    const timeline = room.getLiveTimeline().getEvents();
-    for (const event of timeline) {
-      if (this.destroyed) return;
-      if (event.getType() !== EO_EVENT_TYPE) continue;
-      await this.processIncomingEvent(event);
+    // Start Filen sync service (30-second batch timer)
+    if (this.filenSync) {
+      this.filenSync.start();
     }
   }
 
   /**
-   * Force-save a delta snapshot to Matrix media right now.
-   * Called on beforeunload / logout so data is always persisted.
+   * Debounced Filen fetch — collapses multiple notifications into one download.
+   * If several devices post notifications close together, we only download once.
    */
-  async saveSnapshot(): Promise<void> {
-    const room = this.client.getRoom(this.roomId);
-    if (!room) {
-      console.warn('[EO-DB] Cannot save snapshot — room not available');
+  private debouncedFetchFromFilen(): void {
+    if (this.destroyed) return;
+    if (this.fetchTimer) clearTimeout(this.fetchTimer);
+    this.fetchTimer = setTimeout(() => {
+      this.fetchTimer = null;
+      this.fetchFromFilen().catch(err => {
+        console.warn('[EO-DB] Failed to fetch from Filen after notification:', err);
+      });
+    }, 3_000); // 3s debounce — gives the upload time to fully complete
+  }
+
+  /**
+   * Download and apply the latest current.eodb from Filen.
+   * Called when we receive a sync notification from another device.
+   */
+  private async fetchFromFilen(): Promise<void> {
+    const { auth, masterKeys } = useFilenStore.getState();
+    if (!auth || !this.spaceFolderUuid) return;
+
+    try {
+      const items = await filenListFolder(auth.apiKey, this.spaceFolderUuid, masterKeys);
+      const currentFile = items.find(i => i.type === 'file' && i.name === 'current.eodb');
+      if (!currentFile?.key) return;
+
+      const data = await filenDownloadFile(
+        auth.apiKey, currentFile.uuid, currentFile.key,
+        currentFile.region, currentFile.bucket,
+      );
+      const eodb = unpackEodb(data);
+      const localSeq = await this.store.getCurrentSeq();
+
+      let applied = 0;
+      for (const event of eodb.events) {
+        if (event.seq <= localSeq) continue;
+        await processEvent(this.store, event, this.onEvent);
+        applied++;
+      }
+
+      if (applied > 0) {
+        console.log(`[EO-DB] Applied ${applied} events from Filen (remote sync)`);
+      }
+    } catch (e) {
+      console.warn('[EO-DB] Filen fetch failed:', e);
+    }
+  }
+
+  /**
+   * Hydrate the local store from Filen snapshots.
+   * Falls back gracefully if Filen is not connected or has no data.
+   */
+  private async hydrateFromFilen(): Promise<void> {
+    const { connected } = useFilenStore.getState();
+    if (!connected || !this.spaceFolderUuid) {
+      console.log('[EO-DB] Filen not connected, skipping Filen hydration');
       return;
     }
 
-    const seq = await this.store.getCurrentSeq();
-    const lastSnapshotSeq: number = (await this.store.get('meta:snapshot_seq')) || 0;
-    if (seq === 0 || seq === lastSnapshotSeq) return; // nothing new to snapshot
-    const delta = await createDeltaSnapshot(this.store, this.client.getUserId()!);
-    const mxc = await uploadDeltaSnapshot(this.client, this.roomId, delta, this.keyring);
-    await this.store.put('meta:snapshot_seq', seq);
-    await this.store.put('meta:snapshot_mxc', mxc);
-    const prevMxcs: string[] = (await this.store.get('meta:snapshot_prev_mxcs')) || [];
-    await this.store.put('meta:snapshot_prev_mxcs', [mxc, ...prevMxcs].slice(0, 25));
+    try {
+      const restoredSeq = await FilenSyncService.hydrateFromFilen(
+        this.store, this.spaceFolderUuid, this.onEvent,
+      );
+      if (restoredSeq > 0) {
+        console.log(`[EO-DB] Hydrated from Filen up to seq ${restoredSeq}`);
+        await this.store.put('meta:filen_synced_seq', restoredSeq);
+      }
+    } catch (e) {
+      console.warn('[EO-DB] Filen hydration failed, will start fresh:', e);
+    }
   }
 
   /**
-   * Manual delta snapshot — captures log events since the last snapshot,
-   * uploads to Matrix media, and records the mxc URI in a NUL log event.
+   * Process a locally created event.
    *
-   * Each delta carries up to 25 previous snapshot URIs so hydrating
-   * devices can jump back in large strides.
+   * 1. Generate content-addressable client_event_id via hash
+   * 2. Fold immediately (instant UI update)
+   * 3. That's it — Filen sync service picks it up on the next 30s cycle
+   *
+   * NO individual Matrix message is sent. The Filen sync service handles
+   * batching and posting one notification to the room.
    */
-  async manualSnapshot(): Promise<{ mxc: string; seq: number }> {
-    const currentSeq = await this.store.getCurrentSeq();
-    const lastSnapshotSeq: number = (await this.store.get('meta:snapshot_seq')) || 0;
+  async processLocalEvent(
+    event: Omit<EoEventInput, 'client_event_id' | 'agent' | 'ts'>,
+  ): Promise<number> {
+    const ts = new Date().toISOString();
+    const agent = this.client.getUserId()!;
 
-    if (currentSeq === lastSnapshotSeq) {
-      throw new Error('No new events since last snapshot');
-    }
-
-    // 1. Create delta snapshot (events since last snapshot)
-    const delta = await createDeltaSnapshot(this.store, this.client.getUserId()!);
-
-    // 2. Upload to Matrix media (encrypted if keyring has keys)
-    const mxc = await uploadDeltaSnapshot(this.client, this.roomId, delta, this.keyring);
-
-    // 3. Record the mxc URI in a NUL event — this makes the snapshot
-    //    discoverable from the event log itself
-    await this.processLocalEvent({
-      op: 'NUL',
-      target: 'system.snapshot',
-      operand: {
-        mxc,
-        type: 'delta',
-        from_seq: delta.from_seq,
-        to_seq: delta.to_seq,
-        prev_mxcs: delta.prev_mxcs,
-        event_count: delta.events.length,
-      },
-      acquired_ts: new Date().toISOString(),
+    // Derive deterministic ID from content — same event from two devices
+    // offline will produce the same hash and dedup on fold.
+    const clientEventId = await eventHash({
+      op: event.op,
+      target: event.target,
+      operand: event.operand,
+      agent,
+      ts,
     });
 
-    // 4. Update snapshot bookkeeping
-    await this.store.put('meta:snapshot_seq', currentSeq);
-    await this.store.put('meta:snapshot_mxc', mxc);
-    const prevMxcs: string[] = (await this.store.get('meta:snapshot_prev_mxcs')) || [];
-    await this.store.put('meta:snapshot_prev_mxcs', [mxc, ...prevMxcs].slice(0, 25));
+    const localEvent: EoEventInput = {
+      ...event,
+      client_event_id: clientEventId,
+      agent,
+      ts,
+    };
 
-    // Room state already updated by uploadDeltaSnapshot (with key_id)
-    return { mxc, seq: currentSeq };
+    // Fold immediately — instant UI update, no network round-trip
+    const seq = await processEvent(this.store, localEvent, this.onEvent);
+
+    // Filen sync service will batch this up and upload on its 30s cycle.
+    // No Matrix message sent here — that's the whole point of the redesign.
+
+    return seq;
+  }
+
+  /**
+   * Process a batch import (e.g., CSV file with 93 rows).
+   *
+   * Folds all events locally, then triggers an immediate Filen sync
+   * instead of sending 93 individual Matrix messages (which caused 429s).
+   */
+  async processBatchImport(
+    events: EoEventInput[],
+    onProgress?: (current: number, total: number) => void,
+  ): Promise<number> {
+    const agent = this.client.getUserId()!;
+    let lastSeq = 0;
+
+    for (let i = 0; i < events.length; i++) {
+      const ts = events[i].ts || new Date().toISOString();
+      const clientEventId = events[i].client_event_id || await eventHash({
+        op: events[i].op,
+        target: events[i].target,
+        operand: events[i].operand,
+        agent: events[i].agent || agent,
+        ts,
+      });
+
+      const localEvent: EoEventInput = {
+        ...events[i],
+        client_event_id: clientEventId,
+        agent: events[i].agent || agent,
+        ts,
+      };
+
+      lastSeq = await processEvent(this.store, localEvent, this.onEvent);
+      onProgress?.(i + 1, events.length);
+    }
+
+    // Trigger immediate Filen sync for the whole batch
+    if (this.filenSync) {
+      try {
+        await this.filenSync.forceSave();
+        // Post ONE notification to the room
+        await this.postFilenNotification(lastSeq, events.length);
+      } catch (e) {
+        console.warn('[EO-DB] Immediate batch sync to Filen failed — will retry on next cycle:', e);
+      }
+    }
+
+    return lastSeq;
+  }
+
+  /**
+   * Post a single Filen sync notification to the Matrix room.
+   * This tells other devices "new data is available on Filen, go fetch it."
+   */
+  async postFilenNotification(seq: number, eventCount: number): Promise<void> {
+    try {
+      await sendFilenSyncNotification(this.client, this.roomId, {
+        seq,
+        event_count: eventCount,
+        space_id: this.spaceId,
+        ts: new Date().toISOString(),
+      });
+    } catch (e) {
+      // Non-critical — other devices will eventually poll or see the next notification
+      console.warn('[EO-DB] Failed to post Filen sync notification:', e);
+    }
+  }
+
+  /**
+   * Force-save to Filen right now (called on beforeunload / logout).
+   */
+  async saveSnapshot(): Promise<void> {
+    if (this.filenSync) {
+      try {
+        await this.filenSync.forceSave();
+        const seq = await this.store.getCurrentSeq();
+        if (seq > 0) {
+          await this.postFilenNotification(seq, 0);
+        }
+      } catch (e) {
+        console.warn('[EO-DB] Save to Filen on unload failed:', e);
+      }
+    }
+  }
+
+  /**
+   * Manual snapshot — triggers a full Filen snapshot immediately.
+   */
+  async manualSnapshot(): Promise<{ seq: number }> {
+    const currentSeq = await this.store.getCurrentSeq();
+    if (this.filenSync) {
+      await this.filenSync.forceSave();
+      await this.postFilenNotification(currentSeq, 0);
+    }
+    return { seq: currentSeq };
   }
 
   /**
@@ -390,146 +501,5 @@ export class SyncManager {
       joinRule: joinRuleEvent?.getContent()?.join_rule ?? null,
       historyVisibility: historyEvent?.getContent()?.history_visibility ?? null,
     };
-  }
-
-  /**
-   * Process a locally created event.
-   * 1. Generate content-addressable client_event_id via hash
-   * 2. Fold immediately (instant UI update)
-   * 3. Send to Matrix room async (may fail if offline)
-   * 4. If send fails, queue for later — the queue is protected by a mutex
-   *    so concurrent failures don't clobber each other.
-   */
-  async processLocalEvent(
-    event: Omit<EoEventInput, 'client_event_id' | 'agent' | 'ts'>,
-  ): Promise<number> {
-    const ts = new Date().toISOString();
-    const agent = this.client.getUserId()!;
-
-    // Derive deterministic ID from content — same event from two devices
-    // offline will produce the same hash and dedup on fold.
-    const clientEventId = await eventHash({
-      op: event.op,
-      target: event.target,
-      operand: event.operand,
-      agent,
-      ts,
-    });
-
-    const localEvent: EoEventInput = {
-      ...event,
-      client_event_id: clientEventId,
-      agent,
-      ts,
-    };
-
-    // Fold immediately
-    const seq = await processEvent(this.store, localEvent, this.onEvent);
-
-    // Send to room (best-effort)
-    try {
-      await sendEoEvent(this.client, this.roomId, localEvent);
-    } catch {
-      // Offline — queue for later sync (mutex-protected append)
-      await this.enqueueOfflineEvent(localEvent);
-    }
-
-    // Auto-snapshot to Matrix media every 500 log entries
-    await maybeCreateSnapshot(this.client, this.roomId, this.store, this.client.getUserId()!, this.keyring);
-
-    return seq;
-  }
-
-  /**
-   * Process an incoming room event — dedup by client_event_id, then fold.
-   *
-   * The fold engine's idempotency check (via content hash) handles the case
-   * where we already folded this event locally. Events without a
-   * client_event_id get one derived from their content in processEvent().
-   */
-  private async processIncomingEvent(matrixEvent: MatrixEvent): Promise<void> {
-    const eoEvent = matrixEventToEo(matrixEvent);
-
-    // Skip space-level config events — space discovery uses Matrix state events
-    // and the root IDB, not per-space IDBs. Writing other spaces' events here
-    // just pollutes the store.
-    if (eoEvent.target.startsWith('space')) return;
-
-    // Fast path: if we have a client_event_id, check locally before entering
-    // the fold mutex. This avoids queueing behind the mutex for events we
-    // already processed.
-    if (eoEvent.client_event_id) {
-      const existing = await this.store.get(`idem:${eoEvent.client_event_id}`);
-      if (existing != null) return;
-    }
-
-    // The fold engine will also check idempotency inside the mutex,
-    // and will derive a content hash if client_event_id is missing.
-    await processEvent(this.store, eoEvent, this.onEvent);
-  }
-
-  /**
-   * Append an event to the offline queue atomically.
-   * The mutex ensures two concurrent send-failures don't race on the queue.
-   */
-  private async enqueueOfflineEvent(event: EoEventInput): Promise<void> {
-    await queueMutex.run(async () => {
-      const queue: Array<{ event: EoEventInput; attempts: number }> =
-        (await this.store.get('meta:offline_queue')) || [];
-      queue.push({ event, attempts: 0 });
-      await this.store.put('meta:offline_queue', queue);
-    });
-  }
-
-  /** Max retry attempts before dropping a permanently-failing queued event. */
-  private static readonly MAX_QUEUE_ATTEMPTS = 5;
-
-  /**
-   * Flush queued offline events to the room.
-   *
-   * Tries every event independently — a failure on event #2 does NOT
-   * prevent event #3 from being attempted. Successfully sent events are
-   * removed from the queue; failed ones stay for the next flush cycle
-   * up to MAX_QUEUE_ATTEMPTS, after which they are dropped.
-   *
-   * Backwards-compatible: legacy queue entries (raw EoEventInput without
-   * an `attempts` field) are auto-wrapped on read.
-   *
-   * The receiver deduplicates via content hash, so re-sending an event
-   * that was already received (e.g., via peer sync) is harmless.
-   */
-  private async flushUnsyncedEvents(): Promise<void> {
-    await queueMutex.run(async () => {
-      const raw: any[] = (await this.store.get('meta:offline_queue')) || [];
-      if (raw.length === 0) return;
-
-      // Normalise legacy entries (plain EoEventInput) into { event, attempts }
-      const queue = raw.map((entry: any) =>
-        entry.event ? entry as { event: EoEventInput; attempts: number }
-                     : { event: entry as EoEventInput, attempts: 0 },
-      );
-
-      const remaining: Array<{ event: EoEventInput; attempts: number }> = [];
-      for (const entry of queue) {
-        try {
-          await sendEoEvent(this.client, this.roomId, entry.event);
-        } catch {
-          const attempts = entry.attempts + 1;
-          if (attempts < SyncManager.MAX_QUEUE_ATTEMPTS) {
-            remaining.push({ event: entry.event, attempts });
-          } else {
-            console.warn(
-              '[EO-DB] Dropping queued event after', attempts, 'failed attempts:',
-              entry.event.client_event_id,
-            );
-          }
-          // Don't break — try the rest. Individual event failures
-          // (e.g., size limit) shouldn't block other events.
-          // If we're fully offline, they'll all fail fast anyway.
-        }
-      }
-
-      await this.store.put('meta:offline_queue', remaining);
-    });
   }
 }

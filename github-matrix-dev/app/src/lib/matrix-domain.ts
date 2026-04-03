@@ -29,6 +29,8 @@ export function eoEventTypes(prefix?: string) {
     snapshot: `${p}.snapshot`,
     /** Room state event: stores the latest snapshot URI for fast hydration. */
     snapshotState: `${p}.snapshot_state`,
+    /** Filen sync notification: tells other devices to fetch from Filen. */
+    filenSync: `${p}.filen.sync`,
   } as const;
 }
 

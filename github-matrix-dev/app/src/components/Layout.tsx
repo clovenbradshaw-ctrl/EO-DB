@@ -551,8 +551,15 @@ export function Layout({ session, onLogout }: LayoutProps) {
           }
         }
 
-        // Restart Filen sync for cached space
+        // Restart Filen sync for cached space and wire to fresh SyncManager
         if (existing.filenSync) {
+          const freshSm = existing.syncManager;
+          if (freshSm && selectedSpace) {
+            freshSm.setFilenSync(existing.filenSync, selectedSpace, existing.filenSync.getSpaceFolderUuid());
+            existing.filenSync.onSynced = (seq, count) => {
+              freshSm.postFilenNotification(seq, count).catch(console.warn);
+            };
+          }
           existing.filenSync.start().catch(e =>
             console.warn('[EO-DB] Filen sync restart failed for cached space', selectedSpace, e),
           );
@@ -606,6 +613,16 @@ export function Layout({ session, onLogout }: LayoutProps) {
             spaceFolderUuid,
             userId: session.userId,
           });
+
+          // Wire Filen sync to SyncManager — when Filen upload completes,
+          // post ONE room notification so other devices know to fetch.
+          if (syncManager) {
+            syncManager.setFilenSync(filenSync, selectedSpace, spaceFolderUuid);
+            filenSync.onSynced = (seq, eventCount) => {
+              syncManager!.postFilenNotification(seq, eventCount).catch(console.warn);
+            };
+          }
+
           await filenSync.start();
         } catch (e) {
           console.warn('[EO-DB] Filen sync start failed for space', selectedSpace, e);

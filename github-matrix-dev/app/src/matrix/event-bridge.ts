@@ -13,6 +13,7 @@ const _types = eoEventTypes();
 export const EO_EVENT_TYPE = _types.event;
 export const EO_SNAPSHOT_TYPE = _types.snapshot;
 export const EO_SNAPSHOT_STATE_TYPE = _types.snapshotState;
+export const EO_FILEN_SYNC_TYPE = _types.filenSync;
 
 // --- Governance event types ---
 export const EO_SCHEMA_TYPE = 'com.eo-db.schema';
@@ -67,6 +68,27 @@ export function matrixEventToEo(matrixEvent: MatrixEvent): EoEventInput {
     client_event_id: content.client_event_id,
     meta: content.meta,
   };
+}
+
+/**
+ * Send a Filen sync notification to the room.
+ *
+ * This is the ONLY room message sent during normal operation. Instead of
+ * flooding the room with individual EO events, we batch data to Filen and
+ * post a single lightweight notification so other devices know to fetch.
+ */
+export async function sendFilenSyncNotification(
+  client: MatrixClient,
+  roomId: string,
+  payload: {
+    seq: number;
+    event_count: number;
+    space_id: string;
+    ts: string;
+  },
+): Promise<string> {
+  const result = await client.sendEvent(roomId, EO_FILEN_SYNC_TYPE as any, payload);
+  return result.event_id;
 }
 
 /**

@@ -146,10 +146,10 @@ export async function encryptMetadata(plaintext: string, key: string): Promise<s
  */
 export async function encryptFileContent(data: Uint8Array, fileKey: string): Promise<Uint8Array> {
   const keyBytes = hexToBytes(fileKey.slice(0, 64));
-  const aesKey = await crypto.subtle.importKey('raw', keyBytes, 'AES-GCM', false, ['encrypt']);
+  // WebCrypto accepts Uint8Array at runtime; cast to satisfy strict TS
+  const aesKey = await crypto.subtle.importKey('raw', keyBytes as any, 'AES-GCM', false, ['encrypt']);
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, aesKey, data));
-  // Filen v002 format: IV + ciphertext (which includes the GCM auth tag)
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, aesKey, data as any));
   const result = new Uint8Array(iv.byteLength + ct.byteLength);
   result.set(iv, 0);
   result.set(ct, iv.byteLength);
@@ -162,10 +162,10 @@ export async function encryptFileContent(data: Uint8Array, fileKey: string): Pro
  */
 export async function decryptFileContent(encrypted: Uint8Array, fileKey: string): Promise<Uint8Array> {
   const keyBytes = hexToBytes(fileKey.slice(0, 64));
-  const aesKey = await crypto.subtle.importKey('raw', keyBytes, 'AES-GCM', false, ['decrypt']);
+  const aesKey = await crypto.subtle.importKey('raw', keyBytes as any, 'AES-GCM', false, ['decrypt']);
   const iv = encrypted.slice(0, 12);
   const ct = encrypted.slice(12);
-  return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, aesKey, ct));
+  return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, aesKey, ct as any));
 }
 
 /** Generate a random 64-char hex string for use as a file encryption key. */
@@ -412,7 +412,7 @@ export async function filenUploadFile(
       'Authorization': `Bearer ${apiKey}`,
       'Content-Type': 'application/octet-stream',
     },
-    body: encrypted,
+    body: new Blob([encrypted]),
   });
   const uploadJson = await uploadRes.json();
   if (!uploadJson.status) {
