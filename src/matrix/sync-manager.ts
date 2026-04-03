@@ -18,6 +18,7 @@
 import type { EoDb } from '../db/level.js';
 import { getCurrentSeq, encode, decode } from '../db/level.js';
 import type { EoEventInput } from '../db/types.js';
+import type { LocalKeyring } from '../db/crypto-types.js';
 import { processEvent } from '../db/fold.js';
 import { eventHash } from '../db/hash.js';
 import type { Feed } from '../db/feed.js';
@@ -96,6 +97,7 @@ export class SyncManager {
   private roomId: string;
   private db: EoDb;
   private feed?: Feed;
+  private keyring: LocalKeyring;
 
   /** Additional room IDs to listen to (restricted, governance). */
   private additionalRoomIds: string[] = [];
@@ -111,11 +113,18 @@ export class SyncManager {
     roomId: string,
     db: EoDb,
     feed?: Feed,
+    keyring?: LocalKeyring,
   ) {
     this.client = client;
     this.roomId = roomId;
     this.db = db;
     this.feed = feed;
+    this.keyring = keyring || { keys: new Map() };
+  }
+
+  /** Allow updating keyring after construction (e.g., after key heal). */
+  setKeyring(keyring: LocalKeyring): void {
+    this.keyring = keyring;
   }
 
   /**
@@ -198,7 +207,7 @@ export class SyncManager {
     const snap = await findLatestSnapshot(this.client, this.roomId);
     if (!snap) return;
     const restoredSeq = await restoreFromDeltaChain(
-      this.client, this.db, snap.mxc, this.feed,
+      this.client, this.db, snap.mxc, this.feed, this.keyring,
     );
     await setMeta(this.db, 'meta:snapshot_seq', restoredSeq);
   }
@@ -232,8 +241,7 @@ export class SyncManager {
     if (seq === 0 || seq === lastSnapshotSeq) return;
 
     const delta = await createDeltaSnapshot(this.db, this.client.getUserId()!);
-    const mxc = await uploadDeltaSnapshot(this.client, this.roomId, delta);
-    await setSnapshotStateEvent(this.client, this.roomId, mxc, seq);
+    const mxc = await uploadDeltaSnapshot(this.client, this.roomId, delta, this.keyring);
     await setMeta(this.db, 'meta:snapshot_seq', seq);
     await setMeta(this.db, 'meta:snapshot_mxc', mxc);
     const prevMxcs: string[] = (await getMeta<string[]>(this.db, 'meta:snapshot_prev_mxcs')) || [];
@@ -253,7 +261,7 @@ export class SyncManager {
     }
 
     const delta = await createDeltaSnapshot(this.db, this.client.getUserId()!);
-    const mxc = await uploadDeltaSnapshot(this.client, this.roomId, delta);
+    const mxc = await uploadDeltaSnapshot(this.client, this.roomId, delta, this.keyring);
 
     // Record the mxc URI in a NUL event so the snapshot is discoverable from the log
     await this.processLocalEvent({
@@ -327,7 +335,7 @@ export class SyncManager {
       // Link to previous snapshots in the chain
       snapshot.prev_mxcs = prevMxcs.slice(0, 25);
 
-      lastMxc = await uploadImportSnapshot(this.client, this.roomId, snapshot);
+      lastMxc = await uploadImportSnapshot(this.client, this.roomId, snapshot, this.keyring);
 
       // Update chain for next chunk (or for future snapshots)
       prevMxcs = [lastMxc, ...prevMxcs].slice(0, 25);
@@ -451,7 +459,7 @@ export class SyncManager {
     }
 
     // Auto-snapshot to Matrix media every 500 log entries
-    await maybeCreateSnapshot(this.client, this.roomId, this.db, agent);
+    await maybeCreateSnapshot(this.client, this.roomId, this.db, agent, this.keyring);
 
     return seq;
   }
@@ -480,33 +488,55 @@ export class SyncManager {
    */
   private async enqueueOfflineEvent(event: EoEventInput): Promise<void> {
     await queueMutex.run(async () => {
-      const queue: EoEventInput[] = (await getMeta<EoEventInput[]>(this.db, 'meta:offline_queue')) || [];
-      queue.push(event);
+      const queue: Array<{ event: EoEventInput; attempts: number }> =
+        (await getMeta<Array<{ event: EoEventInput; attempts: number }>>(this.db, 'meta:offline_queue')) || [];
+      queue.push({ event, attempts: 0 });
       await setMeta(this.db, 'meta:offline_queue', queue);
     });
   }
+
+  /** Max retry attempts before dropping a permanently-failing queued event. */
+  private static readonly MAX_QUEUE_ATTEMPTS = 5;
 
   /**
    * Flush queued offline events to the room.
    *
    * Tries every event independently — a failure on event #2 does NOT
    * prevent event #3 from being attempted. Successfully sent events are
-   * removed from the queue; failures stay for the next flush cycle.
+   * removed from the queue; failed ones stay for the next flush cycle
+   * up to MAX_QUEUE_ATTEMPTS, after which they are dropped.
+   *
+   * Backwards-compatible: legacy queue entries (raw EoEventInput without
+   * an `attempts` field) are auto-wrapped on read.
    *
    * The receiver deduplicates via content hash, so re-sending an event
    * already received (e.g., via peer sync) is harmless.
    */
   private async flushUnsyncedEvents(): Promise<void> {
     await queueMutex.run(async () => {
-      const queue: EoEventInput[] = (await getMeta<EoEventInput[]>(this.db, 'meta:offline_queue')) || [];
-      if (queue.length === 0) return;
+      const raw: any[] = (await getMeta<any[]>(this.db, 'meta:offline_queue')) || [];
+      if (raw.length === 0) return;
 
-      const remaining: EoEventInput[] = [];
-      for (const event of queue) {
+      // Normalise legacy entries (plain EoEventInput) into { event, attempts }
+      const queue = raw.map((entry: any) =>
+        entry.event ? entry as { event: EoEventInput; attempts: number }
+                     : { event: entry as EoEventInput, attempts: 0 },
+      );
+
+      const remaining: Array<{ event: EoEventInput; attempts: number }> = [];
+      for (const entry of queue) {
         try {
-          await sendEoEvent(this.client, this.roomId, event);
+          await sendEoEvent(this.client, this.roomId, entry.event);
         } catch {
-          remaining.push(event);
+          const attempts = entry.attempts + 1;
+          if (attempts < SyncManager.MAX_QUEUE_ATTEMPTS) {
+            remaining.push({ event: entry.event, attempts });
+          } else {
+            console.warn(
+              '[EO-DB] Dropping queued event after', attempts, 'failed attempts:',
+              (entry.event as any).client_event_id,
+            );
+          }
         }
       }
 

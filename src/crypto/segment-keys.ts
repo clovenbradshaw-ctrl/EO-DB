@@ -176,7 +176,7 @@ export async function importKey(rawBytes: Uint8Array): Promise<CryptoKey> {
 
 // ─── Base64 Helpers ─────────────────────────────────────────────────────────
 
-function bufferToBase64(buf: Uint8Array): string {
+export function bufferToBase64(buf: Uint8Array): string {
   if (typeof Buffer !== 'undefined') {
     return Buffer.from(buf).toString('base64');
   }
@@ -188,7 +188,7 @@ function bufferToBase64(buf: Uint8Array): string {
   return btoa(binary);
 }
 
-function base64ToBuffer(b64: string): Uint8Array {
+export function base64ToBuffer(b64: string): Uint8Array {
   if (typeof Buffer !== 'undefined') {
     return new Uint8Array(Buffer.from(b64, 'base64'));
   }
