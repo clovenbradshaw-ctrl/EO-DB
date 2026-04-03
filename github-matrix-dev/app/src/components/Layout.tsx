@@ -9,6 +9,7 @@ import { resolveDataRoom } from '../matrix/event-bridge';
 import { configureMatrixDomain } from '../lib/matrix-domain';
 import { HolonNav } from './HolonNav';
 import { TableView } from './TableView';
+import { ViewTabs } from './ViewTabs';
 import { RecordDetailDrawer } from './RecordDetailDrawer';
 import { RecordView } from './RecordView';
 import { ConnectionStatus, useConnectionState, type ConnectionState } from './ConnectionStatus';
@@ -959,15 +960,18 @@ export function Layout({ session, onLogout }: LayoutProps) {
                     onNavigate={(t) => navigate({ scope: t, record: null })}
                   />
                 ) : selectedScope ? (
-                  <TableView
-                    scope={selectedScope}
-                    onSelectRecord={(rec) => navigate({ record: rec })}
-                    onEmptyScope={(parentScope) => navigate({ scope: parentScope, record: null })}
-                    activeRecord={selectedRecord}
-                    session={{ userId: session.userId }}
-                    timeScrubberFilter={timeScrubberFilter}
-                    permissions={currentPermissions}
-                  />
+                  <>
+                    <ViewTabs scope={selectedScope} session={{ userId: session.userId }} />
+                    <TableView
+                      scope={selectedScope}
+                      onSelectRecord={(rec) => navigate({ record: rec })}
+                      onEmptyScope={(parentScope) => navigate({ scope: parentScope, record: null })}
+                      activeRecord={selectedRecord}
+                      session={{ userId: session.userId }}
+                      timeScrubberFilter={timeScrubberFilter}
+                      permissions={currentPermissions}
+                    />
+                  </>
                 ) : (
                   <div style={s.empty}>
                     <div style={s.emptyIcon}>{'\u25A6'}</div>

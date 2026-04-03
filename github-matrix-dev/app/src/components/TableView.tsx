@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import type { EoState } from '../db/types';
 import { useEoStore } from '../store/eo-store';
 import { deriveColumns, buildFieldNameMap, buildFieldNameMapFromSchema, hasFieldsSubObject, getFieldValue, applyFilters, type ColumnDef, type FilterRule } from './filter-types';
@@ -10,6 +10,23 @@ import { RedactedCell, LockIcon, LockedCell } from './RedactedCell';
 import { FilterBar } from './FilterBar';
 import { SortPanel, type SortRule } from './SortPanel';
 import type { ResolvedPermissions } from '../permissions/types';
+import { useViewStore } from '../store/view-store';
+import { defaultColumnWidth, MIN_COLUMN_WIDTH } from './view-types';
+import {
+  DndContext,
+  closestCenter,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from '@dnd-kit/core';
+import {
+  SortableContext,
+  horizontalListSortingStrategy,
+  useSortable,
+  arrayMove,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 
 interface TableViewProps {
   scope: string;
@@ -123,16 +140,70 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; target: string } | null>(null);
   const [columnMenu, setColumnMenu] = useState<{ x: number; y: number; key: string; label: string } | null>(null);
   const [renameCol, setRenameCol] = useState<{ key: string; value: string } | null>(null);
-  const [sorts, setSorts] = useState<SortRule[]>([]);
-  const [advancedFilters, setAdvancedFilters] = useState<FilterRule[]>([]);
-  const [filterConjunction, setFilterConjunction] = useState<'AND' | 'OR'>('AND');
-  const [hiddenColumns, setHiddenColumns] = useState<Set<string>>(new Set());
   const [typeSelector, setTypeSelector] = useState<{ x: number; y: number; target: string; currentType?: string } | null>(null);
-  const [showLastUpdated, setShowLastUpdated] = useState(true);
   const { theme } = useTheme();
   const s = makeStyles(theme);
 
+  // --- View store (SIG) ---
+  const viewStore = useViewStore();
+  const viewConfig = viewStore.getConfig(scope);
+  const sorts = viewConfig.sorts;
+  const advancedFilters = viewConfig.filters;
+  const filterConjunction = viewConfig.filterConjunction;
+  const hiddenColumnsArr = viewConfig.hiddenColumns;
+  const hiddenColumns = useMemo(() => new Set(hiddenColumnsArr), [hiddenColumnsArr]);
+  const showLastUpdated = viewConfig.showLastUpdated;
+  const columnOrder = viewConfig.columnOrder;
+  const columnWidths = viewConfig.columnWidths;
+
+  const setSorts = useCallback((s: SortRule[]) => viewStore.setSorts(scope, s), [scope, viewStore]);
+  const setAdvancedFilters = useCallback((f: FilterRule[]) => viewStore.setFilters(scope, f), [scope, viewStore]);
+  const setFilterConjunction = useCallback((c: 'AND' | 'OR') => viewStore.setFilterConjunction(scope, c), [scope, viewStore]);
+  const setHiddenColumns = useCallback((fn: Set<string> | ((prev: Set<string>) => Set<string>)) => {
+    const next = typeof fn === 'function' ? fn(hiddenColumns) : fn;
+    viewStore.setHiddenColumns(scope, [...next]);
+  }, [scope, viewStore, hiddenColumns]);
+  const setShowLastUpdated = useCallback((show: boolean) => viewStore.setShowLastUpdated(scope, show), [scope, viewStore]);
+
+  // --- Column resize state ---
+  const [resizing, setResizing] = useState<{ key: string; startX: number; startWidth: number } | null>(null);
+  const tableRef = useRef<HTMLTableElement>(null);
+
+  // --- DnD sensors ---
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
+  );
+
   const scopeDepth = scope.split('.').length;
+
+  // --- Column resize handlers ---
+  useEffect(() => {
+    if (!resizing) return;
+    const handleMouseMove = (e: MouseEvent) => {
+      const delta = e.clientX - resizing.startX;
+      const newWidth = Math.max(MIN_COLUMN_WIDTH, resizing.startWidth + delta);
+      viewStore.setColumnWidth(scope, resizing.key, newWidth);
+    };
+    const handleMouseUp = () => setResizing(null);
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [resizing, scope, viewStore]);
+
+  // --- Column drag-end handler ---
+  function handleColumnDragEnd(event: DragEndEvent) {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+    const currentOrder = orderedColumns.map((c) => c.key);
+    const oldIndex = currentOrder.indexOf(active.id as string);
+    const newIndex = currentOrder.indexOf(over.id as string);
+    if (oldIndex === -1 || newIndex === -1) return;
+    const newOrder = arrayMove(currentOrder, oldIndex, newIndex);
+    viewStore.setColumnOrder(scope, newOrder);
+  }
 
   // Load records and field metadata
   useEffect(() => {
@@ -226,6 +297,26 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     return all.filter((col) => !hiddenColumns.has(col.key));
   }, [entityColumns, hiddenColumns, showLastUpdated]);
 
+  // Apply column ordering from view store
+  const orderedColumns = useMemo<ColumnDef[]>(() => {
+    if (columnOrder.length === 0) return columns;
+    const byKey = new Map(columns.map((c) => [c.key, c]));
+    const ordered: ColumnDef[] = [];
+    // First add columns in the saved order
+    for (const key of columnOrder) {
+      const col = byKey.get(key);
+      if (col) {
+        ordered.push(col);
+        byKey.delete(key);
+      }
+    }
+    // Then append any new columns not in the saved order
+    for (const col of columns) {
+      if (byKey.has(col.key)) ordered.push(col);
+    }
+    return ordered;
+  }, [columns, columnOrder]);
+
   const filtered = useMemo(() => {
     let result = records;
 
@@ -316,8 +407,8 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
         label: 'Filter by this column',
         onClick: () => {
           const col = entityColumns.find((c) => c.key === colKey);
-          setAdvancedFilters((prev) => [
-            ...prev,
+          setAdvancedFilters([
+            ...advancedFilters,
             { id: crypto.randomUUID(), field: colKey, operator: col?.type === 'number' ? 'gt' : 'contains', value: '' },
           ]);
         },
@@ -325,14 +416,14 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
       { label: '', onClick: () => {}, separator: true },
       {
         label: 'Hide column',
-        onClick: () => setHiddenColumns((prev) => new Set([...prev, colKey])),
+        onClick: () => viewStore.toggleHiddenColumn(scope, colKey),
         disabled: colKey === '_record',
       },
     ];
     if (hiddenColumns.size > 0) {
       items.push({
         label: `Show all columns (${hiddenColumns.size} hidden)`,
-        onClick: () => setHiddenColumns(new Set()),
+        onClick: () => viewStore.showAllColumns(scope),
       });
     }
     return items;
@@ -502,105 +593,95 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
 
       {/* Table */}
       <div style={s.tableWrap}>
-        <table style={s.table}>
-          <thead>
-            <tr>
-              {columns.map((col) => {
-                const isLocked = permissions?.locked_fields?.includes(col.key);
-                const isRedacted = permissions?.redacted_fields?.includes(col.key);
+        <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleColumnDragEnd}>
+          <table ref={tableRef} style={{ ...s.table, tableLayout: 'fixed' }}>
+            <colgroup>
+              {orderedColumns.map((col) => (
+                <col key={col.key} style={{ width: columnWidths[col.key] || defaultColumnWidth(col.type) }} />
+              ))}
+            </colgroup>
+            <thead>
+              <SortableContext items={orderedColumns.map((c) => c.key)} strategy={horizontalListSortingStrategy}>
+                <tr>
+                  {orderedColumns.map((col) => (
+                    <SortableColumnHeader
+                      key={col.key}
+                      col={col}
+                      theme={theme}
+                      thStyle={s.th}
+                      sorts={sorts}
+                      renameCol={renameCol}
+                      permissions={permissions}
+                      isResizing={resizing?.key === col.key}
+                      disabled={col.key === '_record'}
+                      onContextMenu={(e) => handleColumnContextMenu(e, col)}
+                      onRename={(val) => handleColumnRename(col.key, val)}
+                      onCancelRename={() => setRenameCol(null)}
+                      onResizeStart={(startX) => {
+                        const width = columnWidths[col.key] || defaultColumnWidth(col.type);
+                        setResizing({ key: col.key, startX, startWidth: width });
+                      }}
+                    />
+                  ))}
+                </tr>
+              </SortableContext>
+            </thead>
+            <tbody>
+              {filtered.length === 0 && (
+                <tr>
+                  <td colSpan={orderedColumns.length} style={s.emptyRow}>
+                    {records.length === 0 ? 'No records in this scope' : 'No records match the current filter'}
+                  </td>
+                </tr>
+              )}
+              {filtered.map((rec) => {
+                const isActive = rec.target === activeRecord;
                 return (
-                  <th
-                    key={col.key}
-                    style={{ ...s.th, cursor: 'context-menu', userSelect: 'none' }}
-                    onContextMenu={(e) => handleColumnContextMenu(e, col)}
+                  <tr
+                    key={rec.target}
+                    style={isActive ? s.rowActive : undefined}
+                    onClick={() => onSelectRecord(rec.target)}
+                    onContextMenu={(e) => handleContextMenu(e, rec.target)}
+                    onMouseEnter={(e) => {
+                      if (!isActive) (e.currentTarget as HTMLElement).style.background = theme.bgHover;
+                    }}
+                    onMouseLeave={(e) => {
+                      if (!isActive) (e.currentTarget as HTMLElement).style.background = '';
+                    }}
                   >
-                    {renameCol?.key === col.key ? (
-                      <input
-                        autoFocus
-                        defaultValue={renameCol.value}
-                        style={{
-                          fontSize: 11, fontWeight: 400, border: `1px solid ${theme.accent}`,
-                          borderRadius: 3, padding: '2px 4px', background: theme.bgCard,
-                          color: theme.text, outline: 'none', width: '100%',
-                          textTransform: 'none' as const,
-                        }}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') handleColumnRename(col.key, (e.target as HTMLInputElement).value);
-                          if (e.key === 'Escape') setRenameCol(null);
-                        }}
-                        onBlur={(e) => handleColumnRename(col.key, e.target.value)}
-                      />
-                    ) : (
-                      <span>
-                        {isLocked && <LockIcon />}
-                        {col.label}
-                        {sorts.find((s) => s.field === col.key) && (
-                          <span style={{ marginLeft: 4, fontSize: 10 }}>
-                            {sorts.find((s) => s.field === col.key)!.direction === 'asc' ? '\u25B4' : '\u25BE'}
-                          </span>
-                        )}
-                      </span>
-                    )}
-                  </th>
+                    {orderedColumns.map((col) => {
+                      const isRedacted = permissions?.redacted_fields?.includes(col.key);
+                      const isLocked = permissions?.locked_fields?.includes(col.key);
+                      return (
+                        <td key={col.key} style={s.td}>
+                          {isRedacted
+                            ? <RedactedCell />
+                            : col.key === '_record'
+                            ? <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                                <span style={{
+                                  fontFamily: "'JetBrains Mono', monospace", fontSize: 11,
+                                  color: theme.accent, cursor: 'pointer',
+                                }}>{rec.value?.name || rec.target.split('.').pop()}</span>
+                                {rec.value?._type && <TypeBadge type={rec.value._type} />}
+                              </span>
+                            : col.key === '_last_updated'
+                            ? <span style={{
+                                fontFamily: "'JetBrains Mono', monospace", fontSize: 11,
+                                color: theme.textSecondary,
+                              }}>{rec.last_ts ? formatRelativeTime(rec.last_ts) : '\u2014'}</span>
+                            : isLocked
+                            ? <LockedCell>{renderCell(getFieldValue(rec, col.key, useFieldsSub), col.key, onSelectRecord, theme)}</LockedCell>
+                            : renderCell(getFieldValue(rec, col.key, useFieldsSub), col.key, onSelectRecord, theme)
+                          }
+                        </td>
+                      );
+                    })}
+                  </tr>
                 );
               })}
-            </tr>
-          </thead>
-          <tbody>
-            {filtered.length === 0 && (
-              <tr>
-                <td colSpan={columns.length} style={s.emptyRow}>
-                  {records.length === 0 ? 'No records in this scope' : 'No records match the current filter'}
-                </td>
-              </tr>
-            )}
-            {filtered.map((rec) => {
-              const isActive = rec.target === activeRecord;
-              return (
-                <tr
-                  key={rec.target}
-                  style={isActive ? s.rowActive : undefined}
-                  onClick={() => onSelectRecord(rec.target)}
-                  onContextMenu={(e) => handleContextMenu(e, rec.target)}
-                  onMouseEnter={(e) => {
-                    if (!isActive) (e.currentTarget as HTMLElement).style.background = theme.bgHover;
-                  }}
-                  onMouseLeave={(e) => {
-                    if (!isActive) (e.currentTarget as HTMLElement).style.background = '';
-                  }}
-                >
-                  {columns.map((col) => {
-                    const isRedacted = permissions?.redacted_fields?.includes(col.key);
-                    const isLocked = permissions?.locked_fields?.includes(col.key);
-                    return (
-                      <td key={col.key} style={s.td}>
-                        {isRedacted
-                          ? <RedactedCell />
-                          : col.key === '_record'
-                          ? <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                              <span style={{
-                                fontFamily: "'JetBrains Mono', monospace", fontSize: 11,
-                                color: theme.accent, cursor: 'pointer',
-                              }}>{rec.value?.name || rec.target.split('.').pop()}</span>
-                              {rec.value?._type && <TypeBadge type={rec.value._type} />}
-                            </span>
-                          : col.key === '_last_updated'
-                          ? <span style={{
-                              fontFamily: "'JetBrains Mono', monospace", fontSize: 11,
-                              color: theme.textSecondary,
-                            }}>{rec.last_ts ? formatRelativeTime(rec.last_ts) : '\u2014'}</span>
-                          : isLocked
-                          ? <LockedCell>{renderCell(getFieldValue(rec, col.key, useFieldsSub), col.key, onSelectRecord, theme)}</LockedCell>
-                          : renderCell(getFieldValue(rec, col.key, useFieldsSub), col.key, onSelectRecord, theme)
-                        }
-                      </td>
-                    );
-                  })}
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+            </tbody>
+          </table>
+        </DndContext>
       </div>
 
       {/* Right-click context menu (rows) */}
@@ -649,6 +730,113 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
         </>
       )}
     </div>
+  );
+}
+
+// --- Sortable Column Header ---
+
+interface SortableColumnHeaderProps {
+  col: ColumnDef;
+  theme: Theme;
+  thStyle: React.CSSProperties;
+  sorts: SortRule[];
+  renameCol: { key: string; value: string } | null;
+  permissions?: ResolvedPermissions | null;
+  isResizing: boolean;
+  disabled: boolean;
+  onContextMenu: (e: React.MouseEvent) => void;
+  onRename: (val: string) => void;
+  onCancelRename: () => void;
+  onResizeStart: (startX: number) => void;
+}
+
+function SortableColumnHeader({
+  col, theme, thStyle, sorts, renameCol, permissions,
+  isResizing, disabled, onContextMenu, onRename, onCancelRename, onResizeStart,
+}: SortableColumnHeaderProps) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: col.key, disabled });
+
+  const style: React.CSSProperties = {
+    ...thStyle,
+    cursor: disabled ? 'default' : 'grab',
+    userSelect: 'none',
+    position: 'sticky' as const,
+    top: 0,
+    transform: CSS.Transform.toString(transform ? { ...transform, y: 0 } : null),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+    zIndex: isDragging ? 10 : 2,
+  };
+
+  const isLocked = permissions?.locked_fields?.includes(col.key);
+
+  return (
+    <th
+      ref={setNodeRef}
+      style={style}
+      {...attributes}
+      {...(disabled ? {} : listeners)}
+      onContextMenu={onContextMenu}
+    >
+      {renameCol?.key === col.key ? (
+        <input
+          autoFocus
+          defaultValue={renameCol.value}
+          style={{
+            fontSize: 11, fontWeight: 400, border: `1px solid ${theme.accent}`,
+            borderRadius: 3, padding: '2px 4px', background: theme.bgCard,
+            color: theme.text, outline: 'none', width: '100%',
+            textTransform: 'none' as const,
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') onRename((e.target as HTMLInputElement).value);
+            if (e.key === 'Escape') onCancelRename();
+          }}
+          onBlur={(e) => onRename(e.target.value)}
+        />
+      ) : (
+        <span style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+          {isLocked && <LockIcon />}
+          {col.label}
+          {sorts.find((s) => s.field === col.key) && (
+            <span style={{ marginLeft: 4, fontSize: 10 }}>
+              {sorts.find((s) => s.field === col.key)!.direction === 'asc' ? '\u25B4' : '\u25BE'}
+            </span>
+          )}
+        </span>
+      )}
+      {/* Resize handle */}
+      <div
+        style={{
+          position: 'absolute',
+          top: 0,
+          right: 0,
+          width: 5,
+          height: '100%',
+          cursor: 'col-resize',
+          background: isResizing ? theme.accent : 'transparent',
+          zIndex: 3,
+        }}
+        onMouseDown={(e) => {
+          e.stopPropagation();
+          e.preventDefault();
+          onResizeStart(e.clientX);
+        }}
+        onMouseEnter={(e) => {
+          if (!isResizing) (e.currentTarget as HTMLElement).style.background = theme.border;
+        }}
+        onMouseLeave={(e) => {
+          if (!isResizing) (e.currentTarget as HTMLElement).style.background = 'transparent';
+        }}
+      />
+    </th>
   );
 }
 
@@ -739,10 +927,9 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       color: t.textHeading,
     } as React.CSSProperties,
     th: {
-      position: 'sticky' as const,
-      top: 0,
+      position: 'relative' as const,
       background: t.bgCard,
-      padding: '10px 8px 10px 0',
+      padding: '10px 12px 10px 0',
       paddingLeft: 20,
       textAlign: 'left' as const,
       fontSize: 11,
@@ -752,7 +939,8 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       color: t.textMuted,
       borderBottom: `0.5px solid ${t.border}`,
       whiteSpace: 'nowrap' as const,
-      zIndex: 2,
+      overflow: 'hidden' as const,
+      textOverflow: 'ellipsis' as const,
     },
     td: {
       padding: '10px 8px 10px 0',

@@ -6,6 +6,7 @@ import { useTheme, type Theme } from '../theme';
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 import { TypeSelector, TypeBadge } from './TypeSelector';
 import { buildTree, formatName, type TreeNode } from './scope-picker-utils';
+import { useViewStore } from '../store/view-store';
 
 interface HolonNavProps {
   selectedScope: string | null;
@@ -26,6 +27,7 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; target: string } | null>(null);
   const [typeSelector, setTypeSelector] = useState<{ x: number; y: number; target: string; currentType?: string } | null>(null);
   const [renaming, setRenaming] = useState<{ target: string; currentName: string } | null>(null);
+  const viewStore = useViewStore();
   const { theme } = useTheme();
   const s = makeStyles(theme);
 
@@ -204,6 +206,32 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
             <span style={s.segName}>{name}</span>
           </div>
         ))}
+
+        {/* Saved views */}
+        {isExpanded && (() => {
+          const views = viewStore.getViewsForScope(node.fullPath);
+          if (views.length === 0) return null;
+          const sig = viewStore.getSig(node.fullPath);
+          return views.map((view) => (
+            <div
+              key={`view:${view.id}`}
+              style={{
+                ...s.segItem,
+                paddingLeft: 28 + depth * 16,
+                ...(sig.activeViewId === view.id ? { color: theme.accent, fontWeight: 600 } : {}),
+              }}
+              onClick={() => {
+                viewStore.activateView(node.fullPath, view);
+                onSelectScope(node.fullPath);
+              }}
+            >
+              <span style={{ marginRight: 4, fontSize: 10, opacity: 0.6 }}>
+                {view.visibility === 'private' ? '\uD83D\uDD12' : '\u25A6'}
+              </span>
+              <span style={s.segName}>{view.name}</span>
+            </div>
+          ));
+        })()}
 
         {/* Children — pass this node's _displayField so children can resolve names */}
         {isExpanded && node.children.map(child =>
