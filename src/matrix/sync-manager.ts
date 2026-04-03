@@ -709,16 +709,17 @@ export class SyncManager {
   /**
    * Flush queued offline events to the room.
    *
-   * Tries every event independently — a failure on event #2 does NOT
-   * prevent event #3 from being attempted. Successfully sent events are
-   * removed from the queue; failed ones stay for the next flush cycle
-   * up to MAX_QUEUE_ATTEMPTS, after which they are dropped.
+   * Instead of sending each event individually (which causes 429s), this
+   * batches ALL un-snapshotted events into a single media store upload via
+   * processImportBatch(). The room receives ONE timeline event instead of N.
    *
-   * Backwards-compatible: legacy queue entries (raw EoEventInput without
-   * an `attempts` field) are auto-wrapped on read.
+   * All queued events were already folded locally when created — they're in
+   * the log. processImportBatch reads them from the log, packages into a
+   * binary snapshot, uploads to Matrix media, and maintains the prev_mxcs
+   * breadcrumb chain.
    *
-   * The receiver deduplicates via content hash, so re-sending an event
-   * already received (e.g., via peer sync) is harmless.
+   * The receiver deduplicates via content hash, so re-sending events
+   * already received (e.g., via peer sync or auto-snapshot) is harmless.
    */
   private async flushUnsyncedEvents(): Promise<void> {
     await queueMutex.run(async () => {
@@ -731,53 +732,50 @@ export class SyncManager {
                      : { event: entry as EoEventInput, attempts: 0 },
       );
 
-      const remaining: Array<{ event: EoEventInput; attempts: number }> = [];
-      let flushedCount = 0;
-      for (let i = 0; i < queue.length; i++) {
-        if (this.destroyed) break;
-        const entry = queue[i];
-        try {
-          // Small delay between sends to avoid triggering rate limits
-          if (flushedCount > 0) {
-            await new Promise(r => setTimeout(r, 100));
-          }
-          await sendEoEvent(this.client, this.roomId, entry.event);
-          flushedCount++;
-        } catch (err) {
-          // On rate-limit, stop immediately — re-queue this + all remaining events
-          const retryDelay = SyncManager.getRetryDelay(err);
-          if (retryDelay !== null) {
-            this.rateLimitedUntil = Date.now() + retryDelay;
-            // Re-queue from current index onward (don't increment attempts for rate limits)
-            for (let j = i; j < queue.length; j++) {
-              remaining.push(queue[j]);
-            }
-            // Schedule a deferred retry
-            if (!this.destroyed) {
-              setTimeout(() => { if (!this.destroyed) this.flushUnsyncedEvents(); }, retryDelay);
-            }
-            break;
-          }
+      // Track attempt count for the batch (use max across entries)
+      const batchAttempts = Math.max(...queue.map(e => e.attempts));
 
-          const attempts = entry.attempts + 1;
-          if (attempts < SyncManager.MAX_QUEUE_ATTEMPTS) {
-            remaining.push({ event: entry.event, attempts });
-          } else {
-            console.warn(
-              '[EO-DB] Dropping queued event after', attempts, 'failed attempts:',
-              (entry.event as any).client_event_id,
-            );
-          }
+      try {
+        const currentSeq = await getCurrentSeq(this.db);
+        const lastSnapshotSeq = (await getMeta<number>(this.db, 'meta:snapshot_seq')) || 0;
+
+        if (currentSeq > lastSnapshotSeq) {
+          // Batch all un-snapshotted events into a single media store upload.
+          // This covers the queued events plus any other local events that
+          // haven't been snapshotted yet — one upload instead of N sends.
+          await this.processImportBatch(lastSnapshotSeq, currentSeq, {
+            source: 'offline-queue',
+            record_count: queue.length,
+          });
         }
-      }
+        // else: auto-snapshot already covered these events — nothing to upload
 
-      await setMeta(this.db, 'meta:offline_queue', remaining);
-
-      // Notify after queue is saved
-      if (flushedCount > 0 && remaining.length === 0) {
+        // All events are now in the snapshot chain — clear the queue
+        await setMeta(this.db, 'meta:offline_queue', []);
         this.onSyncStatus?.('confirmed');
-      } else if (remaining.length > 0) {
-        this.onSyncStatus?.('queued');
+      } catch (err) {
+        const retryDelay = SyncManager.getRetryDelay(err);
+        if (retryDelay !== null) {
+          // Rate-limited — keep queue intact, retry after backoff
+          this.rateLimitedUntil = Date.now() + retryDelay;
+          if (!this.destroyed) {
+            setTimeout(() => { if (!this.destroyed) this.flushUnsyncedEvents(); }, retryDelay);
+          }
+          this.onSyncStatus?.('rate-limited');
+        } else {
+          // Non-rate-limit error — increment attempts on all entries
+          const nextAttempts = batchAttempts + 1;
+          if (nextAttempts >= SyncManager.MAX_QUEUE_ATTEMPTS) {
+            console.warn(
+              '[EO-DB] Dropping', queue.length, 'queued events after', nextAttempts, 'failed batch attempts',
+            );
+            await setMeta(this.db, 'meta:offline_queue', []);
+          } else {
+            const bumped = queue.map(e => ({ ...e, attempts: nextAttempts }));
+            await setMeta(this.db, 'meta:offline_queue', bumped);
+          }
+          this.onSyncStatus?.('queued');
+        }
       }
     });
   }

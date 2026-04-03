@@ -28,9 +28,11 @@
 
 import type { EoDb } from '../db/level.js';
 import type { Feed } from '../db/feed.js';
+import type { SyncManager } from '../matrix/sync-manager.js';
 import { getApiKey, touchApiKey } from './api-keys.js';
 import { AirtableClient } from './airtable-client.js';
 import { updateSync } from './airtable-sync.js';
+import { createEventSink } from './event-sink.js';
 import {
   getAllBindings,
   getBinding,
@@ -78,12 +80,18 @@ export interface BindingSyncStatus {
 export class RoomSyncCoordinator {
   private db: EoDb;
   private feed: Feed;
+  private syncManager?: SyncManager;
   private runtimes = new Map</* binding_id */ string, BindingRuntime>();
   private started = false;
 
   constructor(db: EoDb, feed: Feed) {
     this.db = db;
     this.feed = feed;
+  }
+
+  /** Inject SyncManager for grounded batch uploads (can be called after construction). */
+  setSyncManager(sm: SyncManager): void {
+    this.syncManager = sm;
   }
 
   // ── Lifecycle ───────────────────────────────────────────────────────────
@@ -341,11 +349,19 @@ export class RoomSyncCoordinator {
       const client = new AirtableClient(keyEntry.api_key);
       const agent = rt.primary; // Attribute events to the primary syncer
 
+      // Batch events into a single media store upload when SyncManager is available
+      const sink = createEventSink(this.db, this.feed, this.syncManager, {
+        source: 'airtable',
+        label: rt.binding.api_key_label,
+      });
+
       await updateSync(this.db, this.feed, client, agent, {
         baseIds: rt.binding.base_ids.length > 0 ? rt.binding.base_ids : undefined,
         tableIds: rt.binding.table_ids.length > 0 ? rt.binding.table_ids : undefined,
+        sink,
       });
 
+      await sink.flush();
       await touchApiKey(this.db, rt.binding.api_key_label);
       rt.lastSyncAt = new Date().toISOString();
       rt.lastError = null;
