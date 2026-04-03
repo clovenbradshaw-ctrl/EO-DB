@@ -12,6 +12,7 @@ import { TableView } from './TableView';
 import { RecordDetailDrawer } from './RecordDetailDrawer';
 import { RecordView } from './RecordView';
 import { ConnectionStatus, useConnectionState, type ConnectionState } from './ConnectionStatus';
+import { SyncToast, useSyncToast } from './SyncToast';
 import { ErrorBoundary } from './ErrorBoundary';
 import { SyncProgress } from './SyncProgress';
 import { LogView } from './LogView';
@@ -144,6 +145,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
   const getState = useEoStore((s) => s.getState);
   const _browserOnline = useConnectionState(); // triggers re-render on network change
   const syncManager = useEoStore((s) => s.syncManager);
+  const [syncToastStatus, syncToastSeq, onSyncStatus] = useSyncToast();
   const [matrixReady, setMatrixReady] = useState(false);
   // Show actual sync status: "online" only when Matrix sync is connected
   const connectionState: ConnectionState = !navigator.onLine
@@ -519,6 +521,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
             const freshSync = new SyncManager(
               matrixClientRef.current, spaceRoomId, existing.store, onFoldEvent,
             );
+            freshSync.onSyncStatus = onSyncStatus;
             await freshSync.initialize();
             if (!mounted) return;
             existing.syncManager = freshSync;
@@ -546,6 +549,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
           syncManager = new SyncManager(
             matrixClientRef.current, spaceRoomId, store, onFoldEvent,
           );
+          syncManager.onSyncStatus = onSyncStatus;
           await syncManager.initialize();
           if (!mounted) return;
 
@@ -744,6 +748,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
                         }));
                       },
                     );
+                    syncManager.onSyncStatus = onSyncStatus;
                     await syncManager.initialize();
                     useEoStore.getState().setSyncManager(syncManager);
                   } catch (e) {
@@ -825,6 +830,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
             <span title="Target count">{targetCount} targets</span>
           </div>
           <ConnectionStatus state={connectionState} />
+          <SyncToast status={syncToastStatus} seq={syncToastSeq} />
           {selectedSpace && (
             <PermissionBadge role={currentRole} displayName={displayName} />
           )}
