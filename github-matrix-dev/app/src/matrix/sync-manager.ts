@@ -62,6 +62,9 @@ export class SyncManager {
   /** Bound listener reference for cleanup. */
   private handleTimelineEvent: ((event: MatrixEvent) => void) | null = null;
 
+  /** Bound listener for Matrix sync state changes (reconnection). */
+  private syncStateHandler: ((state: string, prevState: string | null) => void) | null = null;
+
   /** Whether this manager has been destroyed. */
   private destroyed = false;
 
@@ -103,7 +106,7 @@ export class SyncManager {
   }
 
   /**
-   * Remove the timeline listener and mark this manager as inactive.
+   * Remove all listeners and mark this manager as inactive.
    * Must be called before switching spaces to prevent stale event injection.
    */
   destroy(): void {
@@ -112,20 +115,52 @@ export class SyncManager {
       this.client.off('Room.timeline' as any, this.handleTimelineEvent);
       this.handleTimelineEvent = null;
     }
+    if (this.syncStateHandler) {
+      this.client.off('sync' as any, this.syncStateHandler);
+      this.syncStateHandler = null;
+    }
+  }
+
+  /**
+   * Wait until the Matrix SDK has the room in its room list.
+   *
+   * After initial sync with initialSyncLimit: 0, the room may not be
+   * available immediately via client.getRoom(). Polls with exponential
+   * backoff up to the timeout.
+   */
+  private async waitForRoom(timeoutMs = 10_000): Promise<boolean> {
+    const start = Date.now();
+    let delay = 100;
+    while (Date.now() - start < timeoutMs) {
+      if (this.client.getRoom(this.roomId)) return true;
+      await new Promise(r => setTimeout(r, delay));
+      delay = Math.min(delay * 2, 2000);
+    }
+    console.warn('[EO-DB] Room', this.roomId, 'not available after', timeoutMs, 'ms');
+    return false;
   }
 
   /**
    * Initialize sync — call after login and store setup.
    *
-   * On a fresh device (seq === 0), hydrates from the latest snapshot stored
-   * in Matrix media, then replays any EO events already present in the room
-   * timeline (from the initial sync) that the snapshot didn't cover.
+   * Waits for the room to appear in the SDK's room list (it may not be
+   * available immediately after initial sync with initialSyncLimit: 0),
+   * then hydrates from the latest snapshot, replays timeline events,
+   * flushes offline queue, and attaches live listeners.
    */
   async initialize(): Promise<void> {
+    // Wait for the room to appear in the SDK's room list.
+    // After initial sync with initialSyncLimit: 0, the room may not be
+    // in client.getRoom() yet even though the sync state is PREPARED.
+    const roomReady = await this.waitForRoom();
+    if (!roomReady) {
+      console.warn('[EO-DB] Proceeding without room — snapshot hydration and timeline replay skipped');
+    }
+
     const currentSeq = await this.store.getCurrentSeq();
 
     // On a fresh device, restore from the latest Matrix media snapshot
-    if (currentSeq === 0) {
+    if (currentSeq === 0 && roomReady) {
       await this.hydrateFromSnapshot();
     }
 
@@ -133,7 +168,9 @@ export class SyncManager {
     // The snapshot may not exist or may be stale — the room timeline is the
     // source of truth. The fold engine deduplicates via client_event_id so
     // replaying events already covered by the snapshot is harmless.
-    await this.replayTimelineEvents();
+    if (roomReady) {
+      await this.replayTimelineEvents();
+    }
 
     // Flush unsynced events BEFORE attaching the live listener — if flush
     // fails, no dangling listener is left behind for the caller to clean up.
@@ -150,6 +187,19 @@ export class SyncManager {
       this.processIncomingEvent(event);
     };
     this.client.on('Room.timeline' as any, this.handleTimelineEvent);
+
+    // Listen for Matrix reconnection to flush offline queue automatically.
+    // CATCHUP/RECONNECTING → SYNCING means the SDK recovered after being offline.
+    this.syncStateHandler = (state: string, prevState: string | null) => {
+      if (this.destroyed) return;
+      if (state === 'SYNCING' && (prevState === 'CATCHUP' || prevState === 'RECONNECTING')) {
+        console.info('[EO-DB] Matrix reconnected — flushing offline queue');
+        this.flushUnsyncedEvents().catch(e =>
+          console.warn('[EO-DB] Reconnect flush failed:', e)
+        );
+      }
+    };
+    this.client.on('sync' as any, this.syncStateHandler);
   }
 
   /**
@@ -193,6 +243,15 @@ export class SyncManager {
   }
 
   /**
+   * Flush queued offline events. Exposed for external callers
+   * (e.g., Layout.tsx online handler) in addition to the internal
+   * reconnection listener.
+   */
+  async retryOfflineQueue(): Promise<void> {
+    await this.flushUnsyncedEvents();
+  }
+
+  /**
    * Force-save a delta snapshot to Matrix media right now.
    * Called on beforeunload / logout so data is always persisted.
    */
@@ -200,6 +259,14 @@ export class SyncManager {
     const seq = await this.store.getCurrentSeq();
     const lastSnapshotSeq: number = (await this.store.get('meta:snapshot_seq')) || 0;
     if (seq === 0 || seq === lastSnapshotSeq) return; // nothing new to snapshot
+
+    // Guard: skip if the room is not in the SDK's room list.
+    // Attempting sendEvent/sendStateEvent on an unknown room throws.
+    if (!this.client.getRoom(this.roomId)) {
+      console.warn('[EO-DB] saveSnapshot skipped — room not loaded:', this.roomId);
+      return;
+    }
+
     const delta = await createDeltaSnapshot(this.store, this.client.getUserId()!);
     const mxc = await uploadDeltaSnapshot(this.client, this.roomId, delta);
     await setSnapshotStateEvent(this.client, this.roomId, mxc, seq);

@@ -17,6 +17,14 @@ import type { Feed } from '../db/feed.js';
 import type { IMatrixClient, ImportMeta } from './types.js';
 import type { DeltaSnapshot } from './types.js';
 import { EO_SNAPSHOT_TYPE, EO_SNAPSHOT_STATE_TYPE, EO_IMPORT_TYPE } from './event-bridge.js';
+import type { LocalKeyring, KeyringEntry } from '../db/crypto-types.js';
+import { getKeyById } from '../crypto/segment-keys.js';
+import {
+  encryptSnapshot,
+  decryptSnapshot,
+  isEncryptedEnvelope,
+  getEnvelopeKeyId,
+} from '../crypto/snapshot-crypto.js';
 
 /** Maximum number of previous snapshot URIs carried in each snapshot. */
 const MAX_PREV_MXCS = 25;
@@ -53,11 +61,13 @@ export async function setSnapshotStateEvent(
   roomId: string,
   mxc: string,
   seq: number,
+  keyId?: string,
 ): Promise<void> {
   await client.sendStateEvent(roomId, EO_SNAPSHOT_STATE_TYPE, {
     mxc,
     seq,
     ts: new Date().toISOString(),
+    ...(keyId ? { key_id: keyId } : {}),
   }, '');
 }
 
@@ -132,13 +142,14 @@ export async function maybeCreateSnapshot(
   roomId: string,
   db: EoDb,
   myUserId: string,
+  snapshotKey?: { key: CryptoKey; key_id: string },
 ): Promise<void> {
   const lastSeq = await getCurrentSeq(db);
   const lastSnapshotSeq = (await getMeta<number>(db, 'meta:snapshot_seq')) || 0;
 
   if (lastSeq - lastSnapshotSeq >= SNAPSHOT_FREQUENCY) {
     const delta = await createDeltaSnapshot(db, myUserId);
-    const mxc = await uploadDeltaSnapshot(client, roomId, delta);
+    const mxc = await uploadDeltaSnapshot(client, roomId, delta, snapshotKey);
     await setMeta(db, 'meta:snapshot_seq', lastSeq);
     await setMeta(db, 'meta:snapshot_mxc', mxc);
     const prevMxcs: string[] = (await getMeta<string[]>(db, 'meta:snapshot_prev_mxcs')) || [];
@@ -182,8 +193,14 @@ export async function uploadDeltaSnapshot(
   client: IMatrixClient,
   roomId: string,
   delta: DeltaSnapshot,
+  snapshotKey?: { key: CryptoKey; key_id: string },
 ): Promise<string> {
-  const binary = pack(delta);
+  const plainBinary = pack(delta);
+
+  // Encrypt the blob if a snapshot key is available (defense-in-depth)
+  const binary = snapshotKey
+    ? await encryptSnapshot(snapshotKey.key, snapshotKey.key_id, plainBinary)
+    : plainBinary;
 
   const uploadResult = await client.uploadContent(binary, {
     name: `eo-delta-${delta.from_seq}-${delta.to_seq}.bin`,
@@ -200,10 +217,11 @@ export async function uploadDeltaSnapshot(
     size_bytes: binary.byteLength,
     version: delta.version,
     type: 'delta',
+    encrypted: !!snapshotKey,
   });
 
   // Set room state for O(1) fast-path lookup
-  await setSnapshotStateEvent(client, roomId, mxcUrl, delta.to_seq);
+  await setSnapshotStateEvent(client, roomId, mxcUrl, delta.to_seq, snapshotKey?.key_id);
 
   return mxcUrl;
 }
@@ -214,13 +232,30 @@ export async function uploadDeltaSnapshot(
 export async function downloadDeltaSnapshot(
   client: IMatrixClient,
   mxcUrl: string,
+  keyring?: LocalKeyring,
 ): Promise<DeltaSnapshot> {
   const httpUrl = client.mxcUrlToHttp(mxcUrl);
   if (!httpUrl) throw new Error('Cannot resolve mxc URL');
 
   const response = await fetch(httpUrl);
-  const buffer = await response.arrayBuffer();
-  return unpack(new Uint8Array(buffer)) as DeltaSnapshot;
+  const raw = new Uint8Array(await response.arrayBuffer());
+
+  // Check if the blob is an encrypted envelope
+  if (isEncryptedEnvelope(raw)) {
+    const keyId = getEnvelopeKeyId(raw);
+    if (!keyId) throw new Error('Encrypted snapshot has no key_id');
+
+    const entry = keyring ? getKeyById(keyring, keyId) : null;
+    if (!entry) {
+      throw new Error(`Cannot decrypt snapshot — missing key ${keyId}`);
+    }
+
+    const plainBytes = await decryptSnapshot(entry.key, raw);
+    return unpack(plainBytes) as DeltaSnapshot;
+  }
+
+  // Legacy unencrypted snapshot
+  return unpack(raw) as DeltaSnapshot;
 }
 
 /**
@@ -240,13 +275,14 @@ export async function restoreFromDeltaChain(
   db: EoDb,
   latestMxc: string,
   feed?: Feed,
+  keyring?: LocalKeyring,
 ): Promise<number> {
   const localSeq = await getCurrentSeq(db);
   const deltas: DeltaSnapshot[] = [];
   const seen = new Set<string>();
 
   // Fetch the head delta
-  const head = await downloadDeltaSnapshot(client, latestMxc);
+  const head = await downloadDeltaSnapshot(client, latestMxc, keyring);
   seen.add(latestMxc);
 
   if (head.to_seq <= localSeq) return localSeq;
@@ -263,9 +299,12 @@ export async function restoreFromDeltaChain(
     if (toFetch.length === 0) break;
 
     for (const mxc of toFetch) seen.add(mxc);
-    const batch = await Promise.all(
-      toFetch.map((mxc) => downloadDeltaSnapshot(client, mxc)),
+    const results = await Promise.allSettled(
+      toFetch.map((mxc) => downloadDeltaSnapshot(client, mxc, keyring)),
     );
+    const batch = results
+      .filter((r): r is PromiseFulfilledResult<DeltaSnapshot> => r.status === 'fulfilled')
+      .map(r => r.value);
 
     for (const delta of batch) {
       if (delta.to_seq <= localSeq) continue;
@@ -333,8 +372,13 @@ export async function uploadImportSnapshot(
   client: IMatrixClient,
   roomId: string,
   snapshot: DeltaSnapshot,
+  snapshotKey?: { key: CryptoKey; key_id: string },
 ): Promise<string> {
-  const binary = pack(snapshot);
+  const plainBinary = pack(snapshot);
+
+  const binary = snapshotKey
+    ? await encryptSnapshot(snapshotKey.key, snapshotKey.key_id, plainBinary)
+    : plainBinary;
 
   const uploadResult = await client.uploadContent(binary, {
     name: `eo-import-${snapshot.from_seq}-${snapshot.to_seq}.bin`,
@@ -353,10 +397,11 @@ export async function uploadImportSnapshot(
     type: 'import',
     event_count: snapshot.events.length,
     import_meta: snapshot.import_meta,
+    encrypted: !!snapshotKey,
   });
 
   // Update room state so hydration chain includes this import
-  await setSnapshotStateEvent(client, roomId, mxcUrl, snapshot.to_seq);
+  await setSnapshotStateEvent(client, roomId, mxcUrl, snapshot.to_seq, snapshotKey?.key_id);
 
   return mxcUrl;
 }

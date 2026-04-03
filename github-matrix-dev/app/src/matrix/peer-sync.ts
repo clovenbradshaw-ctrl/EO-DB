@@ -15,12 +15,14 @@
  */
 
 import type { MatrixClient, MatrixEvent } from 'matrix-js-sdk';
+import { pack, unpack } from 'msgpackr';
 import type { EoStore } from '../db/encrypted-store';
 import type { EoEventInput, EoState } from '../db/types';
 import { processEvent } from '../db/fold';
 import { readLogSince } from '../db/log';
 import { storeFingerprint } from '../db/hash';
 import { peerSyncEventTypes } from '../lib/matrix-domain';
+import { encryptPeerPayload, decryptPeerPayload } from '../crypto/snapshot-crypto';
 
 const _syncTypes = peerSyncEventTypes();
 const SYNC_HELLO = _syncTypes.hello;
@@ -39,23 +41,46 @@ function toDeviceContent(userId: string, deviceId: string, content: Record<strin
   return outer;
 }
 
+/** Minimal keyring interface for PeerSync (avoids importing full crypto-types). */
+interface PeerKeyring {
+  keys: Map<string, { key: CryptoKey; scope: string; version: number }>;
+}
+
 export class PeerSync {
   private client: MatrixClient;
   private roomId: string;
   private store: EoStore;
   private onEvent?: (event: any) => void;
   private toDeviceHandler?: (event: MatrixEvent) => void;
+  private keyring: PeerKeyring;
 
   constructor(
     client: MatrixClient,
     roomId: string,
     store: EoStore,
     onEvent?: (event: any) => void,
+    keyring?: PeerKeyring,
   ) {
     this.client = client;
     this.roomId = roomId;
     this.store = store;
     this.onEvent = onEvent;
+    this.keyring = keyring || { keys: new Map() };
+  }
+
+  /** Update keyring after construction. */
+  setKeyring(keyring: PeerKeyring): void {
+    this.keyring = keyring;
+  }
+
+  /** Resolve the snapshot-scope key for peer payload encryption. */
+  private getSnapshotKey(): { key: CryptoKey; key_id: string } | undefined {
+    for (const [keyId, entry] of this.keyring.keys) {
+      if (entry.scope === '_snapshot') {
+        return { key: entry.key, key_id: keyId };
+      }
+    }
+    return undefined;
   }
 
   /**
@@ -154,7 +179,7 @@ export class PeerSync {
         await this.sendEventsToPeer(sender, content.from_device, content.need_from);
         break;
       case SYNC_EVENTS:
-        await this.processIncomingPeerEvents(content.events);
+        await this.processIncomingPeerEvents(content);
         break;
     }
   }
@@ -223,15 +248,32 @@ export class PeerSync {
     fromSeq: number,
   ): Promise<void> {
     const events = await readLogSince(this.store, fromSeq);
+    const snapshotKey = this.getSnapshotKey();
 
     for (let i = 0; i < events.length; i += BATCH_SIZE) {
       const batch = events.slice(i, i + BATCH_SIZE);
-      await this.client.sendToDevice(SYNC_EVENTS, toDeviceContent(
-        peerUserId, peerDeviceId, {
+
+      // Encrypt the batch if a snapshot key is available
+      let payload: Record<string, any>;
+      if (snapshotKey) {
+        const encrypted = await encryptPeerPayload(
+          snapshotKey.key, snapshotKey.key_id, pack(batch),
+        );
+        payload = {
+          ...encrypted,
+          batch_index: Math.floor(i / BATCH_SIZE),
+          total_batches: Math.ceil(events.length / BATCH_SIZE),
+        };
+      } else {
+        payload = {
           events: batch,
           batch_index: Math.floor(i / BATCH_SIZE),
           total_batches: Math.ceil(events.length / BATCH_SIZE),
-        },
+        };
+      }
+
+      await this.client.sendToDevice(SYNC_EVENTS, toDeviceContent(
+        peerUserId, peerDeviceId, payload,
       ));
     }
   }
@@ -239,11 +281,34 @@ export class PeerSync {
   /**
    * Process incoming peer events through the fold engine.
    *
+   * Handles both encrypted payloads (from peers with snapshot key) and
+   * plaintext payloads (legacy peers or unencrypted spaces).
+   *
    * The fold engine handles deduplication via content-addressable hashing:
    * if we already have an event (either from local creation or Matrix room),
    * processEvent returns the cached seq without re-applying.
    */
-  private async processIncomingPeerEvents(events: EoEventInput[]): Promise<void> {
+  private async processIncomingPeerEvents(content: Record<string, any>): Promise<void> {
+    let events: EoEventInput[];
+
+    if (content.encrypted) {
+      // Encrypted payload — need snapshot key to decrypt
+      const snapshotKey = this.getSnapshotKey();
+      if (!snapshotKey) {
+        console.warn('[EO-DB] Cannot decrypt peer batch — missing snapshot key', content.key_id);
+        return;
+      }
+      try {
+        const plaintext = await decryptPeerPayload(snapshotKey.key, content);
+        events = unpack(plaintext) as EoEventInput[];
+      } catch (e) {
+        console.warn('[EO-DB] Peer batch decryption failed:', e);
+        return;
+      }
+    } else {
+      events = content.events ?? content;
+    }
+
     for (const event of events) {
       await processEvent(this.store, event, this.onEvent);
     }

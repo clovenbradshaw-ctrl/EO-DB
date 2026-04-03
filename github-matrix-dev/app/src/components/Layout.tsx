@@ -598,9 +598,11 @@ export function Layout({ session, onLogout }: LayoutProps) {
       snapshotInFlight = true;
       try {
         const promises: Promise<void>[] = [];
-        for (const [, cached] of spaceCacheRef.current) {
+        for (const [spaceName, cached] of spaceCacheRef.current) {
           if (cached.syncManager) {
-            promises.push(cached.syncManager.saveSnapshot().catch(() => {}));
+            promises.push(cached.syncManager.saveSnapshot().catch(e => {
+              console.warn('[EO-DB] Snapshot save failed for', spaceName, e);
+            }));
           }
         }
         await Promise.all(promises);
@@ -615,12 +617,25 @@ export function Layout({ session, onLogout }: LayoutProps) {
       }
     };
 
+    // Flush offline queues for all cached spaces when browser comes online
+    const handleOnline = () => {
+      for (const [spaceName, cached] of spaceCacheRef.current) {
+        if (cached.syncManager) {
+          cached.syncManager.retryOfflineQueue().catch(e =>
+            console.warn('[EO-DB] Online flush failed for', spaceName, e)
+          );
+        }
+      }
+    };
+
     // beforeunload can't await — fire-and-forget is the best we can do there.
     // visibilitychange ('hidden') is the reliable path for saving snapshots.
     document.addEventListener('visibilitychange', handleVisibilityChange);
     window.addEventListener('beforeunload', () => { saveAllSnapshots(); });
+    window.addEventListener('online', handleOnline);
     return () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('online', handleOnline);
     };
   }, []);
 

@@ -55,7 +55,10 @@ export async function findLatestSnapshot(
   roomId: string,
 ): Promise<{ mxc: string; seq: number } | null> {
   const room = client.getRoom(roomId);
-  if (!room) return null;
+  if (!room) {
+    console.warn('[EO-DB] findLatestSnapshot: room not in client room list:', roomId);
+    return null;
+  }
 
   // Fast path: read directly from room state.
   const stateEvent = room.currentState.getStateEvents(EO_SNAPSHOT_STATE_TYPE, '');
@@ -205,20 +208,37 @@ export async function uploadDeltaSnapshot(
 
 /**
  * Download and decode a delta snapshot from its mxc URI.
+ *
+ * Retries with exponential backoff (1s, 2s, 4s) so a single transient
+ * network failure doesn't permanently break hydration.
  */
 export async function downloadDeltaSnapshot(
   client: MatrixClient,
   mxcUrl: string,
+  maxRetries = 3,
 ): Promise<DeltaSnapshot> {
   const httpUrl = client.mxcUrlToHttp(mxcUrl);
   if (!httpUrl) throw new Error('Cannot resolve mxc URL');
 
-  const response = await fetch(httpUrl);
-  if (!response.ok) {
-    throw new Error(`Snapshot download failed: ${response.status} ${response.statusText} (${httpUrl})`);
+  let lastError: Error | null = null;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const response = await fetch(httpUrl);
+      if (!response.ok) {
+        throw new Error(`Snapshot download failed: ${response.status} ${response.statusText}`);
+      }
+      const buffer = await response.arrayBuffer();
+      return unpack(new Uint8Array(buffer)) as DeltaSnapshot;
+    } catch (e) {
+      lastError = e as Error;
+      if (attempt < maxRetries) {
+        const delay = 1000 * Math.pow(2, attempt);
+        console.warn(`[EO-DB] Snapshot download attempt ${attempt + 1} failed, retrying in ${delay}ms:`, e);
+        await new Promise(r => setTimeout(r, delay));
+      }
+    }
   }
-  const buffer = await response.arrayBuffer();
-  return unpack(new Uint8Array(buffer)) as DeltaSnapshot;
+  throw lastError!;
 }
 
 /**
@@ -243,8 +263,15 @@ export async function restoreFromDeltaChain(
   const deltas: DeltaSnapshot[] = [];
   const seen = new Set<string>(); // avoid re-downloading the same mxc
 
-  // Fetch the head delta first
-  const head = await downloadDeltaSnapshot(client, latestMxc);
+  // Fetch the head delta first. If this fails after retries, fall back
+  // to timeline replay rather than crashing the entire hydration chain.
+  let head: DeltaSnapshot;
+  try {
+    head = await downloadDeltaSnapshot(client, latestMxc);
+  } catch (e) {
+    console.warn('[EO-DB] Head snapshot download failed — falling back to timeline replay:', e);
+    return localSeq;
+  }
   seen.add(latestMxc);
 
   if (head.to_seq <= localSeq) return localSeq; // nothing to apply

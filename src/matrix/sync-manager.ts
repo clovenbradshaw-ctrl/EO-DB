@@ -22,6 +22,8 @@ import { processEvent } from '../db/fold.js';
 import { eventHash } from '../db/hash.js';
 import type { Feed } from '../db/feed.js';
 import type { IMatrixClient, IMatrixEvent, RoomDataSnapshot, ImportMeta } from './types.js';
+import type { LocalKeyring, KeyringEntry } from '../db/crypto-types.js';
+import { getKeyById } from '../crypto/segment-keys.js';
 import { EO_EVENT_TYPE, matrixEventToEo, sendEoEvent, getDataRoom } from './event-bridge.js';
 import { readLogSince } from '../db/log.js';
 import {
@@ -96,6 +98,7 @@ export class SyncManager {
   private roomId: string;
   private db: EoDb;
   private feed?: Feed;
+  private keyring: LocalKeyring;
 
   /** Additional room IDs to listen to (restricted, governance). */
   private additionalRoomIds: string[] = [];
@@ -111,11 +114,29 @@ export class SyncManager {
     roomId: string,
     db: EoDb,
     feed?: Feed,
+    keyring?: LocalKeyring,
   ) {
     this.client = client;
     this.roomId = roomId;
     this.db = db;
     this.feed = feed;
+    this.keyring = keyring || { keys: new Map() };
+  }
+
+  /** Update the keyring (e.g., after key heal or rotation). */
+  setKeyring(keyring: LocalKeyring): void {
+    this.keyring = keyring;
+  }
+
+  /** Resolve the snapshot-scope key from the keyring for blob encryption. */
+  private getSnapshotKey(): { key: CryptoKey; key_id: string } | undefined {
+    // Look for a key with scope '_snapshot' (the reserved snapshot key scope)
+    for (const [keyId, entry] of this.keyring.keys) {
+      if (entry.scope === '_snapshot') {
+        return { key: entry.key, key_id: keyId };
+      }
+    }
+    return undefined;
   }
 
   /**
@@ -198,7 +219,7 @@ export class SyncManager {
     const snap = await findLatestSnapshot(this.client, this.roomId);
     if (!snap) return;
     const restoredSeq = await restoreFromDeltaChain(
-      this.client, this.db, snap.mxc, this.feed,
+      this.client, this.db, snap.mxc, this.feed, this.keyring,
     );
     await setMeta(this.db, 'meta:snapshot_seq', restoredSeq);
   }
@@ -231,9 +252,10 @@ export class SyncManager {
     const lastSnapshotSeq = (await getMeta<number>(this.db, 'meta:snapshot_seq')) || 0;
     if (seq === 0 || seq === lastSnapshotSeq) return;
 
+    const snapshotKey = this.getSnapshotKey();
     const delta = await createDeltaSnapshot(this.db, this.client.getUserId()!);
-    const mxc = await uploadDeltaSnapshot(this.client, this.roomId, delta);
-    await setSnapshotStateEvent(this.client, this.roomId, mxc, seq);
+    const mxc = await uploadDeltaSnapshot(this.client, this.roomId, delta, snapshotKey);
+    await setSnapshotStateEvent(this.client, this.roomId, mxc, seq, snapshotKey?.key_id);
     await setMeta(this.db, 'meta:snapshot_seq', seq);
     await setMeta(this.db, 'meta:snapshot_mxc', mxc);
     const prevMxcs: string[] = (await getMeta<string[]>(this.db, 'meta:snapshot_prev_mxcs')) || [];
@@ -252,8 +274,9 @@ export class SyncManager {
       throw new Error('No new events since last snapshot');
     }
 
+    const snapshotKey = this.getSnapshotKey();
     const delta = await createDeltaSnapshot(this.db, this.client.getUserId()!);
-    const mxc = await uploadDeltaSnapshot(this.client, this.roomId, delta);
+    const mxc = await uploadDeltaSnapshot(this.client, this.roomId, delta, snapshotKey);
 
     // Record the mxc URI in a NUL event so the snapshot is discoverable from the log
     await this.processLocalEvent({
@@ -274,7 +297,7 @@ export class SyncManager {
     const prevMxcs: string[] = (await getMeta<string[]>(this.db, 'meta:snapshot_prev_mxcs')) || [];
     await setMeta(this.db, 'meta:snapshot_prev_mxcs', [mxc, ...prevMxcs].slice(0, 25));
 
-    await setSnapshotStateEvent(this.client, this.roomId, mxc, currentSeq);
+    await setSnapshotStateEvent(this.client, this.roomId, mxc, currentSeq, snapshotKey?.key_id);
 
     return { mxc, seq: currentSeq };
   }
@@ -327,7 +350,8 @@ export class SyncManager {
       // Link to previous snapshots in the chain
       snapshot.prev_mxcs = prevMxcs.slice(0, 25);
 
-      lastMxc = await uploadImportSnapshot(this.client, this.roomId, snapshot);
+      const snapshotKey = this.getSnapshotKey();
+      lastMxc = await uploadImportSnapshot(this.client, this.roomId, snapshot, snapshotKey);
 
       // Update chain for next chunk (or for future snapshots)
       prevMxcs = [lastMxc, ...prevMxcs].slice(0, 25);
@@ -451,7 +475,7 @@ export class SyncManager {
     }
 
     // Auto-snapshot to Matrix media every 500 log entries
-    await maybeCreateSnapshot(this.client, this.roomId, this.db, agent);
+    await maybeCreateSnapshot(this.client, this.roomId, this.db, agent, this.getSnapshotKey());
 
     return seq;
   }
