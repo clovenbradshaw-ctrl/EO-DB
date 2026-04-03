@@ -67,12 +67,19 @@ export class PeerSync {
       this.client.removeListener('toDeviceEvent' as any, this.toDeviceHandler);
     }
 
-    await this.announceToPeers();
-
+    // Attach listener BEFORE announcing — if announceToPeers() fails,
+    // we can still receive peer messages (they may hello us first).
     this.toDeviceHandler = (event: MatrixEvent) => {
       this.handleToDeviceEvent(event);
     };
     this.client.on('toDeviceEvent' as any, this.toDeviceHandler);
+
+    try {
+      await this.announceToPeers();
+    } catch (e) {
+      // Non-fatal — listener is active, peers can still reach us.
+      console.warn('[EO-DB] PeerSync announce failed:', e);
+    }
   }
 
   /**

@@ -201,18 +201,9 @@ export function registerSyncRoute(
                 }
               }
               if (!stillInRoom && coordinator) {
-                // Temporarily remove and re-add without this room
-                coordinator.userLeft(userId);
-                // Re-join any rooms this user is still in via other sockets
-                const remainingRooms = new Set<string>();
-                for (const cu of connectedUsers.values()) {
-                  if (cu.user_id === userId) {
-                    for (const r of cu.rooms) remainingRooms.add(r);
-                  }
-                }
-                for (const r of remainingRooms) {
-                  coordinator.userJoined(r, userId);
-                }
+                // Only remove from this specific room's pool — avoids
+                // unnecessary election churn in other rooms the user is still in.
+                coordinator.userLeftRoom(msg.room_id, userId);
               }
               socket.send(JSON.stringify({
                 type: 'room_left',

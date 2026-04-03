@@ -48,6 +48,8 @@ interface BindingRuntime {
   primary: string | null;
   /** The interval timer handle, or null if paused/no users. */
   timer: ReturnType<typeof setInterval> | null;
+  /** The initial delay timeout handle (cleared on timer restart/stop). */
+  initialTimeout: ReturnType<typeof setTimeout> | null;
   /** True while a sync cycle is in progress (prevents overlapping ticks). */
   syncing: boolean;
   /** ISO timestamp of last successful sync. */
@@ -153,6 +155,25 @@ export class RoomSyncCoordinator {
   }
 
   /**
+   * A user left a specific room. Remove them from pools for that room only.
+   * More efficient than userLeft() when the user is still in other rooms.
+   */
+  userLeftRoom(roomId: string, userId: string): void {
+    for (const rt of this.runtimes.values()) {
+      if (rt.binding.room_id !== roomId) continue;
+      if (!rt.pool.has(userId)) continue;
+      rt.pool.delete(userId);
+      if (rt.primary === userId) {
+        rt.primary = null;
+        this.elect(rt);
+      }
+      if (rt.pool.size === 0) {
+        this.clearTimer(rt);
+      }
+    }
+  }
+
+  /**
    * A user disconnected. Remove them from all pools.
    * If they were the primary, elect a replacement.
    */
@@ -230,6 +251,7 @@ export class RoomSyncCoordinator {
         pool: new Set(),
         primary: null,
         timer: null,
+        initialTimeout: null,
         syncing: false,
         lastSyncAt: null,
         lastError: null,
@@ -270,6 +292,10 @@ export class RoomSyncCoordinator {
   }
 
   private clearTimer(rt: BindingRuntime): void {
+    if (rt.initialTimeout) {
+      clearTimeout(rt.initialTimeout);
+      rt.initialTimeout = null;
+    }
     if (rt.timer) {
       clearInterval(rt.timer);
       rt.timer = null;
@@ -285,7 +311,8 @@ export class RoomSyncCoordinator {
     const intervalMs = rt.binding.sync_interval_sec * 1000;
 
     // Run first sync soon (5s delay to let connections settle)
-    const initialDelay = setTimeout(() => {
+    rt.initialTimeout = setTimeout(() => {
+      rt.initialTimeout = null;
       this.tick(rt);
     }, 5_000);
 
@@ -293,11 +320,6 @@ export class RoomSyncCoordinator {
     rt.timer = setInterval(() => {
       this.tick(rt);
     }, intervalMs);
-
-    // Store the initial timeout so we can clean it up
-    // (slight simplification: if clearTimer is called before initial fires,
-    //  the timeout still fires but tick() is guarded by `syncing` flag
-    //  and will check `enabled` + `primary`)
   }
 
   /** Execute one sync cycle for a binding. */

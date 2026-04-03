@@ -135,18 +135,21 @@ export class SyncManager {
     // replaying events already covered by the snapshot is harmless.
     await this.replayTimelineEvents();
 
-    // Listen for new room events in real-time (main + additional rooms)
+    // Flush unsynced events BEFORE attaching the live listener — if flush
+    // fails, no dangling listener is left behind for the caller to clean up.
+    await this.flushUnsyncedEvents();
+
+    // Listen for new room events in real-time (main + additional rooms).
+    // Attached last so a failure in any earlier step doesn't leak a listener.
     this.handleTimelineEvent = (event: MatrixEvent) => {
       if (this.destroyed) return;
       const eventRoomId = event.getRoomId();
-      if (eventRoomId !== this.roomId && !this.additionalRoomIds.includes(eventRoomId!)) return;
+      if (!eventRoomId) return; // guard null from getRoomId()
+      if (eventRoomId !== this.roomId && !this.additionalRoomIds.includes(eventRoomId)) return;
       if (event.getType() !== EO_EVENT_TYPE) return;
       this.processIncomingEvent(event);
     };
     this.client.on('Room.timeline' as any, this.handleTimelineEvent);
-
-    // Flush any unsynced local events
-    await this.flushUnsyncedEvents();
   }
 
   /**
@@ -395,33 +398,55 @@ export class SyncManager {
    */
   private async enqueueOfflineEvent(event: EoEventInput): Promise<void> {
     await queueMutex.run(async () => {
-      const queue: EoEventInput[] = (await this.store.get('meta:offline_queue')) || [];
-      queue.push(event);
+      const queue: Array<{ event: EoEventInput; attempts: number }> =
+        (await this.store.get('meta:offline_queue')) || [];
+      queue.push({ event, attempts: 0 });
       await this.store.put('meta:offline_queue', queue);
     });
   }
+
+  /** Max retry attempts before dropping a permanently-failing queued event. */
+  private static readonly MAX_QUEUE_ATTEMPTS = 5;
 
   /**
    * Flush queued offline events to the room.
    *
    * Tries every event independently — a failure on event #2 does NOT
    * prevent event #3 from being attempted. Successfully sent events are
-   * removed from the queue; failed ones stay for the next flush cycle.
+   * removed from the queue; failed ones stay for the next flush cycle
+   * up to MAX_QUEUE_ATTEMPTS, after which they are dropped.
+   *
+   * Backwards-compatible: legacy queue entries (raw EoEventInput without
+   * an `attempts` field) are auto-wrapped on read.
    *
    * The receiver deduplicates via content hash, so re-sending an event
    * that was already received (e.g., via peer sync) is harmless.
    */
   private async flushUnsyncedEvents(): Promise<void> {
     await queueMutex.run(async () => {
-      const queue: EoEventInput[] = (await this.store.get('meta:offline_queue')) || [];
-      if (queue.length === 0) return;
+      const raw: any[] = (await this.store.get('meta:offline_queue')) || [];
+      if (raw.length === 0) return;
 
-      const remaining: EoEventInput[] = [];
-      for (const event of queue) {
+      // Normalise legacy entries (plain EoEventInput) into { event, attempts }
+      const queue = raw.map((entry: any) =>
+        entry.event ? entry as { event: EoEventInput; attempts: number }
+                     : { event: entry as EoEventInput, attempts: 0 },
+      );
+
+      const remaining: Array<{ event: EoEventInput; attempts: number }> = [];
+      for (const entry of queue) {
         try {
-          await sendEoEvent(this.client, this.roomId, event);
+          await sendEoEvent(this.client, this.roomId, entry.event);
         } catch {
-          remaining.push(event);
+          const attempts = entry.attempts + 1;
+          if (attempts < SyncManager.MAX_QUEUE_ATTEMPTS) {
+            remaining.push({ event: entry.event, attempts });
+          } else {
+            console.warn(
+              '[EO-DB] Dropping queued event after', attempts, 'failed attempts:',
+              entry.event.client_event_id,
+            );
+          }
           // Don't break — try the rest. Individual event failures
           // (e.g., size limit) shouldn't block other events.
           // If we're fully offline, they'll all fail fast anyway.
