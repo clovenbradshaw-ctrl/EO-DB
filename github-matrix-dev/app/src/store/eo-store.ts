@@ -34,6 +34,9 @@ interface EoDbState {
   /** Process an event through the fold and sync to Matrix */
   dispatch: (event: EoEventInput) => Promise<number>;
 
+  /** Import a batch of events — fold locally, send as single Matrix message */
+  batchImport: (events: EoEventInput[], onProgress?: (current: number, total: number) => void) => Promise<number>;
+
   /** Read the Horizon for a target */
   horizon: (target: string, opts?: HorizonOpts) => Promise<HorizonResponse | HorizonResponse[] | null>;
 
@@ -103,6 +106,31 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     });
 
     return seq;
+  },
+
+  async batchImport(events: EoEventInput[], onProgress?: (current: number, total: number) => void) {
+    const { store, syncManager } = get();
+    if (!store) throw new Error('Store not initialized');
+
+    if (syncManager) {
+      const seq = await syncManager.processBatchImport(events, onProgress);
+      // Update store state with final seq
+      set((state) => ({ lastSeq: seq }));
+      return seq;
+    }
+
+    // Fallback: fold locally only
+    let lastSeq = 0;
+    for (let i = 0; i < events.length; i++) {
+      lastSeq = await processEvent(store, events[i], (fullEvent) => {
+        set((state) => ({
+          recentEvents: [...state.recentEvents.slice(-99), fullEvent],
+          lastSeq: fullEvent.seq,
+        }));
+      });
+      onProgress?.(i + 1, events.length);
+    }
+    return lastSeq;
   },
 
   async horizon(target: string, opts?: HorizonOpts) {

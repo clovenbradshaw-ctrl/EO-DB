@@ -23,7 +23,7 @@ import { processEvent } from '../db/fold.js';
 import { eventHash } from '../db/hash.js';
 import type { Feed } from '../db/feed.js';
 import type { IMatrixClient, IMatrixEvent, RoomDataSnapshot, ImportMeta } from './types.js';
-import { EO_EVENT_TYPE, matrixEventToEo, sendEoEvent, getDataRoom } from './event-bridge.js';
+import { EO_EVENT_TYPE, EO_IMPORT_TYPE, matrixEventToEo, sendEoEvent, sendEoBatchEvent, getDataRoom } from './event-bridge.js';
 import { readLogSince } from '../db/log.js';
 import {
   findLatestSnapshot,
@@ -197,7 +197,13 @@ export class SyncManager {
       if (this.destroyed) return;
       const eventRoomId = event.getRoomId();
       if (eventRoomId !== this.roomId && !this.additionalRoomIds.includes(eventRoomId!)) return;
-      if (event.getType() !== EO_EVENT_TYPE) return;
+      const eventType = event.getType();
+      if (eventType === EO_IMPORT_TYPE) {
+        // Batch import event — unpack and fold each sub-event
+        this.processIncomingBatchEvent(event);
+        return;
+      }
+      if (eventType !== EO_EVENT_TYPE) return;
       this.processIncomingEvent(event);
     };
     this.client.on('Room.timeline', this.handleTimelineEvent);
@@ -258,9 +264,14 @@ export class SyncManager {
     let replayed = 0;
     for (const event of events) {
       if (this.destroyed) return;
-      if (event.getType() !== EO_EVENT_TYPE) continue;
-      await this.processIncomingEvent(event);
-      replayed++;
+      const evType = event.getType();
+      if (evType === EO_IMPORT_TYPE) {
+        await this.processIncomingBatchEvent(event);
+        replayed++;
+      } else if (evType === EO_EVENT_TYPE) {
+        await this.processIncomingEvent(event);
+        replayed++;
+      }
     }
 
     if (replayed > 0) {
@@ -512,10 +523,91 @@ export class SyncManager {
       }
     }
 
-    // Auto-snapshot to Matrix media every 500 log entries
-    await maybeCreateSnapshot(this.client, this.roomId, this.db, agent, this.keyring);
+    // Auto-snapshot to Matrix media every 500 log entries (skip if rate-limited)
+    if (Date.now() >= this.rateLimitedUntil) {
+      await maybeCreateSnapshot(this.client, this.roomId, this.db, agent, this.keyring);
+    }
 
     return seq;
+  }
+
+  /**
+   * Import a batch of events — fold locally, send to Matrix as a single message.
+   *
+   * This avoids the 429 rate-limit storm that occurs when sending 50+ events
+   * individually. Events are folded one-by-one locally (for progress tracking)
+   * but sent to Matrix as a single batch event.
+   *
+   * @param events Array of event inputs (without client_event_id/agent/ts)
+   * @param onProgress Called after each event is folded locally
+   * @returns The final seq number
+   */
+  async processBatchImport(
+    events: Array<Omit<EoEventInput, 'client_event_id' | 'agent' | 'ts' | 'acquired_ts'>>,
+    onProgress?: (current: number, total: number) => void,
+  ): Promise<number> {
+    const agent = this.client.getUserId()!;
+    const preparedEvents: EoEventInput[] = [];
+    let lastSeq = 0;
+
+    // Fold each event locally for instant UI updates
+    for (let i = 0; i < events.length; i++) {
+      const event = events[i];
+      const ts = event.ts as string || new Date().toISOString();
+      const clientEventId = eventHash({
+        op: event.op,
+        target: event.target,
+        operand: event.operand,
+        agent,
+        ts,
+        acquired_ts: ts,
+      } as EoEventInput);
+
+      const localEvent: EoEventInput = {
+        ...event,
+        client_event_id: clientEventId,
+        agent,
+        ts,
+        acquired_ts: ts,
+      };
+
+      lastSeq = await processEvent(this.db, localEvent, this.feed);
+      preparedEvents.push(localEvent);
+      onProgress?.(i + 1, events.length);
+    }
+
+    // Send all events to Matrix as a single batch message
+    try {
+      if (Date.now() < this.rateLimitedUntil) {
+        throw new Error('rate-limited');
+      }
+      await sendEoBatchEvent(this.client, this.roomId, preparedEvents);
+      this.onSyncStatus?.('confirmed');
+    } catch (err) {
+      // Queue individual events for later flush
+      const retryDelay = SyncManager.getRetryDelay(err);
+      if (retryDelay !== null) {
+        this.rateLimitedUntil = Date.now() + retryDelay;
+        this.onSyncStatus?.('rate-limited');
+      } else {
+        this.onSyncStatus?.('queued');
+      }
+      for (const event of preparedEvents) {
+        await this.enqueueOfflineEvent(event);
+      }
+      // Schedule flush
+      if (!this.destroyed) {
+        const delay = retryDelay ?? 2000;
+        setTimeout(() => { if (!this.destroyed) this.flushUnsyncedEvents(); }, delay);
+      }
+    }
+
+    // Snapshot after batch import
+    if (Date.now() >= this.rateLimitedUntil) {
+      await maybeCreateSnapshot(this.client, this.roomId, this.db, agent, this.keyring);
+    }
+
+    return lastSeq;
   }
 
   /**
@@ -537,6 +629,40 @@ export class SyncManager {
   }
 
   /**
+   * Process an incoming batch import event — unpack the events array and fold each one.
+   */
+  private async processIncomingBatchEvent(matrixEvent: IMatrixEvent): Promise<void> {
+    const content = matrixEvent.getContent();
+    const sender = matrixEvent.getSender()!;
+    const batchTs = new Date(matrixEvent.getTs()).toISOString();
+
+    if (!Array.isArray(content.events)) return;
+
+    for (const sub of content.events) {
+      if (this.destroyed) return;
+      const eoEvent: EoEventInput = {
+        op: sub.op,
+        target: sub.target,
+        operand: sub.operand,
+        agent: sender,
+        ts: sub.ts || batchTs,
+        acquired_ts: batchTs,
+        client_event_id: sub.client_event_id,
+        meta: sub.meta,
+      };
+
+      if (eoEvent.target.startsWith('space')) continue;
+
+      if (eoEvent.client_event_id) {
+        const existing = await getMeta(this.db, `idem:${eoEvent.client_event_id}`);
+        if (existing != null) continue;
+      }
+
+      await processEvent(this.db, eoEvent, this.feed);
+    }
+  }
+
+  /**
    * Append an event to the offline queue atomically.
    * The mutex ensures two concurrent send-failures don't race on the queue.
    */
@@ -552,14 +678,29 @@ export class SyncManager {
   /** Max retry attempts before dropping a permanently-failing queued event. */
   private static readonly MAX_QUEUE_ATTEMPTS = 5;
 
-  /** Extract retry delay from a Matrix 429 response, or null if not rate-limited. */
+  /**
+   * Extract retry delay from a Matrix 429 response, or null if not rate-limited.
+   *
+   * The matrix-js-sdk MatrixError shape varies across bundled versions —
+   * check multiple paths to be resilient against minification/wrapping.
+   */
   private static getRetryDelay(error: unknown): number | null {
+    if (!error) return null;
+    const e = error as any;
+
+    // Check all possible indicators of a 429 rate-limit
     const isRateLimit =
-      error instanceof Error &&
-      (('errcode' in error && (error as any).errcode === 'M_LIMIT_EXCEEDED') ||
-       ('httpStatus' in error && (error as any).httpStatus === 429));
+      e.httpStatus === 429 ||
+      e.statusCode === 429 ||
+      e.errcode === 'M_LIMIT_EXCEEDED' ||
+      e.data?.errcode === 'M_LIMIT_EXCEEDED' ||
+      (e.message && /429|too many|rate.?limit|M_LIMIT_EXCEEDED/i.test(String(e.message))) ||
+      (e.name && /MatrixError/i.test(String(e.name)) && /429|limit/i.test(String(e.message)));
+
     if (!isRateLimit) return null;
-    const retryAfter = (error as any)?.data?.retry_after_ms;
+
+    // Prefer server-provided retry_after_ms
+    const retryAfter = e.data?.retry_after_ms ?? e.retry_after_ms;
     return typeof retryAfter === 'number' && retryAfter > 0
       ? retryAfter + 100
       : 2000;
@@ -593,8 +734,13 @@ export class SyncManager {
       const remaining: Array<{ event: EoEventInput; attempts: number }> = [];
       let flushedCount = 0;
       for (let i = 0; i < queue.length; i++) {
+        if (this.destroyed) break;
         const entry = queue[i];
         try {
+          // Small delay between sends to avoid triggering rate limits
+          if (flushedCount > 0) {
+            await new Promise(r => setTimeout(r, 100));
+          }
           await sendEoEvent(this.client, this.roomId, entry.event);
           flushedCount++;
         } catch (err) {

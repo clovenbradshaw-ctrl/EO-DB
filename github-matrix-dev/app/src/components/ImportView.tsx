@@ -192,6 +192,7 @@ interface ImportViewProps {
 export function ImportView({ onImportComplete }: ImportViewProps) {
   const { theme: t } = useTheme();
   const dispatch = useEoStore((s) => s.dispatch);
+  const batchImport = useEoStore((s) => s.batchImport);
 
   const [status, setStatus] = useState<ImportStatus>('idle');
   const [rows, setRows] = useState<ParsedRow[]>([]);
@@ -253,45 +254,39 @@ export function ImportView({ onImportComplete }: ImportViewProps) {
     setStatus('importing');
     setProgress({ current: 0, total: rows.length, errors: 0 });
 
-    let errors = 0;
-    for (let i = 0; i < rows.length; i++) {
-      const row = rows[i];
-      try {
-        const target = row._generic
-          ? `${targetPrefix}.rec_${crypto.randomUUID().slice(0, 8)}`
-          : row.target!;
-        await dispatch({
-          op: row.op as ExternalOperator,
-          target,
-          operand: row.operand ?? {},
-          agent: 'import',
-          ts: row.ts || new Date().toISOString(),
-          acquired_ts: new Date().toISOString(),
-          client_event_id: row.client_event_id,
-          meta: row.meta,
-        });
-      } catch (e: any) {
-        errors++;
-        if (haltOnError) {
-          setStatus('error');
-          setMessage({ type: 'error', text: `Error at row ${i + 1}: ${e.message}` });
-          setProgress(p => ({ ...p, current: i + 1, errors }));
-          return;
-        }
-      }
-      setProgress({ current: i + 1, total: rows.length, errors });
+    // Prepare all events upfront
+    const events = rows.map((row) => ({
+      op: row.op as ExternalOperator,
+      target: row._generic
+        ? `${targetPrefix}.rec_${crypto.randomUUID().slice(0, 8)}`
+        : row.target!,
+      operand: row.operand ?? {},
+      agent: 'import',
+      ts: row.ts || new Date().toISOString(),
+      acquired_ts: new Date().toISOString(),
+      client_event_id: row.client_event_id,
+      meta: row.meta,
+    }));
+
+    try {
+      // Batch import: fold locally for progress, send as single Matrix message
+      await batchImport(events, (current, total) => {
+        setProgress({ current, total, errors: 0 });
+      });
+
+      setStatus('done');
+      setMessage({
+        type: 'success',
+        text: `Successfully imported ${rows.length} event${rows.length !== 1 ? 's' : ''}`,
+      });
+    } catch (e: any) {
+      setStatus('error');
+      setMessage({ type: 'error', text: `Import failed: ${e.message}` });
+      return;
     }
 
-    setStatus('done');
-    setMessage({
-      type: errors > 0 ? 'error' : 'success',
-      text: errors > 0
-        ? `Imported ${rows.length - errors} of ${rows.length} events (${errors} errors)`
-        : `Successfully imported ${rows.length} event${rows.length !== 1 ? 's' : ''}`,
-    });
-
     // Auto-navigate to the imported scope so the user sees their records immediately
-    if (errors === 0 && onImportComplete) {
+    if (onImportComplete) {
       if (isGeneric && targetPrefix.trim()) {
         // Generic imports: navigate to the target prefix scope (e.g. "import.my_data")
         onImportComplete(targetPrefix.trim());

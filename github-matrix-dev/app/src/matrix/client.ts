@@ -111,15 +111,9 @@ export function createMatrixClient(session: MatrixSession): sdk.MatrixClient {
     accessToken: session.accessToken,
   });
 
-  // EO-DB does not use MatrixRTC (VoIP/call features). The SDK's internal
-  // MatrixRTCSessionManager logs noisy warnings ("Got room state event for
-  // unknown room") during sync for rooms not yet in the client's room list.
-  // Stop it immediately to silence those warnings.
-  try {
-    client.matrixRTC?.stop();
-  } catch {
-    // Older SDK versions may not expose matrixRTC — safe to ignore.
-  }
+  // NOTE: MatrixRTC (VoIP/calls) is stopped *after* startClient() completes
+  // in Layout.tsx — stopping here is ineffective because startClient()
+  // re-registers the MatrixRTCSessionManager listeners during sync.
 
   return client;
 }
