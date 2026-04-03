@@ -3,8 +3,11 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
     <meta http-equiv="Content-Security-Policy"
-          content="default-src 'self'; connect-src 'self' https: wss:; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; worker-src 'self';" />
+          content="default-src 'self'; connect-src 'self' https: wss:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; worker-src 'self';" />
     <title>EO///DB</title>
     <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
     <link rel="apple-touch-icon" href="./pwa-192.png" />
@@ -38,5 +41,12 @@
   </head>
   <body>
     <div id="root"></div>
+    <script>
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.getRegistrations().then(function(registrations) {
+          registrations.forEach(function(r) { r.unregister(); });
+        });
+      }
+    </script>
   </body>
 </html>
