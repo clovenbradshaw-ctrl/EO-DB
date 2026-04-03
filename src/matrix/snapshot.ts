@@ -14,9 +14,9 @@ import { getCurrentSeq, encode, decode } from '../db/level.js';
 import { readLogSince } from '../db/log.js';
 import { processEvent } from '../db/fold.js';
 import type { Feed } from '../db/feed.js';
-import type { IMatrixClient } from './types.js';
+import type { IMatrixClient, ImportMeta } from './types.js';
 import type { DeltaSnapshot } from './types.js';
-import { EO_SNAPSHOT_TYPE, EO_SNAPSHOT_STATE_TYPE } from './event-bridge.js';
+import { EO_SNAPSHOT_TYPE, EO_SNAPSHOT_STATE_TYPE, EO_IMPORT_TYPE } from './event-bridge.js';
 
 /** Maximum number of previous snapshot URIs carried in each snapshot. */
 const MAX_PREV_MXCS = 25;
@@ -86,7 +86,8 @@ export async function findLatestSnapshot(
   let latest: { mxc: string; seq: number } | null = null;
 
   for (const event of timeline.getEvents()) {
-    if (event.getType() === EO_SNAPSHOT_TYPE) {
+    const evType = event.getType();
+    if (evType === EO_SNAPSHOT_TYPE || evType === EO_IMPORT_TYPE) {
       const content = event.getContent();
       if (!latest || content.seq > latest.seq) {
         latest = { mxc: content.mxc, seq: content.seq };
@@ -286,4 +287,76 @@ export async function restoreFromDeltaChain(
   }
 
   return lastAppliedSeq;
+}
+
+// ─── Import Snapshots (Grounded Imports) ──────────────────────────────────
+
+/** Maximum events per grounded import chunk to bound memory. */
+export const IMPORT_CHUNK_SIZE = 10_000;
+
+/**
+ * Create an import snapshot from a pre-collected array of folded events.
+ *
+ * Unlike `createDeltaSnapshot` (which reads from the log), this accepts
+ * events directly — the caller has already folded them and knows the
+ * seq range.
+ */
+export function createImportSnapshot(
+  events: import('../db/types.js').EoEvent[],
+  fromSeq: number,
+  toSeq: number,
+  createdBy: string,
+  importMeta?: ImportMeta,
+): DeltaSnapshot {
+  const prevMxcs: string[] = []; // Caller fills in via linkImportToPrevChain
+  return {
+    version: 2,
+    type: 'import',
+    from_seq: fromSeq,
+    to_seq: toSeq,
+    prev_mxcs: prevMxcs,
+    ts: new Date().toISOString(),
+    created_by: createdBy,
+    events,
+    import_meta: importMeta,
+  };
+}
+
+/**
+ * Upload a grounded import snapshot to Matrix media and post a single
+ * lightweight timeline event. Also updates snapshot room state so the
+ * import is woven into the hydration chain.
+ *
+ * Returns the mxc URI of the uploaded binary.
+ */
+export async function uploadImportSnapshot(
+  client: IMatrixClient,
+  roomId: string,
+  snapshot: DeltaSnapshot,
+): Promise<string> {
+  const binary = pack(snapshot);
+
+  const uploadResult = await client.uploadContent(binary, {
+    name: `eo-import-${snapshot.from_seq}-${snapshot.to_seq}.bin`,
+    type: 'application/octet-stream',
+  });
+
+  const mxcUrl = uploadResult.content_uri;
+
+  // Post one lightweight timeline event (the only Matrix "post" for this import)
+  await client.sendEvent(roomId, EO_IMPORT_TYPE, {
+    mxc: mxcUrl,
+    seq: snapshot.to_seq,
+    ts: snapshot.ts,
+    size_bytes: binary.byteLength,
+    version: snapshot.version,
+    type: 'import',
+    event_count: snapshot.events.length,
+    import_meta: snapshot.import_meta,
+  });
+
+  // Update room state so hydration chain includes this import
+  await setSnapshotStateEvent(client, roomId, mxcUrl, snapshot.to_seq);
+
+  return mxcUrl;
 }

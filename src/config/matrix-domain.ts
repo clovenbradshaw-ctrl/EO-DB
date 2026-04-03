@@ -61,6 +61,8 @@ export function eoEventTypes(prefix?: string) {
     snapshot: `${p}.snapshot`,
     /** Room state event: stores the latest snapshot URI for fast hydration. */
     snapshotState: `${p}.snapshot_state`,
+    /** Timeline event for grounded imports (batched events uploaded as binary). */
+    import: `${p}.import`,
   } as const;
 }
 
