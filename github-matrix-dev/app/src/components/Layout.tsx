@@ -593,16 +593,20 @@ export function Layout({ session, onLogout }: LayoutProps) {
   useEffect(() => {
     let snapshotInFlight = false;
 
-    const saveAllSnapshots = () => {
+    const saveAllSnapshots = async () => {
       if (snapshotInFlight) return;
       snapshotInFlight = true;
-      const promises: Promise<void>[] = [];
-      for (const [, cached] of spaceCacheRef.current) {
-        if (cached.syncManager) {
-          promises.push(cached.syncManager.saveSnapshot().catch(() => {}));
+      try {
+        const promises: Promise<void>[] = [];
+        for (const [, cached] of spaceCacheRef.current) {
+          if (cached.syncManager) {
+            promises.push(cached.syncManager.saveSnapshot().catch(() => {}));
+          }
         }
+        await Promise.all(promises);
+      } finally {
+        snapshotInFlight = false;
       }
-      Promise.all(promises).finally(() => { snapshotInFlight = false; });
     };
 
     const handleVisibilityChange = () => {
@@ -611,11 +615,12 @@ export function Layout({ session, onLogout }: LayoutProps) {
       }
     };
 
+    // beforeunload can't await — fire-and-forget is the best we can do there.
+    // visibilitychange ('hidden') is the reliable path for saving snapshots.
     document.addEventListener('visibilitychange', handleVisibilityChange);
-    window.addEventListener('beforeunload', saveAllSnapshots);
+    window.addEventListener('beforeunload', () => { saveAllSnapshots(); });
     return () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
-      window.removeEventListener('beforeunload', saveAllSnapshots);
     };
   }, []);
 

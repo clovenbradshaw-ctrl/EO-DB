@@ -259,11 +259,15 @@ export async function restoreFromDeltaChain(
 
     if (toFetch.length === 0) break; // no more links in the chain
 
-    // Batch-fetch all prev_mxcs in parallel
+    // Batch-fetch all prev_mxcs in parallel — use allSettled so a single
+    // failed download doesn't crash the entire hydration chain.
     for (const mxc of toFetch) seen.add(mxc);
-    const batch = await Promise.all(
+    const results = await Promise.allSettled(
       toFetch.map((mxc) => downloadDeltaSnapshot(client, mxc)),
     );
+    const batch = results
+      .filter((r): r is PromiseFulfilledResult<DeltaSnapshot> => r.status === 'fulfilled')
+      .map(r => r.value);
 
     // Insert in seq order (oldest first)
     for (const delta of batch) {
