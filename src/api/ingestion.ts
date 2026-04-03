@@ -22,6 +22,7 @@ import type { FastifyInstance } from 'fastify';
 import type { EoDb } from '../db/level.js';
 import type { Feed } from '../db/feed.js';
 import type { AuthenticatedRequest } from '../auth/matrix.js';
+import type { SyncManager } from '../matrix/sync-manager.js';
 import {
   storeApiKey,
   getApiKey,
@@ -37,8 +38,9 @@ import {
   updateSync,
   type SyncCustomization,
 } from '../ingestion/airtable-sync.js';
+import { createEventSink } from '../ingestion/event-sink.js';
 
-export function registerIngestionRoutes(app: FastifyInstance, db: EoDb, feed: Feed): void {
+export function registerIngestionRoutes(app: FastifyInstance, db: EoDb, feed: Feed, syncManager?: SyncManager): void {
 
   // ── API Key Management ──────────────────────────────────────────────────
 
@@ -138,13 +140,16 @@ export function registerIngestionRoutes(app: FastifyInstance, db: EoDb, feed: Fe
 
     try {
       const client = new AirtableClient(keyEntry.api_key);
+      const sink = createEventSink(db, feed, syncManager, { source: 'airtable', label });
       const result = await hydrationSync(db, feed, client, agent, {
         baseIds,
         tableIds: body.table_ids,
         customization: body.customization,
+        sink,
       });
+      const grounded = await sink.flush();
       await touchApiKey(db, label);
-      return reply.send(result);
+      return reply.send({ ...result, grounded });
     } catch (e: any) {
       return reply.code(502).send({ error: `Airtable sync error: ${e.message}` });
     }
@@ -177,13 +182,16 @@ export function registerIngestionRoutes(app: FastifyInstance, db: EoDb, feed: Fe
 
     try {
       const client = new AirtableClient(keyEntry.api_key);
+      const sink = createEventSink(db, feed, syncManager, { source: 'airtable', label });
       const result = await updateSync(db, feed, client, agent, {
         baseIds,
         tableIds: body.table_ids,
         customization: body.customization,
+        sink,
       });
+      const grounded = await sink.flush();
       await touchApiKey(db, label);
-      return reply.send(result);
+      return reply.send({ ...result, grounded });
     } catch (e: any) {
       return reply.code(502).send({ error: `Airtable sync error: ${e.message}` });
     }

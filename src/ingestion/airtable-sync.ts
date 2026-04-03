@@ -25,6 +25,7 @@ import { processEvent } from '../db/fold.js';
 import { getState } from '../db/state.js';
 import type { Feed } from '../db/feed.js';
 import type { HydrationJob, TableProgress } from '../db/types.js';
+import type { EventSink } from './event-sink.js';
 import { randomUUID } from 'crypto';
 import {
   AirtableClient,
@@ -280,6 +281,19 @@ export async function recoverInterruptedJobs(db: EoDb): Promise<HydrationJob[]> 
   return interrupted;
 }
 
+// ─── Event emit helper ─────────────────────────────────────────────────────
+
+/** Emit an event through the sink if available, otherwise fold directly. */
+async function emitEvent(
+  db: EoDb,
+  feed: Feed,
+  event: import('../db/types.js').EoEventInput,
+  sink?: EventSink,
+): Promise<number> {
+  if (sink) return sink.emit(event);
+  return processEvent(db, event, feed);
+}
+
 // ─── Target naming ──────────────────────────────────────────────────────────
 
 /** Map an Airtable record to an EO target path. */
@@ -453,6 +467,7 @@ async function ingestRecord(
   exclusions: SyncExclusions = EMPTY_EXCLUSIONS,
   preserveExisting: boolean = true,
   displayField?: string,
+  sink?: EventSink,
 ): Promise<'ingested' | 'skipped_no_change' | 'skipped_duplicate'> {
   const target = recordTarget(baseId, tableId, record.id);
 
@@ -493,7 +508,7 @@ async function ingestRecord(
   const existing = await getState(db, target);
   if (!existing) {
     try {
-      await processEvent(db, {
+      await emitEvent(db, feed, {
         op: 'INS',
         target,
         operand: {
@@ -508,7 +523,7 @@ async function ingestRecord(
         ts: new Date().toISOString(),
         acquired_ts: new Date().toISOString(),
         client_event_id: `at-ins:${baseId}:${tableId}:${record.id}`,
-      }, feed);
+      }, sink);
     } catch (e: any) {
       // Idempotency or concurrent INS — safe to continue to DEF
       if (!e.message?.includes('already') && !e.message?.includes('already instantiated')) throw e;
@@ -517,7 +532,7 @@ async function ingestRecord(
 
   // 5. Ingest via DEF with only storable fields (no computed/Horizon noise)
   try {
-    await processEvent(db, {
+    await emitEvent(db, feed, {
       op: 'DEF',
       target,
       operand: {
@@ -533,7 +548,7 @@ async function ingestRecord(
       ts: new Date().toISOString(),
       acquired_ts: new Date().toISOString(),
       client_event_id: clientEventId,
-    }, feed);
+    }, sink);
 
     // 6. Set display name as a separate DEF — ontologically distinct from the data import.
     //    The name assignment is a user/system choice about how to present this record,
@@ -541,7 +556,7 @@ async function ingestRecord(
     if (displayField) {
       const nameVal = storableFields[displayField] ?? record.fields[displayField];
       if (nameVal != null) {
-        await processEvent(db, {
+        await emitEvent(db, feed, {
           op: 'DEF',
           target,
           operand: { name: String(nameVal) },
@@ -549,7 +564,7 @@ async function ingestRecord(
           ts: new Date().toISOString(),
           acquired_ts: new Date().toISOString(),
           client_event_id: `${clientEventId}:name`,
-        }, feed);
+        }, sink);
       }
     }
 
@@ -619,6 +634,9 @@ export async function hydrationSync(
     apiKeyLabel?: string;
     /** Resume an interrupted job instead of starting fresh. */
     resumeJobId?: string;
+    /** Event sink for grounded imports. When provided, events are batched into
+     *  a single Matrix upload instead of individual room messages. */
+    sink?: EventSink;
   },
 ): Promise<HydrationResult> {
   const start = Date.now();
@@ -663,7 +681,7 @@ export async function hydrationSync(
       const baseExists = await getState(db, baseT);
       if (!baseExists) {
         try {
-          await processEvent(db, {
+          await emitEvent(db, feed, {
             op: 'INS',
             target: baseT,
             operand: { _airtable: { type: 'base', base_id: base.id } },
@@ -671,11 +689,11 @@ export async function hydrationSync(
             ts: new Date().toISOString(),
             acquired_ts: new Date().toISOString(),
             client_event_id: `at-ins-base:${base.id}`,
-          }, feed);
+          }, opts?.sink);
         } catch { /* idempotency or concurrent INS */ }
       }
       try {
-        await processEvent(db, {
+        await emitEvent(db, feed, {
           op: 'DEF',
           target: baseT,
           operand: { name: base.name, _airtable: { type: 'base', base_id: base.id } },
@@ -683,7 +701,7 @@ export async function hydrationSync(
           ts: new Date().toISOString(),
           acquired_ts: new Date().toISOString(),
           client_event_id: `at-base:${base.id}`,
-        }, feed);
+        }, opts?.sink);
       } catch { /* idempotency */ }
 
       for (const table of base.tables) {
@@ -701,7 +719,7 @@ export async function hydrationSync(
         const tblExists = await getState(db, tblT);
         if (!tblExists) {
           try {
-            await processEvent(db, {
+            await emitEvent(db, feed, {
               op: 'INS',
               target: tblT,
               operand: { _airtable: { type: 'table', base_id: base.id, table_id: table.id } },
@@ -709,11 +727,11 @@ export async function hydrationSync(
               ts: new Date().toISOString(),
               acquired_ts: new Date().toISOString(),
               client_event_id: `at-ins-table:${base.id}:${table.id}`,
-            }, feed);
+            }, opts?.sink);
           } catch { /* idempotency or concurrent INS */ }
         }
         try {
-          await processEvent(db, {
+          await emitEvent(db, feed, {
             op: 'DEF',
             target: tblT,
             operand: {
@@ -727,13 +745,13 @@ export async function hydrationSync(
             ts: new Date().toISOString(),
             acquired_ts: new Date().toISOString(),
             client_event_id: `at-table:${base.id}:${table.id}`,
-          }, feed);
+          }, opts?.sink);
         } catch { /* idempotency */ }
 
         // Create per-field schema entities under _schema container
         const schemaTarget = `${tblT}._schema`;
         try {
-          await processEvent(db, {
+          await emitEvent(db, feed, {
             op: 'INS',
             target: schemaTarget,
             operand: { _airtable: { type: 'schema', base_id: base.id, table_id: table.id } },
@@ -741,13 +759,13 @@ export async function hydrationSync(
             ts: new Date().toISOString(),
             acquired_ts: new Date().toISOString(),
             client_event_id: `at-ins-schema:${base.id}:${table.id}`,
-          }, feed);
+          }, opts?.sink);
         } catch { /* idempotency */ }
 
         for (const field of table.fields) {
           const fieldTarget = `${schemaTarget}.${field.id}`;
           try {
-            await processEvent(db, {
+            await emitEvent(db, feed, {
               op: 'INS',
               target: fieldTarget,
               operand: { _airtable: { type: 'field', field_id: field.id, table_id: table.id } },
@@ -755,10 +773,10 @@ export async function hydrationSync(
               ts: new Date().toISOString(),
               acquired_ts: new Date().toISOString(),
               client_event_id: `at-ins-field:${base.id}:${table.id}:${field.id}`,
-            }, feed);
+            }, opts?.sink);
           } catch { /* idempotency */ }
           try {
-            await processEvent(db, {
+            await emitEvent(db, feed, {
               op: 'DEF',
               target: fieldTarget,
               operand: {
@@ -770,7 +788,7 @@ export async function hydrationSync(
               ts: new Date().toISOString(),
               acquired_ts: new Date().toISOString(),
               client_event_id: `at-field:${base.id}:${table.id}:${field.id}`,
-            }, feed);
+            }, opts?.sink);
           } catch { /* idempotency */ }
         }
 
@@ -785,7 +803,7 @@ export async function hydrationSync(
 
         // Sync all records in this table
         try {
-          const result = await syncTable(db, feed, client, base.id, table.id, table.name, agent, null, exclusions, preserveExisting);
+          const result = await syncTable(db, feed, client, base.id, table.id, table.name, agent, null, exclusions, preserveExisting, opts?.sink);
           syncResults.push(result);
 
           // Update job progress
@@ -858,6 +876,8 @@ export async function updateSync(
     tableIds?: string[];
     onTableComplete?: (result: SyncResult) => void;
     customization?: SyncCustomization;
+    /** Event sink for grounded imports. */
+    sink?: EventSink;
   },
 ): Promise<UpdateSyncResult> {
   const start = Date.now();
@@ -894,7 +914,7 @@ export async function updateSync(
 
       try {
         const exclusions = fieldExclusions?.[table.id] ?? EMPTY_EXCLUSIONS;
-        const result = await syncTable(db, feed, client, base.id, table.id, table.name, agent, cursor, exclusions, preserveExisting);
+        const result = await syncTable(db, feed, client, base.id, table.id, table.name, agent, cursor, exclusions, preserveExisting, opts?.sink);
         syncResults.push(result);
         opts?.onTableComplete?.(result);
       } finally {
@@ -929,6 +949,7 @@ async function syncTable(
   cursorSince: string | null,
   exclusions: SyncExclusions = EMPTY_EXCLUSIONS,
   preserveExisting: boolean = true,
+  sink?: EventSink,
 ): Promise<SyncResult> {
   let fetched = 0;
   let ingested = 0;
@@ -970,7 +991,7 @@ async function syncTable(
 
     for (const record of page) {
       fetched++;
-      const result = await ingestRecord(db, feed, baseId, tableId, record, agent, fieldMeta, exclusions, preserveExisting, displayField);
+      const result = await ingestRecord(db, feed, baseId, tableId, record, agent, fieldMeta, exclusions, preserveExisting, displayField, sink);
       switch (result) {
         case 'ingested': ingested++; break;
         case 'skipped_no_change': skippedNoChange++; break;

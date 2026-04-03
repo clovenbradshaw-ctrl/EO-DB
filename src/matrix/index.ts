@@ -22,6 +22,7 @@ export type {
   SpaceEntry,
   SpaceRooms,
   DeltaSnapshot,
+  ImportMeta,
   RoomDataSnapshot,
 } from './types.js';
 
@@ -36,6 +37,7 @@ export {
   EO_EVENT_TYPE,
   EO_SNAPSHOT_TYPE,
   EO_SNAPSHOT_STATE_TYPE,
+  EO_IMPORT_TYPE,
   EO_SPACE_CONFIG_TYPE,
   EO_SCHEMA_MANIFEST_TYPE,
   EO_KEY_ANNOUNCE_TYPE,
@@ -48,6 +50,7 @@ export {
 // Snapshot
 export {
   SNAPSHOT_FREQUENCY,
+  IMPORT_CHUNK_SIZE,
   setSnapshotStateEvent,
   findLatestSnapshot,
   maybeCreateSnapshot,
@@ -55,6 +58,8 @@ export {
   uploadDeltaSnapshot,
   downloadDeltaSnapshot,
   restoreFromDeltaChain,
+  createImportSnapshot,
+  uploadImportSnapshot,
 } from './snapshot.js';
 
 // Sync Manager

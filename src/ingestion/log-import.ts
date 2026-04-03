@@ -13,6 +13,7 @@ import type { EoDb } from '../db/level.js';
 import type { Feed } from '../db/feed.js';
 import { processEvent } from '../db/fold.js';
 import type { ExternalOperator, EoEventInput } from '../db/types.js';
+import type { EventSink } from './event-sink.js';
 
 const EXTERNAL_OPS: Set<string> = new Set(['INS', 'DEF', 'CON', 'SEG', 'SYN', 'EVA']);
 
@@ -280,7 +281,7 @@ export async function processImport(
   feed: Feed,
   rows: ImportEventRow[],
   agent: string,
-  options?: { halt_on_error?: boolean },
+  options?: { halt_on_error?: boolean; sink?: EventSink },
 ): Promise<ImportResult> {
   const result: ImportResult = {
     total: rows.length,
@@ -317,7 +318,9 @@ export async function processImport(
     };
 
     try {
-      const seq = await processEvent(db, eventInput, feed);
+      const seq = options?.sink
+        ? await options.sink.emit(eventInput)
+        : await processEvent(db, eventInput, feed);
       result.sequences.push(seq);
       result.processed++;
     } catch (e: any) {

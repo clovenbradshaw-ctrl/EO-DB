@@ -21,8 +21,9 @@ import type { EoEventInput } from '../db/types.js';
 import { processEvent } from '../db/fold.js';
 import { eventHash } from '../db/hash.js';
 import type { Feed } from '../db/feed.js';
-import type { IMatrixClient, IMatrixEvent, RoomDataSnapshot } from './types.js';
+import type { IMatrixClient, IMatrixEvent, RoomDataSnapshot, ImportMeta } from './types.js';
 import { EO_EVENT_TYPE, matrixEventToEo, sendEoEvent, getDataRoom } from './event-bridge.js';
+import { readLogSince } from '../db/log.js';
 import {
   findLatestSnapshot,
   maybeCreateSnapshot,
@@ -30,6 +31,9 @@ import {
   uploadDeltaSnapshot,
   setSnapshotStateEvent,
   restoreFromDeltaChain,
+  createImportSnapshot,
+  uploadImportSnapshot,
+  IMPORT_CHUNK_SIZE,
 } from './snapshot.js';
 
 // ─── Async Mutex (inline to avoid circular deps) ──────────────────────────
@@ -273,6 +277,73 @@ export class SyncManager {
     await setSnapshotStateEvent(this.client, this.roomId, mxc, currentSeq);
 
     return { mxc, seq: currentSeq };
+  }
+
+  /**
+   * Process a grounded import batch.
+   *
+   * Called by GroundedSink after all events have been folded locally.
+   * Reads the new events from the log (between fromSeq and toSeq),
+   * packages them into an import snapshot, and uploads to Matrix media.
+   *
+   * The room receives exactly ONE timeline event referencing the binary.
+   * No individual sendEoEvent() calls — that's the entire point.
+   *
+   * For very large imports (>IMPORT_CHUNK_SIZE), splits into multiple
+   * snapshot chunks to bound memory pressure.
+   */
+  async processImportBatch(
+    fromSeq: number,
+    toSeq: number,
+    importMeta?: ImportMeta,
+  ): Promise<{ mxc: string; from_seq: number; to_seq: number; event_count: number }> {
+    const userId = this.client.getUserId()!;
+
+    // Read all new events from the log
+    const allEvents = await readLogSince(this.db, fromSeq);
+
+    if (allEvents.length === 0) {
+      throw new Error('No events to ground — import produced no new log entries');
+    }
+
+    // Get current prev_mxcs chain for snapshot linkage
+    let prevMxcs: string[] = (await getMeta<string[]>(this.db, 'meta:snapshot_prev_mxcs')) || [];
+    let lastMxc = '';
+
+    // Chunk if necessary to bound memory on very large imports
+    for (let offset = 0; offset < allEvents.length; offset += IMPORT_CHUNK_SIZE) {
+      const chunk = allEvents.slice(offset, offset + IMPORT_CHUNK_SIZE);
+      const chunkFromSeq = offset === 0 ? fromSeq : chunk[0].seq - 1;
+      const chunkToSeq = chunk[chunk.length - 1].seq;
+
+      const snapshot = createImportSnapshot(
+        chunk,
+        chunkFromSeq,
+        chunkToSeq,
+        userId,
+        importMeta,
+      );
+
+      // Link to previous snapshots in the chain
+      snapshot.prev_mxcs = prevMxcs.slice(0, 25);
+
+      lastMxc = await uploadImportSnapshot(this.client, this.roomId, snapshot);
+
+      // Update chain for next chunk (or for future snapshots)
+      prevMxcs = [lastMxc, ...prevMxcs].slice(0, 25);
+    }
+
+    // Update local snapshot metadata
+    await setMeta(this.db, 'meta:snapshot_seq', toSeq);
+    await setMeta(this.db, 'meta:snapshot_mxc', lastMxc);
+    await setMeta(this.db, 'meta:snapshot_prev_mxcs', prevMxcs);
+
+    return {
+      mxc: lastMxc,
+      from_seq: fromSeq,
+      to_seq: toSeq,
+      event_count: allEvents.length,
+    };
   }
 
   /**
