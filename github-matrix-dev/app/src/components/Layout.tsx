@@ -535,27 +535,14 @@ export function Layout({ session, onLogout }: LayoutProps) {
         if (!mounted) return;
         await init(existing.store);
 
-        // Always create a fresh SyncManager (the old one was destroyed on space switch)
-        if (matrixReady && matrixClientRef.current && spaceRoomId) {
-          try {
-            const freshSync = new SyncManager(
-              matrixClientRef.current, spaceRoomId, existing.store, onFoldEvent,
-            );
-            freshSync.onSyncStatus = onSyncStatus;
-            await freshSync.initialize();
-            if (!mounted) return;
-            existing.syncManager = freshSync;
-            useEoStore.getState().setSyncManager(freshSync);
-          } catch (e) {
-            console.warn('[EO-DB] SyncManager init failed for cached space', selectedSpace, e);
-          }
-        }
+        // Matrix sync disabled — events fold locally, Filen handles sync
 
         // Restart Filen sync for cached space
         if (existing.filenSync) {
           existing.filenSync.start().catch(e =>
             console.warn('[EO-DB] Filen sync restart failed for cached space', selectedSpace, e),
           );
+          useEoStore.getState().setFilenSync(existing.filenSync);
         }
         return;
       }
@@ -568,25 +555,10 @@ export function Layout({ session, onLogout }: LayoutProps) {
 
       await init(store);
 
-      let syncManager: SyncManager | null = null;
+      // Matrix sync disabled — events fold locally, Filen handles sync
+      const syncManager: SyncManager | null = null;
 
-      // Set up sync manager for this space
-      if (matrixReady && matrixClientRef.current && spaceRoomId) {
-        try {
-          syncManager = new SyncManager(
-            matrixClientRef.current, spaceRoomId, store, onFoldEvent,
-          );
-          syncManager.onSyncStatus = onSyncStatus;
-          await syncManager.initialize();
-          if (!mounted) return;
-
-          useEoStore.getState().setSyncManager(syncManager);
-        } catch (e) {
-          console.warn('[EO-DB] SyncManager init failed for space', selectedSpace, e);
-        }
-      }
-
-      // Start Filen backup sync if connected
+      // Start Filen sync (primary read/write sync layer)
       let filenSync: FilenSyncService | null = null;
       const filenState = useFilenStore.getState();
       if (filenState.connected && selectedSpace) {
@@ -599,6 +571,20 @@ export function Layout({ session, onLogout }: LayoutProps) {
           const spaceName = spaceEntry ? ((spaceEntry as any).name || selectedSpace) : selectedSpace;
 
           const spaceFolderUuid = await filenState.ensureSpaceFolder(selectedSpace, spaceName);
+
+          // On fresh device (seq=0), hydrate from Filen before starting sync timer
+          const currentSeq = await store.getCurrentSeq();
+          if (currentSeq === 0) {
+            try {
+              const hydratedSeq = await FilenSyncService.hydrateFromFilen(store, spaceFolderUuid, onFoldEvent);
+              if (hydratedSeq > 0) {
+                await init(store);
+              }
+            } catch (e) {
+              console.warn('[EO-DB] Filen hydration failed for space', selectedSpace, e);
+            }
+          }
+
           filenSync = new FilenSyncService({
             store,
             spaceId: selectedSpace,
@@ -607,6 +593,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
             userId: session.userId,
           });
           await filenSync.start();
+          useEoStore.getState().setFilenSync(filenSync);
         } catch (e) {
           console.warn('[EO-DB] Filen sync start failed for space', selectedSpace, e);
           filenSync = null;
@@ -800,30 +787,10 @@ export function Layout({ session, onLogout }: LayoutProps) {
                 const spaceStore = createStore(idb, key);
                 await init(spaceStore);
 
-                // Set up SyncManager immediately if we have a room
-                let syncManager: SyncManager | null = null;
-                if (mainRoomId && matrixClientRef.current) {
-                  try {
-                    syncManager = new SyncManager(
-                      matrixClientRef.current, mainRoomId, spaceStore,
-                      (event) => {
-                        useEoStore.setState((st) => ({
-                          recentEvents: [...st.recentEvents.slice(-99), event],
-                          lastSeq: event.seq,
-                        }));
-                      },
-                    );
-                    syncManager.onSyncStatus = onSyncStatus;
-                    await syncManager.initialize();
-                    useEoStore.getState().setSyncManager(syncManager);
-                  } catch (e) {
-                    console.warn('[EO-DB] SyncManager init failed for new space', name, e);
-                    syncManager = null;
-                  }
-                }
+                // Matrix sync disabled — events fold locally, Filen handles sync
 
                 // Cache it so setupSpaceStore reuses it instead of re-opening
-                spaceCacheRef.current.set(spaceTarget, { store: spaceStore, syncManager, filenSync: null, mainRoomId });
+                spaceCacheRef.current.set(spaceTarget, { store: spaceStore, syncManager: null, filenSync: null, mainRoomId });
 
                 // Now dispatch is safe — store is initialized (and sync will send to Matrix)
                 const dispatch = useEoStore.getState().dispatch;
