@@ -101,6 +101,51 @@ export async function createGovernanceRoom(
   return result.room_id;
 }
 
+/**
+ * Create a private room for a single view.
+ * Only the owner can write (events_default: 100). Others can be invited
+ * with lower power levels to share the view read-only or with edit access.
+ * Each private view gets its own room for maximum isolation.
+ */
+export async function createViewRoom(
+  client: MatrixClient,
+  spaceName: string,
+  viewName: string,
+  ownerUserId: string,
+): Promise<string> {
+  const result = await client.createRoom({
+    name: `${spaceName} — view: ${viewName}`,
+    room_alias_name: undefined,
+    visibility: 'private' as any,
+    preset: 'private_chat' as any,
+    initial_state: [
+      {
+        type: 'm.room.encryption',
+        state_key: '',
+        content: { algorithm: 'm.megolm.v1.aes-sha2' },
+      },
+      {
+        type: 'm.room.history_visibility',
+        state_key: '',
+        content: { history_visibility: 'shared' },
+      },
+      {
+        type: 'm.room.power_levels',
+        state_key: '',
+        content: {
+          ...EO_POWER_LEVEL_CONTENT,
+          events_default: 100, // Only owner can write by default
+          users: {
+            [ownerUserId]: 100,
+          },
+        },
+      },
+    ],
+  });
+
+  return result.room_id;
+}
+
 // --- Space config management ---
 
 /**

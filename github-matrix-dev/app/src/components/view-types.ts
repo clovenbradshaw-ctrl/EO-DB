@@ -1,0 +1,75 @@
+import type { SortRule } from './SortPanel';
+import type { FilterRule } from './filter-types';
+
+// ---------------------------------------------------------------------------
+// TableViewConfig — the full column/filter/sort layout state for a table view
+// ---------------------------------------------------------------------------
+
+export interface TableViewConfig {
+  columnOrder: string[];                // ordered column keys
+  columnWidths: Record<string, number>; // key → px width
+  hiddenColumns: string[];
+  sorts: SortRule[];
+  filters: FilterRule[];
+  filterConjunction: 'AND' | 'OR';
+  showLastUpdated: boolean;
+  rowHeight?: 'compact' | 'default' | 'tall';
+}
+
+// ---------------------------------------------------------------------------
+// SavedView — an INS entity stored at {scope}._views.{viewId}
+// ---------------------------------------------------------------------------
+
+export interface SavedView {
+  id: string;
+  name: string;
+  scope: string;                        // which table this view belongs to
+  config: TableViewConfig;
+  visibility: 'private' | 'shared';
+  createdBy: string;                    // Matrix user ID
+  createdAt: string;
+  updatedAt: string;
+  roomId?: string;                      // Matrix room for private views
+}
+
+// ---------------------------------------------------------------------------
+// ViewSig — local-only signal stored in localStorage (pre-save state)
+// Keyed by `eo-view-sig:{scope}`
+// ---------------------------------------------------------------------------
+
+export interface ViewSig {
+  scope: string;
+  activeViewId: string | null;          // null = default/unsaved
+  config: TableViewConfig;
+  dirty: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+export function createDefaultConfig(): TableViewConfig {
+  return {
+    columnOrder: [],
+    columnWidths: {},
+    hiddenColumns: [],
+    sorts: [],
+    filters: [],
+    filterConjunction: 'AND',
+    showLastUpdated: true,
+  };
+}
+
+/** Default column width by type */
+export function defaultColumnWidth(type: string): number {
+  switch (type) {
+    case 'number': return 120;
+    case 'boolean': return 80;
+    case 'date': return 150;
+    case 'select': return 150;
+    case 'object': return 200;
+    default: return 200;
+  }
+}
+
+export const MIN_COLUMN_WIDTH = 60;
