@@ -45,6 +45,10 @@ import { RecycleBin, addDeletedSpace, isSpaceDeleted, removeDeletedSpace, getDel
 import { setSpaceConfig, applyEoPowerLevels } from '../permissions/room-topology';
 import { EO_POWER_LEVEL_CONTENT } from '../permissions/types';
 
+/** Set to false to disable all Matrix activity (sync, room creation, discovery).
+ *  When false, the app uses Filen as the sole sync layer. */
+const MATRIX_ENABLED = false;
+
 /**
  * Create a Matrix room for a space and publish the space config state event.
  * Returns the new room ID, or null if creation fails.
@@ -293,6 +297,8 @@ export function Layout({ session, onLogout }: LayoutProps) {
   const roomIdRef = useRef<string | null>(null);
 
   useEffect(() => {
+    if (!MATRIX_ENABLED) return; // Matrix disabled — no client, no sync loop
+
     let mounted = true;
 
     // Configure Matrix domain from the session homeserver
@@ -754,7 +760,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
           {spaceOpen && (
             <SpaceBrowser
               entries={activeEntries}
-              loading={!matrixReady && activeEntries.length === 0}
+              loading={MATRIX_ENABLED && !matrixReady && activeEntries.length === 0}
               activeSpace={selectedSpace}
               onSelect={(target) => {
                 selectSpace(target);
