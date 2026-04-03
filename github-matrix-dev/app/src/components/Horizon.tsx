@@ -78,8 +78,7 @@ export function Horizon({ records, dateColumns, filter, onFilterChange }: Horizo
 
   const isActive =
     filter.rangeMin != null ||
-    filter.rangeMax != null ||
-    filter.emptyHandling !== 'show';
+    filter.rangeMax != null;
 
   // ---- Refs ----
   const trackRef = useRef<HTMLDivElement>(null);
@@ -99,21 +98,6 @@ export function Horizon({ records, dateColumns, filter, onFilterChange }: Horizo
     }
   }, [currentMin, currentMax]);
 
-  // ---- Settings popover ----
-  const [showSettings, setShowSettings] = useState(false);
-  const settingsRef = useRef<HTMLDivElement>(null);
-
-  // Close settings on outside click
-  useEffect(() => {
-    if (!showSettings) return;
-    const handler = (e: MouseEvent) => {
-      if (settingsRef.current && !settingsRef.current.contains(e.target as Node)) {
-        setShowSettings(false);
-      }
-    };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, [showSettings]);
 
   // ---- Value helpers ----
   const valueToFraction = useCallback(
@@ -212,16 +196,6 @@ export function Horizon({ records, dateColumns, filter, onFilterChange }: Horizo
     [onFilterChange],
   );
 
-  const handleEmptyChange = useCallback(
-    (e: React.ChangeEvent<HTMLSelectElement>) => {
-      onFilterChange({
-        ...filter,
-        emptyHandling: e.target.value as TimeScrubberFilter['emptyHandling'],
-      });
-    },
-    [filter, onFilterChange],
-  );
-
   const handleReset = useCallback(() => {
     onFilterChange({ ...DEFAULT_FILTER, dateField: filter.dateField });
   }, [filter.dateField, onFilterChange]);
@@ -248,6 +222,22 @@ export function Horizon({ records, dateColumns, filter, onFilterChange }: Horizo
 
   return (
     <div className="eo-horizon" style={s.bar}>
+      {/* Inline date field selector */}
+      {dateColumns.length > 1 ? (
+        <select
+          value={filter.dateField}
+          onChange={handleDateFieldChange}
+          style={s.fieldSelect}
+          title="Date field"
+        >
+          {dateColumns.map((col) => (
+            <option key={col.key} value={col.key}>{col.label}</option>
+          ))}
+        </select>
+      ) : (
+        <span style={s.fieldLabel}>{dateFieldLabel}</span>
+      )}
+
       {/* Track area */}
       <div
         ref={trackRef}
@@ -269,7 +259,6 @@ export function Horizon({ records, dateColumns, filter, onFilterChange }: Horizo
               background: theme.accent,
             }}
           >
-            {/* Date tooltip */}
             {(dragging && dragRef.current?.handle === 'min') && (
               <div style={s.tooltip}>
                 {formatDate(vizMin)}
@@ -314,54 +303,12 @@ export function Horizon({ records, dateColumns, filter, onFilterChange }: Horizo
         )}
       </div>
 
-      {/* Single settings/reset button */}
-      <div ref={settingsRef} style={s.settingsWrap}>
-        <button
-          style={{
-            ...s.settingsBtn,
-            ...(isActive ? { borderColor: theme.accent, color: theme.accent } : {}),
-          }}
-          onClick={() => setShowSettings((v) => !v)}
-          title="Horizon settings"
-        >
-          <span style={{ fontSize: 10, opacity: 0.7 }}>{dateFieldLabel}</span>
-          <span style={{ fontSize: 8, marginLeft: 4, opacity: 0.4 }}>&#9662;</span>
+      {/* Inline reset button */}
+      {isActive && (
+        <button onClick={handleReset} style={s.resetBtn} title="Reset range">
+          ×
         </button>
-
-        {showSettings && (
-          <div style={s.popover}>
-            <label style={s.popLabel}>Date field</label>
-            <select
-              value={filter.dateField}
-              onChange={handleDateFieldChange}
-              style={s.popSelect}
-            >
-              {dateColumns.map((col) => (
-                <option key={col.key} value={col.key}>
-                  {col.label}
-                </option>
-              ))}
-            </select>
-
-            <label style={{ ...s.popLabel, marginTop: 6 }}>Empty records</label>
-            <select
-              value={filter.emptyHandling}
-              onChange={handleEmptyChange}
-              style={s.popSelect}
-            >
-              <option value="show">Show</option>
-              <option value="hide">Hide</option>
-              <option value="end">At end</option>
-            </select>
-
-            {isActive && (
-              <button onClick={handleReset} style={s.resetInPopover}>
-                Reset
-              </button>
-            )}
-          </div>
-        )}
-      </div>
+      )}
     </div>
   );
 }
@@ -384,62 +331,29 @@ function styles(t: Theme): Record<string, React.CSSProperties> {
       userSelect: 'none',
     } as React.CSSProperties,
 
-    // ---- Settings ----
-    settingsWrap: {
-      position: 'relative',
-      flexShrink: 0,
-    } as React.CSSProperties,
-
-    settingsBtn: {
-      display: 'flex',
-      alignItems: 'center',
+    // ---- Inline date field selector ----
+    fieldSelect: {
       height: 20,
-      padding: '0 6px',
-      background: 'transparent',
-      border: `0.5px solid ${t.border}`,
-      borderRadius: 4,
-      color: t.textSecondary,
-      fontFamily: "'JetBrains Mono', monospace",
-      cursor: 'pointer',
-      whiteSpace: 'nowrap',
-    } as React.CSSProperties,
-
-    popover: {
-      position: 'absolute',
-      top: 24,
-      right: 0,
-      zIndex: 100,
-      background: t.bgCard,
-      border: `1px solid ${t.border}`,
-      borderRadius: 6,
-      padding: 8,
-      minWidth: 160,
-      boxShadow: `0 4px 12px rgba(0,0,0,0.15)`,
-    } as React.CSSProperties,
-
-    popLabel: {
-      display: 'block',
-      fontSize: 9,
-      fontFamily: "'JetBrains Mono', monospace",
-      color: t.textMuted,
-      marginBottom: 2,
-      textTransform: 'uppercase' as const,
-      letterSpacing: '0.5px',
-    },
-
-    popSelect: {
-      width: '100%',
-      height: 22,
-      fontSize: 11,
+      fontSize: 10,
       fontFamily: "'JetBrains Mono', monospace",
       padding: '0 4px',
       border: `0.5px solid ${t.border}`,
       borderRadius: 3,
-      background: t.bgCard,
-      color: t.text,
+      background: 'transparent',
+      color: t.textSecondary,
       outline: 'none',
       cursor: 'pointer',
-    },
+      flexShrink: 0,
+      maxWidth: 140,
+    } as React.CSSProperties,
+
+    fieldLabel: {
+      fontSize: 10,
+      fontFamily: "'JetBrains Mono', monospace",
+      color: t.textSecondary,
+      flexShrink: 0,
+      whiteSpace: 'nowrap',
+    } as React.CSSProperties,
 
     // ---- Track ----
     trackOuter: {
@@ -513,20 +427,22 @@ function styles(t: Theme): Record<string, React.CSSProperties> {
       whiteSpace: 'nowrap',
     } as React.CSSProperties,
 
-    // ---- Reset (inside popover) ----
-    resetInPopover: {
-      display: 'block',
-      width: '100%',
-      marginTop: 8,
-      padding: '4px 0',
+    // ---- Inline reset button ----
+    resetBtn: {
+      height: 20,
+      width: 20,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
       background: 'transparent',
       border: `0.5px solid ${t.border}`,
-      borderRadius: 3,
+      borderRadius: 4,
       color: t.textMuted,
-      fontSize: 10,
+      fontSize: 12,
       fontFamily: "'JetBrains Mono', monospace",
       cursor: 'pointer',
-      textAlign: 'center' as const,
-    },
+      flexShrink: 0,
+      padding: 0,
+    } as React.CSSProperties,
   };
 }
