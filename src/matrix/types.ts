@@ -124,6 +124,7 @@ export const EO_POWER_LEVEL_CONTENT = {
     'com.eo-db.governance': 50,
     'com.eo-db.key.announce': 100,
     'com.eo-db.snapshot': 50,
+    'com.eo-db.import': 10,
     'm.room.name': 100,
     'm.room.power_levels': 100,
   },
@@ -166,15 +167,23 @@ export interface SpaceRooms {
 
 // ─── Snapshot ──────────────────────────────────────────────────────────────
 
+export interface ImportMeta {
+  source: string;        // 'airtable' | 'csv' | 'json' | custom
+  record_count: number;
+  label?: string;
+}
+
 export interface DeltaSnapshot {
   version: 2;
-  type: 'delta';
+  type: 'delta' | 'import';
   from_seq: number;
   to_seq: number;
   prev_mxcs: string[];
   ts: string;
   created_by: string;
   events: import('../db/types.js').EoEvent[];
+  /** Present when type === 'import'. Provenance metadata for grounded imports. */
+  import_meta?: ImportMeta;
 }
 
 // ─── Sync Manager ──────────────────────────────────────────────────────────
