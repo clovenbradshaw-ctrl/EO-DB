@@ -14,13 +14,17 @@
  * where the receiver deduplicates via content-addressable event hashes.
  */
 
+import { pack, unpack } from 'msgpackr';
 import type { MatrixClient, MatrixEvent } from 'matrix-js-sdk';
 import type { EoStore } from '../db/encrypted-store';
 import type { EoEventInput, EoState } from '../db/types';
+import type { LocalKeyring } from '../db/crypto-types';
 import { processEvent } from '../db/fold';
 import { readLogSince } from '../db/log';
 import { storeFingerprint } from '../db/hash';
 import { peerSyncEventTypes } from '../lib/matrix-domain';
+import { getKeyById, resolveSnapshotKeyId } from '../crypto/segment-keys';
+import { encryptPeerPayload, decryptPeerPayload } from '../crypto/snapshot-crypto';
 
 const _syncTypes = peerSyncEventTypes();
 const SYNC_HELLO = _syncTypes.hello;
@@ -44,6 +48,7 @@ export class PeerSync {
   private roomId: string;
   private store: EoStore;
   private onEvent?: (event: any) => void;
+  private keyring: LocalKeyring;
   private toDeviceHandler?: (event: MatrixEvent) => void;
 
   constructor(
@@ -51,11 +56,18 @@ export class PeerSync {
     roomId: string,
     store: EoStore,
     onEvent?: (event: any) => void,
+    keyring?: LocalKeyring,
   ) {
     this.client = client;
     this.roomId = roomId;
     this.store = store;
     this.onEvent = onEvent;
+    this.keyring = keyring || { keys: new Map() };
+  }
+
+  /** Allow updating keyring after construction. */
+  setKeyring(keyring: LocalKeyring): void {
+    this.keyring = keyring;
   }
 
   /**
@@ -154,7 +166,7 @@ export class PeerSync {
         await this.sendEventsToPeer(sender, content.from_device, content.need_from);
         break;
       case SYNC_EVENTS:
-        await this.processIncomingPeerEvents(content.events);
+        await this.processIncomingPeerEvents(content);
         break;
     }
   }
@@ -223,12 +235,20 @@ export class PeerSync {
     fromSeq: number,
   ): Promise<void> {
     const events = await readLogSince(this.store, fromSeq);
+    const keyId = resolveSnapshotKeyId(this.keyring);
+    const keyEntry = keyId ? getKeyById(this.keyring, keyId) : null;
 
     for (let i = 0; i < events.length; i += BATCH_SIZE) {
       const batch = events.slice(i, i + BATCH_SIZE);
+
+      // Encrypt batch if keyring has keys; otherwise send plaintext (unencrypted space)
+      const payload = keyEntry
+        ? await encryptPeerPayload(keyEntry.key, keyId!, pack(batch))
+        : { events: batch };
+
       await this.client.sendToDevice(SYNC_EVENTS, toDeviceContent(
         peerUserId, peerDeviceId, {
-          events: batch,
+          ...payload,
           batch_index: Math.floor(i / BATCH_SIZE),
           total_batches: Math.ceil(events.length / BATCH_SIZE),
         },
@@ -239,11 +259,28 @@ export class PeerSync {
   /**
    * Process incoming peer events through the fold engine.
    *
-   * The fold engine handles deduplication via content-addressable hashing:
-   * if we already have an event (either from local creation or Matrix room),
-   * processEvent returns the cached seq without re-applying.
+   * Detects encrypted payloads via the `encrypted` flag and decrypts before
+   * folding. The fold engine handles deduplication via content-addressable
+   * hashing: if we already have an event (either from local creation or
+   * Matrix room), processEvent returns the cached seq without re-applying.
    */
-  private async processIncomingPeerEvents(events: EoEventInput[]): Promise<void> {
+  private async processIncomingPeerEvents(content: Record<string, any>): Promise<void> {
+    let events: EoEventInput[];
+
+    if (content.encrypted) {
+      // Encrypted peer payload — decrypt before processing
+      const entry = content.key_id ? getKeyById(this.keyring, content.key_id) : null;
+      if (!entry) {
+        console.warn('[EO-DB] Cannot decrypt peer batch — missing key', content.key_id);
+        return;
+      }
+      const plaintext = await decryptPeerPayload(entry.key, content as any);
+      events = unpack(plaintext) as EoEventInput[];
+    } else {
+      // Legacy unencrypted payload
+      events = content.events;
+    }
+
     for (const event of events) {
       await processEvent(this.store, event, this.onEvent);
     }

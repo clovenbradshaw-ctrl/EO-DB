@@ -566,7 +566,9 @@ export function Layout({ session, onLogout }: LayoutProps) {
     const savePromises: Promise<void>[] = [];
     for (const [, cached] of cache) {
       if (cached.syncManager) {
-        savePromises.push(cached.syncManager.saveSnapshot().catch(() => {}));
+        savePromises.push(cached.syncManager.saveSnapshot().catch((err) => {
+              console.warn('[EO-DB] Snapshot save failed:', err);
+            }));
       }
     }
     await Promise.all(savePromises);
@@ -600,7 +602,9 @@ export function Layout({ session, onLogout }: LayoutProps) {
         const promises: Promise<void>[] = [];
         for (const [, cached] of spaceCacheRef.current) {
           if (cached.syncManager) {
-            promises.push(cached.syncManager.saveSnapshot().catch(() => {}));
+            promises.push(cached.syncManager.saveSnapshot().catch((err) => {
+              console.warn('[EO-DB] Snapshot save failed:', err);
+            }));
           }
         }
         await Promise.all(promises);

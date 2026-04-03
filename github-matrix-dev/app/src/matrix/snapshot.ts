@@ -12,9 +12,12 @@ import { pack, unpack } from 'msgpackr';
 import type { MatrixClient } from 'matrix-js-sdk';
 import type { EoStore } from '../db/encrypted-store';
 import type { EoEvent } from '../db/types';
+import type { LocalKeyring } from '../db/crypto-types';
 import { processEvent } from '../db/fold';
 import { EO_SNAPSHOT_TYPE, EO_SNAPSHOT_STATE_TYPE } from './event-bridge';
 import { readLogSince } from '../db/log';
+import { encryptSnapshot, decryptSnapshot } from '../crypto/snapshot-crypto';
+import { resolveSnapshotKeyId } from '../crypto/segment-keys';
 
 /** Maximum number of previous snapshot URIs carried in each snapshot. */
 const MAX_PREV_MXCS = 25;
@@ -33,11 +36,13 @@ export async function setSnapshotStateEvent(
   roomId: string,
   mxc: string,
   seq: number,
+  keyId?: string,
 ): Promise<void> {
   await client.sendStateEvent(roomId, EO_SNAPSHOT_STATE_TYPE as any, {
     mxc,
     seq,
     ts: new Date().toISOString(),
+    ...(keyId ? { key_id: keyId } : {}),
   }, '');
 }
 
@@ -133,13 +138,14 @@ export async function maybeCreateSnapshot(
   roomId: string,
   store: EoStore,
   myUserId: string,
+  keyring?: LocalKeyring,
 ): Promise<void> {
   const lastSeq = await store.getCurrentSeq();
   const lastSnapshotSeq = (await store.get('meta:snapshot_seq')) || 0;
 
   if (lastSeq - lastSnapshotSeq >= SNAPSHOT_FREQUENCY) {
     const delta = await createDeltaSnapshot(store, myUserId);
-    const mxc = await uploadDeltaSnapshot(client, roomId, delta);
+    const mxc = await uploadDeltaSnapshot(client, roomId, delta, keyring);
     await store.put('meta:snapshot_seq', lastSeq);
     await store.put('meta:snapshot_mxc', mxc);
     await store.put('meta:snapshot_prev_mxcs', [mxc, ...delta.prev_mxcs].slice(0, MAX_PREV_MXCS));
@@ -179,8 +185,13 @@ export async function uploadDeltaSnapshot(
   client: MatrixClient,
   roomId: string,
   delta: DeltaSnapshot,
+  keyring?: LocalKeyring,
 ): Promise<string> {
-  const binary = pack(delta);
+  const raw = pack(delta);
+  const keyId = keyring ? resolveSnapshotKeyId(keyring) : undefined;
+  const binary = keyring && keyId
+    ? await encryptSnapshot(raw, keyring, keyId)
+    : raw;
 
   const uploadResult = await client.uploadContent(new Blob([binary]), {
     name: `eo-delta-${delta.from_seq}-${delta.to_seq}.bin`,
@@ -198,7 +209,7 @@ export async function uploadDeltaSnapshot(
     type: 'delta',
   });
 
-  await setSnapshotStateEvent(client, roomId, mxcUrl, delta.to_seq);
+  await setSnapshotStateEvent(client, roomId, mxcUrl, delta.to_seq, keyId);
 
   return mxcUrl;
 }
@@ -209,6 +220,7 @@ export async function uploadDeltaSnapshot(
 export async function downloadDeltaSnapshot(
   client: MatrixClient,
   mxcUrl: string,
+  keyring?: LocalKeyring,
 ): Promise<DeltaSnapshot> {
   const httpUrl = client.mxcUrlToHttp(mxcUrl);
   if (!httpUrl) throw new Error('Cannot resolve mxc URL');
@@ -217,8 +229,11 @@ export async function downloadDeltaSnapshot(
   if (!response.ok) {
     throw new Error(`Snapshot download failed: ${response.status} ${response.statusText} (${httpUrl})`);
   }
-  const buffer = await response.arrayBuffer();
-  return unpack(new Uint8Array(buffer)) as DeltaSnapshot;
+  const raw = new Uint8Array(await response.arrayBuffer());
+  const plaintext = keyring
+    ? await decryptSnapshot(raw, keyring)
+    : raw;
+  return unpack(plaintext) as DeltaSnapshot;
 }
 
 /**
@@ -238,13 +253,14 @@ export async function restoreFromDeltaChain(
   store: EoStore,
   latestMxc: string,
   onEvent?: (event: any) => void,
+  keyring?: LocalKeyring,
 ): Promise<number> {
   const localSeq = await store.getCurrentSeq();
   const deltas: DeltaSnapshot[] = [];
   const seen = new Set<string>(); // avoid re-downloading the same mxc
 
   // Fetch the head delta first
-  const head = await downloadDeltaSnapshot(client, latestMxc);
+  const head = await downloadDeltaSnapshot(client, latestMxc, keyring);
   seen.add(latestMxc);
 
   if (head.to_seq <= localSeq) return localSeq; // nothing to apply
@@ -266,7 +282,7 @@ export async function restoreFromDeltaChain(
     // failed download doesn't crash the entire hydration chain.
     for (const mxc of toFetch) seen.add(mxc);
     const results = await Promise.allSettled(
-      toFetch.map((mxc) => downloadDeltaSnapshot(client, mxc)),
+      toFetch.map((mxc) => downloadDeltaSnapshot(client, mxc, keyring)),
     );
     const batch = results
       .filter((r): r is PromiseFulfilledResult<DeltaSnapshot> => r.status === 'fulfilled')

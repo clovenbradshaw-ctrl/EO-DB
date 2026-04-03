@@ -14,6 +14,7 @@
 import type { MatrixClient, MatrixEvent } from 'matrix-js-sdk';
 import type { EoStore } from '../db/encrypted-store';
 import type { EoEventInput } from '../db/types';
+import type { LocalKeyring } from '../db/crypto-types';
 import { processEvent } from '../db/fold';
 import { eventHash } from '../db/hash';
 import { AsyncMutex } from '../db/mutex';
@@ -56,11 +57,17 @@ export class SyncManager {
   private roomId: string;
   private store: EoStore;
   private onEvent?: (event: any) => void;
+  private keyring: LocalKeyring;
   /** Additional room IDs to listen to (restricted, governance). */
   private additionalRoomIds: string[] = [];
 
   /** Bound listener reference for cleanup. */
   private handleTimelineEvent: ((event: MatrixEvent) => void) | null = null;
+
+  /** Reconnection listener references for cleanup. */
+  private onlineHandler: (() => void) | null = null;
+  private syncStateHandler: ((state: string, prevState: string | null) => void) | null = null;
+  private flushTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** Whether this manager has been destroyed. */
   private destroyed = false;
@@ -70,11 +77,18 @@ export class SyncManager {
     roomId: string,
     store: EoStore,
     onEvent?: (event: any) => void,
+    keyring?: LocalKeyring,
   ) {
     this.client = client;
     this.roomId = roomId;
     this.store = store;
     this.onEvent = onEvent;
+    this.keyring = keyring || { keys: new Map() };
+  }
+
+  /** Allow updating keyring after construction (e.g., after key heal). */
+  setKeyring(keyring: LocalKeyring): void {
+    this.keyring = keyring;
   }
 
   /**
@@ -112,6 +126,36 @@ export class SyncManager {
       this.client.off('Room.timeline' as any, this.handleTimelineEvent);
       this.handleTimelineEvent = null;
     }
+    if (this.onlineHandler) {
+      window.removeEventListener('online', this.onlineHandler);
+      this.onlineHandler = null;
+    }
+    if (this.syncStateHandler) {
+      this.client.off('sync' as any, this.syncStateHandler);
+      this.syncStateHandler = null;
+    }
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+  }
+
+  /**
+   * Poll for the room object to become available in the Matrix SDK store.
+   * On a fresh device the SDK may not have populated the room yet when
+   * initialize() runs — exponential backoff gives the initial sync time
+   * to complete (~6 s max: 200 + 400 + 800 + 1600 + 3200 ms).
+   */
+  private async waitForRoom(maxAttempts = 5): Promise<any | null> {
+    let delay = 200;
+    for (let i = 0; i < maxAttempts; i++) {
+      const room = this.client.getRoom(this.roomId);
+      if (room) return room;
+      await new Promise(resolve => setTimeout(resolve, delay));
+      delay *= 2;
+    }
+    console.warn('[EO-DB] Room', this.roomId, 'not available after polling — continuing with live listener only');
+    return null;
   }
 
   /**
@@ -119,9 +163,12 @@ export class SyncManager {
    *
    * On a fresh device (seq === 0), hydrates from the latest snapshot stored
    * in Matrix media, then replays any EO events already present in the room
-   * timeline (from the initial sync) that the snapshot didn't cover.
+   * timeline (from the initial sync) that the snapshot didn't covered.
    */
   async initialize(): Promise<void> {
+    // Wait for the room to be available in the SDK store before hydrating
+    await this.waitForRoom();
+
     const currentSeq = await this.store.getCurrentSeq();
 
     // On a fresh device, restore from the latest Matrix media snapshot
@@ -150,6 +197,32 @@ export class SyncManager {
       this.processIncomingEvent(event);
     };
     this.client.on('Room.timeline' as any, this.handleTimelineEvent);
+
+    // Auto-flush offline queue when connectivity returns
+    this.onlineHandler = () => { this.debouncedFlush(); };
+    window.addEventListener('online', this.onlineHandler);
+
+    this.syncStateHandler = (state: string, prevState: string | null) => {
+      if (state === 'SYNCING' && (prevState === 'CATCHUP' || prevState === 'ERROR')) {
+        this.debouncedFlush();
+      }
+    };
+    this.client.on('sync' as any, this.syncStateHandler);
+  }
+
+  /**
+   * Debounced flush — prevents hammering on rapid online/offline toggling.
+   * Collapses multiple reconnection signals within 2 s into a single flush.
+   */
+  private debouncedFlush(): void {
+    if (this.destroyed) return;
+    if (this.flushTimer) clearTimeout(this.flushTimer);
+    this.flushTimer = setTimeout(() => {
+      this.flushTimer = null;
+      this.flushUnsyncedEvents().catch((err) => {
+        console.warn('[EO-DB] Reconnection flush failed:', err);
+      });
+    }, 2_000);
   }
 
   /**
@@ -163,7 +236,7 @@ export class SyncManager {
     const snap = await findLatestSnapshot(this.client, this.roomId);
     if (!snap) return;
     const restoredSeq = await restoreFromDeltaChain(
-      this.client, this.store, snap.mxc, this.onEvent,
+      this.client, this.store, snap.mxc, this.onEvent, this.keyring,
     );
     await this.store.put('meta:snapshot_seq', restoredSeq);
   }
@@ -197,12 +270,17 @@ export class SyncManager {
    * Called on beforeunload / logout so data is always persisted.
    */
   async saveSnapshot(): Promise<void> {
+    const room = this.client.getRoom(this.roomId);
+    if (!room) {
+      console.warn('[EO-DB] Cannot save snapshot — room not available');
+      return;
+    }
+
     const seq = await this.store.getCurrentSeq();
     const lastSnapshotSeq: number = (await this.store.get('meta:snapshot_seq')) || 0;
     if (seq === 0 || seq === lastSnapshotSeq) return; // nothing new to snapshot
     const delta = await createDeltaSnapshot(this.store, this.client.getUserId()!);
-    const mxc = await uploadDeltaSnapshot(this.client, this.roomId, delta);
-    await setSnapshotStateEvent(this.client, this.roomId, mxc, seq);
+    const mxc = await uploadDeltaSnapshot(this.client, this.roomId, delta, this.keyring);
     await this.store.put('meta:snapshot_seq', seq);
     await this.store.put('meta:snapshot_mxc', mxc);
     const prevMxcs: string[] = (await this.store.get('meta:snapshot_prev_mxcs')) || [];
@@ -227,8 +305,8 @@ export class SyncManager {
     // 1. Create delta snapshot (events since last snapshot)
     const delta = await createDeltaSnapshot(this.store, this.client.getUserId()!);
 
-    // 2. Upload to Matrix media
-    const mxc = await uploadDeltaSnapshot(this.client, this.roomId, delta);
+    // 2. Upload to Matrix media (encrypted if keyring has keys)
+    const mxc = await uploadDeltaSnapshot(this.client, this.roomId, delta, this.keyring);
 
     // 3. Record the mxc URI in a NUL event — this makes the snapshot
     //    discoverable from the event log itself
@@ -252,9 +330,7 @@ export class SyncManager {
     const prevMxcs: string[] = (await this.store.get('meta:snapshot_prev_mxcs')) || [];
     await this.store.put('meta:snapshot_prev_mxcs', [mxc, ...prevMxcs].slice(0, 25));
 
-    // 5. Update room state for fast hydration on fresh devices
-    await setSnapshotStateEvent(this.client, this.roomId, mxc, currentSeq);
-
+    // Room state already updated by uploadDeltaSnapshot (with key_id)
     return { mxc, seq: currentSeq };
   }
 
@@ -359,7 +435,7 @@ export class SyncManager {
     }
 
     // Auto-snapshot to Matrix media every 500 log entries
-    await maybeCreateSnapshot(this.client, this.roomId, this.store, this.client.getUserId()!);
+    await maybeCreateSnapshot(this.client, this.roomId, this.store, this.client.getUserId()!, this.keyring);
 
     return seq;
   }

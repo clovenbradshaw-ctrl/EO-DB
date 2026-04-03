@@ -86,10 +86,12 @@ export async function maybeEncryptForWrite(
     if (entry) {
       return encryptOperand(entry.key, fieldDesignation.key_id, fieldDesignation.key_version, operand);
     }
-    // We have a designation but no key — this writer shouldn't be encrypting
-    // (they lack access). Let the plaintext through; the SEG boundary will
-    // prevent unauthorized reads at the horizon layer.
-    return operand;
+    // Field is designated for encryption but this writer lacks the key.
+    // Refuse to store plaintext — the caller must acquire the key first.
+    throw new Error(
+      `Cannot write to encrypted field: missing segment key ${fieldDesignation.key_id}. ` +
+      `Request key access before writing to this field.`,
+    );
   }
 
   // 2. Check waterfall encryption scope
@@ -109,6 +111,11 @@ export async function maybeEncryptForWrite(
         }
       }
     }
+    // Encryption scope exists but no usable key found — refuse to leak plaintext
+    throw new Error(
+      `Cannot write to encrypted scope: missing segment key ${scope.key_id}. ` +
+      `Request key access before writing to this target.`,
+    );
   }
 
   // 3. No encryption applies
