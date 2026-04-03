@@ -111,6 +111,7 @@ interface LayoutProps {
 interface CachedSpace {
   store: ReturnType<typeof createStore>;
   syncManager: SyncManager | null;
+  mainRoomId: string | null;
 }
 
 export function Layout({ session, onLogout }: LayoutProps) {
@@ -462,6 +463,11 @@ export function Layout({ session, onLogout }: LayoutProps) {
     let mounted = true;
 
     async function resolveOrCreateRoom(): Promise<string | null> {
+      // 0. Check the space cache first (handles freshly-created spaces
+      //    whose state events haven't synced to the SDK yet)
+      const cached = spaceCacheRef.current.get(selectedSpace!);
+      if (cached?.mainRoomId) return cached.mainRoomId;
+
       // 1. Try the space's own mainRoomId from discovery
       const spaceEntry = mergedEntries.find((e) => e.spaceTarget === selectedSpace);
       if (spaceEntry?.mainRoomId) return spaceEntry.mainRoomId;
@@ -550,7 +556,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
       }
 
       // Cache this space's store + sync manager for fast re-access
-      cache.set(selectedSpace!, { store, syncManager });
+      cache.set(selectedSpace!, { store, syncManager, mainRoomId: spaceRoomId });
     }
 
     setupSpaceStore();
@@ -747,7 +753,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
                 }
 
                 // Cache it so setupSpaceStore reuses it instead of re-opening
-                spaceCacheRef.current.set(spaceTarget, { store: spaceStore, syncManager });
+                spaceCacheRef.current.set(spaceTarget, { store: spaceStore, syncManager, mainRoomId });
 
                 // Now dispatch is safe — store is initialized (and sync will send to Matrix)
                 const dispatch = useEoStore.getState().dispatch;
