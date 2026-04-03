@@ -5,6 +5,7 @@ import { useTheme, type Theme } from '../theme';
 import type { MatrixSession } from '../matrix/client';
 import { RoomDataViewer } from './RoomDataViewer';
 import { MatrixRoomsViewer } from './MatrixRoomsViewer';
+import { UserRoomsBySpaces } from './UserRoomsBySpaces';
 import { FilenStorageWidget } from './FilenStorageWidget';
 
 interface SettingsViewProps {
@@ -21,6 +22,7 @@ export function SettingsView({ session, matrixClient }: SettingsViewProps) {
   const manualSnapshot = useEoStore((s) => s.manualSnapshot);
   const [showRoomData, setShowRoomData] = useState(false);
   const [showAllRooms, setShowAllRooms] = useState(false);
+  const [showRoomsBySpaces, setShowRoomsBySpaces] = useState(false);
   const s = styles(theme);
 
   const [eventCount, setEventCount] = useState<number | null>(null);
@@ -75,6 +77,10 @@ export function SettingsView({ session, matrixClient }: SettingsViewProps) {
     ? session.userId.split(':')[1]
     : 'unknown';
 
+  if (showRoomsBySpaces && matrixClient) {
+    return <UserRoomsBySpaces client={matrixClient} onBack={() => setShowRoomsBySpaces(false)} />;
+  }
+
   if (showAllRooms && matrixClient) {
     return <MatrixRoomsViewer client={matrixClient} onBack={() => setShowAllRooms(false)} />;
   }
@@ -122,6 +128,13 @@ export function SettingsView({ session, matrixClient }: SettingsViewProps) {
               onClick={() => setShowRoomData(true)}
             >
               View Room Data
+            </button>
+            <button
+              style={{ ...s.actionBtn, background: 'transparent', color: theme.accent, border: `1px solid ${theme.accent}` }}
+              onClick={() => setShowRoomsBySpaces(true)}
+              disabled={!matrixClient}
+            >
+              Rooms by Space
             </button>
             <button
               style={{ ...s.actionBtn, background: 'transparent', color: theme.accent, border: `1px solid ${theme.accent}` }}
