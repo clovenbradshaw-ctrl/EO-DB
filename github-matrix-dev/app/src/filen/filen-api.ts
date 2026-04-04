@@ -71,6 +71,12 @@ export async function sha512(input: string): Promise<string> {
   return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
+/** SHA-256 hash — used for nameHashed in Filen v2 auth (64 hex chars). */
+export async function sha256(input: string): Promise<string> {
+  const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input));
+  return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
 export async function deriveKeyFromPassword(password: string, salt: string): Promise<string> {
   const enc = new TextEncoder();
   const key = await crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveBits']);
@@ -216,7 +222,18 @@ export async function filenLogin(
   password: string,
   twofa?: string,
 ): Promise<LoginResult> {
-  const info = await gateway('/v3/auth/info', { email });
+  // Step 1: Get auth info (salt + auth version)
+  let info: any;
+  try {
+    const res = await fetch(`${FILEN_GATEWAY}/v3/auth/info`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email }),
+    });
+    info = await res.json();
+  } catch (e: any) {
+    throw new Error(`Filen auth/info network error: ${e.message}`);
+  }
   if (!info.status) throw new Error(info.message || 'Auth info failed');
 
   const { derivedPassword, derivedMasterKeys } = await generatePasswordAndMasterKey(
@@ -254,7 +271,7 @@ export async function filenCreateFolder(
   masterKey: string,
 ): Promise<string> {
   const uuid = randomUUID();
-  const nameHashed = await sha512(folderName.toLowerCase());
+  const nameHashed = await sha256(folderName.toLowerCase());
   const encName = await encryptMetadata(JSON.stringify({ name: folderName }), masterKey);
 
   const res = await gateway('/v3/dir/create', {
@@ -389,7 +406,7 @@ export async function filenUploadFile(
   const encryptedMetadata = await encryptMetadata(metadataObj, masterKey);
 
   // 3. Hash filename
-  const nameHashed = await sha512(fileName.toLowerCase());
+  const nameHashed = await sha256(fileName.toLowerCase());
 
   // 4. Compute hash of encrypted content for integrity
   const contentHash = await sha512(

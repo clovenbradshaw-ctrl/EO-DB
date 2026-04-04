@@ -44,7 +44,6 @@ export function FilenAdminConfig({ matrixClient, roomId }: FilenAdminConfigProps
 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [twofa, setTwofa] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
@@ -108,7 +107,7 @@ export function FilenAdminConfig({ matrixClient, roomId }: FilenAdminConfigProps
 
     try {
       // 1. Login to Filen
-      const result = await filenLogin(email, password, twofa || undefined);
+      const result = await filenLogin(email, password);
 
       // 2. Ensure /EO-DB/ folder exists
       const baseFolderUuid = await filenGetBaseFolder(result.apiKey);
@@ -131,7 +130,6 @@ export function FilenAdminConfig({ matrixClient, roomId }: FilenAdminConfigProps
 
       setExisting(config);
       setPassword('');
-      setTwofa('');
       setSuccess('Filen config saved to room state. All clients will auto-connect.');
     } catch (e: any) {
       setError(e.message || 'Failed to save Filen config');
@@ -242,15 +240,6 @@ export function FilenAdminConfig({ matrixClient, roomId }: FilenAdminConfigProps
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             placeholder="Filen password"
-            disabled={saving}
-          />
-          <label style={s.label}>2FA Code (optional)</label>
-          <input
-            style={s.input}
-            type="text"
-            value={twofa}
-            onChange={(e) => setTwofa(e.target.value)}
-            placeholder="XXXXXX"
             disabled={saving}
           />
           <div style={s.row}>

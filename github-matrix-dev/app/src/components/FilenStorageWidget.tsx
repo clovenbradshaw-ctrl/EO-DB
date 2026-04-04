@@ -219,12 +219,6 @@ export function FilenStorageWidget() {
             <input style={s.input} type="password" value={password} onChange={e => setPassword(e.target.value)}
               placeholder="Password" onKeyDown={e => e.key === 'Enter' && handleConnect()} />
           </div>
-          <div style={s.field}>
-            <label style={s.label}>2FA code (optional)</label>
-            <input style={s.input} type="text" value={twofa} onChange={e => setTwofa(e.target.value)}
-              placeholder="123456" onKeyDown={e => e.key === 'Enter' && handleConnect()} />
-          </div>
-
           {(loginStatus || error) && (
             <div style={{
               ...s.statusMsg,
