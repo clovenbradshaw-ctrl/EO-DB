@@ -9,14 +9,16 @@ import { UserRoomsBySpaces } from './UserRoomsBySpaces';
 import { FilenStorageWidget } from './FilenStorageWidget';
 import { OP_COLORS, TRIAD_LABELS } from './LogView';
 import { FilenAdminConfig } from './FilenAdminConfig';
+import { ArchivedSpacesSection } from './ArchivedSpaces';
 
 interface SettingsViewProps {
   session: MatrixSession;
   matrixClient?: MatrixClient | null;
   roomId?: string | null;
+  onUnarchive?: (target: string) => void;
 }
 
-export function SettingsView({ session, matrixClient, roomId }: SettingsViewProps) {
+export function SettingsView({ session, matrixClient, roomId, onUnarchive }: SettingsViewProps) {
   const { theme } = useTheme();
   const lastSeq = useEoStore((s) => s.lastSeq);
   const recentEvents = useEoStore((s) => s.recentEvents);
@@ -154,6 +156,13 @@ export function SettingsView({ session, matrixClient, roomId }: SettingsViewProp
             )}
           </div>
         </Section>
+
+        {/* Archived Spaces */}
+        {onUnarchive && (
+          <Section title="Archived Spaces" theme={theme}>
+            <ArchivedSpacesSection onUnarchive={onUnarchive} />
+          </Section>
+        )}
 
         {/* Cloud Storage (shared Filen via room state) */}
         {matrixClient && roomId && (
