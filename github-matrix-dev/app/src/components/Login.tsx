@@ -5,9 +5,10 @@ import { useTheme, type Theme } from '../theme';
 
 interface LoginProps {
   onLogin: (session: MatrixSession) => void;
+  onLocalMode?: () => void;
 }
 
-export function Login({ onLogin }: LoginProps) {
+export function Login({ onLogin, onLocalMode }: LoginProps) {
   const [homeserver, setHomeserver] = useState('app.aminoimmigration.com');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -129,6 +130,15 @@ export function Login({ onLogin }: LoginProps) {
           >
             {loading ? 'Signing in...' : isOffline ? 'Sign in offline' : 'Sign in'}
           </button>
+          {onLocalMode && (
+            <button
+              type="button"
+              onClick={onLocalMode}
+              style={s.localButton}
+            >
+              Use Locally
+            </button>
+          )}
         </form>
         <p style={s.server}>
           {isOffline ? 'Offline — using saved credentials' : 'Direct Matrix connection'}
@@ -210,6 +220,16 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       fontSize: 12,
       color: t.loginTextDim,
       textAlign: 'center',
+    },
+    localButton: {
+      padding: '12px 0',
+      fontSize: 15,
+      fontWeight: 600,
+      border: `1px solid ${t.loginBorder}`,
+      borderRadius: 8,
+      background: 'transparent',
+      color: t.loginTextDim,
+      cursor: 'pointer',
     },
     offlineBadge: {
       display: 'inline-block',

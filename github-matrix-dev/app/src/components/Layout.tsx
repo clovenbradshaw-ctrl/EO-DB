@@ -116,6 +116,7 @@ function formatSpaceName(segment: string): string {
 interface LayoutProps {
   session: MatrixSession;
   onLogout: () => void;
+  localMode?: boolean;
 }
 
 interface CachedSpace {
@@ -125,7 +126,7 @@ interface CachedSpace {
   mainRoomId: string | null;
 }
 
-export function Layout({ session, onLogout }: LayoutProps) {
+export function Layout({ session, onLogout, localMode }: LayoutProps) {
   const init = useEoStore((s) => s.init);
   const teardown = useEoStore((s) => s.teardown);
   const ready = useEoStore((s) => s.ready);
@@ -161,7 +162,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
   // When Matrix is disabled, show "local" (data works, just no remote sync).
   const connectionState: ConnectionState = !navigator.onLine
     ? 'offline'
-    : !MATRIX_ENABLED
+    : (!MATRIX_ENABLED || localMode)
       ? 'local'
       : syncManager
         ? 'online'
@@ -302,7 +303,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
   const roomIdRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (!MATRIX_ENABLED) return; // Matrix disabled — no client, no sync loop
+    if (!MATRIX_ENABLED || localMode) return; // Matrix disabled or local-only — no client, no sync loop
 
     let mounted = true;
 
@@ -363,6 +364,25 @@ export function Layout({ session, onLogout }: LayoutProps) {
 
   // --- Space discovery (re-runs when Matrix becomes ready) ---
   useEffect(() => {
+    // In local mode, the store is already initialized — just set a default space
+    if (localMode) {
+      const now = new Date().toISOString();
+      const localSpace: EoState = {
+        target: 'space_local',
+        value: { name: 'Local' },
+        level: 1,
+        hash: '',
+        last_seq: 0,
+        last_op: 'INS',
+        last_agent: '@local:localhost',
+        last_ts: now,
+        last_acquired_ts: now,
+      };
+      setSpaces([localSpace]);
+      if (selectedSpace === null) selectSpace('space_local');
+      return;
+    }
+
     let mounted = true;
 
     async function discoverSpaces() {
@@ -492,6 +512,8 @@ export function Layout({ session, onLogout }: LayoutProps) {
   // --- Per-space store init (re-runs when selectedSpace changes) ---
   useEffect(() => {
     if (!selectedSpace) return;
+    // In local mode, the store is already initialized via initLocal() — skip
+    if (localMode) return;
 
     let mounted = true;
 
