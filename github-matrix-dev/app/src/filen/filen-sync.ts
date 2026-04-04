@@ -44,6 +44,7 @@ const SNAPSHOT_FREQUENCY = 5_000;      // snapshot every 5,000 events
 const MAX_PREV_SNAPSHOTS = 10;
 const SIGNAL_THROTTLE_MS = 10_000;     // max 1 signal per 10 seconds per client
 const MAX_BACKUP_FILES = 3;            // keep last 3 backup files
+const MAX_MANUAL_SNAPSHOTS = 5;       // keep last 5 manual snapshots
 
 // Matrix event types
 const EO_BACKUP_SIGNAL = 'eo.backup.signal';
@@ -147,6 +148,99 @@ export class FilenSyncService {
   async forceSave(): Promise<void> {
     if (this.destroyed) return;
     await this.syncCycle();
+  }
+
+  /**
+   * Create a full manual snapshot of all events.
+   * Enforces a cap of MAX_MANUAL_SNAPSHOTS — oldest snapshots are deleted.
+   */
+  async createManualSnapshot(): Promise<{ seq: number; filename: string }> {
+    const { auth, masterKeys } = useFilenStore.getState();
+    if (!auth) throw new Error('Not connected to Filen');
+
+    const currentSeq = await this.store.getCurrentSeq();
+    if (currentSeq === 0) throw new Error('No events to snapshot');
+
+    const allEvents = await readLogSince(this.store, 0);
+
+    const snapshotFile: EodbFile = {
+      version: 1,
+      type: 'snapshot',
+      space_id: this.spaceId,
+      space_name: this.spaceName,
+      from_seq: 0,
+      to_seq: currentSeq,
+      created_by: this.userId,
+      created_at: new Date().toISOString(),
+      events: allEvents,
+      prev_snapshots: this.prevSnapshotUuids.slice(0, MAX_PREV_SNAPSHOTS),
+    };
+
+    const binary = packEodb(snapshotFile);
+    const filename = snapshotFilename(currentSeq);
+
+    const uploaded = await filenUploadFile(
+      auth.apiKey, this.spaceFolderUuid, filename, binary, masterKeys[0],
+    );
+
+    // Update chain tracking
+    this.prevSnapshotUuids.unshift(uploaded.uuid);
+    if (this.prevSnapshotUuids.length > MAX_PREV_SNAPSHOTS) {
+      this.prevSnapshotUuids = this.prevSnapshotUuids.slice(0, MAX_PREV_SNAPSHOTS);
+    }
+    this.lastSnapshotSeq = currentSeq;
+    await this.store.put('meta:filen_snapshot_seq', currentSeq);
+
+    console.log(`[EO-DB] Manual snapshot created: ${filename} (${allEvents.length} events, ${binary.byteLength} bytes)`);
+
+    // Enforce snapshot cap — delete oldest beyond MAX_MANUAL_SNAPSHOTS
+    try {
+      const items = await filenListFolder(auth.apiKey, this.spaceFolderUuid, masterKeys);
+      const snapshots: Array<FilenItem & { seq: number }> = [];
+      for (const item of items) {
+        if (item.type !== 'file') continue;
+        const seq = parseSnapshotSeq(item.name);
+        if (seq !== null) snapshots.push({ ...item, seq });
+      }
+      snapshots.sort((a, b) => b.seq - a.seq); // newest first
+      for (let i = MAX_MANUAL_SNAPSHOTS; i < snapshots.length; i++) {
+        try { await filenTrashFile(auth.apiKey, snapshots[i].uuid); } catch { /* ignore */ }
+      }
+    } catch {
+      // Cleanup failure is non-critical
+    }
+
+    // Signal via Matrix
+    if (this.matrixClient && this.roomId) {
+      try {
+        await this.matrixClient.sendEvent(this.roomId, EO_COMPACT_SIGNAL as any, {
+          stream: 'backup',
+          space_id: this.spaceId,
+          filen_path: `/EO-DB/${this.spaceName}/${filename}`,
+          file_uuid: uploaded.uuid,
+          seq: currentSeq,
+          event_count: allEvents.length,
+          size_bytes: binary.byteLength,
+          compacted_at: new Date().toISOString(),
+          compacted_by: this.userId,
+        });
+
+        await this.matrixClient.sendStateEvent(this.roomId, EO_BACKUP_HORIZON as any, {
+          filen_path: `/EO-DB/${this.spaceName}/${filename}`,
+          file_uuid: uploaded.uuid,
+          folder_uuid: this.spaceFolderUuid,
+          seq: currentSeq,
+          event_count: allEvents.length,
+          compressed_bytes: binary.byteLength,
+          compacted_at: new Date().toISOString(),
+          compacted_by: this.userId,
+        }, this.spaceId);
+      } catch (e) {
+        console.warn('[EO-DB] Manual snapshot signal failed (snapshot is safe on Filen):', e);
+      }
+    }
+
+    return { seq: currentSeq, filename };
   }
 
   /**

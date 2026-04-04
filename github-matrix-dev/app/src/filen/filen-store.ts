@@ -71,6 +71,8 @@ export interface FilenStoreState {
   isOrgMode: boolean;
   /** Admin's email in org mode (for display). */
   orgEmail: string | null;
+  /** Currently active spaceId (set by ensureSpaceFolder). */
+  currentSpaceId: string | null;
 
   /** Login to Filen and persist session. */
   login: (email: string, password: string, twofa?: string) => Promise<void>;
@@ -111,6 +113,7 @@ export const useFilenStore = create<FilenStoreState>((set, get) => ({
   lastSyncAt: {},
   isOrgMode: false,
   orgEmail: null,
+  currentSpaceId: null,
 
   async login(email: string, password: string, twofa?: string) {
     set({ connecting: true, error: null });
@@ -330,10 +333,11 @@ export const useFilenStore = create<FilenStoreState>((set, get) => ({
       uuid = await filenCreateFolder(auth.apiKey, parentUuid, anonName, masterKeys[0]);
     }
 
-    // Cache folder UUID and display name
+    // Cache folder UUID, display name, and mark as current space
     set({
       spaceFolders: { ...get().spaceFolders, [spaceId]: uuid },
       spaceDisplayNames: { ...get().spaceDisplayNames, [uuid]: spaceName },
+      currentSpaceId: spaceId,
     });
     return uuid;
   },

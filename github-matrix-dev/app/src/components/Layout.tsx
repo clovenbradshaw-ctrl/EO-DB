@@ -654,6 +654,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                   masterKey: config.masterKey,
                   baseFolderUuid: config.baseFolderUuid,
                   eodbFolderUuid: config.eodbFolderUuid,
+                  savedPassword: config.savedPassword,
                 });
                 filenOrgMode = true;
                 console.log('[EO-DB] Org-mode Filen auto-connected from room state');
@@ -681,6 +682,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                 masterKey: config.masterKey,
                 baseFolderUuid: config.baseFolderUuid,
                 eodbFolderUuid: config.eodbFolderUuid,
+                savedPassword: config.savedPassword,
               }).catch(e => console.warn('[EO-DB] Filen auto-reconnect from state update failed:', e));
             }
           }

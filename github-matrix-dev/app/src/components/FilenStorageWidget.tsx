@@ -1,9 +1,8 @@
 /**
- * FilenStorageWidget — displays EODB backup files from the shared Filen account.
+ * FilenStorageWidget — displays EODB backup files for the current space.
  *
- * This is a display-only component. Authentication is handled by the space admin
- * via FilenAdminConfig (stored in Matrix room state). This widget simply shows
- * the .eodb files in the /EO-DB/ folder when connected.
+ * Scoped to the active space's Filen folder only. Authentication is handled
+ * by the space admin via FilenAdminConfig (stored in Matrix room state).
  */
 
 import { useState, useEffect, useCallback } from 'react';
@@ -15,12 +14,6 @@ import { filenListFolder, type FilenItem } from '../filen/filen-api';
 // ==========================================
 // Types
 // ==========================================
-interface SpaceInfo {
-  name: string;
-  folderUuid: string;
-  files: EodbFileInfo[];
-}
-
 interface EodbFileInfo {
   name: string;
   uuid: string;
@@ -57,127 +50,92 @@ export function FilenStorageWidget() {
   const s = widgetStyles(theme);
 
   const {
-    auth, connected,
-    masterKeys, eodbFolderUuid, lastSyncAt,
-    spaceDisplayNames,
+    auth, connected, masterKeys,
+    currentSpaceId, spaceFolders, spaceDisplayNames, lastSyncAt,
   } = useFilenStore();
 
-  // Space listing
-  const [spaces, setSpaces] = useState<SpaceInfo[]>([]);
-  const [loadingSpaces, setLoadingSpaces] = useState(false);
-  const [expandedSpace, setExpandedSpace] = useState<string | null>(null);
+  const [files, setFiles] = useState<EodbFileInfo[]>([]);
+  const [loading, setLoading] = useState(false);
 
-  // Load spaces when connected
-  const loadSpaces = useCallback(async () => {
-    if (!auth || !eodbFolderUuid) return;
-    setLoadingSpaces(true);
+  // Resolve the current space's folder UUID
+  const folderUuid = currentSpaceId ? spaceFolders[currentSpaceId] : null;
+  const spaceName = folderUuid ? (spaceDisplayNames[folderUuid] || currentSpaceId) : null;
+
+  // Load files for the current space
+  const loadFiles = useCallback(async () => {
+    if (!auth || !folderUuid) return;
+    setLoading(true);
     try {
-      const items = await filenListFolder(auth.apiKey, eodbFolderUuid, masterKeys);
-      const spaceInfos: SpaceInfo[] = [];
-
-      for (const item of items) {
-        if (item.type !== 'folder') continue;
-        // Each subfolder is a space — load its .eodb files
-        const files = await filenListFolder(auth.apiKey, item.uuid, masterKeys);
-        const eodbFiles: EodbFileInfo[] = [];
-        for (const f of files) {
-          if (f.type !== 'file' || !f.name.endsWith('.eodb')) continue;
-          const parsed = parseEodbFilename(f.name);
-          if (!parsed) continue;
-          eodbFiles.push({
-            name: f.name,
-            uuid: f.uuid,
-            size: f.size || 0,
-            type: parsed.type,
-            key: f.key,
-          });
-        }
-        // Sort: current first, then backups (newest first), then snapshots
-        const typePriority = { current: 0, backup: 1, snapshot: 2 };
-        eodbFiles.sort((a, b) => {
-          const pa = typePriority[a.type], pb = typePriority[b.type];
-          if (pa !== pb) return pa - pb;
-          return b.name.localeCompare(a.name);
+      const items = await filenListFolder(auth.apiKey, folderUuid, masterKeys);
+      const eodbFiles: EodbFileInfo[] = [];
+      for (const f of items) {
+        if (f.type !== 'file' || !f.name.endsWith('.eodb')) continue;
+        const parsed = parseEodbFilename(f.name);
+        if (!parsed) continue;
+        eodbFiles.push({
+          name: f.name,
+          uuid: f.uuid,
+          size: f.size || 0,
+          type: parsed.type,
+          key: f.key,
         });
-        // Use display name from store if available, else raw folder name
-        const displayName = spaceDisplayNames[item.uuid] || item.name;
-        spaceInfos.push({ name: displayName, folderUuid: item.uuid, files: eodbFiles });
       }
-
-      setSpaces(spaceInfos);
+      // Sort: current first, then backups (newest first), then snapshots
+      const typePriority = { current: 0, backup: 1, snapshot: 2 };
+      eodbFiles.sort((a, b) => {
+        const pa = typePriority[a.type], pb = typePriority[b.type];
+        if (pa !== pb) return pa - pb;
+        return b.name.localeCompare(a.name);
+      });
+      setFiles(eodbFiles);
     } catch (e: any) {
-      console.warn('[EO-DB] Failed to load spaces from Filen:', e);
+      console.warn('[EO-DB] Failed to load files from Filen:', e);
     } finally {
-      setLoadingSpaces(false);
+      setLoading(false);
     }
-  }, [auth, eodbFolderUuid, masterKeys, spaceDisplayNames]);
+  }, [auth, folderUuid, masterKeys]);
 
   useEffect(() => {
-    if (connected) loadSpaces();
-  }, [connected, loadSpaces]);
+    if (connected && folderUuid) loadFiles();
+  }, [connected, folderUuid, loadFiles]);
 
-  // Not connected — nothing to show (admin configures via FilenAdminConfig above)
   if (!connected) return null;
+
+  const pathLabel = spaceName ? `Filen / EO-DB / ${spaceName}` : 'Filen / EO-DB';
 
   return (
     <div style={s.browser}>
       {/* Toolbar */}
       <div style={s.toolbar}>
-        <span style={s.pathLabel}>Filen / EO-DB</span>
-        <button style={s.refreshBtn} onClick={loadSpaces} disabled={loadingSpaces}>
-          {loadingSpaces ? 'Loading...' : 'Refresh'}
+        <span style={s.pathLabel}>{pathLabel}</span>
+        <button style={s.refreshBtn} onClick={loadFiles} disabled={loading}>
+          {loading ? 'Loading...' : 'Refresh'}
         </button>
       </div>
 
-      {/* Space list */}
+      {/* File list */}
       <div style={s.fileList}>
-        {loadingSpaces && <div style={s.emptyMsg}>Loading spaces...</div>}
-        {!loadingSpaces && spaces.length === 0 && (
+        {loading && <div style={s.emptyMsg}>Loading files...</div>}
+        {!loading && !folderUuid && (
+          <div style={s.emptyMsg}>
+            No Filen folder for this space yet. Data will appear after the first sync cycle (30s).
+          </div>
+        )}
+        {!loading && folderUuid && files.length === 0 && (
           <div style={s.emptyMsg}>
             No backups yet. Data will appear here after the first sync cycle (30s).
           </div>
         )}
-        {!loadingSpaces && spaces.map(space => (
-          <div key={space.folderUuid}>
-            {/* Space header */}
-            <div
-              style={s.spaceRow}
-              onClick={() => setExpandedSpace(expandedSpace === space.folderUuid ? null : space.folderUuid)}
-              onMouseEnter={e => (e.currentTarget.style.background = theme.bgHover)}
-              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-            >
-              <span style={s.spaceIcon}>{expandedSpace === space.folderUuid ? '\u25BE' : '\u25B8'}</span>
-              <span style={s.spaceName}>{space.name}</span>
-              <span style={s.spaceCount}>
-                {space.files.length} {space.files.length === 1 ? 'file' : 'files'}
-              </span>
-              {lastSyncAt[space.folderUuid] && (
-                <span style={s.syncTime}>
-                  {new Date(lastSyncAt[space.folderUuid]).toLocaleTimeString()}
-                </span>
-              )}
-            </div>
-
-            {/* Expanded: show .eodb files */}
-            {expandedSpace === space.folderUuid && (
-              <div style={s.spaceFiles}>
-                {space.files.length === 0 && (
-                  <div style={s.emptyMsg}>No .eodb files yet</div>
-                )}
-                {space.files.map(file => (
-                  <div key={file.uuid} style={s.fileRow}>
-                    <span style={s.fileIcon}>
-                      {file.type === 'current' ? '\u{1F4BE}' : file.type === 'backup' ? '\u{1F4E6}' : '\u{1F4F8}'}
-                    </span>
-                    <span style={s.fileName}>{file.name}</span>
-                    <span style={s.fileTag}>
-                      {file.type === 'current' ? 'LIVE' : file.type === 'backup' ? 'BACK' : 'SNAP'}
-                    </span>
-                    <span style={s.fileSize}>{fmtSize(file.size)}</span>
-                  </div>
-                ))}
-              </div>
-            )}
+        {!loading && files.map(file => (
+          <div key={file.uuid} style={s.fileRow}>
+            <span style={s.fileIcon}>
+              {file.type === 'current' ? '\u{1F4BE}' : file.type === 'backup' ? '\u{1F4E6}' : '\u{1F4F8}'}
+            </span>
+            <span style={s.fileName}>{file.name}</span>
+            <span style={s.fileTag}>
+              {file.type === 'current' ? 'LIVE' : file.type === 'backup' ? 'BACK' : 'SNAP'}
+            </span>
+            <span style={s.fileSize}>{fmtSize(file.size)}</span>
           </div>
         ))}
       </div>
@@ -213,20 +171,6 @@ function widgetStyles(t: Theme): Record<string, React.CSSProperties> {
       fontFamily: mono, fontSize: 11, lineHeight: 1.6,
     },
 
-    spaceRow: {
-      display: 'flex', alignItems: 'center', gap: 8,
-      padding: '6px 10px', borderRadius: 4, cursor: 'pointer',
-      transition: 'background 0.1s',
-    },
-    spaceIcon: { fontSize: 10, color: t.textMuted, flexShrink: 0, width: 12 },
-    spaceName: {
-      flex: 1, fontFamily: mono, fontSize: 12, fontWeight: 600, color: t.text,
-      whiteSpace: 'nowrap' as const, overflow: 'hidden', textOverflow: 'ellipsis',
-    },
-    spaceCount: { fontFamily: mono, fontSize: 10, color: t.textMuted, flexShrink: 0 },
-    syncTime: { fontFamily: mono, fontSize: 9, color: t.textMuted, flexShrink: 0 },
-
-    spaceFiles: { paddingLeft: 20, paddingBottom: 4 },
     fileRow: {
       display: 'flex', alignItems: 'center', gap: 6,
       padding: '4px 10px', fontFamily: mono,
