@@ -634,26 +634,30 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                   </td>
                 </tr>
               )}
-              {filtered.map((rec) => {
+              {filtered.map((rec, rowIndex) => {
                 const isActive = rec.target === activeRecord;
+                const zebraBg = rowIndex % 2 === 0 ? theme.bgCard : theme.bgMuted;
                 return (
                   <tr
                     key={rec.target}
-                    style={isActive ? s.rowActive : undefined}
+                    style={{ background: isActive ? theme.accentBg : zebraBg }}
                     onClick={() => onSelectRecord(rec.target)}
                     onContextMenu={(e) => handleContextMenu(e, rec.target)}
                     onMouseEnter={(e) => {
                       if (!isActive) (e.currentTarget as HTMLElement).style.background = theme.bgHover;
                     }}
                     onMouseLeave={(e) => {
-                      if (!isActive) (e.currentTarget as HTMLElement).style.background = '';
+                      if (!isActive) (e.currentTarget as HTMLElement).style.background = zebraBg;
                     }}
                   >
-                    {orderedColumns.map((col) => {
+                    {orderedColumns.map((col, colIndex) => {
                       const isRedacted = permissions?.redacted_fields?.includes(col.key);
                       const isLocked = permissions?.locked_fields?.includes(col.key);
+                      const tdStyle = colIndex === 0
+                        ? { ...s.td, borderLeft: `3px solid ${theme.accent}` }
+                        : s.td;
                       return (
-                        <td key={col.key} style={s.td}>
+                        <td key={col.key} style={tdStyle}>
                           {isRedacted
                             ? <RedactedCell />
                             : col.key === '_record'
@@ -937,7 +941,7 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       textTransform: 'uppercase' as const,
       letterSpacing: '0.3px',
       color: t.textMuted,
-      borderBottom: `0.5px solid ${t.border}`,
+      borderBottom: `2px solid ${t.borderDivider}`,
       whiteSpace: 'nowrap' as const,
       overflow: 'hidden' as const,
       textOverflow: 'ellipsis' as const,
@@ -945,18 +949,14 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
     td: {
       padding: '10px 8px 10px 0',
       paddingLeft: 20,
-      borderBottom: `0.5px solid ${t.borderLight}`,
+      borderBottom: `1px solid ${t.border}`,
       verticalAlign: 'middle' as const,
-      background: t.bgCard,
       maxWidth: 300,
       overflow: 'hidden',
       textOverflow: 'ellipsis',
       whiteSpace: 'normal' as const,
       wordBreak: 'break-word' as const,
     },
-    rowActive: {
-      background: t.accentBg,
-    } as React.CSSProperties,
     emptyRow: {
       padding: '40px 16px',
       textAlign: 'center' as const,
