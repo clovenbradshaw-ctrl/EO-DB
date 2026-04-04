@@ -47,6 +47,7 @@ import { useHashRoute, type View } from '../lib/router';
 import { type AccessRole, powerLevelToRole, legacyAccessToRole } from '../permissions/types';
 import { resolvePermissionsFromSharing } from '../permissions/resolve';
 import { RecycleBin, addDeletedSpace, isSpaceDeleted, removeDeletedSpace, getDeletedSpaces } from './RecycleBin';
+import { addArchivedSpace, isSpaceArchived, removeArchivedSpace, getArchivedSpaces } from './ArchivedSpaces';
 import { setSpaceConfig, applyEoPowerLevels } from '../permissions/room-topology';
 import { EO_POWER_LEVEL_CONTENT } from '../permissions/types';
 
@@ -215,6 +216,37 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     setSpaceEntries([...spaceEntries]);
     selectSpace(target);
     setShowRecycleBin(false);
+  }
+
+  // Archive a space: hide from browser, viewable in Settings
+  function handleArchiveSpace(spaceTarget: string) {
+    const entry = mergedEntries.find((e) => e.spaceTarget === spaceTarget);
+    addArchivedSpace({
+      target: spaceTarget,
+      name: entry?.displayName || formatSpaceName(spaceTarget.split('.').pop() || ''),
+      archivedAt: Date.now(),
+      archivedBy: session.userId,
+      memberCount: entry?.memberCount || 0,
+    });
+    if (selectedSpace === spaceTarget) {
+      const remaining = mergedEntries.filter((e) => e.spaceTarget !== spaceTarget && !isSpaceDeleted(e.spaceTarget) && !isSpaceArchived(e.spaceTarget));
+      if (remaining.length > 0) {
+        selectSpace(remaining[0].spaceTarget);
+      } else {
+        setSelectedSpace(null);
+        localStorage.removeItem('eo-selected-space');
+      }
+    }
+    setSpaces([...spaces]);
+    setSpaceEntries([...spaceEntries]);
+  }
+
+  // Unarchive a space from settings
+  function handleUnarchiveSpace(target: string) {
+    removeArchivedSpace(target);
+    setSpaces([...spaces]);
+    setSpaceEntries([...spaceEntries]);
+    selectSpace(target);
   }
 
   // Permanently delete a space's local IndexedDB data
@@ -477,8 +509,9 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   }, [spaceEntries, spaces]);
 
   // Filter out soft-deleted spaces from the browser entries
-  const activeEntries = useMemo(() => mergedEntries.filter((e) => !isSpaceDeleted(e.spaceTarget)), [mergedEntries, spaces, spaceEntries]);
+  const activeEntries = useMemo(() => mergedEntries.filter((e) => !isSpaceDeleted(e.spaceTarget) && !isSpaceArchived(e.spaceTarget)), [mergedEntries, spaces, spaceEntries]);
   const deletedSpaceCount = getDeletedSpaces().length;
+  const archivedSpaceCount = getArchivedSpaces().length;
 
   // --- Reset stale state when switching spaces ---
   const prevSpaceRef = useRef(selectedSpace);
@@ -522,6 +555,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     if (localMode) return;
 
     let mounted = true;
+    const cleanupFns: (() => void)[] = [];
 
     async function resolveOrCreateRoom(): Promise<string | null> {
       // When Matrix is disabled, skip all room resolution — local-only mode.
@@ -629,6 +663,34 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           }
         }
       }
+      // Listen for eo.filen.config room state updates so that when the admin
+      // re-saves credentials (e.g. after session expiry), all clients auto-reconnect.
+      if (matrixClientRef.current && spaceRoomId) {
+        const handleRoomStateEvent = (event: any) => {
+          if (
+            event.getType?.() === 'eo.filen.config' &&
+            event.getRoomId?.() === spaceRoomId
+          ) {
+            const config = event.getContent?.() ?? {};
+            if (config.apiKey && config.masterKey) {
+              console.log('[EO-DB] eo.filen.config updated — auto-reconnecting Filen');
+              useFilenStore.getState().restoreFromRoomState({
+                email: config.email,
+                apiKey: config.apiKey,
+                masterKey: config.masterKey,
+                baseFolderUuid: config.baseFolderUuid,
+                eodbFolderUuid: config.eodbFolderUuid,
+              }).catch(e => console.warn('[EO-DB] Filen auto-reconnect from state update failed:', e));
+            }
+          }
+        };
+        matrixClientRef.current.on('RoomState.events' as any, handleRoomStateEvent);
+        // Store handler for cleanup
+        cleanupFns.push(() => {
+          matrixClientRef.current?.removeListener('RoomState.events' as any, handleRoomStateEvent);
+        });
+      }
+
       // Also check if Filen is already in org-mode (from a previous space switch)
       if (useFilenStore.getState().isOrgMode) filenOrgMode = true;
 
@@ -706,6 +768,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
 
     return () => {
       mounted = false;
+      cleanupFns.forEach(fn => fn());
     };
   }, [selectedSpace, session, init, matrixReady, mergedEntries]);
 
@@ -957,8 +1020,10 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                 setSpaceOpen(false);
               }}
               onDelete={handleDeleteSpace}
+              onArchive={handleArchiveSpace}
               onOpenRecycleBin={() => { setShowRecycleBin(true); setSpaceOpen(false); setShowMembers(false); }}
               deletedCount={deletedSpaceCount}
+              archivedCount={archivedSpaceCount}
             />
           )}
 
@@ -1219,7 +1284,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             ) : activeView === 'builder' ? (
               <BuilderView />
             ) : activeView === 'settings' ? (
-              <SettingsView session={session} matrixClient={matrixClientRef.current} roomId={spaceCacheRef.current.get(selectedSpace!)?.mainRoomId ?? null} />
+              <SettingsView session={session} matrixClient={matrixClientRef.current} roomId={spaceCacheRef.current.get(selectedSpace!)?.mainRoomId ?? null} onUnarchive={handleUnarchiveSpace} />
             ) : null}
           </ErrorBoundary>}
         </main>

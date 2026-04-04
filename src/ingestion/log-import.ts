@@ -14,6 +14,14 @@ import type { Feed } from '../db/feed.js';
 import { processEvent } from '../db/fold.js';
 import type { ExternalOperator, EoEventInput } from '../db/types.js';
 import type { EventSink } from './event-sink.js';
+import {
+  jsonToCollections,
+  discoverStructure,
+  populateEntities,
+  autoDetectDefs,
+  resolveEdges,
+  inferCooccurrence,
+} from './edge-detection.js';
 
 const EXTERNAL_OPS: Set<string> = new Set(['INS', 'DEF', 'CON', 'SEG', 'SYN', 'EVA']);
 
@@ -66,23 +74,8 @@ export function parseJsonImport(payload: unknown, targetPrefix?: string): Import
     } else if (Array.isArray(obj._flat_events_for_import)) {
       arr = obj._flat_events_for_import;
     } else {
-      // Keyed collection: flatten all array values
-      const flattened: any[] = [];
-      for (const [key, val] of Object.entries(obj)) {
-        if (Array.isArray(val)) {
-          val.forEach((item: any) => {
-            if (typeof item === 'object' && item !== null) {
-              flattened.push({ _source_key: key, ...item });
-            }
-          });
-        }
-      }
-      if (flattened.length > 0) {
-        arr = flattened;
-      } else {
-        // Single object
-        arr = [obj];
-      }
+      // Keyed collection: discover structure, use entity IDs, and detect edges
+      return parseKeyedCollections(obj, targetPrefix);
     }
   } else {
     throw new Error('JSON import payload must be an array or object');
@@ -109,6 +102,68 @@ export function parseJsonImport(payload: unknown, targetPrefix?: string): Import
       _generic: true,
     } as ImportEventRow;
   });
+}
+
+/**
+ * Parse a keyed-collection JSON object into import rows.
+ * Discovers collections, uses entity IDs as targets,
+ * and auto-detects foreign key relationships to create CON events.
+ */
+function parseKeyedCollections(obj: Record<string, any>, targetPrefix?: string): ImportEventRow[] {
+  const prefix = targetPrefix || 'import';
+  const rows: ImportEventRow[] = [];
+
+  // Discover collections (arrays of objects + singleton objects)
+  const collections = jsonToCollections(obj);
+  if (Object.keys(collections).length === 0) {
+    // Fallback: wrap entire object as single INS event
+    return [{
+      op: 'INS',
+      target: `${prefix}.data.rec1`,
+      operand: obj,
+      _generic: true,
+    }];
+  }
+
+  // Discover structure and populate entities
+  const typeRegistry = discoverStructure(collections);
+  const entityRegistry = populateEntities(collections, typeRegistry);
+
+  // INS events for all entities — use real entity IDs
+  for (const [collectionName, records] of Object.entries(collections)) {
+    const meta = typeRegistry.get(collectionName);
+    if (!meta) continue;
+
+    for (let i = 0; i < records.length; i++) {
+      const record = records[i];
+      const id = record[meta.idField] != null
+        ? String(record[meta.idField])
+        : `rec${String(i + 1).padStart(String(records.length).length, '0')}`;
+      rows.push({
+        op: 'INS',
+        target: `${prefix}.${collectionName}.${id}`,
+        operand: record,
+      });
+    }
+  }
+
+  // Auto-detect foreign key relationships and create CON events
+  const defs = autoDetectDefs(collections, typeRegistry, entityRegistry);
+  if (defs.length > 0) {
+    const { explicitEdges } = resolveEdges(defs, collections, typeRegistry, entityRegistry);
+    for (const edge of explicitEdges) {
+      rows.push({
+        op: 'CON',
+        target: `${prefix}.${edge.sourceCollection}.${edge.source}`,
+        operand: {
+          added: [`${prefix}.${edge.targetCollection}.${edge.target}`],
+          edge_type: edge.field,
+        },
+      });
+    }
+  }
+
+  return rows;
 }
 
 /**
