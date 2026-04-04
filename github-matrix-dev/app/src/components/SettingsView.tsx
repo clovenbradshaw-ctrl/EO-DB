@@ -7,6 +7,7 @@ import { RoomDataViewer } from './RoomDataViewer';
 import { MatrixRoomsViewer } from './MatrixRoomsViewer';
 import { UserRoomsBySpaces } from './UserRoomsBySpaces';
 import { FilenStorageWidget } from './FilenStorageWidget';
+import { OP_COLORS, TRIAD_LABELS } from './LogView';
 
 interface SettingsViewProps {
   session: MatrixSession;
@@ -155,6 +156,46 @@ export function SettingsView({ session, matrixClient }: SettingsViewProps) {
         {/* Filen Storage */}
         <Section title="Extra Storage" theme={theme}>
           <FilenStorageWidget />
+        </Section>
+
+        {/* EO Operator Reference */}
+        <Section title="EO Operator Reference" theme={theme}>
+          <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 16 }}>
+            {TRIAD_LABELS.map((triad) => (
+              <div key={triad.label}>
+                <div style={{
+                  fontSize: 9, fontWeight: 700, color: theme.textMuted,
+                  letterSpacing: '0.06em', textTransform: 'uppercase' as const,
+                  marginBottom: 8, fontFamily: "'JetBrains Mono', monospace",
+                }}>
+                  {triad.label}
+                </div>
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' as const }}>
+                  {triad.ops.map((op) => {
+                    const c = OP_COLORS[op];
+                    return (
+                      <div key={op} style={{
+                        display: 'flex', alignItems: 'center', gap: 6,
+                        padding: '4px 10px', borderRadius: 4,
+                        background: c.bg, border: `1px solid ${c.border}30`,
+                      }}>
+                        <span style={{
+                          fontFamily: "'JetBrains Mono', monospace",
+                          fontSize: 10, fontWeight: 700, color: c.text,
+                        }}>
+                          {op}
+                        </span>
+                        <span style={{
+                          width: 8, height: 8, borderRadius: '50%',
+                          background: c.fill, flexShrink: 0,
+                        }} />
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
         </Section>
 
         {/* Danger Zone */}

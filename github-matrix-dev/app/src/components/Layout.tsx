@@ -28,11 +28,13 @@ import { BuilderView } from './builder/BuilderView';
 import { RecordPageView } from './builder/RecordPageView';
 import { PermissionBadge } from './PermissionBadge';
 import { ViewOnlyBanner } from './ViewOnlyBanner';
+import { useViewStore } from '../store/view-store';
 import { useBuilderStore } from '../store/builder-store';
 import { useSyncStore } from '../store/sync-store';
 import { useTheme, spaceBackgroundTint, type Theme } from '../theme';
 import type { EoState } from '../db/types';
 import type { ViewDefinition } from '../blocks/types';
+import type { ViewType } from './view-types';
 import { discoverSpacesFromMatrix, type SpaceEntry } from '../matrix/space-discovery';
 import { SpaceBrowser } from './SpaceBrowser';
 import { Horizon } from './Horizon';
@@ -757,6 +759,16 @@ export function Layout({ session, onLogout }: LayoutProps) {
   const currentRole: AccessRole = currentPermissions?.role ?? 'viewer';
   const isViewer = currentRole === 'viewer';
 
+  // Determine active view type from saved view
+  const viewStore = useViewStore();
+  const activeViewType: ViewType = useMemo(() => {
+    if (!selectedScope) return 'grid';
+    const sig = viewStore.getSig(selectedScope);
+    if (!sig.activeViewId) return 'grid';
+    const sv = viewStore.savedViews[sig.activeViewId];
+    return sv?.viewType || 'grid';
+  }, [selectedScope, viewStore]);
+
   return (
     <div style={s.container}>
       {/* Top bar */}
@@ -940,7 +952,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
           {/* View navigation */}
           <nav style={s.sidebarNav}>
             <div style={s.navGroupLabel}>Views</div>
-            {(['records', 'log', 'graph'] as View[]).map((view) => (
+            {(['records'] as View[]).map((view) => (
               <button
                 key={view}
                 onClick={() => navigate({ view })}
@@ -967,7 +979,18 @@ export function Layout({ session, onLogout }: LayoutProps) {
                 {view === 'compose' ? '+ Compose' : view.charAt(0).toUpperCase() + view.slice(1)}
               </button>
             ))}
-            <div style={s.navGroupLabel}>Tools</div>
+            <div style={s.navGroupLabel}>System</div>
+            {/* Log */}
+            <button
+              onClick={() => navigate({ view: 'log' })}
+              style={{
+                ...s.navItem,
+                ...(activeView === 'log' ? s.navItemActive : {}),
+              }}
+            >
+              <span style={s.navIcon}>{NAV_ICONS.log}</span>
+              Log
+            </button>
             {/* Builder — Admin+ only (PL >= 50) */}
             {currentPermissions?.can_build_views !== false && (
               <button
@@ -1045,15 +1068,32 @@ export function Layout({ session, onLogout }: LayoutProps) {
                 ) : selectedScope ? (
                   <>
                     <ViewTabs scope={selectedScope} session={{ userId: session.userId }} />
-                    <TableView
-                      scope={selectedScope}
-                      onSelectRecord={(rec) => navigate({ record: rec })}
-                      onEmptyScope={(parentScope) => navigate({ scope: parentScope, record: null })}
-                      activeRecord={selectedRecord}
-                      session={{ userId: session.userId }}
-                      timeScrubberFilter={timeScrubberFilter}
-                      permissions={currentPermissions}
-                    />
+                    {activeViewType === 'graph' ? (
+                      <GraphView allStates={allStates} />
+                    ) : activeViewType === 'grid' ? (
+                      <TableView
+                        scope={selectedScope}
+                        onSelectRecord={(rec) => navigate({ record: rec })}
+                        onEmptyScope={(parentScope) => navigate({ scope: parentScope, record: null })}
+                        activeRecord={selectedRecord}
+                        session={{ userId: session.userId }}
+                        timeScrubberFilter={timeScrubberFilter}
+                        permissions={currentPermissions}
+                      />
+                    ) : (
+                      <div style={{
+                        flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        flexDirection: 'column' as const, gap: 8, color: theme.textMuted,
+                      }}>
+                        <div style={{ fontSize: 28, opacity: 0.3 }}>
+                          {activeViewType === 'kanban' ? '\u25A5' : activeViewType === 'calendar' ? '\u25F7' : '\u25A6'}
+                        </div>
+                        <div style={{ fontSize: 13, fontWeight: 500 }}>
+                          {activeViewType.charAt(0).toUpperCase() + activeViewType.slice(1)} view
+                        </div>
+                        <div style={{ fontSize: 11, opacity: 0.7 }}>Coming soon</div>
+                      </div>
+                    )}
                   </>
                 ) : (
                   <div style={s.empty}>

@@ -3,7 +3,7 @@ import { useViewStore } from '../store/view-store';
 import { useEoStore } from '../store/eo-store';
 import { useTheme, type Theme } from '../theme';
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
-import type { SavedView, TableViewConfig } from './view-types';
+import { VIEW_TYPE_META, type SavedView, type TableViewConfig, type ViewType } from './view-types';
 
 interface ViewTabsProps {
   scope: string;
@@ -24,6 +24,7 @@ export function ViewTabs({ scope, session }: ViewTabsProps) {
 
   const [showNameInput, setShowNameInput] = useState(false);
   const [newViewName, setNewViewName] = useState('');
+  const [newViewType, setNewViewType] = useState<ViewType>('grid');
   const [newViewVisibility, setNewViewVisibility] = useState<'private' | 'shared'>('private');
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
@@ -40,6 +41,7 @@ export function ViewTabs({ scope, session }: ViewTabsProps) {
           id: st.target.split('.').pop()!,
           name: st.value.name,
           scope,
+          viewType: st.value.viewType || 'grid',
           config: st.value.config || {
             columnOrder: [],
             columnWidths: {},
@@ -71,6 +73,7 @@ export function ViewTabs({ scope, session }: ViewTabsProps) {
         target: `${scope}._views.${viewId}`,
         operand: {
           name: newViewName.trim(),
+          viewType: newViewType,
           config,
           visibility: newViewVisibility,
           createdBy: session.userId,
@@ -87,6 +90,7 @@ export function ViewTabs({ scope, session }: ViewTabsProps) {
         id: viewId,
         name: newViewName.trim(),
         scope,
+        viewType: newViewType,
         config,
         visibility: newViewVisibility,
         createdBy: session.userId,
@@ -99,6 +103,7 @@ export function ViewTabs({ scope, session }: ViewTabsProps) {
 
     setShowNameInput(false);
     setNewViewName('');
+    setNewViewType('grid');
   }
 
   async function handleUpdateView() {
@@ -174,6 +179,7 @@ export function ViewTabs({ scope, session }: ViewTabsProps) {
         target: `${scope}._views.${newId}`,
         operand: {
           name: newName,
+          viewType: source.viewType || 'grid',
           config: source.config,
           visibility: source.visibility,
           createdBy: session.userId,
@@ -240,44 +246,48 @@ export function ViewTabs({ scope, session }: ViewTabsProps) {
         style={sig.activeViewId === null ? s.tabActive : s.tab}
         onClick={() => viewStore.resetToDefault(scope)}
       >
-        {'\u25A6'} Grid view
+        <span style={{ fontSize: 11, opacity: 0.7 }}>{VIEW_TYPE_META.grid.icon}</span> Grid view
       </button>
 
       {/* Saved view tabs */}
-      {savedViews.filter((v) => !viewStore.savedViews[v.id]?.scope || viewStore.savedViews[v.id]?.scope === scope).map((view) => (
-        <button
-          key={view.id}
-          style={sig.activeViewId === view.id ? s.tabActive : s.tab}
-          onClick={() => viewStore.activateView(scope, view)}
-          onContextMenu={(e) => {
-            e.preventDefault();
-            setCtxMenu({ x: e.clientX, y: e.clientY, viewId: view.id });
-          }}
-        >
-          {renaming === view.id ? (
-            <input
-              autoFocus
-              value={renameValue}
-              onChange={(e) => setRenameValue(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') handleRename(view.id);
-                if (e.key === 'Escape') setRenaming(null);
-              }}
-              onBlur={() => handleRename(view.id)}
-              onClick={(e) => e.stopPropagation()}
-              style={s.renameInput}
-            />
-          ) : (
-            <>
-              {view.visibility === 'private' && <span style={{ marginRight: 4, fontSize: 10 }}>{'\uD83D\uDD12'}</span>}
-              {view.name}
-              {sig.activeViewId === view.id && sig.dirty && (
-                <span style={s.dirtyDot} title="Unsaved changes" />
-              )}
-            </>
-          )}
-        </button>
-      ))}
+      {savedViews.filter((v) => !viewStore.savedViews[v.id]?.scope || viewStore.savedViews[v.id]?.scope === scope).map((view) => {
+        const vtMeta = VIEW_TYPE_META[view.viewType || 'grid'];
+        return (
+          <button
+            key={view.id}
+            style={sig.activeViewId === view.id ? s.tabActive : s.tab}
+            onClick={() => viewStore.activateView(scope, view)}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              setCtxMenu({ x: e.clientX, y: e.clientY, viewId: view.id });
+            }}
+          >
+            {renaming === view.id ? (
+              <input
+                autoFocus
+                value={renameValue}
+                onChange={(e) => setRenameValue(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') handleRename(view.id);
+                  if (e.key === 'Escape') setRenaming(null);
+                }}
+                onBlur={() => handleRename(view.id)}
+                onClick={(e) => e.stopPropagation()}
+                style={s.renameInput}
+              />
+            ) : (
+              <>
+                <span style={{ fontSize: 11, opacity: 0.7 }}>{vtMeta.icon}</span>
+                {view.visibility === 'private' && <span style={{ marginRight: 2, fontSize: 10 }}>{'\uD83D\uDD12'}</span>}
+                {view.name}
+                {sig.activeViewId === view.id && sig.dirty && (
+                  <span style={s.dirtyDot} title="Unsaved changes" />
+                )}
+              </>
+            )}
+          </button>
+        );
+      })}
 
       {/* Save / Update button */}
       {sig.dirty && (
@@ -313,6 +323,31 @@ export function ViewTabs({ scope, session }: ViewTabsProps) {
               placeholder="View name..."
               style={s.nameInput}
             />
+            {/* View type selector */}
+            <div style={{ display: 'flex', gap: 4, marginTop: 8, flexWrap: 'wrap' as const }}>
+              {(Object.keys(VIEW_TYPE_META) as ViewType[]).map((vt) => {
+                const meta = VIEW_TYPE_META[vt];
+                const active = newViewType === vt;
+                return (
+                  <button
+                    key={vt}
+                    onClick={() => setNewViewType(vt)}
+                    style={{
+                      display: 'inline-flex', alignItems: 'center', gap: 4,
+                      padding: '4px 8px', fontSize: 11, fontWeight: active ? 600 : 400,
+                      border: `1px solid ${active ? theme.accent : theme.border}`,
+                      borderRadius: 4, cursor: 'pointer',
+                      background: active ? theme.accentBg : 'transparent',
+                      color: active ? theme.accent : theme.textSecondary,
+                    }}
+                  >
+                    <span style={{ fontSize: 12 }}>{meta.icon}</span>
+                    {meta.label}
+                  </button>
+                );
+              })}
+            </div>
+            {/* Visibility */}
             <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
               <button
                 style={newViewVisibility === 'private' ? s.visBtnActive : s.visBtn}

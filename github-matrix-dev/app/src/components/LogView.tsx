@@ -1,22 +1,32 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, Fragment } from 'react';
 import { useEoStore } from '../store/eo-store';
 import { useTheme } from '../theme';
 import type { EoEvent, LoggableOperator } from '../db/types';
 
-// --- Operator colors (pastel palette matching design spec) ---
-const OP_COLORS: Record<string, { bg: string; text: string; border: string }> = {
-  NUL: { bg: '#F0F0F0', text: '#888', border: 'transparent' },
-  SIG: { bg: '#E6F1FB', text: '#185FA5', border: 'transparent' },
-  INS: { bg: '#EAF3DE', text: '#3B6D11', border: 'transparent' },
-  UPD: { bg: '#FAEEDA', text: '#854F0B', border: 'transparent' },
-  SEG: { bg: '#FFF3E0', text: '#E65100', border: 'transparent' },
-  CON: { bg: '#E6F1FB', text: '#185FA5', border: 'transparent' },
-  SYN: { bg: '#FCE4EC', text: '#C62828', border: 'transparent' },
-  DEF: { bg: '#FAEEDA', text: '#854F0B', border: 'transparent' },
-  EVA: { bg: '#FAEEDA', text: '#854F0B', border: 'transparent' },
-  REC: { bg: '#FCEBEB', text: '#A32D2D', border: 'transparent' },
-  DEL: { bg: '#FCEBEB', text: '#A32D2D', border: 'transparent' },
+// --- Operator colors — three triads ---
+export const OP_COLORS: Record<string, { bg: string; text: string; border: string; fill: string }> = {
+  // Identity triad (warm)
+  NUL: { bg: '#FEF3C7', text: '#92400E', border: '#F59E0B', fill: '#FBBF24' },
+  INS: { bg: '#DCFCE7', text: '#166534', border: '#22C55E', fill: '#4ADE80' },
+  // Structure triad (cool)
+  SEG: { bg: '#DBEAFE', text: '#1E40AF', border: '#3B82F6', fill: '#60A5FA' },
+  CON: { bg: '#E0E7FF', text: '#3730A3', border: '#6366F1', fill: '#818CF8' },
+  SYN: { bg: '#F3E8FF', text: '#6B21A8', border: '#A855F7', fill: '#C084FC' },
+  // Interpretation triad (earth)
+  DEF: { bg: '#FFF7ED', text: '#9A3412', border: '#F97316', fill: '#FB923C' },
+  EVA: { bg: '#F0FDFA', text: '#115E59', border: '#14B8A6', fill: '#2DD4BF' },
+  REC: { bg: '#FDF2F8', text: '#9D174D', border: '#EC4899', fill: '#F472B6' },
+  // Legacy operators (backward compat)
+  SIG: { bg: '#E6F1FB', text: '#185FA5', border: '#A8CCE8', fill: '#5B9BD5' },
+  UPD: { bg: '#FAEEDA', text: '#854F0B', border: '#E0C9A0', fill: '#C9A84C' },
+  DEL: { bg: '#FCEBEB', text: '#A32D2D', border: '#E8A0A0', fill: '#D45050' },
 };
+
+export const TRIAD_LABELS: { label: string; ops: string[] }[] = [
+  { label: 'Identity', ops: ['NUL', 'INS'] },
+  { label: 'Structure', ops: ['SEG', 'CON', 'SYN'] },
+  { label: 'Interpretation', ops: ['DEF', 'EVA', 'REC'] },
+];
 
 const ALL_OPS: LoggableOperator[] = ['NUL', 'INS', 'SEG', 'CON', 'SYN', 'DEF', 'EVA', 'REC'];
 
@@ -107,6 +117,7 @@ function OpBadge({ op, size = 'normal' }: { op: string; size?: 'normal' | 'small
     <span style={{
       display: 'inline-block',
       background: c.bg, color: c.text,
+      border: `1px solid ${c.border}`,
       borderRadius: 3, fontSize: size === 'small' ? 9 : 10, fontWeight: 600,
       padding: size === 'small' ? '0px 4px' : '1px 6px',
       lineHeight: 1.4, textAlign: 'center' as const,
@@ -264,40 +275,50 @@ function StatsBar({ events, activeFilters, onToggleFilter }: {
         })}
       </div>
 
-      {/* Op filter chips */}
-      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' as const }}>
-        {ALL_OPS.map((op) => {
-          const count = counts[op] || 0;
-          const active = activeFilters.has(op);
-          const c = OP_COLORS[op];
-          return (
-            <button
-              key={op}
-              onClick={() => onToggleFilter(op)}
-              style={{
-                display: 'inline-flex', alignItems: 'center', gap: 4,
-                padding: '3px 8px', borderRadius: 4, cursor: 'pointer',
-                fontSize: 10, fontWeight: 600,
-                fontFamily: "'JetBrains Mono', monospace",
-                border: `1px solid ${active ? c.text + '40' : t.border}`,
-                background: active ? c.bg : 'transparent',
-                color: active ? c.text : count > 0 ? t.textSecondary : t.textMuted,
-                opacity: count === 0 ? 0.4 : 1,
-                transition: 'all 0.1s',
-              }}
-            >
-              {op}
-              {count > 0 && (
-                <span style={{
-                  fontSize: 9, color: active ? c.text : t.textMuted,
-                  fontWeight: 400, opacity: 0.8,
-                }}>
-                  {count}
-                </span>
-              )}
-            </button>
-          );
-        })}
+      {/* Op filter chips — grouped by triad */}
+      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' as const, alignItems: 'center' }}>
+        {TRIAD_LABELS.map((triad, idx) => (
+          <Fragment key={triad.label}>
+            {idx > 0 && (
+              <div style={{
+                width: 1, height: 16, background: t.borderDivider,
+                margin: '0 4px', flexShrink: 0,
+              }} />
+            )}
+            {triad.ops.map((op) => {
+              const count = counts[op] || 0;
+              const active = activeFilters.has(op);
+              const c = OP_COLORS[op];
+              return (
+                <button
+                  key={op}
+                  onClick={() => onToggleFilter(op)}
+                  style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 4,
+                    padding: '3px 8px', borderRadius: 4, cursor: 'pointer',
+                    fontSize: 10, fontWeight: 600,
+                    fontFamily: "'JetBrains Mono', monospace",
+                    border: `1px solid ${active ? c.border : count > 0 ? c.border + '60' : t.border}`,
+                    background: active ? c.bg : 'transparent',
+                    color: active ? c.text : count > 0 ? c.text : t.textMuted,
+                    opacity: count === 0 ? 0.4 : 1,
+                    transition: 'all 0.15s',
+                  }}
+                >
+                  {op}
+                  {count > 0 && (
+                    <span style={{
+                      fontSize: 9, color: active ? c.text : t.textMuted,
+                      fontWeight: 400, opacity: 0.8,
+                    }}>
+                      {count}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </Fragment>
+        ))}
       </div>
     </div>
   );
@@ -523,9 +544,9 @@ function EventRow({ event, isSelected, onSelect }: {
       {/* Left color accent */}
       <div style={{
         width: 3, flexShrink: 0,
-        background: opColor.text,
-        opacity: isSelected ? 1 : 0.5,
+        background: isSelected ? opColor.border : `${opColor.border}40`,
         borderRadius: '0 2px 2px 0',
+        transition: 'background 0.15s',
       }} />
 
       {/* Main content */}

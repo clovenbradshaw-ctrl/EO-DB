@@ -2,6 +2,20 @@ import type { SortRule } from './SortPanel';
 import type { FilterRule } from './filter-types';
 
 // ---------------------------------------------------------------------------
+// ViewType — the kind of visualization for a saved view
+// ---------------------------------------------------------------------------
+
+export type ViewType = 'grid' | 'graph' | 'kanban' | 'calendar' | 'gallery';
+
+export const VIEW_TYPE_META: Record<ViewType, { label: string; icon: string }> = {
+  grid: { label: 'Grid', icon: '\u229E' },
+  graph: { label: 'Graph', icon: '\u2B21' },
+  kanban: { label: 'Kanban', icon: '\u25A5' },
+  calendar: { label: 'Calendar', icon: '\u25F7' },
+  gallery: { label: 'Gallery', icon: '\u25A6' },
+};
+
+// ---------------------------------------------------------------------------
 // TableViewConfig — the full column/filter/sort layout state for a table view
 // ---------------------------------------------------------------------------
 
@@ -24,6 +38,7 @@ export interface SavedView {
   id: string;
   name: string;
   scope: string;                        // which table this view belongs to
+  viewType?: ViewType;                  // visualization type (defaults to 'grid')
   config: TableViewConfig;
   visibility: 'private' | 'shared';
   createdBy: string;                    // Matrix user ID
