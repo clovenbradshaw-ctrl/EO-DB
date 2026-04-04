@@ -995,6 +995,8 @@ export function Layout({ session, onLogout }: LayoutProps) {
                 spaceTarget={selectedSpace}
                 currentUserId={session.userId}
                 onClose={() => setShowMembers(false)}
+                matrixClient={matrixClientRef.current}
+                mainRoomId={spaceCacheRef.current.get(selectedSpace)?.mainRoomId ?? null}
               />
             </div>
           )}
