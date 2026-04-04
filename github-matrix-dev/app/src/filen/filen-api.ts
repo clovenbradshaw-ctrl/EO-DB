@@ -445,7 +445,7 @@ export async function filenUploadFile(
   const nameHashed = await sha256(fileName.toLowerCase());
 
   // 4. Compute hash of encrypted content for integrity
-  const hashBuf = await crypto.subtle.digest('SHA-512', encrypted);
+  const hashBuf = await crypto.subtle.digest('SHA-512', encrypted as unknown as BufferSource);
   const contentHash = Array.from(new Uint8Array(hashBuf))
     .map(b => b.toString(16).padStart(2, '0')).join('');
 
