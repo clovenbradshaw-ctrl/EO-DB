@@ -8,16 +8,22 @@
  */
 
 import { useEffect, useState, useCallback } from 'react';
+import type { MatrixClient } from 'matrix-js-sdk';
 import { useSyncStore, type PeerInfo, type StorageLocation, type SyncPair } from '../store/sync-store';
 import { useEoStore } from '../store/eo-store';
 import type { MatrixSession } from '../matrix/client';
 import { useTheme, type Theme } from '../theme';
+import { readBackupHealth, type BackupHealth, type UserBackupStatus } from '../filen/backup-monitor';
+import { useFilenStore } from '../filen/filen-store';
 
 interface DataSyncDashboardProps {
   session: MatrixSession;
+  matrixClient?: MatrixClient | null;
+  roomId?: string | null;
+  spaceId?: string | null;
 }
 
-export function DataSyncDashboard({ session }: DataSyncDashboardProps) {
+export function DataSyncDashboard({ session, matrixClient, roomId, spaceId }: DataSyncDashboardProps) {
   const {
     localPeer,
     peers,
@@ -201,6 +207,15 @@ export function DataSyncDashboard({ session }: DataSyncDashboardProps) {
         )}
       </section>
 
+      {/* Cloud Storage (Filen) — shown when org-mode is active */}
+      {matrixClient && roomId && spaceId && (
+        <CloudStoragePanel
+          matrixClient={matrixClient}
+          roomId={roomId}
+          spaceId={spaceId}
+        />
+      )}
+
       {/* Delta Snapshots */}
       <section style={s.section}>
         <h3 style={s.sectionTitle}>
@@ -269,6 +284,142 @@ export function DataSyncDashboard({ session }: DataSyncDashboardProps) {
         />
       </section>
     </div>
+  );
+}
+
+/* ── Cloud Storage Panel ──────────────────────────────── */
+
+function CloudStoragePanel({
+  matrixClient,
+  roomId,
+  spaceId,
+}: {
+  matrixClient: MatrixClient;
+  roomId: string;
+  spaceId: string;
+}) {
+  const { theme } = useTheme();
+  const s = makeStyles(theme);
+  const [health, setHealth] = useState<BackupHealth | null>(null);
+  const isOrgMode = useFilenStore((st) => st.isOrgMode);
+
+  useEffect(() => {
+    const update = () => {
+      const h = readBackupHealth(matrixClient, roomId, spaceId);
+      setHealth(h);
+    };
+    update();
+    const interval = setInterval(update, 10_000); // refresh every 10s
+    return () => clearInterval(interval);
+  }, [matrixClient, roomId, spaceId]);
+
+  if (!health || (!health.orgMode && !isOrgMode)) return null;
+
+  const statusColors: Record<string, string> = {
+    active: theme.success,
+    stale: theme.warning,
+    offline: theme.textMuted,
+  };
+
+  return (
+    <section style={s.section}>
+      <h3 style={s.sectionTitle}>
+        <CloudIcon />
+        Cloud Storage (Filen)
+      </h3>
+      <p style={s.sectionDesc}>Shared data store — all users read/write via Filen</p>
+
+      {/* Head + Horizon summary */}
+      <div style={{
+        ...s.snapshotPanel,
+        flexDirection: 'column' as const,
+        gap: 12,
+        marginBottom: 16,
+      }}>
+        <div style={s.snapshotRow}>
+          <span style={s.snapshotLabel}>Head Seq</span>
+          <span style={s.snapshotValue}>{health.headSeq || 'None'}</span>
+        </div>
+        {health.headUpdatedAt && (
+          <div style={s.snapshotRow}>
+            <span style={s.snapshotLabel}>Last Update</span>
+            <span style={s.snapshotValue}>
+              {formatTime(health.headUpdatedAt)} by {health.headUpdatedBy}
+            </span>
+          </div>
+        )}
+        <div style={s.snapshotRow}>
+          <span style={s.snapshotLabel}>Snapshot (Horizon)</span>
+          <span style={s.snapshotValue}>
+            {health.horizonSeq > 0
+              ? `seq ${health.horizonSeq} (${formatTime(health.horizonCompactedAt)})`
+              : 'None'}
+          </span>
+        </div>
+      </div>
+
+      {/* Per-user status table */}
+      {health.perUserStatus.length > 0 ? (
+        <div style={{
+          background: theme.bgCard,
+          border: `1px solid ${theme.border}`,
+          borderRadius: 8,
+          overflow: 'hidden',
+        }}>
+          <table style={{
+            width: '100%',
+            borderCollapse: 'collapse',
+            fontFamily: "'JetBrains Mono', monospace",
+            fontSize: 11,
+          }}>
+            <thead>
+              <tr>
+                <th style={{ textAlign: 'left', padding: '8px 12px', borderBottom: `1px solid ${theme.border}`, color: theme.textMuted, fontWeight: 500, fontSize: 10 }}>User</th>
+                <th style={{ textAlign: 'left', padding: '8px 12px', borderBottom: `1px solid ${theme.border}`, color: theme.textMuted, fontWeight: 500, fontSize: 10 }}>Status</th>
+                <th style={{ textAlign: 'left', padding: '8px 12px', borderBottom: `1px solid ${theme.border}`, color: theme.textMuted, fontWeight: 500, fontSize: 10 }}>Last Upload</th>
+                <th style={{ textAlign: 'right', padding: '8px 12px', borderBottom: `1px solid ${theme.border}`, color: theme.textMuted, fontWeight: 500, fontSize: 10 }}>Seq</th>
+              </tr>
+            </thead>
+            <tbody>
+              {health.perUserStatus.map((user) => (
+                <tr key={user.userId}>
+                  <td style={{ padding: '6px 12px', borderBottom: `1px solid ${theme.border}`, color: theme.textHeading }}>
+                    {user.userId.split(':')[0].replace('@', '')}
+                  </td>
+                  <td style={{ padding: '6px 12px', borderBottom: `1px solid ${theme.border}` }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <div style={{
+                        width: 6, height: 6, borderRadius: '50%',
+                        background: statusColors[user.status] || theme.textMuted,
+                      }} />
+                      <span style={{ color: statusColors[user.status] || theme.textMuted }}>
+                        {user.status}
+                      </span>
+                    </div>
+                  </td>
+                  <td style={{ padding: '6px 12px', borderBottom: `1px solid ${theme.border}`, color: theme.textSecondary }}>
+                    {formatTime(user.lastUploadAt)}
+                  </td>
+                  <td style={{ padding: '6px 12px', borderBottom: `1px solid ${theme.border}`, color: theme.text, textAlign: 'right' }}>
+                    {user.lastSeq.toLocaleString()}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div style={s.emptyState}>No backup signals received yet</div>
+      )}
+    </section>
+  );
+}
+
+function CloudIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: 6 }}>
+      <path d="M4 12a3.5 3.5 0 0 1-.5-6.95 5 5 0 0 1 9.53 1.35A3 3 0 0 1 12 12H4z" />
+    </svg>
   );
 }
 

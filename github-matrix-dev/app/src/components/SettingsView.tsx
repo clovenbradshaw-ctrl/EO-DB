@@ -8,13 +8,15 @@ import { MatrixRoomsViewer } from './MatrixRoomsViewer';
 import { UserRoomsBySpaces } from './UserRoomsBySpaces';
 import { FilenStorageWidget } from './FilenStorageWidget';
 import { OP_COLORS, TRIAD_LABELS } from './LogView';
+import { FilenAdminConfig } from './FilenAdminConfig';
 
 interface SettingsViewProps {
   session: MatrixSession;
   matrixClient?: MatrixClient | null;
+  roomId?: string | null;
 }
 
-export function SettingsView({ session, matrixClient }: SettingsViewProps) {
+export function SettingsView({ session, matrixClient, roomId }: SettingsViewProps) {
   const { theme } = useTheme();
   const lastSeq = useEoStore((s) => s.lastSeq);
   const recentEvents = useEoStore((s) => s.recentEvents);
@@ -153,8 +155,15 @@ export function SettingsView({ session, matrixClient }: SettingsViewProps) {
           </div>
         </Section>
 
-        {/* Filen Storage */}
-        <Section title="Extra Storage" theme={theme}>
+        {/* Cloud Storage (shared Filen via room state) */}
+        {matrixClient && roomId && (
+          <Section title="Cloud Storage" theme={theme}>
+            <FilenAdminConfig matrixClient={matrixClient} roomId={roomId} />
+          </Section>
+        )}
+
+        {/* Filen Storage (personal) */}
+        <Section title="Personal Filen" theme={theme}>
           <FilenStorageWidget />
         </Section>
 
