@@ -549,6 +549,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     if (localMode) return;
 
     let mounted = true;
+    const cleanupFns: (() => void)[] = [];
 
     async function resolveOrCreateRoom(): Promise<string | null> {
       // When Matrix is disabled, skip all room resolution — local-only mode.
@@ -656,6 +657,34 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           }
         }
       }
+      // Listen for eo.filen.config room state updates so that when the admin
+      // re-saves credentials (e.g. after session expiry), all clients auto-reconnect.
+      if (matrixClientRef.current && spaceRoomId) {
+        const handleRoomStateEvent = (event: any) => {
+          if (
+            event.getType?.() === 'eo.filen.config' &&
+            event.getRoomId?.() === spaceRoomId
+          ) {
+            const config = event.getContent?.() ?? {};
+            if (config.apiKey && config.masterKey) {
+              console.log('[EO-DB] eo.filen.config updated — auto-reconnecting Filen');
+              useFilenStore.getState().restoreFromRoomState({
+                email: config.email,
+                apiKey: config.apiKey,
+                masterKey: config.masterKey,
+                baseFolderUuid: config.baseFolderUuid,
+                eodbFolderUuid: config.eodbFolderUuid,
+              }).catch(e => console.warn('[EO-DB] Filen auto-reconnect from state update failed:', e));
+            }
+          }
+        };
+        matrixClientRef.current.on('RoomState.events' as any, handleRoomStateEvent);
+        // Store handler for cleanup
+        cleanupFns.push(() => {
+          matrixClientRef.current?.removeListener('RoomState.events' as any, handleRoomStateEvent);
+        });
+      }
+
       // Also check if Filen is already in org-mode (from a previous space switch)
       if (useFilenStore.getState().isOrgMode) filenOrgMode = true;
 
@@ -733,6 +762,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
 
     return () => {
       mounted = false;
+      cleanupFns.forEach(fn => fn());
     };
   }, [selectedSpace, session, init, matrixReady, mergedEntries]);
 
