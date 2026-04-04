@@ -20,6 +20,7 @@ import {
   filenGetBaseFolder,
   filenEnsureFolder,
 } from '../filen/filen-api';
+import { useFilenStore } from '../filen/filen-store';
 
 const EO_FILEN_CONFIG = 'eo.filen.config';
 
@@ -131,7 +132,16 @@ export function FilenAdminConfig({ matrixClient, roomId }: FilenAdminConfigProps
 
       await matrixClient.sendStateEvent(roomId, EO_FILEN_CONFIG as any, config, '');
 
+      // Immediately update the live Filen store so the current client reconnects
+      // without needing a page reload or space switch.
+      try {
+        await useFilenStore.getState().restoreFromRoomState(config);
+      } catch (e) {
+        console.warn('[EO-DB] Failed to live-restore Filen after config save:', e);
+      }
+
       setExisting(config);
+      setFilenStatus('connected');
       setPassword('');
       setSuccess('Filen config saved to room state. All clients will auto-connect.');
     } catch (e: any) {

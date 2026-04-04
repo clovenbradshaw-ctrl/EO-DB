@@ -150,6 +150,8 @@ export const useFilenStore = create<FilenStoreState>((set, get) => ({
         localStorage.removeItem(STORAGE_KEY);
         return false;
       }
+      // Optimistically set connected so the UI shows the session immediately,
+      // then validate the API key in the background. If expired, disconnect.
       set({
         auth: session.auth,
         masterKeys: session.masterKeys,
@@ -157,6 +159,36 @@ export const useFilenStore = create<FilenStoreState>((set, get) => ({
         eodbFolderUuid: session.eodbFolderUuid,
         connected: true,
       });
+
+      // Background validation — disconnect if API key has expired
+      fetch(`${FILEN_GATEWAY}/v3/user/info`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${session.auth.apiKey}`,
+        },
+        body: '{}',
+      })
+        .then(r => r.json())
+        .then(d => {
+          if (!d.status) {
+            console.warn('[EO-DB] Filen session expired — clearing stored session');
+            localStorage.removeItem(STORAGE_KEY);
+            set({
+              auth: null,
+              masterKeys: [],
+              baseFolderUuid: '',
+              eodbFolderUuid: '',
+              spaceFolders: {},
+              connected: false,
+              error: 'Filen session expired — please log in again',
+            });
+          }
+        })
+        .catch(() => {
+          // Network error — keep session, will retry on next sync cycle
+        });
+
       return true;
     } catch {
       localStorage.removeItem(STORAGE_KEY);
