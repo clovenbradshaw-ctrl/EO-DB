@@ -158,7 +158,7 @@ export async function setSpaceConfig(
 ): Promise<void> {
   await client.sendStateEvent(
     governanceRoomId,
-    EO_SPACE_CONFIG_TYPE,
+    EO_SPACE_CONFIG_TYPE as any,
     config,
     '',
   );
@@ -194,7 +194,7 @@ export async function setSchemaManifest(
 ): Promise<void> {
   await client.sendStateEvent(
     mainRoomId,
-    EO_SCHEMA_MANIFEST_TYPE,
+    EO_SCHEMA_MANIFEST_TYPE as any,
     { fields },
     '',
   );
@@ -255,7 +255,7 @@ export async function applyEoPowerLevels(
     },
   };
 
-  await client.sendStateEvent(roomId, 'm.room.power_levels', updatedContent, '');
+  await client.sendStateEvent(roomId, 'm.room.power_levels' as any, updatedContent, '');
 }
 
 // --- Membership management ---
