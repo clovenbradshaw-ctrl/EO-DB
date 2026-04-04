@@ -8,6 +8,8 @@ import {
   runEdgeDetection,
   toEoEvents,
   csvToCollections,
+  jsonToCollections,
+  autoDetectDefs,
   type DefDeclaration,
   type ExplicitEdge,
   type InferredEdge,
@@ -383,5 +385,161 @@ describe('toEoEvents', () => {
       expect(typeof event.target).toBe('string');
       expect(event.target.startsWith('lawfirm.')).toBe(true);
     }
+  });
+});
+
+describe('jsonToCollections', () => {
+  it('picks up array collections', () => {
+    const result = jsonToCollections({
+      items: [{ id: '1', name: 'a' }],
+      things: [{ id: '2', name: 'b' }],
+    });
+    expect(Object.keys(result)).toEqual(['items', 'things']);
+  });
+
+  it('wraps singleton objects as single-item arrays', () => {
+    const result = jsonToCollections({
+      firm: { name: 'Test LLP', founded: '1987' },
+      attorneys: [{ id: 'ATT-001', name: 'Alice' }],
+    });
+    expect(result.firm).toHaveLength(1);
+    expect(result.firm[0].name).toBe('Test LLP');
+    expect(result.attorneys).toHaveLength(1);
+  });
+
+  it('skips primitive values', () => {
+    const result = jsonToCollections({
+      name: 'test',
+      count: 42,
+      active: true,
+      items: [{ id: '1' }],
+    });
+    expect(Object.keys(result)).toEqual(['items']);
+  });
+
+  it('skips empty arrays', () => {
+    const result = jsonToCollections({
+      items: [],
+      things: [{ id: '1' }],
+    });
+    expect(Object.keys(result)).toEqual(['things']);
+  });
+});
+
+describe('autoDetectDefs', () => {
+  it('detects scalar foreign key references', () => {
+    const collections = {
+      cases: [{ id: 'CASE-001', lead_attorney: 'ATT-001' }],
+      attorneys: [{ id: 'ATT-001', name: 'Alice' }],
+    };
+    const typeReg = discoverStructure(collections);
+    const entityReg = populateEntities(collections, typeReg);
+    const defs = autoDetectDefs(collections, typeReg, entityReg);
+
+    const leadDef = defs.find(d => d.sourceField === 'lead_attorney');
+    expect(leadDef).toBeDefined();
+    expect(leadDef!.sourceCollection).toBe('cases');
+    expect(leadDef!.targetCollection).toBe('attorneys');
+  });
+
+  it('detects array foreign key references', () => {
+    const collections = {
+      cases: [{ id: 'CASE-001', team: ['ATT-001', 'ATT-002'] }],
+      attorneys: [
+        { id: 'ATT-001', name: 'Alice' },
+        { id: 'ATT-002', name: 'Bob' },
+      ],
+    };
+    const typeReg = discoverStructure(collections);
+    const entityReg = populateEntities(collections, typeReg);
+    const defs = autoDetectDefs(collections, typeReg, entityReg);
+
+    const teamDef = defs.find(d => d.sourceField === 'team');
+    expect(teamDef).toBeDefined();
+    expect(teamDef!.targetCollection).toBe('attorneys');
+  });
+
+  it('detects self-referential fields', () => {
+    const collections = {
+      cases: [
+        { id: 'CASE-001', related_cases: ['CASE-002'] },
+        { id: 'CASE-002', related_cases: ['CASE-001'] },
+      ],
+    };
+    const typeReg = discoverStructure(collections);
+    const entityReg = populateEntities(collections, typeReg);
+    const defs = autoDetectDefs(collections, typeReg, entityReg);
+
+    const relDef = defs.find(d => d.sourceField === 'related_cases');
+    expect(relDef).toBeDefined();
+    expect(relDef!.sourceCollection).toBe('cases');
+    expect(relDef!.targetCollection).toBe('cases');
+  });
+
+  it('does not create duplicate DEF declarations', () => {
+    const collections = {
+      cases: [
+        { id: 'CASE-001', team: ['ATT-001'] },
+        { id: 'CASE-002', team: ['ATT-001'] },
+      ],
+      attorneys: [{ id: 'ATT-001', name: 'Alice' }],
+    };
+    const typeReg = discoverStructure(collections);
+    const entityReg = populateEntities(collections, typeReg);
+    const defs = autoDetectDefs(collections, typeReg, entityReg);
+
+    const teamDefs = defs.filter(d => d.sourceField === 'team');
+    expect(teamDefs).toHaveLength(1);
+  });
+});
+
+describe('runEdgeDetection with autoDetectRefs', () => {
+  it('auto-detects edges without DEF declarations', () => {
+    const result = runEdgeDetection(LAW_FIRM_JSON, '', {
+      format: 'json',
+      autoDetectRefs: true,
+    });
+
+    expect(result.entityRegistry.size).toBe(11);
+    // Should auto-detect lead_attorney, team, primary_case, produced_by, related_cases
+    expect(result.explicitEdges.length).toBeGreaterThan(0);
+
+    // lead_attorney edges should be detected
+    const leadEdges = result.explicitEdges.filter(e => e.field === 'lead_attorney');
+    expect(leadEdges.length).toBe(3);
+
+    // team edges should be detected
+    const teamEdges = result.explicitEdges.filter(e => e.field === 'team');
+    expect(teamEdges.length).toBe(6);
+  });
+
+  it('prefers explicit DEFs over auto-detection', () => {
+    const explicitResult = runEdgeDetection(LAW_FIRM_JSON, LAW_FIRM_DEFS, {
+      format: 'json',
+      autoDetectRefs: true,
+    });
+
+    // With explicit DEFs, auto-detect is skipped
+    const autoResult = runEdgeDetection(LAW_FIRM_JSON, LAW_FIRM_DEFS, {
+      format: 'json',
+      autoDetectRefs: false,
+    });
+
+    expect(explicitResult.explicitEdges.length).toBe(autoResult.explicitEdges.length);
+  });
+
+  it('handles singleton objects in JSON', () => {
+    const data = {
+      firm: { name: 'Test LLP', offices: ['Nashville'] },
+      attorneys: [{ id: 'ATT-001', name: 'Alice' }],
+    };
+    const result = runEdgeDetection(JSON.stringify(data), '', {
+      format: 'json',
+      autoDetectRefs: true,
+    });
+
+    // firm + 1 attorney = 2 entities
+    expect(result.entityRegistry.size).toBe(2);
+    expect(result.entityRegistry.has('ATT-001')).toBe(true);
   });
 });

@@ -32,6 +32,8 @@ export interface PipelineOptions {
   csvDelimiter?: string;
   outputMode?: 'explicit' | 'inferred' | 'both';
   inferCooccurrence?: boolean;
+  /** When true, auto-detect foreign key fields that reference entity IDs. */
+  autoDetectRefs?: boolean;
 }
 
 // ─── Registry Types ──────────────────────────────────────────────────────────
@@ -393,6 +395,96 @@ export function inferCooccurrence(
   return edges;
 }
 
+// ─── JSON → Collections helper ──────────────────────────────────────────────
+
+/**
+ * Convert a parsed JSON object into a collections map.
+ * - Array values whose items are objects become collections directly.
+ * - Plain object values (singletons) are wrapped as single-item arrays.
+ * - Primitive values are skipped.
+ */
+export function jsonToCollections(
+  parsed: Record<string, any>,
+): Record<string, Record<string, any>[]> {
+  const collections: Record<string, Record<string, any>[]> = {};
+  for (const [key, val] of Object.entries(parsed)) {
+    if (Array.isArray(val) && val.length > 0 && typeof val[0] === 'object' && val[0] !== null) {
+      collections[key] = val as Record<string, any>[];
+    } else if (typeof val === 'object' && val !== null && !Array.isArray(val)) {
+      // Singleton object — wrap as single-item array
+      collections[key] = [val];
+    }
+  }
+  return collections;
+}
+
+// ─── Auto-detect foreign key fields ─────────────────────────────────────────
+
+/**
+ * Scan all fields in all collections for values that match entity IDs
+ * in the entity registry, and generate DEF declarations automatically.
+ */
+export function autoDetectDefs(
+  collections: Record<string, Record<string, any>[]>,
+  typeRegistry: TypeRegistry,
+  entityRegistry: EntityRegistry,
+): DefDeclaration[] {
+  const declarations: DefDeclaration[] = [];
+  const seen = new Set<string>(); // "collection.field→targetCollection"
+
+  for (const [collectionName, records] of Object.entries(collections)) {
+    const meta = typeRegistry.get(collectionName);
+    if (!meta) continue;
+
+    for (const record of records) {
+      for (const [field, value] of Object.entries(record)) {
+        // Skip the ID field itself
+        if (field === meta.idField) continue;
+
+        // Collect candidate IDs from the field value
+        const candidateIds = extractCandidateIds(value);
+        for (const candidateId of candidateIds) {
+          const entity = entityRegistry.get(candidateId);
+          if (!entity) continue;
+          // Don't create self-referencing DEFs for the same entity
+          if (candidateId === String(record[meta.idField])) continue;
+
+          const key = `${collectionName}.${field}→${entity.collection}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+
+          declarations.push({
+            sourceCollection: collectionName,
+            sourceField: field,
+            targetCollection: entity.collection,
+          });
+        }
+      }
+    }
+  }
+
+  return declarations;
+}
+
+/**
+ * Extract string values from a field that could be entity IDs.
+ * Handles scalars, arrays, and arrays of strings.
+ */
+function extractCandidateIds(value: any): string[] {
+  if (value == null) return [];
+  if (typeof value === 'string') return [value];
+  if (typeof value === 'number') return [];
+  if (typeof value === 'boolean') return [];
+  if (Array.isArray(value)) {
+    const ids: string[] = [];
+    for (const item of value) {
+      if (typeof item === 'string') ids.push(item);
+    }
+    return ids;
+  }
+  return [];
+}
+
 // ─── Pipeline Orchestrator ───────────────────────────────────────────────────
 
 export function runEdgeDetection(
@@ -407,12 +499,7 @@ export function runEdgeDetection(
   let collections: Record<string, Record<string, any>[]>;
   if (options.format === 'json') {
     const parsed = JSON.parse(rawData);
-    collections = {};
-    for (const [key, val] of Object.entries(parsed)) {
-      if (Array.isArray(val) && val.length > 0 && typeof val[0] === 'object' && val[0] !== null) {
-        collections[key] = val as Record<string, any>[];
-      }
-    }
+    collections = jsonToCollections(parsed);
   } else {
     collections = csvToCollections(
       rawData,
@@ -427,12 +514,17 @@ export function runEdgeDetection(
   // Step 2: INS
   const entityRegistry = populateEntities(collections, typeRegistry);
 
+  // Step 2.5: Auto-detect DEFs if requested and no explicit DEFs provided
+  const allDeclarations = declarations.length === 0 && options.autoDetectRefs
+    ? autoDetectDefs(collections, typeRegistry, entityRegistry)
+    : declarations;
+
   // Step 3: DEF → CON
-  const { explicitEdges, unresolvedRefs } = resolveEdges(declarations, collections, typeRegistry, entityRegistry);
+  const { explicitEdges, unresolvedRefs } = resolveEdges(allDeclarations, collections, typeRegistry, entityRegistry);
 
   // Step 4: SYN (optional)
   const inferredEdges = options.inferCooccurrence
-    ? inferCooccurrence(declarations, collections, typeRegistry, entityRegistry)
+    ? inferCooccurrence(allDeclarations, collections, typeRegistry, entityRegistry)
     : [];
 
   // Filter by output mode
