@@ -212,7 +212,7 @@ export function parseCsvImport(csvText: string, options?: { delimiter?: string; 
 /**
  * Parse delimited text into an array of string arrays, handling quoted fields.
  */
-function parseCsvLines(text: string, delimiter: string = ','): string[][] {
+export function parseCsvLines(text: string, delimiter: string = ','): string[][] {
   const results: string[][] = [];
   let current: string[] = [];
   let field = '';
