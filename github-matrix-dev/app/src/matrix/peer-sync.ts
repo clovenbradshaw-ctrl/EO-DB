@@ -25,6 +25,9 @@ import { storeFingerprint } from '../db/hash';
 import { peerSyncEventTypes } from '../lib/matrix-domain';
 import { getKeyById, resolveSnapshotKeyId } from '../crypto/segment-keys';
 import { encryptPeerPayload, decryptPeerPayload } from '../crypto/snapshot-crypto';
+import { selectTransport, executeSync, type TransportRouterDeps, type PeerInfo } from './transport-router';
+import type { WebRTCPeer } from './webrtc-peer';
+import type { FilenShareService } from '../filen/filen-share';
 
 const _syncTypes = peerSyncEventTypes();
 const SYNC_HELLO = _syncTypes.hello;
@@ -43,6 +46,9 @@ function toDeviceContent(userId: string, deviceId: string, content: Record<strin
   return outer;
 }
 
+/** Gap size threshold for upgrading to WebRTC or Filen transport. */
+const GAP_THRESHOLD = 100;
+
 export class PeerSync {
   private client: MatrixClient;
   private roomId: string;
@@ -50,6 +56,11 @@ export class PeerSync {
   private onEvent?: (event: any) => void;
   private keyring: LocalKeyring;
   private toDeviceHandler?: (event: MatrixEvent) => void;
+
+  /** Optional WebRTC peer for direct browser-to-browser transfers. */
+  private webrtcPeer: WebRTCPeer | null = null;
+  /** Optional Filen share service for async dead-drop transfers. */
+  private filenShare: FilenShareService | null = null;
 
   constructor(
     client: MatrixClient,
@@ -68,6 +79,16 @@ export class PeerSync {
   /** Allow updating keyring after construction. */
   setKeyring(keyring: LocalKeyring): void {
     this.keyring = keyring;
+  }
+
+  /** Attach a WebRTC peer instance for transport upgrades. */
+  setWebRTCPeer(peer: WebRTCPeer): void {
+    this.webrtcPeer = peer;
+  }
+
+  /** Attach a Filen share service for async dead-drop transfers. */
+  setFilenShare(share: FilenShareService): void {
+    this.filenShare = share;
   }
 
   /**
@@ -142,6 +163,7 @@ export class PeerSync {
           my_fingerprint: fingerprint,
           my_device: this.client.getDeviceId(),
           room_id: this.roomId,
+          rtc_capable: this.webrtcPeer !== null,
         },
       ));
     }
@@ -157,7 +179,7 @@ export class PeerSync {
 
     switch (type) {
       case SYNC_HELLO:
-        await this.handleHello(sender, content.my_device, content.my_seq, content.my_fingerprint);
+        await this.handleHello(sender, content.my_device, content.my_seq, content.my_fingerprint, content.rtc_capable);
         break;
       case SYNC_OFFER:
         await this.handleOffer(sender, content);
@@ -176,6 +198,7 @@ export class PeerSync {
     senderDeviceId: string,
     theirSeq: number,
     theirFingerprint?: string,
+    theirRtcCapable?: boolean,
   ): Promise<void> {
     const mySeq = await this.store.getCurrentSeq();
     const myFingerprint = await this.computeFingerprint();
@@ -197,6 +220,7 @@ export class PeerSync {
         has_events_you_need: hasEventsTheyNeed,
         needs_events_from_you: needsEventsFromThem,
         fingerprint_match: fingerprintMatch,
+        rtc_capable: this.webrtcPeer !== null,
       },
     ));
   }
@@ -211,6 +235,27 @@ export class PeerSync {
       // If fingerprints match or are unknown, request from our current seq.
       const mySeq = await this.store.getCurrentSeq();
       const needFrom = content.fingerprint_match === false ? 0 : mySeq;
+      const gapSize = content.my_seq - mySeq;
+
+      // For large gaps, use the transport router to select the best transport
+      if (gapSize > GAP_THRESHOLD && (this.webrtcPeer || this.filenShare)) {
+        const peer: PeerInfo = {
+          userId: senderUserId,
+          deviceId: content.my_device,
+          seq: content.my_seq,
+          fingerprint: content.my_fingerprint,
+          rtcCapable: content.rtc_capable ?? false,
+          online: true,
+        };
+        const deps: TransportRouterDeps = {
+          sendViaMatrix: (uid, did, from) => this.requestEvents(uid, did, from),
+          webrtcPeer: this.webrtcPeer,
+          filenShare: this.filenShare,
+        };
+        const result = await executeSync(peer, needFrom, gapSize, deps);
+        if (result.success) return;
+        // If all transports failed, fall through to Matrix to-device
+      }
 
       await this.requestEvents(senderUserId, content.my_device, needFrom);
     }

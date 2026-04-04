@@ -53,6 +53,28 @@ export function keyEventTypes(prefix?: string) {
   } as const;
 }
 
+/** WebRTC signaling event types (to-device). */
+export function peerRtcEventTypes(prefix?: string) {
+  const p = prefix ?? _eventPrefix;
+  return {
+    offer: `${p}.peer.rtc.offer`,
+    answer: `${p}.peer.rtc.answer`,
+    ice: `${p}.peer.rtc.ice`,
+    hangup: `${p}.peer.rtc.hangup`,
+  } as const;
+}
+
+/** Filen P2P sharing event types. */
+export function filenShareEventTypes(prefix?: string) {
+  const p = prefix ?? _eventPrefix;
+  return {
+    /** Timeline event: peer offers data via Filen. */
+    share: `${p}.peer.filen.share`,
+    /** Room state event: latest Filen share pointer per space. */
+    latest: `${p}.peer.filen.latest`,
+  } as const;
+}
+
 export interface MatrixDomainConfig {
   eventPrefix?: string;
   dataRoomAlias?: string;
