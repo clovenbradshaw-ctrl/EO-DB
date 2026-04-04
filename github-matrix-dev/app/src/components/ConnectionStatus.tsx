@@ -5,7 +5,7 @@
 import { useState, useEffect } from 'react';
 import { useTheme, type Theme } from '../theme';
 
-export type ConnectionState = 'online' | 'offline' | 'syncing';
+export type ConnectionState = 'online' | 'offline' | 'syncing' | 'local';
 
 interface ConnectionStatusProps {
   state: ConnectionState;
@@ -18,6 +18,7 @@ export function ConnectionStatus({ state }: ConnectionStatusProps) {
     online: { color: theme.success, bg: theme.successBg, borderColor: theme.successBorder, label: 'Connected' },
     offline: { color: theme.danger, bg: theme.dangerBg, borderColor: theme.dangerBorder, label: 'Offline' },
     syncing: { color: theme.warning, bg: theme.warningBg, borderColor: theme.warningBorder, label: 'Syncing...' },
+    local: { color: theme.accent, bg: theme.accentBg, borderColor: theme.accentBorder, label: 'Local' },
   };
 
   const config = stateConfig[state];

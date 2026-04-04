@@ -155,14 +155,17 @@ export function Layout({ session, onLogout }: LayoutProps) {
   const syncManager = useEoStore((s) => s.syncManager);
   const [syncToastStatus, syncToastSeq, onSyncStatus] = useSyncToast();
   const [matrixReady, setMatrixReady] = useState(false);
-  // Show actual sync status: "online" only when Matrix sync is connected
+  // Show actual sync status: "online" only when Matrix sync is connected.
+  // When Matrix is disabled, show "local" (data works, just no remote sync).
   const connectionState: ConnectionState = !navigator.onLine
     ? 'offline'
-    : syncManager
-      ? 'online'
-      : matrixReady
-        ? 'syncing' // Matrix client ready but no sync manager yet
-        : 'offline';
+    : !MATRIX_ENABLED
+      ? 'local'
+      : syncManager
+        ? 'online'
+        : matrixReady
+          ? 'syncing'
+          : 'offline';
 
   // Helper to select a space and persist the choice
   function selectSpace(target: string) {
@@ -491,6 +494,9 @@ export function Layout({ session, onLogout }: LayoutProps) {
     let mounted = true;
 
     async function resolveOrCreateRoom(): Promise<string | null> {
+      // When Matrix is disabled, skip all room resolution — local-only mode.
+      if (!MATRIX_ENABLED) return null;
+
       // 0. Check the space cache first (handles freshly-created spaces
       //    whose state events haven't synced to the SDK yet)
       const cached = spaceCacheRef.current.get(selectedSpace!);
