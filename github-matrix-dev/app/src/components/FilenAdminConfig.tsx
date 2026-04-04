@@ -78,12 +78,22 @@ export function FilenAdminConfig({ matrixClient, roomId }: FilenAdminConfigProps
         setExisting(content as ExistingConfig);
         setEmail(content.email || '');
 
-        // Verify Filen session is still valid
-        fetch('https://gateway.filen.io/v3/user/info', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${content.apiKey}` },
-          body: '{}',
-        })
+        // Verify Filen session is still valid (Filen requires Checksum header)
+        const verifyBody = '{}';
+        crypto.subtle.digest('SHA-512', new TextEncoder().encode(verifyBody))
+          .then(hashBuf => {
+            const checksum = Array.from(new Uint8Array(hashBuf))
+              .map(b => b.toString(16).padStart(2, '0')).join('');
+            return fetch('https://gateway.filen.io/v3/user/info', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${content.apiKey}`,
+                'Checksum': checksum,
+              },
+              body: verifyBody,
+            });
+          })
           .then(r => r.json())
           .then(d => setFilenStatus(d.status ? 'connected' : 'expired'))
           .catch(() => setFilenStatus('expired'));

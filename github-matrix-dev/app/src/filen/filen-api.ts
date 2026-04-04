@@ -205,10 +205,19 @@ async function gateway(
   data: Record<string, unknown>,
   apiKey?: string,
 ): Promise<any> {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const body = JSON.stringify(data);
+  // Filen gateway requires a Checksum header: SHA-512 of the request body
+  const hashBuf = await crypto.subtle.digest('SHA-512', new TextEncoder().encode(body));
+  const checksum = Array.from(new Uint8Array(hashBuf))
+    .map(b => b.toString(16).padStart(2, '0')).join('');
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'Checksum': checksum,
+  };
   if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
   const res = await fetch(`${FILEN_GATEWAY}${endpoint}`, {
-    method: 'POST', headers, body: JSON.stringify(data),
+    method: 'POST', headers, body,
   });
   return res.json();
 }
@@ -223,17 +232,7 @@ export async function filenLogin(
   twofa?: string,
 ): Promise<LoginResult> {
   // Step 1: Get auth info (salt + auth version)
-  let info: any;
-  try {
-    const res = await fetch(`${FILEN_GATEWAY}/v3/auth/info`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email }),
-    });
-    info = await res.json();
-  } catch (e: any) {
-    throw new Error(`Filen auth/info network error: ${e.message}`);
-  }
+  const info = await gateway('/v3/auth/info', { email });
   if (!info.status) throw new Error(info.message || 'Auth info failed');
 
   const { derivedPassword, derivedMasterKeys } = await generatePasswordAndMasterKey(
