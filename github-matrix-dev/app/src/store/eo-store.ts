@@ -99,10 +99,16 @@ export const useEoStore = create<EoDbState>((set, get) => ({
   },
 
   async dispatch(event: EoEventInput) {
-    const { store } = get();
+    const { store, syncManager } = get();
     if (!store) throw new Error('Store not initialized');
 
-    // Fold locally — Filen sync picks up new events on its 30s timer
+    // If Matrix sync is active, route through SyncManager (folds locally + sends to room)
+    if (syncManager) {
+      const seq = await syncManager.processLocalEvent(event);
+      return seq;
+    }
+
+    // Otherwise fold locally only — Filen sync picks up new events on its 30s timer
     const seq = await processEvent(store, event, (fullEvent) => {
       set((state) => ({
         recentEvents: [...state.recentEvents.slice(-99), fullEvent],
