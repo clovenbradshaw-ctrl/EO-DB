@@ -712,7 +712,7 @@ export function LogView({ targetFilter }: { targetFilter?: string | null }) {
                 <input
                   value={searchText}
                   onChange={(e) => setSearchText(e.target.value)}
-                  placeholder="Search events\u2026"
+                  placeholder="Search events…"
                   style={{
                     width: 180, height: 28, fontSize: 11,
                     padding: '0 8px 0 28px', color: t.text,
