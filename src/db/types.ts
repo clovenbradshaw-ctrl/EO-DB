@@ -5,7 +5,8 @@ export type Operator = 'NUL' | 'SIG' | 'INS' | 'SEG' | 'CON' | 'SYN' | 'DEF' | '
 export type LoggableOperator = 'NUL' | 'INS' | 'SEG' | 'CON' | 'SYN' | 'DEF' | 'EVA' | 'REC';
 
 // Operators that can be submitted externally (by humans or sync bridges)
-export type ExternalOperator = 'NUL' | 'INS' | 'SEG' | 'CON' | 'SYN' | 'DEF' | 'EVA';
+// SIG is submittable but ephemeral — tracked locally, never persisted to the log.
+export type ExternalOperator = 'NUL' | 'SIG' | 'INS' | 'SEG' | 'CON' | 'SYN' | 'DEF' | 'EVA';
 
 // An event in the log
 export interface EoEvent {

@@ -8,6 +8,16 @@ import type { EoEvent, EoEventInput, EoState, EvaRegistration, RecResult, Extern
 import { isEncryptedOperand } from './crypto-types.js';
 import type { Feed } from './feed.js';
 import { seedHash, chainHash, eventHash } from './hash.js';
+import { SigTracker } from './sig.js';
+import type { SigEvent } from './sig.js';
+
+/** Global SIG tracker — ephemeral, in-memory only. */
+const sigTracker = new SigTracker();
+
+/** Access the SIG tracker for querying local SIG state. */
+export function getSigTracker(): SigTracker {
+  return sigTracker;
+}
 
 /** Configuration for REC loop runner. */
 export interface RecConfig {
@@ -46,6 +56,24 @@ export async function processEvent(
   // 0. REC is system-generated — reject external submissions
   if (event.op === 'REC') {
     throw new Error('REC is system-generated and cannot be submitted externally');
+  }
+
+  // 0.1. SIG is ephemeral — track locally but never persist
+  if (event.op === 'SIG') {
+    const sigEvent: SigEvent = {
+      op: 'SIG',
+      target: event.target,
+      operand: event.operand,
+      agent: event.agent,
+      ts: event.ts,
+      acquired_ts: event.acquired_ts,
+    };
+    sigTracker.track(sigEvent);
+    // Notify changefeed so live subscribers see SIG activity
+    if (feed) {
+      feed.notify({ ...sigEvent, seq: -1 } as unknown as EoEvent);
+    }
+    return -1; // No seq assigned — SIG is not logged
   }
 
   // 0.5. Deterministic event hashing — assign client_event_id from content hash
