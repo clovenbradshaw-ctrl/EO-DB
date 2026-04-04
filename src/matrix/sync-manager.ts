@@ -75,6 +75,13 @@ class QueueMutex {
 /** Mutex protecting the offline queue from concurrent read-modify-write. */
 const queueMutex = new QueueMutex();
 
+/**
+ * Kill-switch for all Matrix uploads (snapshots, event sends, queue flushes).
+ * Login and local fold still work — only outbound writes to Matrix are disabled.
+ * Set to false when the new storage backend is ready.
+ */
+const MATRIX_UPLOAD_DISABLED = true;
+
 // ─── Meta key helpers ──────────────────────────────────────────────────────
 
 async function getMeta<T>(db: EoDb, key: string): Promise<T | null> {
@@ -284,6 +291,8 @@ export class SyncManager {
    * Called on page unload / visibility hidden so data is always persisted.
    */
   async saveSnapshot(): Promise<void> {
+    if (MATRIX_UPLOAD_DISABLED) return;
+
     const seq = await getCurrentSeq(this.db);
     const lastSnapshotSeq = (await getMeta<number>(this.db, 'meta:snapshot_seq')) || 0;
     if (seq === 0 || seq === lastSnapshotSeq) return;
@@ -301,6 +310,10 @@ export class SyncManager {
    * uploads to Matrix media, and records the mxc URI in a NUL log event.
    */
   async manualSnapshot(): Promise<{ mxc: string; seq: number }> {
+    if (MATRIX_UPLOAD_DISABLED) {
+      throw new Error('Matrix uploads are currently disabled');
+    }
+
     const currentSeq = await getCurrentSeq(this.db);
     const lastSnapshotSeq = (await getMeta<number>(this.db, 'meta:snapshot_seq')) || 0;
 
@@ -353,6 +366,10 @@ export class SyncManager {
     toSeq: number,
     importMeta?: ImportMeta,
   ): Promise<{ mxc: string; from_seq: number; to_seq: number; event_count: number }> {
+    if (MATRIX_UPLOAD_DISABLED) {
+      return { mxc: '', from_seq: fromSeq, to_seq: toSeq, event_count: 0 };
+    }
+
     const userId = this.client.getUserId()!;
 
     // Read all new events from the log
@@ -499,7 +516,9 @@ export class SyncManager {
     const seq = await processEvent(this.db, localEvent, this.feed);
 
     // Send to room (best-effort, skip if rate-limited)
-    if (Date.now() < this.rateLimitedUntil) {
+    if (MATRIX_UPLOAD_DISABLED) {
+      // Matrix uploads disabled — local fold already happened above
+    } else if (Date.now() < this.rateLimitedUntil) {
       await this.enqueueOfflineEvent(localEvent);
       this.onSyncStatus?.('queued');
     } else {
@@ -524,7 +543,7 @@ export class SyncManager {
     }
 
     // Auto-snapshot to Matrix media every 500 log entries (skip if rate-limited)
-    if (Date.now() >= this.rateLimitedUntil) {
+    if (!MATRIX_UPLOAD_DISABLED && Date.now() >= this.rateLimitedUntil) {
       await maybeCreateSnapshot(this.client, this.roomId, this.db, agent, this.keyring);
     }
 
@@ -577,33 +596,37 @@ export class SyncManager {
     }
 
     // Send all events to Matrix as a single batch message
-    try {
-      if (Date.now() < this.rateLimitedUntil) {
-        throw new Error('rate-limited');
-      }
-      await sendEoBatchEvent(this.client, this.roomId, preparedEvents);
-      this.onSyncStatus?.('confirmed');
-    } catch (err) {
-      // Queue individual events for later flush
-      const retryDelay = SyncManager.getRetryDelay(err);
-      if (retryDelay !== null) {
-        this.rateLimitedUntil = Date.now() + retryDelay;
-        this.onSyncStatus?.('rate-limited');
-      } else {
-        this.onSyncStatus?.('queued');
-      }
-      for (const event of preparedEvents) {
-        await this.enqueueOfflineEvent(event);
-      }
-      // Schedule flush
-      if (!this.destroyed) {
-        const delay = retryDelay ?? 2000;
-        setTimeout(() => { if (!this.destroyed) this.flushUnsyncedEvents(); }, delay);
+    if (MATRIX_UPLOAD_DISABLED) {
+      // Matrix uploads disabled — local fold already happened above
+    } else {
+      try {
+        if (Date.now() < this.rateLimitedUntil) {
+          throw new Error('rate-limited');
+        }
+        await sendEoBatchEvent(this.client, this.roomId, preparedEvents);
+        this.onSyncStatus?.('confirmed');
+      } catch (err) {
+        // Queue individual events for later flush
+        const retryDelay = SyncManager.getRetryDelay(err);
+        if (retryDelay !== null) {
+          this.rateLimitedUntil = Date.now() + retryDelay;
+          this.onSyncStatus?.('rate-limited');
+        } else {
+          this.onSyncStatus?.('queued');
+        }
+        for (const event of preparedEvents) {
+          await this.enqueueOfflineEvent(event);
+        }
+        // Schedule flush
+        if (!this.destroyed) {
+          const delay = retryDelay ?? 2000;
+          setTimeout(() => { if (!this.destroyed) this.flushUnsyncedEvents(); }, delay);
+        }
       }
     }
 
     // Snapshot after batch import
-    if (Date.now() >= this.rateLimitedUntil) {
+    if (!MATRIX_UPLOAD_DISABLED && Date.now() >= this.rateLimitedUntil) {
       await maybeCreateSnapshot(this.client, this.roomId, this.db, agent, this.keyring);
     }
 
@@ -722,6 +745,8 @@ export class SyncManager {
    * already received (e.g., via peer sync or auto-snapshot) is harmless.
    */
   private async flushUnsyncedEvents(): Promise<void> {
+    if (MATRIX_UPLOAD_DISABLED) return;
+
     await queueMutex.run(async () => {
       const raw: any[] = (await getMeta<any[]>(this.db, 'meta:offline_queue')) || [];
       if (raw.length === 0) return;
