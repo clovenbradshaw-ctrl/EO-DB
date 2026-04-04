@@ -81,7 +81,7 @@ const queueMutex = new QueueMutex();
  * Login and local fold still work — only outbound writes to Matrix are disabled.
  * Set to false when the new storage backend is ready.
  */
-const MATRIX_UPLOAD_DISABLED = true;
+const MATRIX_UPLOAD_DISABLED = false;
 
 // ─── Meta key helpers ──────────────────────────────────────────────────────
 
