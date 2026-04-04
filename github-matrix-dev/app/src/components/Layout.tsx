@@ -28,6 +28,7 @@ import { SettingsView } from './SettingsView';
 import { SpaceMembers } from './SpaceMembers';
 import { ImportView } from './ImportView';
 import { BuilderView } from './builder/BuilderView';
+import { MessagesView } from './MessagesView';
 import { RecordPageView } from './builder/RecordPageView';
 import { PermissionBadge } from './PermissionBadge';
 import { ViewOnlyBanner } from './ViewOnlyBanner';
@@ -866,6 +867,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     import: '\u2B07',   // download arrow
     builder: '\u2B1A',  // blocks
     settings: '\u2699', // gear
+    messages: '\uD83D\uDCAC', // speech bubble
   };
 
   // --- Permission resolution ---
@@ -1140,6 +1142,17 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                 {view === 'compose' ? '+ Compose' : view.charAt(0).toUpperCase() + view.slice(1)}
               </button>
             ))}
+            <div style={s.navGroupLabel}>Collaborate</div>
+            <button
+              onClick={() => navigate({ view: 'messages' })}
+              style={{
+                ...s.navItem,
+                ...(activeView === 'messages' ? s.navItemActive : {}),
+              }}
+            >
+              <span style={s.navIcon}>{NAV_ICONS.messages}</span>
+              Messages
+            </button>
             <div style={s.navGroupLabel}>System</div>
             {/* Log */}
             <button
@@ -1285,6 +1298,8 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               <ComposeView permissions={currentPermissions} />
             ) : activeView === 'builder' ? (
               <BuilderView />
+            ) : activeView === 'messages' ? (
+              <MessagesView scope={selectedScope} userId={session.userId} />
             ) : activeView === 'settings' ? (
               <SettingsView session={session} matrixClient={matrixClientRef.current} roomId={spaceCacheRef.current.get(selectedSpace!)?.mainRoomId ?? null} onUnarchive={handleUnarchiveSpace} />
             ) : null}
