@@ -1198,7 +1198,11 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             <ViewsBrowser
               onBack={() => setShowViewsBrowser(false)}
               onSelectView={(view) => {
-                viewStore.activateView(view.scope, view);
+                if (view.id) {
+                  viewStore.activateView(view.scope, view);
+                } else {
+                  viewStore.resetToDefault(view.scope);
+                }
                 navigate({ view: 'records', scope: view.scope });
                 setShowViewsBrowser(false);
               }}

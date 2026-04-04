@@ -1,8 +1,8 @@
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useState, useMemo, useRef } from 'react';
 import { useEoStore } from '../store/eo-store';
 import { useViewStore } from '../store/view-store';
 import { VIEW_TYPE_META, type SavedView, type ViewType } from './view-types';
-import { formatName } from './scope-picker-utils';
+import { buildTree, formatName, type TreeNode } from './scope-picker-utils';
 import { useTheme, type Theme } from '../theme';
 
 interface ViewsBrowserProps {
@@ -14,18 +14,32 @@ export function ViewsBrowser({ onBack, onSelectView }: ViewsBrowserProps) {
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
   const ready = useEoStore((s) => s.ready);
   const lastSeq = useEoStore((s) => s.lastSeq);
-  const viewStore = useViewStore();
+  const registerSavedViews = useViewStore((s) => s.registerSavedViews);
+  const savedViews = useViewStore((s) => s.savedViews);
   const { theme } = useTheme();
   const s = makeStyles(theme);
 
-  const [expanded, setExpanded] = useState<Set<ViewType>>(new Set(['grid']));
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
+  const [tables, setTables] = useState<TreeNode[]>([]);
+  const hasLoadedOnce = useRef(false);
 
-  // Bulk-load all saved views across all scopes
+  // Load tables and saved views
   useEffect(() => {
     if (!ready) return;
-    setLoading(true);
+    if (!hasLoadedOnce.current) setLoading(true);
+
     getStateByPrefix('').then((states) => {
+      // Build tree to discover tables
+      const tree = buildTree(states, '');
+      setTables(tree);
+
+      // Auto-expand all tables on first load
+      if (!hasLoadedOnce.current) {
+        setExpanded(new Set(tree.map((n) => n.fullPath)));
+      }
+
+      // Extract saved views
       const viewStates = states.filter(
         (st) => st.target.includes('._views.') && st.value?.name && !st.value?._deleted,
       );
@@ -55,105 +69,133 @@ export function ViewsBrowser({ onBack, onSelectView }: ViewsBrowserProps) {
         };
       });
       if (views.length > 0) {
-        viewStore.registerSavedViews(views);
+        registerSavedViews(views);
       }
+      hasLoadedOnce.current = true;
       setLoading(false);
     });
-  }, [ready, lastSeq, getStateByPrefix, viewStore]);
+  }, [ready, lastSeq, getStateByPrefix, registerSavedViews]);
 
-  // Group saved views by viewType
-  const grouped = useMemo(() => {
-    const allViews = Object.values(viewStore.savedViews);
-    const map = new Map<ViewType, SavedView[]>();
-    for (const vt of Object.keys(VIEW_TYPE_META) as ViewType[]) {
-      map.set(vt, []);
-    }
-    for (const view of allViews) {
-      const type = (view.viewType || 'grid') as ViewType;
-      const list = map.get(type);
-      if (list) {
-        list.push(view);
-      } else {
-        map.get('grid')!.push(view);
-      }
+  // Group saved views by scope
+  const viewsByScope = useMemo(() => {
+    const map = new Map<string, SavedView[]>();
+    for (const view of Object.values(savedViews)) {
+      const list = map.get(view.scope);
+      if (list) list.push(view);
+      else map.set(view.scope, [view]);
     }
     // Sort each group by name
     for (const list of map.values()) {
       list.sort((a, b) => a.name.localeCompare(b.name));
     }
     return map;
-  }, [viewStore.savedViews]);
+  }, [savedViews]);
 
-  function toggleFolder(vt: ViewType) {
+  function toggleTable(fullPath: string) {
     setExpanded((prev) => {
       const next = new Set(prev);
-      if (next.has(vt)) next.delete(vt);
-      else next.add(vt);
+      if (next.has(fullPath)) next.delete(fullPath);
+      else next.add(fullPath);
       return next;
     });
   }
 
-  const totalViews = Object.values(viewStore.savedViews).length;
+  // Create a synthetic "default grid view" SavedView for a scope
+  function makeDefaultView(scope: string): SavedView {
+    return {
+      id: '',
+      name: 'Grid view',
+      scope,
+      viewType: 'grid',
+      config: {
+        columnOrder: [],
+        columnWidths: {},
+        hiddenColumns: [],
+        sorts: [],
+        filters: [],
+        filterConjunction: 'AND',
+        showLastUpdated: true,
+      },
+      visibility: 'shared',
+      createdBy: '',
+      createdAt: '',
+      updatedAt: '',
+    };
+  }
 
   return (
     <div style={s.container}>
       <div style={s.header}>
         <button onClick={onBack} style={s.backBtn}>{'\u2190'} Back</button>
-        <span style={s.title}>Saved Views</span>
+        <span style={s.title}>Tables</span>
       </div>
 
       {loading ? (
-        <div style={s.empty}>Loading views...</div>
-      ) : totalViews === 0 ? (
+        <div style={s.empty}>Loading...</div>
+      ) : tables.length === 0 ? (
         <div style={s.empty}>
-          <span style={{ opacity: 0.4, fontSize: 18 }}>{'\u25A6'}</span>
-          <span>No saved views yet</span>
+          <span style={{ opacity: 0.4, fontSize: 18 }}>{'\u229E'}</span>
+          <span>No tables yet</span>
           <span style={{ fontSize: 10, color: theme.textMuted }}>
-            Save a view from the table toolbar
+            Import data to create tables
           </span>
         </div>
       ) : (
         <div style={s.scroll}>
-          {(Object.keys(VIEW_TYPE_META) as ViewType[]).map((vt) => {
-            const meta = VIEW_TYPE_META[vt];
-            const views = grouped.get(vt) || [];
-            const isExpanded = expanded.has(vt);
-            const isEmpty = views.length === 0;
+          {tables.map((node) => {
+            const isExpanded = expanded.has(node.fullPath);
+            const scopeViews = viewsByScope.get(node.fullPath) || [];
 
             return (
-              <div key={vt}>
+              <div key={node.fullPath}>
+                {/* Table row */}
                 <div
-                  style={{
-                    ...s.folder,
-                    ...(isEmpty ? { opacity: 0.5 } : {}),
-                  }}
-                  onClick={() => !isEmpty && toggleFolder(vt)}
+                  style={s.tableRow}
+                  onClick={() => toggleTable(node.fullPath)}
                 >
                   <span style={s.chevron}>
-                    {isEmpty ? '\u00A0\u00A0' : isExpanded ? '\u25BE' : '\u25B8'}
+                    {isExpanded ? '\u25BE' : '\u25B8'}
                   </span>
-                  <span style={s.folderIcon}>{meta.icon}</span>
-                  <span style={s.folderLabel}>{meta.label}</span>
-                  <span style={s.folderCount}>({views.length})</span>
+                  <span style={s.tableIcon}>{'\u229E'}</span>
+                  <span style={s.tableLabel}>
+                    {formatName(node.segment)}
+                  </span>
+                  {node.childCount > 0 && (
+                    <span style={s.badge}>{node.childCount}</span>
+                  )}
                 </div>
 
-                {isExpanded && views.map((view) => (
-                  <div
-                    key={view.id}
-                    style={s.viewItem}
-                    onClick={() => onSelectView(view)}
-                  >
-                    <div style={s.viewName}>
-                      {view.visibility === 'private' && (
-                        <span style={{ marginRight: 4, fontSize: 10 }}>{'\uD83D\uDD12'}</span>
-                      )}
-                      {view.name}
+                {/* Views under this table */}
+                {isExpanded && (
+                  <>
+                    {/* Default grid view — always present */}
+                    <div
+                      style={s.viewItem}
+                      onClick={() => onSelectView(makeDefaultView(node.fullPath))}
+                    >
+                      <span style={s.viewIcon}>{VIEW_TYPE_META.grid.icon}</span>
+                      <span style={s.viewName}>Grid view</span>
                     </div>
-                    <div style={s.viewScope}>
-                      {formatName(view.scope.split('.').pop() || view.scope)}
-                    </div>
-                  </div>
-                ))}
+
+                    {/* Saved views */}
+                    {scopeViews.map((view) => {
+                      const vtMeta = VIEW_TYPE_META[(view.viewType || 'grid') as ViewType];
+                      return (
+                        <div
+                          key={view.id}
+                          style={s.viewItem}
+                          onClick={() => onSelectView(view)}
+                        >
+                          <span style={s.viewIcon}>{vtMeta.icon}</span>
+                          {view.visibility === 'private' && (
+                            <span style={{ fontSize: 10, marginRight: 2 }}>{'\uD83D\uDD12'}</span>
+                          )}
+                          <span style={s.viewName}>{view.name}</span>
+                        </div>
+                      );
+                    })}
+                  </>
+                )}
               </div>
             );
           })}
@@ -210,14 +252,14 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       fontSize: 12,
       color: t.textSecondary,
     },
-    folder: {
+    tableRow: {
       display: 'flex',
       alignItems: 'center',
       gap: 6,
       padding: '8px 12px',
       cursor: 'pointer',
       fontSize: 12,
-      fontWeight: 500,
+      fontWeight: 600,
       color: t.textHeading,
       userSelect: 'none',
     },
@@ -227,37 +269,45 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       flexShrink: 0,
       color: t.textMuted,
     },
-    folderIcon: {
+    tableIcon: {
       fontSize: 13,
       opacity: 0.7,
     },
-    folderLabel: {
+    tableLabel: {
       flex: 1,
-    },
-    folderCount: {
-      fontSize: 10,
-      color: t.textMuted,
-      fontWeight: 400,
-    },
-    viewItem: {
-      padding: '6px 12px 6px 36px',
-      cursor: 'pointer',
-      borderRadius: 4,
-      margin: '0 4px',
-      transition: 'background 0.1s',
-    },
-    viewName: {
-      fontSize: 12,
-      fontWeight: 500,
-      color: t.text,
       overflow: 'hidden',
       textOverflow: 'ellipsis',
       whiteSpace: 'nowrap',
     },
-    viewScope: {
+    badge: {
       fontSize: 10,
       color: t.textMuted,
-      marginTop: 1,
+      fontWeight: 400,
+      background: t.border,
+      borderRadius: 8,
+      padding: '1px 6px',
+      minWidth: 18,
+      textAlign: 'center',
+    },
+    viewItem: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6,
+      padding: '5px 12px 5px 36px',
+      cursor: 'pointer',
+      borderRadius: 4,
+      margin: '0 4px',
+      fontSize: 12,
+      fontWeight: 400,
+      color: t.text,
+      transition: 'background 0.1s',
+    },
+    viewIcon: {
+      fontSize: 11,
+      opacity: 0.6,
+      flexShrink: 0,
+    },
+    viewName: {
       overflow: 'hidden',
       textOverflow: 'ellipsis',
       whiteSpace: 'nowrap',
