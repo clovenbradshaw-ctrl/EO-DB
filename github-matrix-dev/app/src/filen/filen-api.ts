@@ -197,7 +197,7 @@ function pickRandom<T>(arr: T[]): T {
 }
 
 // ──────────────────────────────────────────────────────────────
-// API helpers
+// API helpers — direct fetch, matches working standalone HTML
 // ──────────────────────────────────────────────────────────────
 
 async function gateway(
@@ -205,20 +205,25 @@ async function gateway(
   data: Record<string, unknown>,
   apiKey?: string,
 ): Promise<any> {
-  const body = JSON.stringify(data);
-
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   };
   if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
-  const res = await fetch(`${FILEN_GATEWAY}${endpoint}`, {
-    method: 'POST', headers, body,
+  const res = await fetch(FILEN_GATEWAY + endpoint, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(data),
   });
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`;
+    try { const j = await res.json(); msg = j.message || msg; } catch {}
+    throw new Error(msg);
+  }
   return res.json();
 }
 
 // ──────────────────────────────────────────────────────────────
-// Auth
+// Auth — logic ported directly from working standalone HTML
 // ──────────────────────────────────────────────────────────────
 
 export async function filenLogin(
@@ -226,32 +231,69 @@ export async function filenLogin(
   password: string,
   twofa?: string,
 ): Promise<LoginResult> {
-  // Step 1: Get auth info (salt + auth version)
-  const info = await gateway('/v3/auth/info', { email });
-  if (!info.status) throw new Error(info.message || 'Auth info failed');
-
-  const { derivedPassword, derivedMasterKeys } = await generatePasswordAndMasterKey(
-    password, info.data.authVersion, info.data.salt,
-  );
-
-  const login = await gateway('/v3/login', {
-    email,
-    password: derivedPassword,
-    twoFactorCode: twofa || 'XXXXXX',
-    authVersion: info.data.authVersion,
+  // Step 1: auth/info — exact same fetch as standalone HTML
+  const aiRes = await fetch(FILEN_GATEWAY + '/v3/auth/info', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email }),
   });
-  if (!login.status) throw new Error(login.message || 'Login failed');
+  const ai = await aiRes.json();
+  if (!ai.status) throw new Error(ai.message || 'Auth info failed');
+
+  // Step 2: derive password + master key (same PBKDF2 as standalone HTML)
+  const enc = new TextEncoder();
+  const km = await crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', salt: enc.encode(ai.data.salt), iterations: 200000, hash: 'SHA-512' },
+    km, 512,
+  );
+  const fullKey = Array.from(new Uint8Array(bits))
+    .map(b => b.toString(16).padStart(2, '0')).join('');
+  const masterKey = fullKey.substring(0, fullKey.length / 2);
+  const loginPw = fullKey.substring(fullKey.length / 2);
+  const derivedPw = await sha512(loginPw);
+
+  // Step 3: login — exact same fetch as standalone HTML
+  const lrRes = await fetch(FILEN_GATEWAY + '/v3/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      email,
+      password: derivedPw,
+      twoFactorCode: twofa || 'XXXXXX',
+      authVersion: ai.data.authVersion,
+    }),
+  });
+  const lr = await lrRes.json();
+  if (!lr.status) throw new Error(lr.message || 'Login failed');
 
   return {
-    apiKey: login.data.apiKey,
-    masterKeys: [derivedMasterKeys],
+    apiKey: lr.data.apiKey,
+    masterKeys: [masterKey],
   };
 }
 
 export async function filenGetBaseFolder(apiKey: string): Promise<string> {
-  const res = await gateway('/v3/user/baseFolder', {}, apiKey);
-  if (!res.status) throw new Error(res.message || 'Failed to get base folder');
-  return res.data.uuid;
+  const res = await fetch(FILEN_GATEWAY + '/v3/user/baseFolder', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    body: '{}',
+  });
+  const data = await res.json();
+  if (!data.status) {
+    // Fallback: try GET like standalone HTML
+    const res2 = await fetch(FILEN_GATEWAY + '/v3/user/baseFolder', {
+      method: 'GET',
+      headers: { 'Authorization': `Bearer ${apiKey}` },
+    });
+    const data2 = await res2.json();
+    if (!data2.status) throw new Error(data2.message || 'Failed to get base folder');
+    return data2.data.uuid;
+  }
+  return data.data.uuid;
 }
 
 // ──────────────────────────────────────────────────────────────
