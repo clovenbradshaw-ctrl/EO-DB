@@ -323,7 +323,7 @@ export class FilenSyncService {
         try {
           // Timeline event: backup signal
           const txnId = `eo_backup_${now}_${Math.random().toString(36).slice(2, 8)}`;
-          await this.matrixClient.sendEvent(this.roomId, EO_BACKUP_SIGNAL, {
+          await this.matrixClient.sendEvent(this.roomId, EO_BACKUP_SIGNAL as any, {
             stream: 'backup',
             space_id: this.spaceId,
             filen_path: `/EO-DB/${this.spaceName}/${filename}`,
@@ -336,7 +336,7 @@ export class FilenSyncService {
           });
 
           // State event: update head pointer
-          await this.matrixClient.sendStateEvent(this.roomId, EO_BACKUP_HEAD, {
+          await this.matrixClient.sendStateEvent(this.roomId, EO_BACKUP_HEAD as any, {
             filen_path: `/EO-DB/${this.spaceName}/${filename}`,
             file_uuid: uploaded.uuid,
             folder_uuid: this.spaceFolderUuid,
@@ -445,7 +445,7 @@ export class FilenSyncService {
     // Signal compaction via Matrix
     if (this.matrixClient && this.roomId) {
       try {
-        await this.matrixClient.sendEvent(this.roomId, EO_COMPACT_SIGNAL, {
+        await this.matrixClient.sendEvent(this.roomId, EO_COMPACT_SIGNAL as any, {
           stream: 'backup',
           space_id: this.spaceId,
           filen_path: `/EO-DB/${this.spaceName}/${filename}`,
@@ -457,7 +457,7 @@ export class FilenSyncService {
           compacted_by: this.userId,
         });
 
-        await this.matrixClient.sendStateEvent(this.roomId, EO_BACKUP_HORIZON, {
+        await this.matrixClient.sendStateEvent(this.roomId, EO_BACKUP_HORIZON as any, {
           filen_path: `/EO-DB/${this.spaceName}/${filename}`,
           file_uuid: uploaded.uuid,
           folder_uuid: this.spaceFolderUuid,
