@@ -93,7 +93,7 @@ export function RecCycleMap({ cycle, onNavigate }: RecCycleMapProps) {
                   fontSize={8}
                   fontWeight="600"
                 >
-                  {label.length > 8 ? label.slice(0, 7) + '\u2026' : label}
+                  {label.length > 8 ? label.slice(0, 7) + '…' : label}
                 </text>
               </g>
             );
