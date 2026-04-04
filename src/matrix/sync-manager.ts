@@ -23,7 +23,7 @@ import { processEvent } from '../db/fold.js';
 import { eventHash } from '../db/hash.js';
 import type { Feed } from '../db/feed.js';
 import type { IMatrixClient, IMatrixEvent, RoomDataSnapshot, ImportMeta } from './types.js';
-import { EO_EVENT_TYPE, EO_IMPORT_TYPE, matrixEventToEo, sendEoEvent, sendEoBatchEvent, getDataRoom } from './event-bridge.js';
+import { EO_EVENT_TYPE, EO_IMPORT_TYPE, matrixEventToEo, getDataRoom } from './event-bridge.js';
 import { readLogSince } from '../db/log.js';
 import {
   findLatestSnapshot,
@@ -36,6 +36,7 @@ import {
   uploadImportSnapshot,
   IMPORT_CHUNK_SIZE,
 } from './snapshot.js';
+import { SendBuffer } from './send-buffer.js';
 
 // ─── Async Mutex (inline to avoid circular deps) ──────────────────────────
 
@@ -121,6 +122,9 @@ export class SyncManager {
   /** Optional callback for sync status changes (confirmed, queued, rate-limited). */
   onSyncStatus?: (status: 'confirmed' | 'queued' | 'rate-limited') => void;
 
+  /** Coalescing buffer — batches outbound events into periodic snapshot uploads. */
+  private sendBuffer: SendBuffer;
+
   constructor(
     client: IMatrixClient,
     roomId: string,
@@ -133,6 +137,13 @@ export class SyncManager {
     this.db = db;
     this.feed = feed;
     this.keyring = keyring || { keys: new Map() };
+
+    // Wire up the send buffer with delegate callbacks
+    this.sendBuffer = new SendBuffer({
+      uploadBufferedEvents: () => this.flushSendBuffer(),
+      isUploadDisabled: () => MATRIX_UPLOAD_DISABLED,
+      getRateLimitedUntil: () => this.rateLimitedUntil,
+    });
   }
 
   /** Allow updating keyring after construction (e.g., after key heal). */
@@ -170,6 +181,9 @@ export class SyncManager {
    */
   destroy(): void {
     this.destroyed = true;
+    // Flush any buffered events before tearing down
+    this.sendBuffer.flush().catch(() => {});
+    this.sendBuffer.destroy();
     if (this.handleTimelineEvent) {
       this.client.off('Room.timeline', this.handleTimelineEvent);
       this.handleTimelineEvent = null;
@@ -287,11 +301,60 @@ export class SyncManager {
   }
 
   /**
+   * Flush the send buffer — upload all un-snapshotted events as a single
+   * binary snapshot to Matrix media.
+   *
+   * This is the delegate callback invoked by SendBuffer on timer/size flush.
+   * Returns true on success, false if the upload failed (triggers retry).
+   */
+  private async flushSendBuffer(): Promise<boolean> {
+    try {
+      const currentSeq = await getCurrentSeq(this.db);
+      const lastSnapshotSeq = (await getMeta<number>(this.db, 'meta:snapshot_seq')) || 0;
+
+      if (currentSeq <= lastSnapshotSeq) {
+        // Nothing new to upload — another path already snapshotted
+        return true;
+      }
+
+      await this.processImportBatch(lastSnapshotSeq, currentSeq, {
+        source: 'send-buffer',
+        record_count: currentSeq - lastSnapshotSeq,
+      });
+
+      this.onSyncStatus?.('confirmed');
+      return true;
+    } catch (err) {
+      const retryDelay = SyncManager.getRetryDelay(err);
+      if (retryDelay !== null) {
+        this.rateLimitedUntil = Date.now() + retryDelay;
+        this.onSyncStatus?.('rate-limited');
+      } else {
+        this.onSyncStatus?.('queued');
+      }
+      return false;
+    }
+  }
+
+  /** Expose send buffer status for diagnostics. */
+  getSendBufferStatus(): { buffered: number; flushing: boolean } {
+    return this.sendBuffer.getStatus();
+  }
+
+  /** Force-flush the send buffer immediately (e.g., on page unload). */
+  async flushSendBufferNow(): Promise<void> {
+    await this.sendBuffer.flush();
+  }
+
+  /**
    * Force-save a delta snapshot to Matrix media right now.
    * Called on page unload / visibility hidden so data is always persisted.
    */
   async saveSnapshot(): Promise<void> {
     if (MATRIX_UPLOAD_DISABLED) return;
+
+    // Flush the send buffer first so all buffered events get included
+    await this.sendBuffer.flush();
 
     const seq = await getCurrentSeq(this.db);
     const lastSnapshotSeq = (await getMeta<number>(this.db, 'meta:snapshot_seq')) || 0;
@@ -515,37 +578,10 @@ export class SyncManager {
     // Fold immediately — UI sees the change instantly
     const seq = await processEvent(this.db, localEvent, this.feed);
 
-    // Send to room (best-effort, skip if rate-limited)
-    if (MATRIX_UPLOAD_DISABLED) {
-      // Matrix uploads disabled — local fold already happened above
-    } else if (Date.now() < this.rateLimitedUntil) {
-      await this.enqueueOfflineEvent(localEvent);
-      this.onSyncStatus?.('queued');
-    } else {
-      try {
-        await sendEoEvent(this.client, this.roomId, localEvent);
-        this.onSyncStatus?.('confirmed');
-      } catch (err) {
-        // If rate-limited, set the flag so subsequent sends skip the network
-        const retryDelay = SyncManager.getRetryDelay(err);
-        if (retryDelay !== null) {
-          this.rateLimitedUntil = Date.now() + retryDelay;
-          this.onSyncStatus?.('rate-limited');
-          // Schedule a flush to drain the queue after the backoff period
-          if (!this.destroyed) {
-            setTimeout(() => { if (!this.destroyed) this.flushUnsyncedEvents(); }, retryDelay);
-          }
-        } else {
-          this.onSyncStatus?.('queued');
-        }
-        await this.enqueueOfflineEvent(localEvent);
-      }
-    }
-
-    // Auto-snapshot to Matrix media every 500 log entries (skip if rate-limited)
-    if (!MATRIX_UPLOAD_DISABLED && Date.now() >= this.rateLimitedUntil) {
-      await maybeCreateSnapshot(this.client, this.roomId, this.db, agent, this.keyring);
-    }
+    // Buffer for batched upload instead of sending individually.
+    // The send buffer coalesces events and flushes as a single snapshot
+    // upload every 10s (or at 500 events), avoiding 429 rate limits.
+    this.sendBuffer.enqueue(localEvent);
 
     return seq;
   }
@@ -595,39 +631,11 @@ export class SyncManager {
       onProgress?.(i + 1, events.length);
     }
 
-    // Send all events to Matrix as a single batch message
-    if (MATRIX_UPLOAD_DISABLED) {
-      // Matrix uploads disabled — local fold already happened above
-    } else {
-      try {
-        if (Date.now() < this.rateLimitedUntil) {
-          throw new Error('rate-limited');
-        }
-        await sendEoBatchEvent(this.client, this.roomId, preparedEvents);
-        this.onSyncStatus?.('confirmed');
-      } catch (err) {
-        // Queue individual events for later flush
-        const retryDelay = SyncManager.getRetryDelay(err);
-        if (retryDelay !== null) {
-          this.rateLimitedUntil = Date.now() + retryDelay;
-          this.onSyncStatus?.('rate-limited');
-        } else {
-          this.onSyncStatus?.('queued');
-        }
-        for (const event of preparedEvents) {
-          await this.enqueueOfflineEvent(event);
-        }
-        // Schedule flush
-        if (!this.destroyed) {
-          const delay = retryDelay ?? 2000;
-          setTimeout(() => { if (!this.destroyed) this.flushUnsyncedEvents(); }, delay);
-        }
-      }
-    }
-
-    // Snapshot after batch import
-    if (!MATRIX_UPLOAD_DISABLED && Date.now() >= this.rateLimitedUntil) {
-      await maybeCreateSnapshot(this.client, this.roomId, this.db, agent, this.keyring);
+    // Buffer all events for batched upload. The send buffer will flush
+    // them as a single snapshot upload within 10s (or immediately if
+    // the buffer hits 500 events). No individual sends, no 429 storms.
+    for (const event of preparedEvents) {
+      this.sendBuffer.enqueue(event);
     }
 
     return lastSeq;

@@ -62,6 +62,10 @@ export {
   uploadImportSnapshot,
 } from './snapshot.js';
 
+// Send Buffer
+export { SendBuffer } from './send-buffer.js';
+export type { SendBufferFlushDelegate } from './send-buffer.js';
+
 // Sync Manager
 export { SyncManager } from './sync-manager.js';
 
