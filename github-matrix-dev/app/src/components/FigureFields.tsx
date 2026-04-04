@@ -48,7 +48,7 @@ export function FigureFields({ figure, onNavigate }: FigureFieldsProps) {
         },
       },
       {
-        label: currentLabel ? `Rename (${currentLabel})` : 'Set display name\u2026',
+        label: currentLabel ? `Rename (${currentLabel})` : 'Set display name…',
         onClick: () => {
           setDisplayNameEdit({ fieldKey, currentLabel });
           setContextMenu(null);
