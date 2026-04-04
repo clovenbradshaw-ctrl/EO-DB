@@ -313,7 +313,7 @@ function CloudStoragePanel({
     return () => clearInterval(interval);
   }, [matrixClient, roomId, spaceId]);
 
-  if (!health?.orgMode && !isOrgMode) return null;
+  if (!health || (!health.orgMode && !isOrgMode)) return null;
 
   const statusColors: Record<string, string> = {
     active: theme.success,
