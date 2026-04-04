@@ -195,7 +195,7 @@ export class FilenShareService {
     const keyBase64 = await exportKey(oneTimeKey);
 
     // Compute checksum of encrypted blob
-    const hashBuf = await crypto.subtle.digest('SHA-256', ciphertext);
+    const hashBuf = await crypto.subtle.digest('SHA-256', ciphertext as unknown as BufferSource);
     const checksum = Array.from(new Uint8Array(hashBuf))
       .map(b => b.toString(16).padStart(2, '0')).join('');
 
