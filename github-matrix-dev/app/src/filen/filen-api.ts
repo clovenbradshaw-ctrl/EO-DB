@@ -206,14 +206,9 @@ async function gateway(
   apiKey?: string,
 ): Promise<any> {
   const body = JSON.stringify(data);
-  // Filen gateway requires a Checksum header: SHA-512 of the request body
-  const hashBuf = await crypto.subtle.digest('SHA-512', new TextEncoder().encode(body));
-  const checksum = Array.from(new Uint8Array(hashBuf))
-    .map(b => b.toString(16).padStart(2, '0')).join('');
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    'Checksum': checksum,
   };
   if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
   const res = await fetch(`${FILEN_GATEWAY}${endpoint}`, {
