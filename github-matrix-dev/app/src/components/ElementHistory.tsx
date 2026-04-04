@@ -11,6 +11,7 @@ const OP_COLORS: Record<string, { bg: string; text: string }> = {
   SEG: { bg: '#FFF3E0', text: '#E65100' },
   SYN: { bg: '#FCE4EC', text: '#C62828' },
   EVA: { bg: '#FAEEDA', text: '#854F0B' },
+  SIG: { bg: '#E6F1FB', text: '#185FA5' },
   NUL: { bg: '#F0F0F0', text: '#888' },
   REC: { bg: '#FCEBEB', text: '#A32D2D' },
 };

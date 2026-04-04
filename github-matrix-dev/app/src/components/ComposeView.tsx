@@ -4,10 +4,11 @@ import { useTheme, type Theme } from '../theme';
 import type { ExternalOperator, EoState } from '../db/types';
 import type { ResolvedPermissions } from '../permissions/types';
 
-const OPERATORS: ExternalOperator[] = ['INS', 'DEF', 'CON', 'SEG', 'SYN', 'EVA', 'NUL'];
+const OPERATORS: ExternalOperator[] = ['INS', 'SIG', 'DEF', 'CON', 'SEG', 'SYN', 'EVA', 'NUL'];
 
 const OP_DESCRIPTIONS: Record<string, string> = {
   INS: 'INS — Insert a new record with fields',
+  SIG: 'SIG — Signal: direct attention at a target (ephemeral, not saved)',
   DEF: 'DEF — Define/update fields on an existing target',
   CON: 'CON — Connect targets with graph edges',
   SEG: 'SEG — Segment: mark a boundary (archive, exclude)',
@@ -29,7 +30,7 @@ function filterOperatorsByPermissions(
 }
 
 const OP_COLORS: Record<string, string> = {
-  INS: '#4ade80', DEF: '#38bdf8', CON: '#a78bfa', SEG: '#f472b6',
+  INS: '#4ade80', SIG: '#5B9BD5', DEF: '#38bdf8', CON: '#a78bfa', SEG: '#f472b6',
   SYN: '#fbbf24', EVA: '#34d399', NUL: '#5c5f7a',
 };
 

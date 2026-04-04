@@ -11,6 +11,7 @@ const EO_EVENT_TYPE = 'com.eo-db.event';
 
 const OP_COLORS: Record<string, string> = {
   INS: '#22c55e',
+  SIG: '#5B9BD5',
   UPD: '#f59e0b',
   DEL: '#ef4444',
   CON: '#8b5cf6',

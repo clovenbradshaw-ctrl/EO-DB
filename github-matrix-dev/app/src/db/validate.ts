@@ -10,7 +10,7 @@
 
 import type { EoEventInput, ExternalOperator } from './types';
 
-const VALID_EXTERNAL_OPS = new Set<string>(['NUL', 'INS', 'SEG', 'CON', 'SYN', 'DEF', 'EVA']);
+const VALID_EXTERNAL_OPS = new Set<string>(['NUL', 'SIG', 'INS', 'SEG', 'CON', 'SYN', 'DEF', 'EVA']);
 
 export interface ValidationError {
   field: string;

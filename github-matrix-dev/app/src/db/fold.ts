@@ -7,6 +7,16 @@ import { AsyncMutex } from './mutex';
 import { eventHash } from './hash';
 import { validateEvent, formatValidationErrors } from './validate';
 import type { EoEvent, EoEventInput, EoState, EvaRegistration, RecResult, ExternalOperator, DerivedEntity } from './types';
+import { SigTracker } from './sig';
+import type { SigEvent } from './sig';
+
+/** Global SIG tracker — ephemeral, in-memory only. */
+const sigTracker = new SigTracker();
+
+/** Access the SIG tracker for querying local SIG state. */
+export function getSigTracker(): SigTracker {
+  return sigTracker;
+}
 
 /** Fold mutex — ensures only one processEvent executes at a time. */
 const foldMutex = new AsyncMutex();
@@ -38,6 +48,24 @@ async function processEventInner(
   if (event.op === 'REC') {
     throw new Error('REC is system-generated and cannot be submitted externally');
   }
+
+  // SIG is ephemeral — track locally but never persist
+  if (event.op === 'SIG') {
+    const sigEvent: SigEvent = {
+      op: 'SIG',
+      target: event.target,
+      operand: event.operand,
+      agent: event.agent,
+      ts: event.ts,
+      acquired_ts: event.acquired_ts,
+    };
+    sigTracker.track(sigEvent);
+    if (onEvent) {
+      onEvent({ ...sigEvent, seq: -1 } as unknown as EoEvent);
+    }
+    return -1;
+  }
+
   const validationErrors = validateEvent(event);
   if (validationErrors) {
     throw new Error(`Invalid event: ${formatValidationErrors(validationErrors)}`);
