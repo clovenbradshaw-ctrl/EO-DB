@@ -806,6 +806,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
                   operand: { name },
                   agent: session.userId,
                   ts: new Date().toISOString(),
+                  acquired_ts: new Date().toISOString(),
                 });
 
                 // Add to spaces list with correct owner so permissions resolve
@@ -814,9 +815,12 @@ export function Layout({ session, onLogout }: LayoutProps) {
                 setSpaces((prev) => [...prev, {
                   target: idbTarget,
                   value: { name },
+                  level: 1,
+                  last_seq: 1,
+                  last_op: 'INS',
                   last_agent: session.userId,
                   last_ts: now,
-                  seq: 1,
+                  last_acquired_ts: now,
                 } as EoState]);
 
                 // Register space in root IDB so it survives page reload without Matrix
@@ -827,9 +831,12 @@ export function Layout({ session, onLogout }: LayoutProps) {
                 await setRootState(rootSt, {
                   target: idbTarget,
                   value: { name },
+                  level: 1,
+                  last_seq: 1,
+                  last_op: 'INS',
                   last_agent: session.userId,
                   last_ts: now,
-                  seq: 1,
+                  last_acquired_ts: now,
                 } as EoState);
                 rootSt.close();
 

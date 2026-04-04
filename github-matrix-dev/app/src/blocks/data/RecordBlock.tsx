@@ -80,7 +80,7 @@ export function RecordBlock({ block, mode }: Props) {
     const fields = headerFields.length > 0
       ? headerFields
       : Object.keys(record.value).filter(k => !k.startsWith('_')).slice(0, 4);
-    return fields.map(f => ({
+    return fields.map((f: string) => ({
       key: f,
       value: record.value[f] ?? record.value?.fields?.[f] ?? '—',
     }));
@@ -128,7 +128,7 @@ export function RecordBlock({ block, mode }: Props) {
         )}
         {showHeader && displayFields.length > 0 && (
           <div style={s.fieldsRow}>
-            {displayFields.map(({ key, value }) => (
+            {displayFields.map(({ key, value }: { key: string; value: any }) => (
               <div key={key} style={s.fieldChip}>
                 <span style={s.fieldKey}>{key}</span>
                 <span style={s.fieldValue}>{String(value)}</span>

@@ -34,7 +34,7 @@ export async function encryptSnapshot(
 
   const iv = crypto.getRandomValues(new Uint8Array(IV_LENGTH));
   const ct = new Uint8Array(
-    await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, entry.key, binary),
+    await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, entry.key, binary as unknown as BufferSource),
   );
   const envelope: EncryptedSnapshotEnvelope = {
     v: 1,
@@ -66,9 +66,9 @@ export async function decryptSnapshot(
     }
     const iv = base64ToBuffer(outer.iv);
     const plaintext = await crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv },
+      { name: 'AES-GCM', iv: iv as unknown as BufferSource },
       entry.key,
-      outer.ct,
+      outer.ct as unknown as BufferSource,
     );
     return new Uint8Array(plaintext);
   }
@@ -92,7 +92,7 @@ export async function encryptPeerPayload(
 ): Promise<EncryptedPeerPayload> {
   const iv = crypto.getRandomValues(new Uint8Array(IV_LENGTH));
   const ct = new Uint8Array(
-    await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, binary),
+    await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, binary as unknown as BufferSource),
   );
   return {
     encrypted: true,
@@ -109,9 +109,9 @@ export async function decryptPeerPayload(
   const iv = base64ToBuffer(payload.iv);
   const ct = base64ToBuffer(payload.ct);
   const plaintext = await crypto.subtle.decrypt(
-    { name: 'AES-GCM', iv },
+    { name: 'AES-GCM', iv: iv as unknown as BufferSource },
     key,
-    ct,
+    ct as unknown as BufferSource,
   );
   return new Uint8Array(plaintext);
 }
