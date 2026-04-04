@@ -463,9 +463,8 @@ export async function filenUploadFile(
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${apiKey}`,
-      'Content-Type': 'application/octet-stream',
     },
-    body: encrypted as unknown as BodyInit,
+    body: encrypted,
   });
   const uploadJson = await uploadRes.json();
   if (!uploadJson.status) {
