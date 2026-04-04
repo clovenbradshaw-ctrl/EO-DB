@@ -47,7 +47,7 @@ import { EO_POWER_LEVEL_CONTENT } from '../permissions/types';
 
 /** Set to false to disable all Matrix activity (sync, room creation, discovery).
  *  When false, the app uses Filen as the sole sync layer. */
-const MATRIX_ENABLED = false;
+const MATRIX_ENABLED = true;
 
 /**
  * Create a Matrix room for a space and publish the space config state event.
@@ -155,14 +155,17 @@ export function Layout({ session, onLogout }: LayoutProps) {
   const syncManager = useEoStore((s) => s.syncManager);
   const [syncToastStatus, syncToastSeq, onSyncStatus] = useSyncToast();
   const [matrixReady, setMatrixReady] = useState(false);
-  // Show actual sync status: "online" only when Matrix sync is connected
+  // Show actual sync status: "online" only when Matrix sync is connected.
+  // When Matrix is disabled, show "local" (data works, just no remote sync).
   const connectionState: ConnectionState = !navigator.onLine
     ? 'offline'
-    : syncManager
-      ? 'online'
-      : matrixReady
-        ? 'syncing' // Matrix client ready but no sync manager yet
-        : 'offline';
+    : !MATRIX_ENABLED
+      ? 'local'
+      : syncManager
+        ? 'online'
+        : matrixReady
+          ? 'syncing'
+          : 'offline';
 
   // Helper to select a space and persist the choice
   function selectSpace(target: string) {
@@ -491,6 +494,9 @@ export function Layout({ session, onLogout }: LayoutProps) {
     let mounted = true;
 
     async function resolveOrCreateRoom(): Promise<string | null> {
+      // When Matrix is disabled, skip all room resolution — local-only mode.
+      if (!MATRIX_ENABLED) return null;
+
       // 0. Check the space cache first (handles freshly-created spaces
       //    whose state events haven't synced to the SDK yet)
       const cached = spaceCacheRef.current.get(selectedSpace!);
@@ -541,7 +547,10 @@ export function Layout({ session, onLogout }: LayoutProps) {
         if (!mounted) return;
         await init(existing.store);
 
-        // Matrix sync disabled — events fold locally, Filen handles sync
+        // Restore cached sync manager
+        if (existing.syncManager) {
+          useEoStore.getState().setSyncManager(existing.syncManager);
+        }
 
         // Restart Filen sync for cached space
         if (existing.filenSync) {
@@ -561,8 +570,24 @@ export function Layout({ session, onLogout }: LayoutProps) {
 
       await init(store);
 
-      // Matrix sync disabled — events fold locally, Filen handles sync
-      const syncManager: SyncManager | null = null;
+      // Start Matrix sync if we have a room
+      let syncManager: SyncManager | null = null;
+      if (MATRIX_ENABLED && spaceRoomId && matrixClientRef.current) {
+        try {
+          syncManager = new SyncManager(
+            matrixClientRef.current,
+            spaceRoomId,
+            store,
+            onFoldEvent,
+          );
+          await syncManager.initialize();
+          if (!mounted) { syncManager.destroy(); return; }
+          useEoStore.getState().setSyncManager(syncManager);
+        } catch (e) {
+          console.warn('[EO-DB] Matrix sync initialization failed for space', selectedSpace, e);
+          syncManager = null;
+        }
+      }
 
       // Start Filen sync (primary read/write sync layer)
       let filenSync: FilenSyncService | null = null;

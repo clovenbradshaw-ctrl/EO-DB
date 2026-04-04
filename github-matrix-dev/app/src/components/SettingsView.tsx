@@ -19,6 +19,7 @@ export function SettingsView({ session, matrixClient }: SettingsViewProps) {
   const recentEvents = useEoStore((s) => s.recentEvents);
   const store = useEoStore((s) => s.store);
   const syncManager = useEoStore((s) => s.syncManager);
+  const filenSync = useEoStore((s) => s.filenSync);
   const manualSnapshot = useEoStore((s) => s.manualSnapshot);
   const [showRoomData, setShowRoomData] = useState(false);
   const [showAllRooms, setShowAllRooms] = useState(false);
@@ -112,15 +113,15 @@ export function SettingsView({ session, matrixClient }: SettingsViewProps) {
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <div style={{
               width: 6, height: 6, borderRadius: '50%',
-              background: syncManager ? '#22c55e' : theme.textMuted,
-              boxShadow: syncManager ? '0 0 6px #22c55e' : 'none',
+              background: syncManager ? '#22c55e' : filenSync ? theme.accent : theme.textMuted,
+              boxShadow: syncManager ? '0 0 6px #22c55e' : filenSync ? `0 0 6px ${theme.accent}` : 'none',
             }} />
             <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: theme.text }}>
-              Matrix sync: {syncManager ? 'connected' : 'offline'}
+              {syncManager ? 'Matrix sync: connected' : filenSync ? 'Filen sync: active' : 'Sync: local only'}
             </span>
           </div>
           <div style={{ marginTop: 8, display: 'flex', gap: 8, alignItems: 'center' }}>
-            <button style={s.actionBtn} onClick={handleSnapshot} disabled={!syncManager}>
+            <button style={s.actionBtn} onClick={handleSnapshot}>
               Take Snapshot
             </button>
             <button
