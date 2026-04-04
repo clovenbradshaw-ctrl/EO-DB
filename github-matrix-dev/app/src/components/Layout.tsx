@@ -44,6 +44,7 @@ import { useHashRoute, type View } from '../lib/router';
 import { type AccessRole, powerLevelToRole, legacyAccessToRole } from '../permissions/types';
 import { resolvePermissionsFromSharing } from '../permissions/resolve';
 import { RecycleBin, addDeletedSpace, isSpaceDeleted, removeDeletedSpace, getDeletedSpaces } from './RecycleBin';
+import { addArchivedSpace, isSpaceArchived, removeArchivedSpace, getArchivedSpaces } from './ArchivedSpaces';
 import { setSpaceConfig, applyEoPowerLevels } from '../permissions/room-topology';
 import { EO_POWER_LEVEL_CONTENT } from '../permissions/types';
 
@@ -209,6 +210,37 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     setSpaceEntries([...spaceEntries]);
     selectSpace(target);
     setShowRecycleBin(false);
+  }
+
+  // Archive a space: hide from browser, viewable in Settings
+  function handleArchiveSpace(spaceTarget: string) {
+    const entry = mergedEntries.find((e) => e.spaceTarget === spaceTarget);
+    addArchivedSpace({
+      target: spaceTarget,
+      name: entry?.displayName || formatSpaceName(spaceTarget.split('.').pop() || ''),
+      archivedAt: Date.now(),
+      archivedBy: session.userId,
+      memberCount: entry?.memberCount || 0,
+    });
+    if (selectedSpace === spaceTarget) {
+      const remaining = mergedEntries.filter((e) => e.spaceTarget !== spaceTarget && !isSpaceDeleted(e.spaceTarget) && !isSpaceArchived(e.spaceTarget));
+      if (remaining.length > 0) {
+        selectSpace(remaining[0].spaceTarget);
+      } else {
+        setSelectedSpace(null);
+        localStorage.removeItem('eo-selected-space');
+      }
+    }
+    setSpaces([...spaces]);
+    setSpaceEntries([...spaceEntries]);
+  }
+
+  // Unarchive a space from settings
+  function handleUnarchiveSpace(target: string) {
+    removeArchivedSpace(target);
+    setSpaces([...spaces]);
+    setSpaceEntries([...spaceEntries]);
+    selectSpace(target);
   }
 
   // Permanently delete a space's local IndexedDB data
@@ -471,8 +503,9 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   }, [spaceEntries, spaces]);
 
   // Filter out soft-deleted spaces from the browser entries
-  const activeEntries = useMemo(() => mergedEntries.filter((e) => !isSpaceDeleted(e.spaceTarget)), [mergedEntries, spaces, spaceEntries]);
+  const activeEntries = useMemo(() => mergedEntries.filter((e) => !isSpaceDeleted(e.spaceTarget) && !isSpaceArchived(e.spaceTarget)), [mergedEntries, spaces, spaceEntries]);
   const deletedSpaceCount = getDeletedSpaces().length;
+  const archivedSpaceCount = getArchivedSpaces().length;
 
   // --- Reset stale state when switching spaces ---
   const prevSpaceRef = useRef(selectedSpace);
@@ -940,8 +973,10 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                 setSpaceOpen(false);
               }}
               onDelete={handleDeleteSpace}
+              onArchive={handleArchiveSpace}
               onOpenRecycleBin={() => { setShowRecycleBin(true); setSpaceOpen(false); setShowMembers(false); }}
               deletedCount={deletedSpaceCount}
+              archivedCount={archivedSpaceCount}
             />
           )}
 
@@ -1175,7 +1210,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             ) : activeView === 'builder' ? (
               <BuilderView />
             ) : activeView === 'settings' ? (
-              <SettingsView session={session} matrixClient={matrixClientRef.current} roomId={spaceCacheRef.current.get(selectedSpace!)?.mainRoomId ?? null} />
+              <SettingsView session={session} matrixClient={matrixClientRef.current} roomId={spaceCacheRef.current.get(selectedSpace!)?.mainRoomId ?? null} onUnarchive={handleUnarchiveSpace} />
             ) : null}
           </ErrorBoundary>}
         </main>

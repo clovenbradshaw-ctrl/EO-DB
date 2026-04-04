@@ -21,8 +21,10 @@ interface SpaceBrowserProps {
   onClose: () => void;
   onCreate: (name: string) => void;
   onDelete?: (spaceTarget: string) => void;
+  onArchive?: (spaceTarget: string) => void;
   onOpenRecycleBin?: () => void;
   deletedCount?: number;
+  archivedCount?: number;
 }
 
 function relativeTime(ts: number): string {
@@ -47,7 +49,7 @@ function formatDate(ts: number): string {
   });
 }
 
-export function SpaceBrowser({ entries, loading, activeSpace, onSelect, onClose, onCreate, onDelete, onOpenRecycleBin, deletedCount = 0 }: SpaceBrowserProps) {
+export function SpaceBrowser({ entries, loading, activeSpace, onSelect, onClose, onCreate, onDelete, onArchive, onOpenRecycleBin, deletedCount = 0, archivedCount = 0 }: SpaceBrowserProps) {
   const { theme } = useTheme();
   const s = makeStyles(theme);
 
@@ -131,6 +133,7 @@ export function SpaceBrowser({ entries, loading, activeSpace, onSelect, onClose,
           <button style={{ ...s.colHeader, width: 70, flexShrink: 0, textAlign: 'right' }} onClick={() => toggleSort('members')}>
             Members{sortArrow('members')}
           </button>
+          {onArchive && <div style={{ width: 36, flexShrink: 0 }} />}
           {onDelete && <div style={{ width: 36, flexShrink: 0 }} />}
         </div>
 
@@ -204,6 +207,35 @@ export function SpaceBrowser({ entries, loading, activeSpace, onSelect, onClose,
                   <div style={{ ...s.cell, width: 70, flexShrink: 0, textAlign: 'right', color: theme.textMuted }}>
                     {entry.memberCount}
                   </div>
+                  {onArchive && (
+                    <div
+                      style={{
+                        width: 36,
+                        flexShrink: 0,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                      }}
+                    >
+                      <span
+                        onClick={(e) => { e.stopPropagation(); onArchive(entry.spaceTarget); }}
+                        style={{
+                          fontSize: 11,
+                          color: theme.textMuted,
+                          cursor: 'pointer',
+                          padding: '4px 6px',
+                          borderRadius: 4,
+                          opacity: 0.4,
+                          transition: 'opacity 0.15s, color 0.15s',
+                        }}
+                        onMouseEnter={(e) => { (e.currentTarget).style.opacity = '1'; (e.currentTarget).style.color = theme.accent; }}
+                        onMouseLeave={(e) => { (e.currentTarget).style.opacity = '0.4'; (e.currentTarget).style.color = theme.textMuted; }}
+                        title="Archive space"
+                      >
+                        {'\u2261'}
+                      </span>
+                    </div>
+                  )}
                   {onDelete && (
                     <div
                       style={{
@@ -266,26 +298,46 @@ export function SpaceBrowser({ entries, loading, activeSpace, onSelect, onClose,
           </div>
         )}
 
-        {/* Recycle bin link */}
-        {onOpenRecycleBin && (
+        {/* Footer links */}
+        {(onOpenRecycleBin || archivedCount > 0) && (
           <div style={s.recycleBinFooter}>
-            <button onClick={onOpenRecycleBin} style={s.recycleBinButton}>
-              <span style={{ fontSize: 13, opacity: 0.5 }}>{'\u2672'}</span>
-              Recycle Bin
-              {deletedCount > 0 && (
+            {archivedCount > 0 && (
+              <div style={{
+                ...s.recycleBinButton,
+                cursor: 'default',
+                opacity: 0.7,
+              }}>
+                <span style={{ fontSize: 12, opacity: 0.5 }}>{'\u2261'}</span>
+                {archivedCount} archived
                 <span style={{
                   fontSize: 9,
-                  fontWeight: 600,
-                  background: theme.warningBg,
-                  color: theme.warning,
-                  padding: '1px 6px',
-                  borderRadius: 8,
+                  color: theme.textMuted,
                   marginLeft: 'auto',
+                  fontStyle: 'italic',
                 }}>
-                  {deletedCount}
+                  Settings to manage
                 </span>
-              )}
-            </button>
+              </div>
+            )}
+            {onOpenRecycleBin && (
+              <button onClick={onOpenRecycleBin} style={s.recycleBinButton}>
+                <span style={{ fontSize: 13, opacity: 0.5 }}>{'\u2672'}</span>
+                Recycle Bin
+                {deletedCount > 0 && (
+                  <span style={{
+                    fontSize: 9,
+                    fontWeight: 600,
+                    background: theme.warningBg,
+                    color: theme.warning,
+                    padding: '1px 6px',
+                    borderRadius: 8,
+                    marginLeft: 'auto',
+                  }}>
+                    {deletedCount}
+                  </span>
+                )}
+              </button>
+            )}
           </div>
         )}
       </div>
