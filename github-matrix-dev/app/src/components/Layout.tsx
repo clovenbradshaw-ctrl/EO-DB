@@ -10,10 +10,13 @@ import { useFilenStore } from '../filen/filen-store';
 import { resolveDataRoom } from '../matrix/event-bridge';
 import { configureMatrixDomain } from '../lib/matrix-domain';
 import { HolonNav } from './HolonNav';
+import { ViewsBrowser } from './ViewsBrowser';
 import { TableView } from './TableView';
 import { ViewTabs } from './ViewTabs';
 import { RecordDetailDrawer } from './RecordDetailDrawer';
 import { RecordView } from './RecordView';
+import { useIsMobile } from '../hooks/useIsMobile';
+import { formatName } from './scope-picker-utils';
 import { ConnectionStatus, useConnectionState, type ConnectionState } from './ConnectionStatus';
 import { SyncToast, useSyncToast } from './SyncToast';
 import { ErrorBoundary } from './ErrorBoundary';
@@ -147,6 +150,9 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   const [spaceOpen, setSpaceOpen] = useState(false);
   const [showMembers, setShowMembers] = useState(false);
   const [showRecycleBin, setShowRecycleBin] = useState(false);
+  const [showViewsBrowser, setShowViewsBrowser] = useState(false);
+  const isMobile = useIsMobile();
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [spaces, setSpaces] = useState<EoState[]>([]);
   const [spaceEntries, setSpaceEntries] = useState<SpaceEntry[]>([]);
   const [allStates, setAllStates] = useState<EoState[]>([]);
@@ -896,6 +902,17 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       {/* Top bar */}
       <header style={s.topBar}>
         <div style={s.topBarLeft}>
+          {isMobile && (
+            <button
+              onClick={() => setMobileSidebarOpen((prev) => !prev)}
+              style={{
+                background: 'none', border: 'none', color: theme.textHeading,
+                fontSize: 18, cursor: 'pointer', padding: '0 8px 0 0', lineHeight: 1,
+              }}
+            >
+              {'\u2630'}
+            </button>
+          )}
           <span style={s.logo}>
             <span style={{ color: theme.success }}>EO</span>
             <span style={{ color: theme.borderLight, opacity: 0.5 }}>///</span>
@@ -1072,28 +1089,46 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
 
       {/* Body */}
       <div style={s.body}>
-        <aside style={s.sidebar}>
+        {/* Mobile overlay backdrop */}
+        {isMobile && mobileSidebarOpen && (
+          <div
+            style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', zIndex: 998 }}
+            onClick={() => setMobileSidebarOpen(false)}
+          />
+        )}
+        <aside style={{
+          ...s.sidebar,
+          ...(isMobile ? {
+            position: 'fixed' as const, left: 0, top: 0, bottom: 0, zIndex: 999,
+            transform: mobileSidebarOpen ? 'translateX(0)' : 'translateX(-100%)',
+            transition: 'transform 0.2s ease',
+            width: 260,
+          } : {}),
+        }}>
           {/* View navigation */}
           <nav style={s.sidebarNav}>
-            <div style={s.navGroupLabel}>Views</div>
-            {(['records'] as View[]).map((view) => (
-              <button
-                key={view}
-                onClick={() => navigate({ view })}
-                style={{
-                  ...s.navItem,
-                  ...(activeView === view ? s.navItemActive : {}),
-                }}
-              >
-                <span style={s.navIcon}>{NAV_ICONS[view]}</span>
-                {view.charAt(0).toUpperCase() + view.slice(1)}
-              </button>
-            ))}
+            <div style={s.navGroupLabel}>Records</div>
+            <button
+              onClick={() => {
+                if (activeView !== 'records') {
+                  navigate({ view: 'records' });
+                }
+                setShowViewsBrowser((prev) => !prev);
+                if (isMobile) setMobileSidebarOpen(false);
+              }}
+              style={{
+                ...s.navItem,
+                ...(activeView === 'records' ? s.navItemActive : {}),
+              }}
+            >
+              <span style={s.navIcon}>{NAV_ICONS.records}</span>
+              Views
+            </button>
             <div style={s.navGroupLabel}>Actions</div>
             {(['compose', 'import'] as View[]).map((view) => (
               <button
                 key={view}
-                onClick={() => navigate({ view })}
+                onClick={() => { setShowViewsBrowser(false); navigate({ view }); }}
                 style={{
                   ...s.navItem,
                   ...(activeView === view ? s.navItemActive : {}),
@@ -1106,7 +1141,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             <div style={s.navGroupLabel}>System</div>
             {/* Log */}
             <button
-              onClick={() => navigate({ view: 'log' })}
+              onClick={() => { setShowViewsBrowser(false); navigate({ view: 'log' }); }}
               style={{
                 ...s.navItem,
                 ...(activeView === 'log' ? s.navItemActive : {}),
@@ -1118,7 +1153,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             {/* Builder — Admin+ only (PL >= 50) */}
             {currentPermissions?.can_build_views !== false && (
               <button
-                onClick={() => navigate({ view: 'builder', builderViewId: null, customPageId: null })}
+                onClick={() => { setShowViewsBrowser(false); navigate({ view: 'builder', builderViewId: null, customPageId: null }); }}
                 style={{
                   ...s.navItem,
                   ...(activeView === 'builder' ? s.navItemActive : {}),
@@ -1131,7 +1166,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             {/* Settings — Admin+ only (PL >= 50) */}
             {currentPermissions?.can_set_governance !== false && (
               <button
-                onClick={() => navigate({ view: 'settings' })}
+                onClick={() => { setShowViewsBrowser(false); navigate({ view: 'settings' }); }}
                 style={{
                   ...s.navItem,
                   ...(activeView === 'settings' ? s.navItemActive : {}),
@@ -1143,8 +1178,17 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             )}
           </nav>
 
-          {/* Objects tree */}
-          {ready ? (
+          {/* Objects tree or Views Browser */}
+          {showViewsBrowser ? (
+            <ViewsBrowser
+              onBack={() => setShowViewsBrowser(false)}
+              onSelectView={(view) => {
+                viewStore.activateView(view.scope, view);
+                navigate({ view: 'records', scope: view.scope });
+                setShowViewsBrowser(false);
+              }}
+            />
+          ) : ready ? (
             <HolonNav
               selectedScope={selectedScope}
               onSelectScope={(scope) => { navigate({ scope, record: null }); }}
@@ -1251,6 +1295,8 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             allStates={allStates}
             onClose={() => navigate({ record: null })}
             onNavigate={(t) => navigate({ record: t })}
+            profileFields={selectedScope ? viewStore.getConfig(selectedScope).profileFields : undefined}
+            isMobile={isMobile}
           />
         )}
       </div>
@@ -1263,11 +1309,13 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
  * record page view for the record's collection. If yes, render RecordPageView
  * in a drawer. If no, fall back to the default RecordDetailDrawer.
  */
-function RecordPageOrDrawer({ recordTarget, allStates, onClose, onNavigate }: {
+function RecordPageOrDrawer({ recordTarget, allStates, onClose, onNavigate, profileFields, isMobile }: {
   recordTarget: string;
   allStates: EoState[];
   onClose: () => void;
   onNavigate: (target: string) => void;
+  profileFields?: string[];
+  isMobile?: boolean;
 }) {
   const loadView = useBuilderStore((s) => s.loadView);
 
@@ -1303,9 +1351,10 @@ function RecordPageOrDrawer({ recordTarget, allStates, onClose, onNavigate }: {
   if (recordPageView) {
     return (
       <div style={{
-        width: 720, maxWidth: '50vw', height: '100%',
-        flexShrink: 0, borderLeft: '1px solid var(--border, #e0e0e0)',
+        width: isMobile ? '100vw' : 720, maxWidth: isMobile ? '100vw' : '50vw', height: '100%',
+        flexShrink: 0, borderLeft: isMobile ? 'none' : '1px solid var(--border, #e0e0e0)',
         background: 'var(--bg, #fff)', display: 'flex', flexDirection: 'column',
+        ...(isMobile ? { position: 'fixed' as const, inset: 0, zIndex: 1000 } : {}),
       }}>
         <RecordPageView
           recordTarget={recordTarget}
@@ -1322,6 +1371,8 @@ function RecordPageOrDrawer({ recordTarget, allStates, onClose, onNavigate }: {
       target={recordTarget}
       onClose={onClose}
       onNavigate={onNavigate}
+      profileFields={profileFields}
+      isMobile={isMobile}
     />
   );
 }

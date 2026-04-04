@@ -28,6 +28,8 @@ export interface TableViewConfig {
   filterConjunction: 'AND' | 'OR';
   showLastUpdated: boolean;
   rowHeight?: 'compact' | 'default' | 'tall';
+  cellOverflow?: 'clip' | 'wrap';
+  profileFields?: string[];
 }
 
 // ---------------------------------------------------------------------------

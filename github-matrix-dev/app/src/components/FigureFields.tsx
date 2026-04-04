@@ -7,9 +7,10 @@ import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 interface FigureFieldsProps {
   figure: EoState;
   onNavigate: (target: string) => void;
+  profileFields?: string[];
 }
 
-export function FigureFields({ figure, onNavigate }: FigureFieldsProps) {
+export function FigureFields({ figure, onNavigate, profileFields }: FigureFieldsProps) {
   const dispatch = useEoStore((s) => s.dispatch);
   const { theme } = useTheme();
   const s = makeStyles(theme);
@@ -23,9 +24,18 @@ export function FigureFields({ figure, onNavigate }: FigureFieldsProps) {
     return <div style={s.mono}>{JSON.stringify(value)}</div>;
   }
 
-  const entries = Object.entries(value).filter(([k]) => !k.startsWith('_'));
+  let entries = Object.entries(value).filter(([k]) => !k.startsWith('_'));
   // Display name overrides stored in _fieldLabels on the figure
   const fieldLabels: Record<string, string> = (value as any)._fieldLabels || {};
+
+  // Filter and order by profileFields if provided
+  if (profileFields && profileFields.length > 0) {
+    const allowed = new Set(profileFields);
+    const filtered = entries.filter(([k]) => allowed.has(k));
+    // Maintain profileFields order
+    filtered.sort((a, b) => profileFields.indexOf(a[0]) - profileFields.indexOf(b[0]));
+    entries = filtered;
+  }
 
   function handleContextMenu(e: React.MouseEvent, fieldKey: string) {
     e.preventDefault();
