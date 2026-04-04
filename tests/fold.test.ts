@@ -1166,3 +1166,56 @@ describe('Full Fixture Sequence', () => {
     expect(allEvents).toHaveLength(10);
   });
 });
+
+// --- SIG Tests ---
+
+describe('SIG', () => {
+  it('returns -1 (no seq assigned)', async () => {
+    const seq = await processEvent(db, ev({ op: 'SIG' as any, target: 'app.tblClients.rec001', operand: { cursor: true } }));
+    expect(seq).toBe(-1);
+  });
+
+  it('does not write to the log', async () => {
+    await processEvent(db, ev({ op: 'SIG' as any, target: 'app.tblClients.rec001', operand: { gaze: 'active' } }));
+    const allEvents = await readLogSince(db, 0);
+    expect(allEvents).toHaveLength(0);
+  });
+
+  it('does not create state', async () => {
+    await processEvent(db, ev({ op: 'SIG' as any, target: 'app.tblClients.rec001', operand: {} }));
+    const state = await getState(db, 'app.tblClients.rec001');
+    expect(state).toBeNull();
+  });
+
+  it('tracks SIG events in the SigTracker', async () => {
+    const { getSigTracker } = await import('../src/db/fold.js');
+    const tracker = getSigTracker();
+    tracker.clear();
+
+    await processEvent(db, ev({ op: 'SIG' as any, target: 'app.tblClients.rec001', operand: { cursor: [10, 20] } }));
+    await processEvent(db, ev({ op: 'SIG' as any, target: 'app.tblClients.rec002', operand: { cursor: [30, 40] } }));
+
+    expect(tracker.size).toBe(2);
+    expect(tracker.getEvents()).toHaveLength(2);
+    expect(tracker.getLatest('app.tblClients.rec001')?.operand).toEqual({ cursor: [10, 20] });
+  });
+
+  it('does not consume a seq number', async () => {
+    await processEvent(db, ev({ op: 'SIG' as any, target: 'app.tblClients.rec001', operand: {} }));
+    // Next real event should get seq 1, not 2
+    const seq = await processEvent(db, ev({ op: 'INS', target: 'app.tblClients.rec001', operand: { name: 'Test' } }));
+    expect(seq).toBe(1);
+  });
+
+  it('notifies changefeed subscribers', async () => {
+    const { Feed } = await import('../src/db/feed.js');
+    const feed = new Feed();
+    const received: any[] = [];
+    feed.subscribe('**', (event) => received.push(event));
+
+    await processEvent(db, ev({ op: 'SIG' as any, target: 'app.tblClients.rec001', operand: { focus: true } }), feed);
+    expect(received).toHaveLength(1);
+    expect(received[0].op).toBe('SIG');
+    expect(received[0].target).toBe('app.tblClients.rec001');
+  });
+});
