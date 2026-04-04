@@ -189,10 +189,11 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     const { store, filenSync } = get();
     if (!store) throw new Error('Store not initialized');
     if (filenSync) {
-      await filenSync.forceSave();
+      const result = await filenSync.createManualSnapshot();
+      return { mxc: 'filen', seq: result.seq };
     }
     const seq = await store.getCurrentSeq();
-    return { mxc: 'filen', seq };
+    return { mxc: 'local', seq };
   },
 
   teardown() {
