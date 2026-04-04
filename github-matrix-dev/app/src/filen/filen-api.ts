@@ -550,3 +550,135 @@ export async function filenTrashFile(apiKey: string, fileUuid: string): Promise<
     throw new Error(res.message || 'Failed to trash file');
   }
 }
+
+// ──────────────────────────────────────────────────────────────
+// Public link sharing — for cross-account P2P data exchange
+// ──────────────────────────────────────────────────────────────
+
+export interface FilenPublicLink {
+  uuid: string;      // link UUID
+  key: string;       // link decryption key (for Filen-layer encryption)
+  downloadUrl: string;
+}
+
+/**
+ * Create a public link for a file on Filen.
+ *
+ * The public link allows anyone with the URL to download the file.
+ * Since our .eodb files are additionally encrypted with a one-time
+ * AES-256-GCM key (shared via Matrix), the Filen public link only
+ * exposes the Filen-encrypted blob — not the plaintext.
+ *
+ * @param expiration - Link expiration: 'never', '1h', '6h', '1d', '3d', '7d', '14d', '30d'
+ */
+export async function filenCreatePublicLink(
+  apiKey: string,
+  fileUuid: string,
+  fileKey: string,
+  expiration: string = '7d',
+): Promise<FilenPublicLink> {
+  const linkUuid = crypto.randomUUID();
+
+  // Encrypt the file key for the public link
+  // Filen uses the link key to let link recipients decrypt the file metadata
+  const linkKey = generateFileKey();
+  const encryptedFileKey = await encryptMetadata(
+    JSON.stringify({ key: fileKey }),
+    linkKey,
+  );
+
+  const res = await gateway('/v3/file/link/edit', {
+    uuid: fileUuid,
+    linkUuid,
+    expiration,
+    password: 'empty',
+    passwordHashed: await sha256('empty'),
+    downloadBtn: true,
+    type: 'enable',
+    linkKey: encryptedFileKey,
+  }, apiKey);
+
+  if (!res.status) {
+    throw new Error(res.message || 'Failed to create public link');
+  }
+
+  return {
+    uuid: linkUuid,
+    key: linkKey,
+    downloadUrl: `https://filen.io/d/${linkUuid}#${linkKey}`,
+  };
+}
+
+/**
+ * Download a file from a Filen public link.
+ *
+ * This does NOT require Filen authentication — anyone with the link
+ * and key can download. The file is still Filen-encrypted; the caller
+ * must additionally decrypt with their application-layer key.
+ */
+export async function filenDownloadPublicLink(
+  linkUuid: string,
+  linkKey: string,
+): Promise<Uint8Array> {
+  // Get file info from the public link
+  const infoRes = await fetch(FILEN_GATEWAY + '/v3/file/link/info', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ uuid: linkUuid }),
+  });
+  const info = await infoRes.json();
+  if (!info.status) {
+    throw new Error(info.message || 'Failed to get public link info');
+  }
+
+  // Decrypt the file key from the link metadata
+  const decryptedMeta = await decryptMetadata(info.data.key, linkKey);
+  if (!decryptedMeta) {
+    throw new Error('Failed to decrypt public link metadata');
+  }
+  let fileKey: string;
+  try {
+    fileKey = JSON.parse(decryptedMeta).key;
+  } catch {
+    fileKey = decryptedMeta;
+  }
+
+  // Download the encrypted file content
+  const egestUrl = pickRandom(FILEN_EGEST_SERVERS);
+  const params = new URLSearchParams({
+    uuid: info.data.uuid,
+    region: info.data.region || 'de-1',
+    bucket: info.data.bucket || 'filen-1',
+    index: '0',
+  });
+
+  const downloadRes = await fetch(`${egestUrl}/v3/download?${params}`, {
+    method: 'GET',
+  });
+
+  if (!downloadRes.ok) {
+    throw new Error(`Public link download failed: ${downloadRes.status}`);
+  }
+
+  const encrypted = new Uint8Array(await downloadRes.arrayBuffer());
+  return decryptFileContent(encrypted, fileKey);
+}
+
+/**
+ * Disable (remove) a public link for a file.
+ */
+export async function filenDisablePublicLink(
+  apiKey: string,
+  fileUuid: string,
+  linkUuid: string,
+): Promise<void> {
+  const res = await gateway('/v3/file/link/edit', {
+    uuid: fileUuid,
+    linkUuid,
+    type: 'disable',
+  }, apiKey);
+
+  if (!res.status && !/not found/i.test(res.message || '')) {
+    throw new Error(res.message || 'Failed to disable public link');
+  }
+}
