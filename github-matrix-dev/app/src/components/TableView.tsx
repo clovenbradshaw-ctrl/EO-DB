@@ -12,6 +12,8 @@ import { SortPanel, type SortRule } from './SortPanel';
 import type { ResolvedPermissions } from '../permissions/types';
 import { useViewStore } from '../store/view-store';
 import { defaultColumnWidth, MIN_COLUMN_WIDTH } from './view-types';
+import { formatName } from './scope-picker-utils';
+import { useIsMobile } from '../hooks/useIsMobile';
 import {
   DndContext,
   closestCenter,
@@ -155,6 +157,12 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   const showLastUpdated = viewConfig.showLastUpdated;
   const columnOrder = viewConfig.columnOrder;
   const columnWidths = viewConfig.columnWidths;
+  const rowHeight = viewConfig.rowHeight || 'default';
+  const cellOverflow = viewConfig.cellOverflow || 'wrap';
+  const profileFields = viewConfig.profileFields;
+  const isMobile = useIsMobile();
+
+  const [showProfilePicker, setShowProfilePicker] = useState(false);
 
   const setSorts = useCallback((s: SortRule[]) => viewStore.setSorts(scope, s), [scope, viewStore]);
   const setAdvancedFilters = useCallback((f: FilterRule[]) => viewStore.setFilters(scope, f), [scope, viewStore]);
@@ -588,6 +596,130 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
             placeholder="Search…"
             style={s.filterInput}
           />
+
+          {/* Row height toggle */}
+          <div style={{ display: 'flex', gap: 2 }}>
+            {(['compact', 'default', 'tall'] as const).map((h, i) => {
+              const labels = ['S', 'M', 'L'];
+              const isActive = rowHeight === h;
+              return (
+                <button
+                  key={h}
+                  onClick={() => viewStore.setRowHeight(scope, h)}
+                  title={h.charAt(0).toUpperCase() + h.slice(1)}
+                  style={{
+                    ...s.toggleBtn,
+                    padding: '0 6px',
+                    minWidth: 24,
+                    background: isActive ? theme.accentBg : 'transparent',
+                    color: isActive ? theme.accent : theme.textMuted,
+                    border: `1px solid ${isActive ? theme.accentBorder : theme.border}`,
+                    borderRadius: i === 0 ? '4px 0 0 4px' : i === 2 ? '0 4px 4px 0' : 0,
+                    borderRight: i < 2 ? 'none' : undefined,
+                  }}
+                >
+                  {labels[i]}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Cell overflow toggle */}
+          <div style={{ display: 'flex', gap: 2 }}>
+            {(['clip', 'wrap'] as const).map((mode, i) => {
+              const isActive = cellOverflow === mode;
+              return (
+                <button
+                  key={mode}
+                  onClick={() => viewStore.setCellOverflow(scope, mode)}
+                  style={{
+                    ...s.toggleBtn,
+                    padding: '0 8px',
+                    background: isActive ? theme.accentBg : 'transparent',
+                    color: isActive ? theme.accent : theme.textMuted,
+                    border: `1px solid ${isActive ? theme.accentBorder : theme.border}`,
+                    borderRadius: i === 0 ? '4px 0 0 4px' : '0 4px 4px 0',
+                    borderRight: i === 0 ? 'none' : undefined,
+                  }}
+                >
+                  {mode.charAt(0).toUpperCase() + mode.slice(1)}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Profile fields picker */}
+          <div style={{ position: 'relative' as const }}>
+            <button
+              onClick={() => setShowProfilePicker((prev) => !prev)}
+              style={{
+                ...s.toggleBtn,
+                background: profileFields ? theme.accentBg : 'transparent',
+                color: profileFields ? theme.accent : theme.textMuted,
+                border: `1px solid ${profileFields ? theme.accentBorder : theme.border}`,
+              }}
+              title="Configure which fields appear in the record detail drawer"
+            >
+              {'\u229E'} Profile
+            </button>
+            {showProfilePicker && (
+              <>
+                <div
+                  style={{ position: 'fixed', inset: 0, zIndex: 9998 }}
+                  onClick={() => setShowProfilePicker(false)}
+                />
+                <div style={{
+                  position: 'absolute', top: '100%', right: 0, zIndex: 9999,
+                  background: theme.bgCard, border: `1px solid ${theme.border}`,
+                  borderRadius: 8, padding: 12, boxShadow: `0 8px 30px ${theme.shadow}`,
+                  minWidth: 200, maxHeight: 320, overflowY: 'auto',
+                }}>
+                  <div style={{ fontSize: 11, fontWeight: 600, marginBottom: 8, color: theme.textHeading }}>
+                    Profile Fields
+                  </div>
+                  {entityColumns.map((col) => {
+                    const isChecked = !profileFields || profileFields.includes(col.key);
+                    return (
+                      <label
+                        key={col.key}
+                        style={{
+                          display: 'flex', alignItems: 'center', gap: 8,
+                          padding: '4px 0', fontSize: 12, color: theme.text, cursor: 'pointer',
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={isChecked}
+                          onChange={() => {
+                            const current = profileFields || entityColumns.map((c) => c.key);
+                            const next = isChecked
+                              ? current.filter((k) => k !== col.key)
+                              : [...current, col.key];
+                            viewStore.setProfileFields(scope, next.length === entityColumns.length ? undefined : next);
+                          }}
+                        />
+                        {col.label}
+                      </label>
+                    );
+                  })}
+                  <div style={{ display: 'flex', gap: 8, marginTop: 8, borderTop: `1px solid ${theme.border}`, paddingTop: 8 }}>
+                    <button
+                      onClick={() => viewStore.setProfileFields(scope, undefined)}
+                      style={{ fontSize: 10, background: 'none', border: 'none', color: theme.accent, cursor: 'pointer' }}
+                    >
+                      Select All
+                    </button>
+                    <button
+                      onClick={() => viewStore.setProfileFields(scope, [])}
+                      style={{ fontSize: 10, background: 'none', border: 'none', color: theme.textMuted, cursor: 'pointer' }}
+                    >
+                      Clear
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
         </div>
       </div>
 
@@ -653,7 +785,13 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                       const isRedacted = permissions?.redacted_fields?.includes(col.key);
                       const isLocked = permissions?.locked_fields?.includes(col.key);
                       return (
-                        <td key={col.key} style={s.td}>
+                        <td key={col.key} style={{
+                          ...s.td,
+                          padding: `${rowHeight === 'compact' ? 4 : rowHeight === 'tall' ? 18 : 10}px 8px ${rowHeight === 'compact' ? 4 : rowHeight === 'tall' ? 18 : 10}px 20px`,
+                          ...(cellOverflow === 'clip'
+                            ? { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', wordBreak: 'normal' as const }
+                            : { whiteSpace: 'normal', wordBreak: 'break-word' as const }),
+                        }}>
                           {isRedacted
                             ? <RedactedCell />
                             : col.key === '_record'
@@ -661,7 +799,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                                 <span style={{
                                   fontFamily: "'JetBrains Mono', monospace", fontSize: 11,
                                   color: theme.accent, cursor: 'pointer',
-                                }}>{rec.value?.name || rec.target.split('.').pop()}</span>
+                                }}>{rec.value?.name || formatName(rec.target.split('.').pop() || '')}</span>
                                 {rec.value?._type && <TypeBadge type={rec.value._type} />}
                               </span>
                             : col.key === '_last_updated'

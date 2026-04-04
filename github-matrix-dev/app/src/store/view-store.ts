@@ -60,6 +60,8 @@ interface ViewStoreState {
   setFilterConjunction: (scope: string, conjunction: 'AND' | 'OR') => void;
   setShowLastUpdated: (scope: string, show: boolean) => void;
   setRowHeight: (scope: string, height: 'compact' | 'default' | 'tall') => void;
+  setCellOverflow: (scope: string, mode: 'clip' | 'wrap') => void;
+  setProfileFields: (scope: string, fields: string[] | undefined) => void;
 
   // --- View lifecycle ---
 
@@ -167,6 +169,14 @@ export const useViewStore = create<ViewStoreState>((set, get) => ({
 
   setRowHeight(scope, height) {
     _updateConfig(set, get, scope, { rowHeight: height });
+  },
+
+  setCellOverflow(scope, mode) {
+    _updateConfig(set, get, scope, { cellOverflow: mode });
+  },
+
+  setProfileFields(scope, fields) {
+    _updateConfig(set, get, scope, { profileFields: fields });
   },
 
   activateView(scope, view) {
