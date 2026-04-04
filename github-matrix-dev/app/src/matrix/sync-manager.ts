@@ -1,6 +1,12 @@
 /**
  * Sync manager — orchestrates snapshot persistence, offline queue, and deduplication.
  *
+ * NOTE: When Filen org-mode is active (eo.filen.config room state exists),
+ * Filen is the primary data store and SyncManager is NOT created. The
+ * FilenSyncService handles all data persistence and signaling. SyncManager
+ * remains available as a fallback for spaces without Filen org-mode, where
+ * Matrix timeline events (com.eo-db.event) are still the data transport.
+ *
  * Data is persisted as delta snapshots in Matrix media — each snapshot
  * contains only the events since the last one, plus up to 25 previous
  * snapshot URIs for fast chain traversal. Below 500 log entries the

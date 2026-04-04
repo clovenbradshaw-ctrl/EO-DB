@@ -570,9 +570,42 @@ export function Layout({ session, onLogout }: LayoutProps) {
 
       await init(store);
 
-      // Start Matrix sync if we have a room
+      // Detect Filen org-mode from room state BEFORE starting sync layers.
+      // When org-mode is active, Filen is the primary data store and we
+      // skip Matrix SyncManager (which would send data via timeline events).
+      let filenOrgMode = false;
+      const filenState = useFilenStore.getState();
+      if (!filenState.connected && matrixClientRef.current && spaceRoomId) {
+        const room = matrixClientRef.current.getRoom(spaceRoomId);
+        if (room) {
+          const configEvent = room.currentState.getStateEvents('eo.filen.config' as any, '');
+          if (configEvent) {
+            const config = (configEvent as any).getContent?.() ?? configEvent;
+            if (config.apiKey && config.masterKey) {
+              try {
+                await useFilenStore.getState().restoreFromRoomState({
+                  email: config.email,
+                  apiKey: config.apiKey,
+                  masterKey: config.masterKey,
+                  baseFolderUuid: config.baseFolderUuid,
+                  eodbFolderUuid: config.eodbFolderUuid,
+                });
+                filenOrgMode = true;
+                console.log('[EO-DB] Org-mode Filen auto-connected from room state');
+              } catch (e) {
+                console.warn('[EO-DB] Org-mode Filen auto-connect failed:', e);
+              }
+            }
+          }
+        }
+      }
+      // Also check if Filen is already in org-mode (from a previous space switch)
+      if (useFilenStore.getState().isOrgMode) filenOrgMode = true;
+
+      // Start Matrix sync if we have a room AND Filen org-mode is NOT active.
+      // In org-mode, Filen handles all data persistence — Matrix is signals only.
       let syncManager: SyncManager | null = null;
-      if (MATRIX_ENABLED && spaceRoomId && matrixClientRef.current) {
+      if (MATRIX_ENABLED && spaceRoomId && matrixClientRef.current && !filenOrgMode) {
         try {
           syncManager = new SyncManager(
             matrixClientRef.current,
@@ -589,10 +622,12 @@ export function Layout({ session, onLogout }: LayoutProps) {
         }
       }
 
-      // Start Filen sync (primary read/write sync layer)
+      // Start Filen sync (primary data store layer)
       let filenSync: FilenSyncService | null = null;
-      const filenState = useFilenStore.getState();
-      if (filenState.connected && selectedSpace) {
+
+      // Now start Filen sync if connected (either org-mode or personal)
+      const filenStateNow = useFilenStore.getState();
+      if (filenStateNow.connected && selectedSpace) {
         try {
           // Find the space name from the merged entries
           const spaceEntry = mergedEntries.find(e => {
@@ -601,7 +636,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
           });
           const spaceName = spaceEntry ? ((spaceEntry as any).name || selectedSpace) : selectedSpace;
 
-          const spaceFolderUuid = await filenState.ensureSpaceFolder(selectedSpace, spaceName);
+          const spaceFolderUuid = await filenStateNow.ensureSpaceFolder(selectedSpace, spaceName);
 
           // On fresh device (seq=0), hydrate from Filen before starting sync timer
           const currentSeq = await store.getCurrentSeq();
@@ -622,6 +657,8 @@ export function Layout({ session, onLogout }: LayoutProps) {
             spaceName,
             spaceFolderUuid,
             userId: session.userId,
+            matrixClient: matrixClientRef.current || undefined,
+            roomId: spaceRoomId || undefined,
           });
           await filenSync.start();
           useEoStore.getState().setFilenSync(filenSync);
@@ -1076,7 +1113,7 @@ export function Layout({ session, onLogout }: LayoutProps) {
             ) : activeView === 'builder' ? (
               <BuilderView />
             ) : activeView === 'settings' ? (
-              <SettingsView session={session} matrixClient={matrixClientRef.current} />
+              <SettingsView session={session} matrixClient={matrixClientRef.current} roomId={spaceCacheRef.current.get(selectedSpace!)?.mainRoomId ?? null} />
             ) : null}
           </ErrorBoundary>}
         </main>
