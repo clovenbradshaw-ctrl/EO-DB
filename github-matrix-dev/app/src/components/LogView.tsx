@@ -18,8 +18,6 @@ export const OP_COLORS: Record<string, { bg: string; text: string; border: strin
   REC: { bg: '#FDF2F8', text: '#9D174D', border: '#EC4899', fill: '#F472B6' },
   // Identity triad (ephemeral)
   SIG: { bg: '#E6F1FB', text: '#185FA5', border: '#A8CCE8', fill: '#5B9BD5' },
-  UPD: { bg: '#FAEEDA', text: '#854F0B', border: '#E0C9A0', fill: '#C9A84C' },
-  DEL: { bg: '#FCEBEB', text: '#A32D2D', border: '#E8A0A0', fill: '#D45050' },
 };
 
 export const TRIAD_LABELS: { label: string; ops: string[] }[] = [

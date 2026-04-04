@@ -10,11 +10,15 @@ interface RoomDataViewerProps {
 const EO_EVENT_TYPE = 'com.eo-db.event';
 
 const OP_COLORS: Record<string, string> = {
+  NUL: '#FBBF24',
+  SIG: '#5B9BD5',
   INS: '#22c55e',
-  UPD: '#f59e0b',
-  DEL: '#ef4444',
+  SEG: '#60A5FA',
   CON: '#8b5cf6',
+  SYN: '#C084FC',
+  DEF: '#FB923C',
   EVA: '#06b6d4',
+  REC: '#F472B6',
 };
 
 export function RoomDataViewer({ onBack }: RoomDataViewerProps) {
