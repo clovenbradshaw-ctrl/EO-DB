@@ -168,13 +168,9 @@ export function SettingsView({ session, matrixClient, roomId, onUnarchive }: Set
         {matrixClient && roomId && (
           <Section title="Cloud Storage" theme={theme}>
             <FilenAdminConfig matrixClient={matrixClient} roomId={roomId} />
+            <FilenStorageWidget />
           </Section>
         )}
-
-        {/* Filen Storage (personal) */}
-        <Section title="Personal Filen" theme={theme}>
-          <FilenStorageWidget />
-        </Section>
 
         {/* EO Operator Reference */}
         <Section title="EO Operator Reference" theme={theme}>

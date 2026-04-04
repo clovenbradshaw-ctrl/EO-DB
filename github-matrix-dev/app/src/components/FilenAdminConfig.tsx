@@ -35,6 +35,8 @@ interface ExistingConfig {
   masterKey: string;
   baseFolderUuid: string;
   eodbFolderUuid: string;
+  /** Base64-encoded password for automatic re-login on API key expiry. */
+  savedPassword?: string;
   saved_at?: string;
   saved_by?: string;
 }
@@ -119,13 +121,14 @@ export function FilenAdminConfig({ matrixClient, roomId }: FilenAdminConfigProps
         result.apiKey, baseFolderUuid, 'EO-DB', result.masterKeys,
       );
 
-      // 3. Store as room state event
+      // 3. Store as room state event (includes saved password for auto re-login)
       const config: ExistingConfig = {
         email,
         apiKey: result.apiKey,
         masterKey: result.masterKeys[0],
         baseFolderUuid,
         eodbFolderUuid,
+        savedPassword: btoa(password),
         saved_at: new Date().toISOString(),
         saved_by: matrixClient.getUserId() || undefined,
       };

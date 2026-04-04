@@ -688,10 +688,12 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       // Also check if Filen is already in org-mode (from a previous space switch)
       if (useFilenStore.getState().isOrgMode) filenOrgMode = true;
 
-      // Start Matrix sync if we have a room AND Filen org-mode is NOT active.
-      // In org-mode, Filen handles all data persistence — Matrix is signals only.
+      // Start Matrix sync ONLY if Filen is NOT connected (in any mode).
+      // When Filen is the data store, Matrix is signals only — no SyncManager
+      // needed (it would try to hydrate from Matrix media, causing 404 errors).
       let syncManager: SyncManager | null = null;
-      if (MATRIX_ENABLED && spaceRoomId && matrixClientRef.current && !filenOrgMode) {
+      const filenConnected = useFilenStore.getState().connected;
+      if (MATRIX_ENABLED && spaceRoomId && matrixClientRef.current && !filenOrgMode && !filenConnected) {
         try {
           syncManager = new SyncManager(
             matrixClientRef.current,
