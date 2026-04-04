@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import type { MatrixClient } from 'matrix-js-sdk';
 import { useEoStore } from '../store/eo-store';
 import { useTheme, type Theme } from '../theme';
 import type { EoState } from '../db/types';
@@ -14,6 +15,8 @@ import {
 } from '../permissions/types';
 import { resolvePermissionsFromSharing } from '../permissions/resolve';
 import { FieldPermissions } from './FieldPermissions';
+import { SpaceInvite } from './SpaceInvite';
+import { inviteToRoom } from '../permissions/room-topology';
 
 type AccessLevel = 'read' | 'write' | 'admin';
 
@@ -28,6 +31,10 @@ interface SpaceMembersProps {
   spaceTarget: string;
   currentUserId: string;
   onClose: () => void;
+  /** Matrix client for user discovery and room invitations */
+  matrixClient?: MatrixClient | null;
+  /** The main Matrix room ID for this space (used for room-level invites) */
+  mainRoomId?: string | null;
 }
 
 const ROLE_OPTIONS_5: { value: AccessRole; label: string; desc: string; pl: number }[] = [
@@ -51,7 +58,7 @@ const LEGACY_ROLE_LABELS: Record<AccessLevel, string> = {
   admin: 'Full access',
 };
 
-export function SpaceMembers({ spaceTarget, currentUserId, onClose }: SpaceMembersProps) {
+export function SpaceMembers({ spaceTarget, currentUserId, onClose, matrixClient, mainRoomId }: SpaceMembersProps) {
   const { theme } = useTheme();
   const s = styles(theme);
   const dispatch = useEoStore((st) => st.dispatch);
@@ -67,6 +74,7 @@ export function SpaceMembers({ spaceTarget, currentUserId, onClose }: SpaceMembe
   const [newAccess, setNewAccess] = useState<AccessLevel>('read');
   const [addError, setAddError] = useState('');
   const [addSuccess, setAddSuccess] = useState('');
+  const [inviting, setInviting] = useState(false);
 
   // Dropdown state
   const [openDropdown, setOpenDropdown] = useState<string | null>(null);
@@ -206,9 +214,18 @@ export function SpaceMembers({ spaceTarget, currentUserId, onClose }: SpaceMembe
       return;
     }
 
+    await addMemberById(targetId, newAccess);
+  }
+
+  /** Add a member by Matrix user ID — dispatches EO sharing + Matrix room invite */
+  async function addMemberById(targetId: string, access: AccessLevel = newAccess) {
+    setAddError('');
+    setAddSuccess('');
+    setInviting(true);
+
     const newEntry: ShareEntry = {
       user_id: targetId,
-      access: newAccess,
+      access,
       added_by: currentUserId,
       added_at: new Date().toISOString(),
     };
@@ -216,6 +233,7 @@ export function SpaceMembers({ spaceTarget, currentUserId, onClose }: SpaceMembe
     const updatedSharing = [...members, newEntry];
 
     try {
+      // 1. Update the EO sharing list
       await dispatch({
         op: 'DEF',
         target: spaceTarget,
@@ -225,11 +243,25 @@ export function SpaceMembers({ spaceTarget, currentUserId, onClose }: SpaceMembe
         acquired_ts: new Date().toISOString(),
       });
       setMembers(updatedSharing);
+
+      // 2. Send a Matrix room invitation so the user discovers the space
+      if (matrixClient && mainRoomId) {
+        try {
+          await inviteToRoom(matrixClient, mainRoomId, targetId);
+        } catch (matrixErr: any) {
+          // Non-fatal: the EO sharing entry is already saved.
+          // Common case: user is already in the room, or invite PL insufficient.
+          console.warn('[EO-DB] Matrix invite failed (sharing saved):', matrixErr.message || matrixErr);
+        }
+      }
+
       setNewMatrixId('');
-      setAddSuccess(`${formatUserId(targetId)} added`);
+      setAddSuccess(`${formatUserId(targetId)} invited`);
       setTimeout(() => setAddSuccess(''), 3000);
     } catch (e: any) {
       setAddError('Failed: ' + e.message);
+    } finally {
+      setInviting(false);
     }
   }
 
@@ -300,28 +332,39 @@ export function SpaceMembers({ spaceTarget, currentUserId, onClose }: SpaceMembe
       {canManageMembers() && (
         <div style={s.inviteSection}>
           <div style={s.inviteRow}>
-            <input
-              style={s.inviteInput}
-              value={newMatrixId}
-              onChange={(e) => { setNewMatrixId(e.target.value); setAddError(''); }}
-              placeholder="Add people by Matrix ID..."
-              onKeyDown={(e) => e.key === 'Enter' && handleAddMember()}
-            />
+            {matrixClient ? (
+              <SpaceInvite
+                matrixClient={matrixClient}
+                existingMemberIds={[owner, ...members.map((m) => m.user_id)]}
+                onInvite={(userId) => addMemberById(userId, newAccess)}
+                inviting={inviting}
+              />
+            ) : (
+              <input
+                style={s.inviteInput}
+                value={newMatrixId}
+                onChange={(e) => { setNewMatrixId(e.target.value); setAddError(''); }}
+                placeholder="Add people by Matrix ID..."
+                onKeyDown={(e) => e.key === 'Enter' && handleAddMember()}
+              />
+            )}
             <RolePicker
               theme={theme}
               value={newAccess}
               onChange={setNewAccess}
               compact
             />
-            <button
-              style={{
-                ...s.inviteBtn,
-                opacity: newMatrixId.trim() ? 1 : 0.5,
-              }}
-              onClick={handleAddMember}
-            >
-              Invite
-            </button>
+            {!matrixClient && (
+              <button
+                style={{
+                  ...s.inviteBtn,
+                  opacity: newMatrixId.trim() ? 1 : 0.5,
+                }}
+                onClick={handleAddMember}
+              >
+                Invite
+              </button>
+            )}
           </div>
           {addError && <div style={s.errorMsg}>{addError}</div>}
           {addSuccess && <div style={s.successMsg}>{addSuccess}</div>}
