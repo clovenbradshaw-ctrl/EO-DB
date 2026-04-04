@@ -11,6 +11,8 @@ import {
   filenLogin as apiLogin,
   filenGetBaseFolder,
   filenEnsureFolder,
+  filenFindFolder,
+  filenCreateFolder,
   type FilenAuth,
   type LoginResult,
 } from './filen-api';
@@ -18,13 +20,20 @@ import {
 const STORAGE_KEY = 'eo-filen-session';
 const EODB_ROOT_FOLDER = 'EO-DB';
 const FILEN_GATEWAY = 'https://gateway.filen.io';
+/** Only re-validate Filen API key if last check was more than 5 minutes ago. */
+const VALIDATION_INTERVAL_MS = 5 * 60 * 1000;
 
 interface PersistedSession {
   auth: FilenAuth;
   masterKeys: string[];
   baseFolderUuid: string;
   eodbFolderUuid: string;
+  /** Base64-encoded password for automatic re-login on API key expiry. */
+  savedPassword?: string;
 }
+
+/** Timestamp of the last successful API key validation. */
+let lastValidatedAt = 0;
 
 /** Config stored in Matrix room state event `eo.filen.config`. */
 export interface FilenOrgConfig {
@@ -33,6 +42,8 @@ export interface FilenOrgConfig {
   masterKey: string;
   baseFolderUuid: string;
   eodbFolderUuid: string;
+  /** Base64-encoded password for automatic re-login on API key expiry. */
+  savedPassword?: string;
 }
 
 export interface FilenStoreState {
@@ -46,6 +57,8 @@ export interface FilenStoreState {
   eodbFolderUuid: string;
   /** Cached space folder UUIDs: spaceId -> folderUuid. */
   spaceFolders: Record<string, string>;
+  /** Human-readable display names: folderUuid -> spaceName. */
+  spaceDisplayNames: Record<string, string>;
   /** Whether Filen is connected and ready. */
   connected: boolean;
   /** Loading state for login. */
@@ -77,12 +90,21 @@ export interface FilenStoreState {
   recordSync: (spaceId: string) => void;
 }
 
+/** Derive a deterministic UUID-like folder name from a spaceId using SHA-256. */
+async function spaceIdToFolderName(spaceId: string): Promise<string> {
+  const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(spaceId));
+  const hex = Array.from(new Uint8Array(hash).slice(0, 16))
+    .map(b => b.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+}
+
 export const useFilenStore = create<FilenStoreState>((set, get) => ({
   auth: null,
   masterKeys: [],
   baseFolderUuid: '',
   eodbFolderUuid: '',
   spaceFolders: {},
+  spaceDisplayNames: {},
   connected: false,
   connecting: false,
   error: null,
@@ -107,8 +129,10 @@ export const useFilenStore = create<FilenStoreState>((set, get) => ({
         masterKeys: result.masterKeys,
         baseFolderUuid,
         eodbFolderUuid,
+        savedPassword: btoa(password),
       };
       localStorage.setItem(STORAGE_KEY, JSON.stringify(session));
+      lastValidatedAt = Date.now();
 
       set({
         auth,
@@ -132,6 +156,7 @@ export const useFilenStore = create<FilenStoreState>((set, get) => ({
       baseFolderUuid: '',
       eodbFolderUuid: '',
       spaceFolders: {},
+      spaceDisplayNames: {},
       connected: false,
       connecting: false,
       error: null,
@@ -151,7 +176,7 @@ export const useFilenStore = create<FilenStoreState>((set, get) => ({
         return false;
       }
       // Optimistically set connected so the UI shows the session immediately,
-      // then validate the API key in the background. If expired, disconnect.
+      // then validate the API key in the background. If expired, try re-login.
       set({
         auth: session.auth,
         masterKeys: session.masterKeys,
@@ -160,7 +185,12 @@ export const useFilenStore = create<FilenStoreState>((set, get) => ({
         connected: true,
       });
 
-      // Background validation — disconnect if API key has expired
+      // Skip validation if we checked recently (avoids hammering on re-mounts)
+      if (Date.now() - lastValidatedAt < VALIDATION_INTERVAL_MS) {
+        return true;
+      }
+
+      // Background validation — try re-login on API key expiry
       fetch(`${FILEN_GATEWAY}/v3/user/info`, {
         method: 'POST',
         headers: {
@@ -170,9 +200,32 @@ export const useFilenStore = create<FilenStoreState>((set, get) => ({
         body: '{}',
       })
         .then(r => r.json())
-        .then(d => {
-          if (!d.status) {
-            console.warn('[EO-DB] Filen session expired — clearing stored session');
+        .then(async (d) => {
+          if (d.status) {
+            lastValidatedAt = Date.now();
+            return;
+          }
+          // API key expired — attempt automatic re-login with saved credentials
+          console.warn('[EO-DB] Filen API key expired — attempting re-login');
+          if (session.savedPassword && session.auth.email) {
+            try {
+              await get().login(session.auth.email, atob(session.savedPassword));
+              console.log('[EO-DB] Filen re-login successful');
+            } catch (e) {
+              console.warn('[EO-DB] Filen re-login failed — clearing session:', e);
+              localStorage.removeItem(STORAGE_KEY);
+              set({
+                auth: null,
+                masterKeys: [],
+                baseFolderUuid: '',
+                eodbFolderUuid: '',
+                spaceFolders: {},
+                connected: false,
+                error: 'Filen session expired — please log in again',
+              });
+            }
+          } else {
+            console.warn('[EO-DB] Filen session expired — no saved credentials for re-login');
             localStorage.removeItem(STORAGE_KEY);
             set({
               auth: null,
@@ -211,16 +264,24 @@ export const useFilenStore = create<FilenStoreState>((set, get) => ({
       const data = await res.json();
 
       let apiKey = config.apiKey;
+      let masterKeys = [config.masterKey];
+
       if (!data.status) {
-        // Token expired — try re-login if we have creds in account_data
-        // For now, just fail; the admin can update the config
-        throw new Error('Filen API key expired — admin needs to update eo.filen.config');
+        // Token expired — auto re-login if saved password is available
+        if (config.savedPassword) {
+          console.log('[EO-DB] Filen API key expired — auto re-logging in');
+          const result = await apiLogin(config.email, atob(config.savedPassword));
+          apiKey = result.apiKey;
+          masterKeys = result.masterKeys;
+        } else {
+          throw new Error('Filen API key expired — admin needs to update credentials');
+        }
       }
 
       const auth: FilenAuth = { apiKey, email: config.email };
       set({
         auth,
-        masterKeys: [config.masterKey],
+        masterKeys,
         baseFolderUuid: config.baseFolderUuid,
         eodbFolderUuid: config.eodbFolderUuid,
         connected: true,
@@ -228,7 +289,7 @@ export const useFilenStore = create<FilenStoreState>((set, get) => ({
         isOrgMode: true,
         orgEmail: config.email,
       });
-      // Do NOT persist to localStorage — creds come from Matrix room state each session
+      lastValidatedAt = Date.now();
     } catch (e: any) {
       set({ connecting: false, error: e.message });
       throw e;
@@ -253,10 +314,27 @@ export const useFilenStore = create<FilenStoreState>((set, get) => ({
     if (!auth) throw new Error('Not connected to Filen');
 
     const parentUuid = eodbFolderUuid || await get().ensureEodbFolder();
-    // Use space name as folder name (sanitize for filesystem safety)
-    const safeName = spaceName.replace(/[^\w\s-]/g, '').trim() || spaceId;
-    const uuid = await filenEnsureFolder(auth.apiKey, parentUuid, safeName, masterKeys);
-    set({ spaceFolders: { ...get().spaceFolders, [spaceId]: uuid } });
+
+    // Use a deterministic UUID derived from spaceId for anonymized folder names
+    const anonName = await spaceIdToFolderName(spaceId);
+
+    // Try the new UUID-based name first
+    let uuid = await filenFindFolder(auth.apiKey, parentUuid, anonName, masterKeys);
+    if (!uuid) {
+      // Fall back to legacy readable name (migration for existing folders)
+      const legacyName = spaceName.replace(/[^\w\s-]/g, '').trim() || spaceId;
+      uuid = await filenFindFolder(auth.apiKey, parentUuid, legacyName, masterKeys);
+    }
+    if (!uuid) {
+      // Neither exists — create with anonymized name
+      uuid = await filenCreateFolder(auth.apiKey, parentUuid, anonName, masterKeys[0]);
+    }
+
+    // Cache folder UUID and display name
+    set({
+      spaceFolders: { ...get().spaceFolders, [spaceId]: uuid },
+      spaceDisplayNames: { ...get().spaceDisplayNames, [uuid]: spaceName },
+    });
     return uuid;
   },
 

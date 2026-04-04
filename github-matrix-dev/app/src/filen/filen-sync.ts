@@ -591,6 +591,12 @@ export class FilenSyncService {
     snapshots.sort((a, b) => b.seq - a.seq);
     backups.sort((a, b) => a.seq - b.seq);
 
+    if (snapshots.length === 0 && backups.length === 0) {
+      console.warn('[EO-DB] hydrateFromFilen: no .eodb files found in folder', spaceFolderUuid);
+    } else {
+      console.log(`[EO-DB] hydrateFromFilen: found ${snapshots.length} snapshots, ${backups.length} backups`);
+    }
+
     let lastAppliedSeq = localSeq;
 
     // Apply latest snapshot first (it contains all events from seq 0)
