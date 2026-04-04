@@ -90,6 +90,92 @@ describe('parseJsonImport', () => {
   it('rejects non-object items', () => {
     expect(() => parseJsonImport(['not-an-object'])).toThrow('not an object');
   });
+
+  it('handles keyed collections with entity IDs', () => {
+    const data = {
+      attorneys: [
+        { id: 'ATT-001', name: 'Alice', cases: ['CASE-001'] },
+        { id: 'ATT-002', name: 'Bob', cases: ['CASE-001'] },
+      ],
+      cases: [
+        { id: 'CASE-001', title: 'Test', lead_attorney: 'ATT-001', team: ['ATT-001', 'ATT-002'] },
+      ],
+    };
+    const rows = parseJsonImport(data);
+    const insRows = rows.filter(r => r.op === 'INS');
+    const conRows = rows.filter(r => r.op === 'CON');
+
+    // 2 attorneys + 1 case = 3 INS events
+    expect(insRows).toHaveLength(3);
+    // Targets should use real entity IDs
+    expect(insRows.some(r => r.target === 'import.attorneys.ATT-001')).toBe(true);
+    expect(insRows.some(r => r.target === 'import.attorneys.ATT-002')).toBe(true);
+    expect(insRows.some(r => r.target === 'import.cases.CASE-001')).toBe(true);
+
+    // CON events for detected relationships
+    expect(conRows.length).toBeGreaterThan(0);
+    // lead_attorney ATT-001 reference from CASE-001
+    const leadEdge = conRows.find(
+      r => r.target === 'import.cases.CASE-001' && r.operand?.edge_type === 'lead_attorney',
+    );
+    expect(leadEdge).toBeDefined();
+    expect(leadEdge!.operand.added).toContain('import.attorneys.ATT-001');
+  });
+
+  it('handles singleton objects in keyed collections', () => {
+    const data = {
+      firm: { name: 'Test LLP', founded: '1987' },
+      attorneys: [
+        { id: 'ATT-001', name: 'Alice' },
+      ],
+    };
+    const rows = parseJsonImport(data);
+    const insRows = rows.filter(r => r.op === 'INS');
+    // firm singleton + 1 attorney = 2 INS events
+    expect(insRows).toHaveLength(2);
+    expect(insRows.some(r => r.target.includes('.firm.'))).toBe(true);
+    expect(insRows.some(r => r.target === 'import.attorneys.ATT-001')).toBe(true);
+  });
+
+  it('handles law firm data with complex cross-references', () => {
+    const data = {
+      firm: { name: 'Test LLP', offices: ['Nashville', 'Atlanta'] },
+      attorneys: [
+        { id: 'ATT-001', name: 'Diana', cases: ['CASE-001'], mentees: ['ATT-002'] },
+        { id: 'ATT-002', name: 'Tomas', cases: ['CASE-001'] },
+      ],
+      cases: [
+        { id: 'CASE-001', title: 'Test v. Corp', lead_attorney: 'ATT-001', team: ['ATT-001', 'ATT-002'], client_id: 'CLI-001', documents: ['DOC-001'] },
+      ],
+      clients: [
+        { id: 'CLI-001', name: 'Acme Corp', cases: ['CASE-001'] },
+      ],
+      documents: [
+        { id: 'DOC-001', title: 'Brief', cases: ['CASE-001'] },
+      ],
+    };
+    const rows = parseJsonImport(data);
+    const insRows = rows.filter(r => r.op === 'INS');
+    const conRows = rows.filter(r => r.op === 'CON');
+
+    // firm + 2 attorneys + 1 case + 1 client + 1 document = 6
+    expect(insRows).toHaveLength(6);
+    // Should detect cross-collection references
+    expect(conRows.length).toBeGreaterThan(0);
+    // ATT-001 mentors ATT-002
+    const mentorEdge = conRows.find(
+      r => r.target === 'import.attorneys.ATT-001' && r.operand?.edge_type === 'mentees',
+    );
+    expect(mentorEdge).toBeDefined();
+  });
+
+  it('respects target_prefix for keyed collections', () => {
+    const data = {
+      items: [{ id: 'ITEM-1', name: 'Widget' }],
+    };
+    const rows = parseJsonImport(data, 'lawfirm');
+    expect(rows[0].target).toBe('lawfirm.items.ITEM-1');
+  });
 });
 
 // --- CSV parsing tests ---
