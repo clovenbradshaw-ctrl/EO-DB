@@ -464,7 +464,7 @@ export async function filenUploadFile(
     headers: {
       'Authorization': `Bearer ${apiKey}`,
     },
-    body: encrypted,
+    body: encrypted as unknown as Blob,
   });
   const uploadJson = await uploadRes.json();
   if (!uploadJson.status) {
