@@ -145,7 +145,6 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     const { store } = get();
     if (!store) throw new Error('Store not initialized');
 
-    // Fold locally — Filen sync picks up new events on its 30s timer
     let lastSeq = 0;
     for (let i = 0; i < events.length; i++) {
       lastSeq = await processEvent(store, events[i], (fullEvent) => {
@@ -156,6 +155,15 @@ export const useEoStore = create<EoDbState>((set, get) => ({
       });
       onProgress?.(i + 1, events.length);
     }
+
+    // Upload to Filen immediately after import (don't wait for 30s timer)
+    const { filenSync } = get();
+    if (filenSync) {
+      filenSync.forceSave().catch((e) =>
+        console.warn('[EO-DB] Filen upload after import failed:', e),
+      );
+    }
+
     return lastSeq;
   },
 
