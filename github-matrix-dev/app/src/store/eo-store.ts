@@ -1,5 +1,7 @@
 import { create } from 'zustand';
 import type { EoStore } from '../db/encrypted-store';
+import { createLocalStore } from '../db/encrypted-store';
+import { createIdb } from '../db/idb';
 import type { EoEvent, EoEventInput, EoState, HorizonResponse } from '../db/types';
 import { processEvent } from '../db/fold';
 import { horizonGet, type HorizonOpts } from '../db/horizon';
@@ -27,6 +29,9 @@ interface EoDbState {
 
   /** Initialize the store with an encrypted store instance */
   init: (store: EoStore) => Promise<void>;
+
+  /** Initialize a local-only (unencrypted) store — no Matrix session needed */
+  initLocal: (dbName?: string) => Promise<void>;
 
   /** Set the sync manager after it's initialized */
   setSyncManager: (syncManager: SyncManager) => void;
@@ -81,6 +86,23 @@ export const useEoStore = create<EoDbState>((set, get) => ({
       hydrated = all.slice(-100);
     } catch {
       // Log read may fail on a brand-new store — that's fine
+    }
+
+    set({ store, lastSeq, ready: true, recentEvents: hydrated });
+  },
+
+  async initLocal(dbName = 'local') {
+    set({ ready: false, recentEvents: [], lastSeq: 0 });
+    const idb = await createIdb(dbName);
+    const store = createLocalStore(idb);
+    const lastSeq = await store.getCurrentSeq();
+
+    let hydrated: EoEvent[] = [];
+    try {
+      const all = await readLogSince(store, 0);
+      hydrated = all.slice(-100);
+    } catch {
+      // Brand-new store — nothing to hydrate
     }
 
     set({ store, lastSeq, ready: true, recentEvents: hydrated });
