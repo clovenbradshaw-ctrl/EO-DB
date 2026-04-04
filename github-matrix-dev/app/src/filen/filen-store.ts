@@ -167,11 +167,19 @@ export const useFilenStore = create<FilenStoreState>((set, get) => ({
   async restoreFromRoomState(config: FilenOrgConfig): Promise<void> {
     set({ connecting: true, error: null });
     try {
-      // Verify session is still valid
+      // Verify session is still valid (Filen requires Checksum header)
+      const body = '{}';
+      const hashBuf = await crypto.subtle.digest('SHA-512', new TextEncoder().encode(body));
+      const checksum = Array.from(new Uint8Array(hashBuf))
+        .map(b => b.toString(16).padStart(2, '0')).join('');
       const res = await fetch(`${FILEN_GATEWAY}/v3/user/info`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.apiKey}` },
-        body: '{}',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${config.apiKey}`,
+          'Checksum': checksum,
+        },
+        body,
       });
       const data = await res.json();
 

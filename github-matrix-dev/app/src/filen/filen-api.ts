@@ -71,6 +71,12 @@ export async function sha512(input: string): Promise<string> {
   return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
+/** SHA-256 hash — used for nameHashed in Filen v2 auth (64 hex chars). */
+export async function sha256(input: string): Promise<string> {
+  const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input));
+  return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
 export async function deriveKeyFromPassword(password: string, salt: string): Promise<string> {
   const enc = new TextEncoder();
   const key = await crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveBits']);
@@ -199,10 +205,19 @@ async function gateway(
   data: Record<string, unknown>,
   apiKey?: string,
 ): Promise<any> {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const body = JSON.stringify(data);
+  // Filen gateway requires a Checksum header: SHA-512 of the request body
+  const hashBuf = await crypto.subtle.digest('SHA-512', new TextEncoder().encode(body));
+  const checksum = Array.from(new Uint8Array(hashBuf))
+    .map(b => b.toString(16).padStart(2, '0')).join('');
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'Checksum': checksum,
+  };
   if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
   const res = await fetch(`${FILEN_GATEWAY}${endpoint}`, {
-    method: 'POST', headers, body: JSON.stringify(data),
+    method: 'POST', headers, body,
   });
   return res.json();
 }
@@ -216,6 +231,7 @@ export async function filenLogin(
   password: string,
   twofa?: string,
 ): Promise<LoginResult> {
+  // Step 1: Get auth info (salt + auth version)
   const info = await gateway('/v3/auth/info', { email });
   if (!info.status) throw new Error(info.message || 'Auth info failed');
 
@@ -254,7 +270,7 @@ export async function filenCreateFolder(
   masterKey: string,
 ): Promise<string> {
   const uuid = randomUUID();
-  const nameHashed = await sha512(folderName.toLowerCase());
+  const nameHashed = await sha256(folderName.toLowerCase());
   const encName = await encryptMetadata(JSON.stringify({ name: folderName }), masterKey);
 
   const res = await gateway('/v3/dir/create', {
@@ -389,7 +405,7 @@ export async function filenUploadFile(
   const encryptedMetadata = await encryptMetadata(metadataObj, masterKey);
 
   // 3. Hash filename
-  const nameHashed = await sha512(fileName.toLowerCase());
+  const nameHashed = await sha256(fileName.toLowerCase());
 
   // 4. Compute hash of encrypted content for integrity
   const contentHash = await sha512(
