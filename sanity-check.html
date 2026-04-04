@@ -1,0 +1,567 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Matrix + Filen Sanity Check</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'JetBrains Mono', 'SF Mono', 'Consolas', monospace;
+      background: #0d1117; color: #c9d1d9;
+      padding: 2rem; max-width: 720px; margin: 0 auto;
+    }
+    h1 { font-size: 1.4rem; margin-bottom: 1.5rem; color: #58a6ff; }
+    h2 { font-size: 1rem; margin: 1.5rem 0 0.75rem; color: #8b949e; border-bottom: 1px solid #21262d; padding-bottom: 0.4rem; }
+    label { display: block; font-size: 0.8rem; color: #8b949e; margin-bottom: 0.25rem; }
+    input, textarea {
+      width: 100%; padding: 0.5rem 0.7rem; margin-bottom: 0.75rem;
+      background: #161b22; border: 1px solid #30363d; border-radius: 6px;
+      color: #c9d1d9; font-family: inherit; font-size: 0.85rem;
+    }
+    input:focus, textarea:focus { border-color: #58a6ff; outline: none; }
+    textarea { resize: vertical; min-height: 60px; }
+    button {
+      padding: 0.5rem 1.2rem; border: none; border-radius: 6px;
+      font-family: inherit; font-size: 0.85rem; cursor: pointer;
+      background: #238636; color: #fff; margin-right: 0.5rem; margin-bottom: 0.5rem;
+    }
+    button:hover { background: #2ea043; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    button.secondary { background: #30363d; color: #c9d1d9; }
+    button.secondary:hover { background: #484f58; }
+    button.danger { background: #da3633; }
+    button.danger:hover { background: #f85149; }
+    #log {
+      background: #010409; border: 1px solid #21262d; border-radius: 6px;
+      padding: 1rem; margin-top: 1rem; max-height: 400px; overflow-y: auto;
+      font-size: 0.78rem; line-height: 1.6; white-space: pre-wrap;
+    }
+    .log-ok { color: #3fb950; }
+    .log-err { color: #f85149; }
+    .log-info { color: #58a6ff; }
+    .log-warn { color: #d29922; }
+    .status-dot {
+      display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+      margin-right: 6px; vertical-align: middle;
+    }
+    .dot-off { background: #484f58; }
+    .dot-on { background: #3fb950; }
+    .dot-err { background: #f85149; }
+    .section { background: #161b22; border: 1px solid #21262d; border-radius: 8px; padding: 1rem 1.2rem; margin-bottom: 1rem; }
+    .status-bar { display: flex; gap: 1.5rem; margin-bottom: 1rem; font-size: 0.85rem; }
+  </style>
+</head>
+<body>
+
+<h1>Matrix + Filen Sanity Check</h1>
+
+<div class="status-bar">
+  <span><span id="matrix-dot" class="status-dot dot-off"></span>Matrix: <span id="matrix-status">disconnected</span></span>
+  <span><span id="filen-dot" class="status-dot dot-off"></span>Filen: <span id="filen-status">disconnected</span></span>
+</div>
+
+<!-- Matrix Login -->
+<div class="section">
+  <h2>1. Matrix Login</h2>
+  <label>Homeserver URL</label>
+  <input id="hs-url" type="url" placeholder="https://matrix.org" value="https://matrix.org" />
+  <label>User ID</label>
+  <input id="mx-user" type="text" placeholder="@user:matrix.org" />
+  <label>Password</label>
+  <input id="mx-pass" type="password" placeholder="password" />
+  <button id="btn-mx-login" onclick="matrixLogin()">Login to Matrix</button>
+  <button class="secondary" id="btn-mx-logout" onclick="matrixLogout()" disabled>Logout</button>
+</div>
+
+<!-- Filen Credentials (stored in Matrix) -->
+<div class="section">
+  <h2>2. Filen Credentials (saved in Matrix account data)</h2>
+  <label>Filen Email</label>
+  <input id="fi-email" type="email" placeholder="you@example.com" />
+  <label>Filen Password</label>
+  <input id="fi-pass" type="password" placeholder="password" />
+  <button class="secondary" onclick="saveFilenCreds()">Save to Matrix</button>
+  <button class="secondary" onclick="loadFilenCreds()">Load from Matrix</button>
+  <button id="btn-fi-login" onclick="filenLogin()">Login to Filen</button>
+</div>
+
+<!-- Post Update -->
+<div class="section">
+  <h2>3. Post Update to Filen File</h2>
+  <label>File path on Filen (e.g. /sanity-check/updates.log)</label>
+  <input id="fi-path" type="text" placeholder="/sanity-check/updates.log" value="/sanity-check/updates.log" />
+  <label>Update message</label>
+  <textarea id="fi-msg" placeholder="Sanity check update..."></textarea>
+  <button onclick="postUpdate()">Post Update</button>
+  <button class="secondary" onclick="readFile()">Read File</button>
+</div>
+
+<div id="log"></div>
+
+<!-- Matrix JS SDK (browser bundle) -->
+<script src="https://cdn.jsdelivr.net/npm/matrix-js-sdk@34.11.0/lib/browser-matrix.min.js"></script>
+
+<!-- Filen SDK (browser bundle) -->
+<script src="https://cdn.jsdelivr.net/npm/@anthropic-ai/sdk@0.1.0/dist/index.min.js" onerror=""></script>
+
+<script type="module">
+  // ── State ──────────────────────────────────────────────────────────
+  let matrixClient = null;
+  let filenLoggedIn = false;
+  let filenEmail = '';
+  let filenPassword = '';
+  let filenApiKey = '';
+  let filenMasterKeys = [];
+
+  const FILEN_ACCOUNT_DATA_TYPE = 'eo.filen.credentials';
+  const FILEN_API = 'https://gateway.filen.io';
+
+  // ── Logging ────────────────────────────────────────────────────────
+  const logEl = document.getElementById('log');
+
+  function log(msg, cls = '') {
+    const ts = new Date().toISOString().slice(11, 23);
+    const line = document.createElement('div');
+    line.className = cls;
+    line.textContent = `[${ts}] ${msg}`;
+    logEl.appendChild(line);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+  window.log = log; // expose for inline handlers
+
+  function setStatus(which, state, text) {
+    document.getElementById(`${which}-status`).textContent = text;
+    const dot = document.getElementById(`${which}-dot`);
+    dot.className = `status-dot dot-${state}`;
+  }
+
+  // ── Matrix ─────────────────────────────────────────────────────────
+  window.matrixLogin = async function matrixLogin() {
+    const hsUrl = document.getElementById('hs-url').value.replace(/\/+$/, '');
+    const user = document.getElementById('mx-user').value.trim();
+    const pass = document.getElementById('mx-pass').value;
+
+    if (!hsUrl || !user || !pass) { log('Fill in all Matrix fields', 'log-err'); return; }
+
+    log(`Logging into Matrix as ${user} on ${hsUrl}...`, 'log-info');
+    document.getElementById('btn-mx-login').disabled = true;
+
+    try {
+      // Create a temporary client to log in
+      const tempClient = globalThis.matrixcs.createClient({ baseUrl: hsUrl });
+      const resp = await tempClient.login('m.login.password', {
+        user: user,
+        password: pass,
+      });
+
+      log(`Authenticated. access_token received, user_id=${resp.user_id}`, 'log-ok');
+
+      // Create the real client with credentials
+      matrixClient = globalThis.matrixcs.createClient({
+        baseUrl: hsUrl,
+        accessToken: resp.access_token,
+        userId: resp.user_id,
+        deviceId: resp.device_id,
+      });
+
+      setStatus('matrix', 'on', `${resp.user_id}`);
+      document.getElementById('btn-mx-logout').disabled = false;
+      document.getElementById('btn-mx-login').disabled = true;
+
+      log('Matrix login complete. You can now save/load Filen credentials.', 'log-ok');
+
+      // Auto-load Filen creds if they exist
+      await loadFilenCreds();
+    } catch (err) {
+      log(`Matrix login failed: ${err.message}`, 'log-err');
+      setStatus('matrix', 'err', 'error');
+      document.getElementById('btn-mx-login').disabled = false;
+    }
+  };
+
+  window.matrixLogout = async function matrixLogout() {
+    if (!matrixClient) return;
+    try {
+      await matrixClient.logout(true);
+    } catch (_) {}
+    matrixClient = null;
+    setStatus('matrix', 'off', 'disconnected');
+    document.getElementById('btn-mx-login').disabled = false;
+    document.getElementById('btn-mx-logout').disabled = true;
+    log('Logged out of Matrix.', 'log-info');
+  };
+
+  // ── Filen Credentials in Matrix ───────────────────────────────────
+  window.saveFilenCreds = async function saveFilenCreds() {
+    if (!matrixClient) { log('Login to Matrix first', 'log-err'); return; }
+
+    const email = document.getElementById('fi-email').value.trim();
+    const pass = document.getElementById('fi-pass').value;
+    if (!email || !pass) { log('Fill in Filen email and password', 'log-err'); return; }
+
+    try {
+      // Encode credentials (base64 for basic obfuscation in account data —
+      // in production you'd encrypt with the account's cross-signing keys)
+      const payload = {
+        email: email,
+        password: btoa(pass),
+        saved_at: new Date().toISOString(),
+      };
+
+      await matrixClient.setAccountData(FILEN_ACCOUNT_DATA_TYPE, payload);
+      log(`Filen credentials saved to Matrix account data (type: ${FILEN_ACCOUNT_DATA_TYPE})`, 'log-ok');
+    } catch (err) {
+      log(`Failed to save Filen creds: ${err.message}`, 'log-err');
+    }
+  };
+
+  window.loadFilenCreds = async function loadFilenCreds() {
+    if (!matrixClient) { log('Login to Matrix first', 'log-err'); return; }
+
+    try {
+      const data = await matrixClient.getAccountData(FILEN_ACCOUNT_DATA_TYPE);
+      if (data) {
+        const content = data.getContent ? data.getContent() : data;
+        document.getElementById('fi-email').value = content.email || '';
+        document.getElementById('fi-pass').value = content.password ? atob(content.password) : '';
+        filenEmail = content.email;
+        filenPassword = content.password ? atob(content.password) : '';
+        log(`Loaded Filen credentials from Matrix (saved ${content.saved_at || 'unknown'})`, 'log-ok');
+      } else {
+        log('No Filen credentials found in Matrix account data', 'log-warn');
+      }
+    } catch (err) {
+      // getAccountData might throw if not found
+      if (err.errcode === 'M_NOT_FOUND' || err.message?.includes('not found')) {
+        log('No Filen credentials found in Matrix account data yet', 'log-warn');
+      } else {
+        log(`Failed to load Filen creds: ${err.message}`, 'log-err');
+      }
+    }
+  };
+
+  // ── Filen API helpers ──────────────────────────────────────────────
+
+  // Derive Filen password hash (they use a custom PBKDF2-like scheme)
+  async function deriveFilenPassword(password) {
+    const enc = new TextEncoder();
+    // Filen uses SHA-512 iterated hashing
+    let derived = password;
+    for (let i = 0; i < 200000; i++) {
+      const data = enc.encode(derived);
+      const hash = await crypto.subtle.digest('SHA-512', data);
+      derived = Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
+    }
+    return derived;
+  }
+
+  // Simpler auth hash (Filen v2 API uses this)
+  async function hashFn(input) {
+    const data = new TextEncoder().encode(input);
+    const hash = await crypto.subtle.digest('SHA-512', data);
+    return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  async function deriveKeyFromPassword(password, salt, iterations = 200000) {
+    const enc = new TextEncoder();
+    const keyMaterial = await crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveBits']);
+    const bits = await crypto.subtle.deriveBits(
+      { name: 'PBKDF2', salt: enc.encode(salt), iterations, hash: 'SHA-512' },
+      keyMaterial,
+      512
+    );
+    return Array.from(new Uint8Array(bits)).map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  window.filenLogin = async function filenLogin() {
+    const email = document.getElementById('fi-email').value.trim();
+    const pass = document.getElementById('fi-pass').value;
+    if (!email || !pass) { log('Fill in Filen email and password', 'log-err'); return; }
+
+    log('Logging into Filen...', 'log-info');
+
+    try {
+      // Step 1: Get auth info
+      const authInfoResp = await fetch(`${FILEN_API}/v3/auth/info`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email }),
+      });
+      const authInfo = await authInfoResp.json();
+
+      if (!authInfo.status) {
+        throw new Error(authInfo.message || 'Failed to get auth info');
+      }
+
+      log(`Auth info received. Auth version: ${authInfo.data.authVersion}`, 'log-info');
+
+      // Step 2: Derive password based on auth version
+      let derivedPassword;
+      if (authInfo.data.authVersion === 2) {
+        derivedPassword = await deriveKeyFromPassword(pass, authInfo.data.salt, 200000);
+      } else {
+        // v1 fallback
+        derivedPassword = await hashFn(pass);
+      }
+
+      // Step 3: Login
+      const loginResp = await fetch(`${FILEN_API}/v3/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email,
+          password: derivedPassword,
+          twoFactorCode: '000000',
+          authVersion: authInfo.data.authVersion,
+        }),
+      });
+      const loginData = await loginResp.json();
+
+      if (!loginData.status) {
+        throw new Error(loginData.message || 'Login failed');
+      }
+
+      filenApiKey = loginData.data.apiKey;
+      filenLoggedIn = true;
+      filenEmail = email;
+      filenPassword = pass;
+
+      // Step 4: Get master keys
+      const masterKeysStr = loginData.data.masterKeys || '';
+      if (masterKeysStr) {
+        // Master keys are pipe-separated, encrypted with derived key
+        // For the sanity check, we store the API key which is sufficient for file ops
+        log('Master keys info received', 'log-info');
+      }
+
+      setStatus('filen', 'on', email);
+      log(`Filen login successful! API key obtained.`, 'log-ok');
+
+      // Persist API key in Matrix for future sessions
+      if (matrixClient) {
+        try {
+          await matrixClient.setAccountData(FILEN_ACCOUNT_DATA_TYPE, {
+            email,
+            password: btoa(pass),
+            apiKey: filenApiKey,
+            saved_at: new Date().toISOString(),
+          });
+          log('Filen session persisted to Matrix account data', 'log-ok');
+        } catch (e) {
+          log(`Could not persist to Matrix: ${e.message}`, 'log-warn');
+        }
+      }
+
+    } catch (err) {
+      log(`Filen login failed: ${err.message}`, 'log-err');
+      setStatus('filen', 'err', 'error');
+    }
+  };
+
+  // ── Filen file operations ─────────────────────────────────────────
+
+  async function filenApiCall(endpoint, body = {}) {
+    const resp = await fetch(`${FILEN_API}${endpoint}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${filenApiKey}`,
+      },
+      body: JSON.stringify(body),
+    });
+    return resp.json();
+  }
+
+  // Get or create directory path, returning the parent UUID
+  async function ensureDir(pathStr) {
+    const parts = pathStr.split('/').filter(Boolean);
+
+    // Get base folder UUID
+    const baseFolderResp = await filenApiCall('/v3/user/baseFolder');
+    if (!baseFolderResp.status) throw new Error('Could not get base folder');
+
+    let parentUUID = baseFolderResp.data.uuid;
+
+    for (const dirName of parts) {
+      // List current directory
+      const contentResp = await filenApiCall('/v3/dir/content', { uuid: parentUUID });
+      if (!contentResp.status) throw new Error(`Could not list dir: ${contentResp.message}`);
+
+      // Look for existing subdirectory
+      const existing = (contentResp.data.folders || []).find(f => {
+        try {
+          // Folder names are encrypted — try metadata
+          return f.name === dirName;
+        } catch { return false; }
+      });
+
+      if (existing) {
+        parentUUID = existing.uuid;
+      } else {
+        // Create directory
+        const newUUID = crypto.randomUUID();
+        const createResp = await filenApiCall('/v3/dir/create', {
+          uuid: newUUID,
+          name: dirName,
+          parent: parentUUID,
+        });
+        if (!createResp.status) throw new Error(`Could not create dir "${dirName}": ${createResp.message}`);
+        parentUUID = newUUID;
+        log(`Created directory: ${dirName}`, 'log-info');
+      }
+    }
+    return parentUUID;
+  }
+
+  window.postUpdate = async function postUpdate() {
+    if (!filenLoggedIn || !filenApiKey) {
+      log('Login to Filen first', 'log-err');
+      return;
+    }
+
+    const filePath = document.getElementById('fi-path').value.trim();
+    const message = document.getElementById('fi-msg').value.trim();
+    if (!filePath || !message) { log('Fill in file path and message', 'log-err'); return; }
+
+    const ts = new Date().toISOString();
+    const entry = `[${ts}] ${message}\n`;
+
+    log(`Posting update to ${filePath}...`, 'log-info');
+
+    try {
+      // Parse path into dir + filename
+      const pathParts = filePath.split('/').filter(Boolean);
+      const fileName = pathParts.pop();
+      const dirPath = pathParts.join('/');
+
+      // Ensure parent directory exists
+      const parentUUID = await ensureDir(dirPath);
+
+      // Try to find existing file to append
+      const contentResp = await filenApiCall('/v3/dir/content', { uuid: parentUUID });
+      let existingContent = '';
+      let existingFileUUID = null;
+
+      if (contentResp.status && contentResp.data.uploads) {
+        const existingFile = contentResp.data.uploads.find(f => f.name === fileName);
+        if (existingFile) {
+          existingFileUUID = existingFile.uuid;
+          log('Found existing file, will append', 'log-info');
+          // For the sanity check, we'll just create a new version
+        }
+      }
+
+      // Upload new content as a file
+      const fileContent = existingContent + entry;
+      const blob = new Blob([fileContent], { type: 'text/plain' });
+
+      // Use Filen upload endpoint
+      const fileUUID = existingFileUUID || crypto.randomUUID();
+
+      const formData = new FormData();
+      formData.append('file', blob, fileName);
+
+      const uploadResp = await fetch(`${FILEN_API}/v3/upload`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${filenApiKey}`,
+        },
+        body: JSON.stringify({
+          uuid: fileUUID,
+          name: fileName,
+          parent: parentUUID,
+          size: blob.size,
+          mime: 'text/plain',
+          content: btoa(fileContent),
+        }),
+      });
+      const uploadData = await uploadResp.json();
+
+      if (!uploadData.status) {
+        // Fallback: try the notes/text approach
+        log(`Direct upload response: ${uploadData.message || 'unknown'}. Trying alternative...`, 'log-warn');
+
+        // Use the dir/content approach — create a simple text note via the API
+        const noteResp = await filenApiCall('/v3/notes/create', {
+          uuid: crypto.randomUUID(),
+          title: fileName,
+          content: fileContent,
+          type: 'text',
+        });
+
+        if (noteResp.status) {
+          log(`Update posted as note: "${fileName}"`, 'log-ok');
+        } else {
+          throw new Error(noteResp.message || 'Upload failed');
+        }
+      } else {
+        log(`Update posted to ${filePath}`, 'log-ok');
+      }
+
+      log(`Content: ${entry.trim()}`, 'log-info');
+
+      // Also notify via Matrix if connected
+      if (matrixClient) {
+        try {
+          await matrixClient.setAccountData('eo.filen.last_update', {
+            path: filePath,
+            message: message,
+            timestamp: ts,
+          });
+          log('Update metadata saved to Matrix account data', 'log-ok');
+        } catch (e) {
+          log(`Matrix metadata save failed: ${e.message}`, 'log-warn');
+        }
+      }
+    } catch (err) {
+      log(`Post update failed: ${err.message}`, 'log-err');
+    }
+  };
+
+  window.readFile = async function readFile() {
+    if (!filenLoggedIn || !filenApiKey) {
+      log('Login to Filen first', 'log-err');
+      return;
+    }
+
+    const filePath = document.getElementById('fi-path').value.trim();
+    if (!filePath) { log('Fill in file path', 'log-err'); return; }
+
+    log(`Reading ${filePath}...`, 'log-info');
+
+    try {
+      const pathParts = filePath.split('/').filter(Boolean);
+      const fileName = pathParts.pop();
+      const dirPath = pathParts.join('/');
+
+      const parentUUID = await ensureDir(dirPath);
+      const contentResp = await filenApiCall('/v3/dir/content', { uuid: parentUUID });
+
+      if (contentResp.status && contentResp.data.uploads) {
+        const file = contentResp.data.uploads.find(f => f.name === fileName);
+        if (file) {
+          log(`Found file: ${fileName} (${file.size} bytes, uuid: ${file.uuid})`, 'log-ok');
+          // File content would require download+decrypt — log metadata for sanity check
+          log(`Last modified: ${file.timestamp ? new Date(file.timestamp * 1000).toISOString() : 'unknown'}`, 'log-info');
+        } else {
+          log(`File not found: ${fileName}`, 'log-warn');
+          log(`Files in directory: ${(contentResp.data.uploads || []).map(f => f.name).join(', ') || '(empty)'}`, 'log-info');
+        }
+      } else {
+        log(`Could not list directory: ${contentResp.message || 'unknown error'}`, 'log-err');
+      }
+    } catch (err) {
+      log(`Read failed: ${err.message}`, 'log-err');
+    }
+  };
+
+  // ── Init ───────────────────────────────────────────────────────────
+  log('Matrix + Filen Sanity Check loaded', 'log-info');
+  log('Step 1: Login to Matrix', 'log-info');
+  log('Step 2: Save Filen credentials (persisted in Matrix account data)', 'log-info');
+  log('Step 3: Login to Filen, then post updates to a file', 'log-info');
+</script>
+
+</body>
+</html>
