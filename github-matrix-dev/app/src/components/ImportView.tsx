@@ -14,7 +14,19 @@ interface ParsedRow {
   ts?: string;
   client_event_id?: string;
   meta?: Record<string, any>;
+  /** Row came from a generic (no-op/target) import and needs a random target. */
   _generic?: boolean;
+  /** Row came from a keyed-collection import; `target` is a relative path ("collection.id"). */
+  _keyed?: boolean;
+}
+
+type ImportMode = 'event' | 'generic' | 'keyed';
+
+interface KeyedSummary {
+  /** Collections discovered: name → entity count. */
+  collections: Array<{ name: string; count: number; idField: string }>;
+  /** Number of CON edge events generated from auto-detected references. */
+  edgeCount: number;
 }
 
 type ImportStatus = 'idle' | 'parsed' | 'importing' | 'done' | 'error';
@@ -54,22 +66,192 @@ function parseCsvLines(text: string, delimiter: string): string[][] {
 }
 
 // ---------------------------------------------------------------------------
-// Parse helpers
+// Keyed-collection detection (mirrors server-side parseKeyedCollections)
 // ---------------------------------------------------------------------------
 
-function parseJson(text: string): { rows: ParsedRow[]; isGeneric: boolean } {
+const ID_PATTERNS: RegExp[] = [
+  /^[A-Z]+-\d+$/,
+  /^[A-Z]+_\d+$/,
+  /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i,
+  /^\d+$/,
+];
+
+function jsonToCollections(parsed: Record<string, any>): Record<string, Record<string, any>[]> {
+  const collections: Record<string, Record<string, any>[]> = {};
+  for (const [key, val] of Object.entries(parsed)) {
+    if (Array.isArray(val) && val.length > 0 && typeof val[0] === 'object' && val[0] !== null) {
+      collections[key] = val as Record<string, any>[];
+    } else if (typeof val === 'object' && val !== null && !Array.isArray(val)) {
+      collections[key] = [val];
+    }
+  }
+  return collections;
+}
+
+function findIdField(records: Record<string, any>[]): { idField: string } {
+  if (records.length === 0) return { idField: 'id' };
+
+  const fieldValues = new Map<string, string[]>();
+  for (const record of records) {
+    for (const [key, val] of Object.entries(record)) {
+      if (val == null) continue;
+      const strVal = typeof val === 'string' ? val : typeof val === 'number' ? String(val) : null;
+      if (strVal === null) continue;
+      if (!fieldValues.has(key)) fieldValues.set(key, []);
+      fieldValues.get(key)!.push(strVal);
+    }
+  }
+
+  const candidates: string[] = [];
+  for (const [field, values] of fieldValues) {
+    if (values.length === records.length && new Set(values).size === records.length) {
+      candidates.push(field);
+    }
+  }
+  if (candidates.length === 0) {
+    const firstField = fieldValues.keys().next().value;
+    return { idField: firstField ?? 'id' };
+  }
+  let chosen = candidates[0];
+  for (const c of candidates) {
+    if (c === 'id') { chosen = c; break; }
+    if (c.endsWith('_id') && chosen !== 'id') chosen = c;
+  }
+  // Prefer ID-like patterns (ATT-001, UUID) when multiple candidates exist
+  for (const c of candidates) {
+    const values = fieldValues.get(c)!;
+    if (values.length > 0 && ID_PATTERNS.some(p => values.every(v => p.test(v)))) {
+      if (chosen !== 'id' && !chosen.endsWith('_id')) chosen = c;
+      break;
+    }
+  }
+  return { idField: chosen };
+}
+
+function extractCandidateIds(value: any): string[] {
+  if (value == null) return [];
+  if (typeof value === 'string') return [value];
+  if (Array.isArray(value)) {
+    const ids: string[] = [];
+    for (const item of value) if (typeof item === 'string') ids.push(item);
+    return ids;
+  }
+  return [];
+}
+
+interface KeyedParse {
+  rows: ParsedRow[];
+  summary: KeyedSummary;
+}
+
+function parseKeyedCollections(obj: Record<string, any>): KeyedParse | null {
+  const collections = jsonToCollections(obj);
+  const names = Object.keys(collections);
+  if (names.length === 0) return null;
+
+  // Discover ID fields per collection.
+  const meta = new Map<string, { idField: string }>();
+  for (const [name, records] of Object.entries(collections)) {
+    meta.set(name, findIdField(records));
+  }
+
+  // Build entity registry: id → collection
+  const entityRegistry = new Map<string, { collection: string }>();
+  for (const [name, records] of Object.entries(collections)) {
+    const idField = meta.get(name)!.idField;
+    for (let i = 0; i < records.length; i++) {
+      const raw = records[i][idField];
+      const id = raw != null
+        ? String(raw)
+        : `rec${String(i + 1).padStart(String(records.length).length, '0')}`;
+      // Don't collide across collections — first writer wins for lookup
+      if (!entityRegistry.has(id)) entityRegistry.set(id, { collection: name });
+    }
+  }
+
+  const rows: ParsedRow[] = [];
+
+  // INS events
+  for (const [name, records] of Object.entries(collections)) {
+    const idField = meta.get(name)!.idField;
+    for (let i = 0; i < records.length; i++) {
+      const raw = records[i][idField];
+      const id = raw != null
+        ? String(raw)
+        : `rec${String(i + 1).padStart(String(records.length).length, '0')}`;
+      rows.push({
+        op: 'INS',
+        target: `${name}.${id}`,
+        operand: records[i],
+        _keyed: true,
+      });
+    }
+  }
+
+  // Auto-detect foreign key refs → CON events.
+  let edgeCount = 0;
+  for (const [name, records] of Object.entries(collections)) {
+    const idField = meta.get(name)!.idField;
+    for (const record of records) {
+      const sourceId = String(record[idField]);
+      for (const [field, value] of Object.entries(record)) {
+        if (field === idField) continue;
+        const candidates = extractCandidateIds(value);
+        for (const candidateId of candidates) {
+          if (candidateId === sourceId) continue;
+          const entry = entityRegistry.get(candidateId);
+          if (!entry) continue;
+          rows.push({
+            op: 'CON',
+            target: `${name}.${sourceId}`,
+            operand: {
+              added: [`${entry.collection}.${candidateId}`],
+              edge_type: field,
+            },
+            _keyed: true,
+          });
+          edgeCount++;
+        }
+      }
+    }
+  }
+
+  const summary: KeyedSummary = {
+    collections: names.map(n => ({
+      name: n,
+      count: collections[n].length,
+      idField: meta.get(n)!.idField,
+    })),
+    edgeCount,
+  };
+
+  return { rows, summary };
+}
+
+// ---------------------------------------------------------------------------
+// JSON parse
+// ---------------------------------------------------------------------------
+
+function parseJson(text: string): { rows: ParsedRow[]; mode: ImportMode; keyed?: KeyedSummary } {
   let data: any;
   try { data = JSON.parse(text); }
   catch { throw new Error('Invalid JSON — could not parse file'); }
 
+  // Event-format wrappers
   let arr: any[] | null = Array.isArray(data) ? data
     : Array.isArray(data?.events) ? data.events
     : Array.isArray(data?._flat_events_for_import) ? data._flat_events_for_import
     : null;
 
-  if (!arr && typeof data === 'object' && data !== null && !Array.isArray(data)) {
+  // Keyed-collections object (multiple entity types at top level)
+  if (!arr && typeof data === 'object' && data !== null && !Array.isArray(data) && !data.op) {
+    const keyed = parseKeyedCollections(data);
+    if (keyed) {
+      return { rows: keyed.rows, mode: 'keyed', keyed: keyed.summary };
+    }
+    // Single collection fallback → generic flatten
     const hasArrayProp = Object.values(data).some(v => Array.isArray(v));
-    if (hasArrayProp && !data.op) {
+    if (hasArrayProp) {
       const flattened: any[] = [];
       for (const [key, val] of Object.entries(data)) {
         if (Array.isArray(val)) {
@@ -97,17 +279,17 @@ function parseJson(text: string): { rows: ParsedRow[]; isGeneric: boolean } {
       if (!row.target) throw new Error(`Item ${i}: missing "target"`);
       row.op = row.op.toUpperCase();
     }
-    return { rows: arr as ParsedRow[], isGeneric: false };
+    return { rows: arr as ParsedRow[], mode: 'event' };
   }
 
   const rows: ParsedRow[] = arr.map((item, i) => {
     if (typeof item !== 'object' || item === null) throw new Error(`Item ${i}: not an object`);
     return { op: 'INS', target: null, operand: item, _generic: true };
   });
-  return { rows, isGeneric: true };
+  return { rows, mode: 'generic' };
 }
 
-function parseCsv(text: string, forceTsv: boolean): { rows: ParsedRow[]; isGeneric: boolean } {
+function parseCsv(text: string, forceTsv: boolean): { rows: ParsedRow[]; mode: ImportMode } {
   let delimiter: string;
   if (forceTsv) {
     delimiter = '\t';
@@ -156,7 +338,7 @@ function parseCsv(text: string, forceTsv: boolean): { rows: ParsedRow[]; isGener
       rows.push(row);
     }
     if (rows.length === 0) throw new Error('File has no data rows');
-    return { rows, isGeneric: false };
+    return { rows, mode: 'event' };
   }
 
   // Generic CSV: each row → INS
@@ -178,7 +360,7 @@ function parseCsv(text: string, forceTsv: boolean): { rows: ParsedRow[]; isGener
     rows.push({ op: 'INS', target: null, operand, _generic: true });
   }
   if (rows.length === 0) throw new Error('File has no data rows');
-  return { rows, isGeneric: true };
+  return { rows, mode: 'generic' };
 }
 
 // ---------------------------------------------------------------------------
@@ -196,7 +378,8 @@ export function ImportView({ onImportComplete }: ImportViewProps) {
 
   const [status, setStatus] = useState<ImportStatus>('idle');
   const [rows, setRows] = useState<ParsedRow[]>([]);
-  const [isGeneric, setIsGeneric] = useState(false);
+  const [mode, setMode] = useState<ImportMode>('event');
+  const [keyedSummary, setKeyedSummary] = useState<KeyedSummary | null>(null);
   const [fileName, setFileName] = useState('');
   const [fileStats, setFileStats] = useState('');
   const [targetPrefix, setTargetPrefix] = useState('');
@@ -218,17 +401,34 @@ export function ImportView({ onImportComplete }: ImportViewProps) {
         const text = reader.result as string;
         const result = ext === 'json' ? parseJson(text) : parseCsv(text, ext === 'tsv');
         setRows(result.rows);
-        setIsGeneric(result.isGeneric);
+        setMode(result.mode);
+        const keyed = result.mode === 'keyed' ? (result as { keyed: KeyedSummary }).keyed : null;
+        setKeyedSummary(keyed);
         setFileName(file.name);
-        const label = result.isGeneric ? 'row' : 'event';
         const sizeKb = (file.size / 1024).toFixed(1);
-        setFileStats(`${result.rows.length} ${label}${result.rows.length !== 1 ? 's' : ''} · ${sizeKb} KB · ${ext!.toUpperCase()}${result.isGeneric ? ' (generic → INS)' : ''}`);
-        if (result.isGeneric) {
+        let label: string;
+        let suffix = '';
+        if (result.mode === 'keyed' && keyed) {
+          const entityCount = keyed.collections.reduce((s, c) => s + c.count, 0);
+          label = 'event';
+          suffix = ` · ${keyed.collections.length} tables · ${entityCount} entities${keyed.edgeCount ? ` · ${keyed.edgeCount} edges` : ''}`;
+        } else if (result.mode === 'generic') {
+          label = 'row';
+          suffix = ' (generic → INS)';
+        } else {
+          label = 'event';
+        }
+        setFileStats(`${result.rows.length} ${label}${result.rows.length !== 1 ? 's' : ''} · ${sizeKb} KB · ${ext!.toUpperCase()}${suffix}`);
+        if (result.mode === 'generic' || result.mode === 'keyed') {
           const baseName = file.name.replace(/\.[^.]+$/, '').replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase();
-          setTargetPrefix('import.' + baseName);
+          setTargetPrefix(result.mode === 'keyed' ? 'import' : 'import.' + baseName);
         }
         setStatus('parsed');
-        setMessage({ type: 'info', text: `Parsed ${result.rows.length} ${label}s. Review and click "Import Events" to proceed.` });
+        let msg = `Parsed ${result.rows.length} ${label}s.`;
+        if (result.mode === 'keyed' && keyed) {
+          msg = `Detected ${keyed.collections.length} entity types (${keyed.collections.map(c => c.name).join(', ')}) with ${keyed.edgeCount} auto-detected relationships.`;
+        }
+        setMessage({ type: 'info', text: `${msg} Review and click "Import Events" to proceed.` });
       } catch (e: any) {
         setStatus('error');
         setMessage({ type: 'error', text: e.message });
@@ -240,7 +440,8 @@ export function ImportView({ onImportComplete }: ImportViewProps) {
   const handleClear = () => {
     setStatus('idle');
     setRows([]);
-    setIsGeneric(false);
+    setMode('event');
+    setKeyedSummary(null);
     setFileName('');
     setFileStats('');
     setTargetPrefix('');
@@ -255,12 +456,17 @@ export function ImportView({ onImportComplete }: ImportViewProps) {
     setProgress({ current: 0, total: rows.length, errors: 0 });
 
     // Prepare all events upfront
+    const prefix = targetPrefix.trim().replace(/\.+$/, '');
     const events = rows.map((row) => ({
       op: row.op as ExternalOperator,
-      target: row._generic
-        ? `${targetPrefix}.rec_${crypto.randomUUID().slice(0, 8)}`
+      target: row._keyed
+        ? `${prefix}.${row.target}`
+        : row._generic
+        ? `${prefix}.rec_${crypto.randomUUID().slice(0, 8)}`
         : row.target!,
-      operand: row.operand ?? {},
+      operand: row._keyed && row.op === 'CON' && row.operand?.added
+        ? { ...row.operand, added: row.operand.added.map((t: string) => `${prefix}.${t}`) }
+        : row.operand ?? {},
       agent: 'import',
       ts: row.ts || new Date().toISOString(),
       acquired_ts: new Date().toISOString(),
@@ -287,10 +493,10 @@ export function ImportView({ onImportComplete }: ImportViewProps) {
 
     // Auto-navigate to the imported scope so the user sees their records immediately
     if (onImportComplete) {
-      if (isGeneric && targetPrefix.trim()) {
-        // Generic imports: navigate to the target prefix scope (e.g. "import.my_data")
+      if ((mode === 'generic' || mode === 'keyed') && targetPrefix.trim()) {
+        // Generic/keyed imports: navigate to the target prefix scope (e.g. "import.my_data")
         onImportComplete(targetPrefix.trim());
-      } else if (!isGeneric && rows.length > 0 && rows[0].target) {
+      } else if (mode === 'event' && rows.length > 0 && rows[0].target) {
         // Event-format imports: derive the common parent scope from event targets
         const firstTarget = rows[0].target!;
         const parts = firstTarget.split('.');
@@ -358,8 +564,8 @@ export function ImportView({ onImportComplete }: ImportViewProps) {
         </div>
       )}
 
-      {/* Target prefix for generic imports */}
-      {isGeneric && status === 'parsed' && (
+      {/* Target prefix for generic/keyed imports */}
+      {(mode === 'generic' || mode === 'keyed') && status === 'parsed' && (
         <div style={{ marginTop: 16 }}>
           <label style={{ fontSize: 11, fontWeight: 600, color: t.textSecondary, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
             Target Prefix
@@ -367,7 +573,7 @@ export function ImportView({ onImportComplete }: ImportViewProps) {
           <input
             value={targetPrefix}
             onChange={(e) => setTargetPrefix(e.target.value)}
-            placeholder="e.g. import.my_data"
+            placeholder={mode === 'keyed' ? 'e.g. import' : 'e.g. import.my_data'}
             style={{
               display: 'block', width: '100%', marginTop: 4, padding: '8px 10px',
               border: `1px solid ${t.border}`, borderRadius: 4, background: t.bg,
@@ -376,7 +582,40 @@ export function ImportView({ onImportComplete }: ImportViewProps) {
             }}
           />
           <div style={{ fontSize: 11, color: t.textMuted, marginTop: 4 }}>
-            Each row becomes an INS event at {targetPrefix || '...'}.rec_*
+            {mode === 'keyed'
+              ? `Entities land at ${targetPrefix || '...'}.{table}.{id}`
+              : `Each row becomes an INS event at ${targetPrefix || '...'}.rec_*`}
+          </div>
+        </div>
+      )}
+
+      {/* Detected tables summary (keyed mode) */}
+      {mode === 'keyed' && keyedSummary && status === 'parsed' && (
+        <div style={{ marginTop: 16 }}>
+          <div style={{ fontSize: 11, fontWeight: 600, color: t.textSecondary, textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 6 }}>
+            Detected Tables ({keyedSummary.collections.length})
+          </div>
+          <div style={{ border: `1px solid ${t.border}`, borderRadius: 6, background: t.bgMuted, padding: '8px 0' }}>
+            {keyedSummary.collections.map((c) => (
+              <div key={c.name} style={{
+                display: 'flex', justifyContent: 'space-between',
+                padding: '4px 12px', fontSize: 12, color: t.text,
+                fontFamily: "'JetBrains Mono', monospace",
+              }}>
+                <span>{c.name}</span>
+                <span style={{ color: t.textMuted }}>
+                  {c.count} {c.count === 1 ? 'entity' : 'entities'} · id: {c.idField}
+                </span>
+              </div>
+            ))}
+            {keyedSummary.edgeCount > 0 && (
+              <div style={{
+                padding: '6px 12px 4px', fontSize: 11, color: t.textMuted,
+                borderTop: `1px solid ${t.border}`, marginTop: 4,
+              }}>
+                + {keyedSummary.edgeCount} auto-detected {keyedSummary.edgeCount === 1 ? 'edge' : 'edges'} (CON)
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -414,11 +653,11 @@ export function ImportView({ onImportComplete }: ImportViewProps) {
           </button>
           <button
             onClick={runImport}
-            disabled={isGeneric && !targetPrefix.trim()}
+            disabled={(mode === 'generic' || mode === 'keyed') && !targetPrefix.trim()}
             style={{
               padding: '6px 16px', fontSize: 12, border: 'none', borderRadius: 4,
               background: t.accent, color: '#fff', cursor: 'pointer', fontWeight: 600,
-              opacity: isGeneric && !targetPrefix.trim() ? 0.5 : 1,
+              opacity: (mode === 'generic' || mode === 'keyed') && !targetPrefix.trim() ? 0.5 : 1,
             }}
           >
             Import Events
