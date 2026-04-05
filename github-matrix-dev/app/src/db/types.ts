@@ -37,6 +37,23 @@ export interface EoState {
   last_agent: string;
   last_ts: string;                // submission timestamp of last event
   last_acquired_ts: string;       // acquisition timestamp of last event
+  // Incrementally-maintained fold cache — updated on each event for this target.
+  // Reads are O(1); horizonGet consumes these directly instead of rescanning the log.
+  _fold?: EoStateFold;
+  graphMetrics?: GraphMetrics;    // maintained by CON/SYN on edge changes
+  _lastRecSeq?: number;           // seq of latest REC event on this target (for RecCycleInfo)
+}
+
+export interface EoStateFold {
+  trajectory: TrajectoryEntry[];         // compressed per-op entries with running hash
+  trajectoryHead: string;                // running hash after the last event (for O(1) chain-append)
+  trajectoryFingerprint: TrajectoryFingerprint;
+  cadence: CadenceInfo;
+  eventCount: number;
+  firstEventTs: string;
+  lastEventTs: string;
+  intervalsSorted: number[];             // sorted ms gaps between consecutive events (capped window)
+  recentTimestamps: number[];            // event timestamps within the last hour of lastEventTs
 }
 
 // Derived entity registration — tracks INS2+ entities and their constituents

@@ -4,7 +4,7 @@ import { getEdgesFrom, getEdgesTo } from './graph';
 import { resolveAlias } from './helpers';
 import { readLogForTarget } from './log';
 import type {
-  EoState, EvaRegistration, HorizonResponse, GroundEntry, SignalEntry,
+  EoEvent, EoState, EvaRegistration, HorizonResponse, GroundEntry, SignalEntry,
   NearbyEntry, GovernanceEntry, LoggableOperator, AncestryEntry, TrajectoryEntry,
   TrajectoryFingerprint, CadenceInfo, CadenceClass, GraphMetrics, GraphRole,
   RecResult, RecCycleInfo,
@@ -35,25 +35,24 @@ export async function horizonGet(
   const figure = await getFigureState(store, resolved);
   if (!figure) return null;
 
+  // Read pre-computed fold products directly from the state row — these are
+  // maintained incrementally by fold-cache.ts on every event.
+  const fold = figure._fold;
+  const trajectory = opts?.trajectory !== false ? (fold?.trajectory ?? []) : undefined;
+  const trajectoryFingerprint = fold?.trajectoryFingerprint;
+  const cadence = fold?.cadence;
+  const graphMetrics = figure.graphMetrics;
+
   const ancestry = opts?.ancestry !== false ? await getAncestry(store, resolved) : undefined;
   const grounds = opts?.grounds !== false ? await getGrounds(store, resolved) : [];
   const nearby = opts?.nearby !== false ? await getNearby(store, resolved) : undefined;
   const governance = opts?.governance !== false ? await getGovernance(store, resolved) : undefined;
-  const trajectory = opts?.trajectory !== false ? await getTrajectory(store, resolved) : undefined;
   const signals = opts?.signals ? await detectSignals(store, resolved) : undefined;
 
-  // ─── Pattern Surfacing (cheap, auto-computed alongside existing layers) ───
   const hashCohort = figure?.hash
     ? await getHashCohortFromStore(store, figure.hash, resolved)
     : undefined;
-  const trajectoryFingerprint = trajectory && trajectory.length > 0
-    ? await computeTrajectoryFingerprint(trajectory)
-    : undefined;
-  const cadence = trajectory && trajectory.length > 0
-    ? await computeCadence(store, resolved)
-    : undefined;
-  const graphMetrics = await computeGraphMetrics(store, resolved);
-  const recCycle = await getRecCycleInfo(store, resolved);
+  const recCycle = await getRecCycleInfo(store, figure);
 
   return {
     target: resolved, figure, ancestry, grounds, nearby, governance, trajectory, signals,
@@ -80,7 +79,7 @@ async function horizonGetByPrefix(
     const grounds = opts?.grounds !== false ? await getGrounds(store, state.target) : [];
     const nearby = opts?.nearby === true ? await getNearby(store, state.target) : undefined;
     const governance = opts?.governance === true ? await getGovernance(store, state.target) : undefined;
-    const trajectory = opts?.trajectory === true ? await getTrajectory(store, state.target) : undefined;
+    const trajectory = opts?.trajectory === true ? (figure?._fold?.trajectory ?? []) : undefined;
     const signals = opts?.signals ? await detectSignals(store, state.target) : undefined;
 
     results.push({ target: state.target, figure, grounds, nearby, governance, trajectory, signals });
@@ -338,7 +337,9 @@ async function getGovernance(store: EoStore, target: string): Promise<Governance
 
 // --- Layer 5: Trajectory ---
 
-async function getTrajectory(store: EoStore, target: string): Promise<TrajectoryEntry[]> {
+/** Legacy fallback — rescans the full event log. Retained for tests/backfill.
+ *  Production reads use the cached figure._fold.trajectory. */
+export async function getTrajectory(store: EoStore, target: string): Promise<TrajectoryEntry[]> {
   const events = await readLogForTarget(store, target);
   if (events.length === 0) return [];
 
@@ -452,7 +453,7 @@ async function sha256Hex(input: string): Promise<string> {
     .join('');
 }
 
-async function computeTrajectoryFingerprint(trajectory: TrajectoryEntry[]): Promise<TrajectoryFingerprint> {
+export async function computeTrajectoryFingerprint(trajectory: TrajectoryEntry[]): Promise<TrajectoryFingerprint> {
   const sequence = trajectory.map(t => t.op).join('.');
   const fingerprint = (await sha256Hex(sequence)).slice(0, 16);
 
@@ -465,7 +466,8 @@ async function computeTrajectoryFingerprint(trajectory: TrajectoryEntry[]): Prom
 
 // ─── Pattern Surfacing: Temporal Cadence ─────────────────────────
 
-async function computeCadence(store: EoStore, target: string): Promise<CadenceInfo> {
+/** Legacy fallback — rescans the full event log. Retained for tests/backfill. */
+export async function computeCadence(store: EoStore, target: string): Promise<CadenceInfo> {
   const events = await readLogForTarget(store, target);
   if (events.length === 0) {
     return { classification: 'sparse', lastEventTs: '', eventCount: 0, description: 'No events' };
@@ -525,7 +527,8 @@ async function computeCadence(store: EoStore, target: string): Promise<CadenceIn
 
 // ─── Pattern Surfacing: Graph Metrics ────────────────────────────
 
-async function computeGraphMetrics(store: EoStore, target: string): Promise<GraphMetrics | undefined> {
+/** Legacy fallback — retained for tests/backfill. Production reads figure.graphMetrics. */
+export async function computeGraphMetrics(store: EoStore, target: string): Promise<GraphMetrics | undefined> {
   const outEdges = await getEdgesFrom(store, target);
   const inEdges = await getEdgesTo(store, target);
 
@@ -567,19 +570,21 @@ async function computeGraphMetrics(store: EoStore, target: string): Promise<Grap
 
 // ─── Pattern Surfacing: REC Cycle Info ───────────────────────────
 
-async function getRecCycleInfo(store: EoStore, target: string): Promise<RecCycleInfo | undefined> {
+async function getRecCycleInfo(store: EoStore, figure: EoState): Promise<RecCycleInfo | undefined> {
   // Check if this target has formula registrations (EVA)
-  const registration = await store.get(`eva:${target}`) as EvaRegistration | null;
+  const registration = await store.get(`eva:${figure.target}`) as EvaRegistration | null;
   if (!registration) return undefined;
 
-  // Check for REC events on this target
-  const events = await readLogForTarget(store, target);
-  const recEvent = [...events].reverse().find(e => e.op === 'REC');
+  // Use the cached last-REC pointer rather than rescanning the log
+  const recSeq = figure._lastRecSeq;
+  if (recSeq === undefined) return undefined;
+  const padded = String(recSeq).padStart(12, '0');
+  const recEvent = await store.get(`log:${padded}`) as EoEvent | null;
   if (!recEvent) return undefined;
 
   const participants = recEvent.operand?.contains
     ? (recEvent.operand.contains as Array<{ target: string }>).map(c => c.target)
-    : [target];
+    : [figure.target];
   const edges = recEvent.operand?.contains
     ? (recEvent.operand.contains as Array<{ target: string }>).flatMap((c, i, arr) => {
       const next = arr[(i + 1) % arr.length];
