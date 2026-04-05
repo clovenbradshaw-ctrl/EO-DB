@@ -8,9 +8,11 @@ import { useTheme, type Theme } from '../theme';
 interface ViewsBrowserProps {
   onBack: () => void;
   onSelectView: (view: SavedView) => void;
+  filter?: 'recent' | 'all' | 'shared';
+  newViewNonce?: number;
 }
 
-export function ViewsBrowser({ onBack, onSelectView }: ViewsBrowserProps) {
+export function ViewsBrowser({ onBack, onSelectView, filter = 'all', newViewNonce = 0 }: ViewsBrowserProps) {
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
   const ready = useEoStore((s) => s.ready);
   const lastSeq = useEoStore((s) => s.lastSeq);
@@ -76,10 +78,25 @@ export function ViewsBrowser({ onBack, onSelectView }: ViewsBrowserProps) {
     });
   }, [ready, lastSeq, getStateByPrefix, registerSavedViews]);
 
-  // Group saved views by scope
+  // Apply filter to saved views
+  const filteredViews = useMemo(() => {
+    const all = Object.values(savedViews);
+    switch (filter) {
+      case 'shared':
+        return all.filter((v) => v.visibility === 'shared');
+      case 'recent':
+        // TODO: proper recency tracking; for now, sort by updatedAt desc
+        return [...all].sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''));
+      case 'all':
+      default:
+        return all;
+    }
+  }, [savedViews, filter]);
+
+  // Group filtered views by scope
   const viewsByScope = useMemo(() => {
     const map = new Map<string, SavedView[]>();
-    for (const view of Object.values(savedViews)) {
+    for (const view of filteredViews) {
       const list = map.get(view.scope);
       if (list) list.push(view);
       else map.set(view.scope, [view]);
@@ -89,7 +106,14 @@ export function ViewsBrowser({ onBack, onSelectView }: ViewsBrowserProps) {
       list.sort((a, b) => a.name.localeCompare(b.name));
     }
     return map;
-  }, [savedViews]);
+  }, [filteredViews]);
+
+  // Respond to "+ New View" signal: expand all tables so user can pick a scope to create under.
+  useEffect(() => {
+    if (newViewNonce > 0 && tables.length > 0) {
+      setExpanded(new Set(tables.map((n) => n.fullPath)));
+    }
+  }, [newViewNonce, tables]);
 
   function toggleTable(fullPath: string) {
     setExpanded((prev) => {

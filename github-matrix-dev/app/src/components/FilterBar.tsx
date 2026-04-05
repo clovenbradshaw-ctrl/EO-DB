@@ -1,8 +1,9 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState } from 'react';
 import type { ColumnDef, FilterRule, FilterOperator } from './filter-types';
 import { operatorsForType, OPERATOR_LABELS } from './filter-types';
 import { useTheme, type Theme } from '../theme';
 import { QueryFilterInput } from './QueryFilterInput';
+import { usePanelPosition } from '../hooks/usePanelPosition';
 
 type FilterMode = 'visual' | 'query';
 
@@ -28,25 +29,12 @@ export function FilterBar({
   const [mode, setMode] = useState<FilterMode>('visual');
   const { theme } = useTheme();
   const s = makeStyles(theme);
-  const btnRef = useRef<HTMLButtonElement>(null);
-  const [panelPos, setPanelPos] = useState<{ top: number; right: number }>({ top: 0, right: 0 });
-
-  const updatePanelPos = useCallback(() => {
-    if (btnRef.current) {
-      const rect = btnRef.current.getBoundingClientRect();
-      setPanelPos({
-        top: rect.bottom + 4,
-        right: window.innerWidth - rect.right,
-      });
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!open) return;
-    updatePanelPos();
-    window.addEventListener('resize', updatePanelPos);
-    return () => window.removeEventListener('resize', updatePanelPos);
-  }, [open, updatePanelPos]);
+  const { anchorRef, panelRef, style: panelStyle } = usePanelPosition({
+    open,
+    placement: 'bottom-end',
+    estimatedWidth: 560,
+    estimatedHeight: 360,
+  });
 
   function addFilter() {
     const field = columns[0]?.key || '';
@@ -90,7 +78,7 @@ export function FilterBar({
   return (
     <div style={{ position: 'relative' }}>
       <button
-        ref={btnRef}
+        ref={anchorRef as React.RefObject<HTMLButtonElement>}
         style={{
           ...s.filterBtn,
           ...(activeCount > 0 ? s.filterBtnActive : {}),
@@ -109,7 +97,7 @@ export function FilterBar({
       {open && (
         <>
           <div style={s.backdrop} onClick={() => setOpen(false)} />
-          <div style={{ ...s.panel, top: panelPos.top, right: panelPos.right }}>
+          <div ref={panelRef} style={{ ...s.panel, ...panelStyle }}>
             <div style={s.panelHeader}>
               <span style={s.panelTitle}>Filters</span>
               <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>

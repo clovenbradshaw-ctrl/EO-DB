@@ -7,6 +7,8 @@ import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 import { TypeSelector, TypeBadge } from './TypeSelector';
 import { buildTree, formatName, type TreeNode } from './scope-picker-utils';
 import { useViewStore } from '../store/view-store';
+import { Modal } from './Modal';
+import { usePanelPosition } from '../hooks/usePanelPosition';
 
 interface HolonNavProps {
   selectedScope: string | null;
@@ -30,6 +32,13 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
   const viewStore = useViewStore();
   const { theme } = useTheme();
   const s = makeStyles(theme);
+  const typeSelectorPos = usePanelPosition({
+    open: !!typeSelector,
+    placement: 'bottom-start',
+    virtualAnchor: typeSelector ? { x: typeSelector.x, y: typeSelector.y } : null,
+    estimatedWidth: 220,
+    estimatedHeight: 280,
+  });
 
   useEffect(() => {
     if (!ready) return;
@@ -274,10 +283,8 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
             style={{ position: 'fixed', inset: 0, zIndex: 9998 }}
             onClick={() => setTypeSelector(null)}
           />
-          <div style={{
-            position: 'fixed',
-            left: typeSelector.x,
-            top: typeSelector.y,
+          <div ref={typeSelectorPos.panelRef} style={{
+            ...typeSelectorPos.style,
             zIndex: 9999,
             background: theme.bgCard,
             border: `1px solid ${theme.border}`,
@@ -293,26 +300,15 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
         </>
       )}
 
-      {/* Rename popover */}
-      {renaming && (
-        <>
-          <div
-            style={{ position: 'fixed', inset: 0, zIndex: 9998 }}
-            onClick={() => setRenaming(null)}
-          />
-          <div style={{
-            position: 'fixed',
-            left: '50%',
-            top: '30%',
-            transform: 'translateX(-50%)',
-            zIndex: 9999,
-            background: theme.bgCard,
-            border: `1px solid ${theme.border}`,
-            borderRadius: 8,
-            boxShadow: `0 8px 30px ${theme.shadow}`,
-            padding: 16,
-            minWidth: 280,
-          }}>
+      {/* Rename dialog */}
+      <Modal
+        open={!!renaming}
+        onClose={() => setRenaming(null)}
+        title="Rename"
+        width={320}
+      >
+        {renaming && (
+          <>
             <div style={{ fontSize: 12, color: theme.textMuted, marginBottom: 4 }}>Display name</div>
             <div style={{ fontSize: 10, color: theme.textMuted, marginBottom: 8, fontFamily: "'JetBrains Mono', monospace" }}>
               {renaming.target}
@@ -337,9 +333,6 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
                   color: theme.text,
                   outline: 'none',
                   boxSizing: 'border-box',
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Escape') setRenaming(null);
                 }}
               />
               <div style={{ display: 'flex', gap: 8, marginTop: 8, justifyContent: 'flex-end' }}>
@@ -370,9 +363,9 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
                 >Save</button>
               </div>
             </form>
-          </div>
-        </>
-      )}
+          </>
+        )}
+      </Modal>
     </div>
   );
 }

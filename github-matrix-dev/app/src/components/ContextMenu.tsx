@@ -1,5 +1,6 @@
-import { useEffect, useRef } from 'react';
+import { useEffect } from 'react';
 import { useTheme, type Theme } from '../theme';
+import { usePanelPosition } from '../hooks/usePanelPosition';
 
 export interface ContextMenuItem {
   label: string;
@@ -19,19 +20,13 @@ interface ContextMenuProps {
 export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
   const { theme } = useTheme();
   const s = makeStyles(theme);
-  const ref = useRef<HTMLDivElement>(null);
-
-  // Adjust position to stay within viewport
-  useEffect(() => {
-    if (!ref.current) return;
-    const rect = ref.current.getBoundingClientRect();
-    if (rect.right > window.innerWidth) {
-      ref.current.style.left = `${window.innerWidth - rect.width - 8}px`;
-    }
-    if (rect.bottom > window.innerHeight) {
-      ref.current.style.top = `${window.innerHeight - rect.height - 8}px`;
-    }
-  }, [x, y]);
+  const { panelRef, style: panelStyle } = usePanelPosition({
+    open: true,
+    placement: 'bottom-start',
+    virtualAnchor: { x, y },
+    estimatedWidth: 200,
+    estimatedHeight: Math.max(40, items.length * 32 + 8),
+  });
 
   useEffect(() => {
     function handleEsc(e: KeyboardEvent) {
@@ -44,7 +39,7 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
   return (
     <>
       <div style={s.backdrop} onClick={onClose} onContextMenu={(e) => { e.preventDefault(); onClose(); }} />
-      <div ref={ref} style={{ ...s.menu, left: x, top: y }}>
+      <div ref={panelRef} style={{ ...s.menu, ...panelStyle }}>
         {items.map((item, i) => {
           if (item.separator) {
             return <div key={i} style={s.separator} />;
