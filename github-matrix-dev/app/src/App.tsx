@@ -15,25 +15,7 @@ const LOCAL_SESSION: MatrixSession = {
   homeserver: 'http://localhost',
 };
 
-const ALLOWED_HOSTS = new Set([
-  'app.aminoimmigration.com',
-  'localhost',
-  '127.0.0.1',
-  '::1',
-  '',
-]);
-
 function AppInner() {
-  const host = window.location.hostname;
-  if (!ALLOWED_HOSTS.has(host)) {
-    return (
-      <div style={{ padding: 40, fontFamily: 'system-ui', textAlign: 'center' }}>
-        <h1>Unauthorized host</h1>
-        <p>This application is only available at <strong>app.aminoimmigration.com</strong>.</p>
-        <p>You are visiting <code>{host}</code>.</p>
-      </div>
-    );
-  }
   return <AppMain />;
 }
 
