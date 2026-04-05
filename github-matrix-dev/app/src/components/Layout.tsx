@@ -52,8 +52,9 @@ import { type AccessRole, powerLevelToRole, legacyAccessToRole } from '../permis
 import { resolvePermissionsFromSharing } from '../permissions/resolve';
 import { RecycleBin, addDeletedSpace, isSpaceDeleted, removeDeletedSpace, getDeletedSpaces } from './RecycleBin';
 import { addArchivedSpace, isSpaceArchived, removeArchivedSpace, getArchivedSpaces } from './ArchivedSpaces';
-import { setSpaceConfig, applyEoPowerLevels } from '../permissions/room-topology';
+import { setSpaceConfig, applyEoPowerLevels, createGovernanceRoom } from '../permissions/room-topology';
 import { EO_POWER_LEVEL_CONTENT } from '../permissions/types';
+import { listAllHomeserverUsers } from '../matrix/user-discovery';
 
 /** Set to false to disable all Matrix activity (sync, room creation, discovery).
  *  When false, the app uses Filen as the sole sync layer. */
@@ -78,7 +79,22 @@ async function createSpaceRoom(
   opts: CreateSpaceOptions = {},
 ): Promise<string | null> {
   const discoverability = opts.discoverability ?? 'public';
-  const inviteUserIds = opts.inviteUserIds ?? [];
+  let inviteUserIds = opts.inviteUserIds ?? [];
+
+  // For public spaces, auto-invite every discoverable homeserver user so
+  // they receive a room invite (not just a knock-based discovery entry).
+  if (discoverability === 'public') {
+    try {
+      const all = await listAllHomeserverUsers(client as any, 500);
+      const merged = new Set<string>(inviteUserIds);
+      for (const u of all) {
+        if (u.userId && u.userId !== ownerUserId) merged.add(u.userId);
+      }
+      inviteUserIds = Array.from(merged);
+    } catch (e) {
+      console.warn('[EO-DB] Failed to enumerate homeserver users for public invite:', e);
+    }
+  }
 
   try {
     const initialState: any[] = [
@@ -103,8 +119,8 @@ async function createSpaceRoom(
     };
 
     if (discoverability === 'public') {
-      // Listed in homeserver's public room directory. Joining still requires
-      // owner approval via the knock flow.
+      // Listed in homeserver's public room directory. Anyone not already
+      // invited can still join by knocking.
       createArgs.visibility = 'public';
       initialState.push({
         type: 'm.room.join_rules',
@@ -116,6 +132,11 @@ async function createSpaceRoom(
         state_key: '',
         content: { guest_access: 'forbidden' },
       });
+      // Also send direct invites to every discovered homeserver user so
+      // they get a notification instead of having to discover+knock.
+      if (inviteUserIds.length > 0) {
+        createArgs.invite = inviteUserIds;
+      }
     } else {
       // Private / invite-only (original behavior).
       createArgs.visibility = 'private';
@@ -128,18 +149,49 @@ async function createSpaceRoom(
     const result = await client.createRoom(createArgs);
     const roomId = result.room_id;
 
-    // Publish space config so discoverSpacesFromMatrix() can find this room
-    await setSpaceConfig(client, roomId, {
+    // A space spans multiple rooms. Create the governance room eagerly so
+    // admins have somewhere to publish policies / schema changes from day
+    // one. The restricted room stays lazy (created on first restricted
+    // field assignment) per spec. Only the owner is a member initially;
+    // admins are invited when they're granted the admin role.
+    let governanceRoomId: string | null = null;
+    try {
+      governanceRoomId = await createGovernanceRoom(client as any, spaceName, roomId);
+    } catch (e) {
+      console.warn('[EO-DB] Failed to create governance room for', spaceName, e);
+    }
+
+    // Publish space config so discoverSpacesFromMatrix() can find this room.
+    // The config is authoritative and lists every associated room.
+    const spaceConfig: any = {
       name: spaceName,
-      rooms: { main: roomId },
+      rooms: { main: roomId, ...(governanceRoomId ? { governance: governanceRoomId } : {}) },
       field_assignments: [],
       space_settings: {},
       discoverability,
-    });
+    };
+    await setSpaceConfig(client, roomId, spaceConfig);
+    // Mirror the config into the governance room as well so admins joining
+    // via the governance room can resolve the space topology.
+    if (governanceRoomId) {
+      try {
+        await setSpaceConfig(client, governanceRoomId, spaceConfig);
+      } catch (e) {
+        console.warn('[EO-DB] Failed to mirror space config to governance room:', e);
+      }
+    }
 
-    // For public spaces, still invite any pre-selected users if provided.
+    // Best-effort: retry any invites that the homeserver rejected during
+    // createRoom (Synapse drops invalid user IDs silently). This also
+    // catches users added after the initial create.
     if (discoverability === 'public' && inviteUserIds.length > 0) {
+      const room = client.getRoom?.(roomId);
+      const already = new Set<string>(
+        room?.getMembersWithMembership?.('invite')?.map((m: any) => m.userId) ?? [],
+      );
+      room?.getMembersWithMembership?.('join')?.forEach((m: any) => already.add(m.userId));
       for (const uid of inviteUserIds) {
+        if (already.has(uid)) continue;
         try {
           await client.invite(roomId, uid);
         } catch (e) {
@@ -148,7 +200,12 @@ async function createSpaceRoom(
       }
     }
 
-    console.info('[EO-DB] Created Matrix room for space', spaceName, '→', roomId, '(', discoverability, ')');
+    console.info(
+      '[EO-DB] Created Matrix rooms for space', spaceName,
+      '→ main:', roomId,
+      governanceRoomId ? `governance: ${governanceRoomId}` : '(governance: skipped)',
+      '(', discoverability, ',', inviteUserIds.length, 'invited)',
+    );
     return roomId;
   } catch (e) {
     console.warn('[EO-DB] Failed to create Matrix room for space', spaceName, e);
