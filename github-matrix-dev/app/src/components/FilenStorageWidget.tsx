@@ -9,7 +9,8 @@ import { useState, useEffect, useCallback } from 'react';
 import type { Theme } from '../theme';
 import { useTheme } from '../theme';
 import { useFilenStore } from '../filen/filen-store';
-import { filenListFolder, type FilenItem } from '../filen/filen-api';
+import { filenListFolder, filenDownloadFile } from '../filen/filen-api';
+import { unpackEodb, type EodbFile } from '../filen/eodb-format';
 
 // ==========================================
 // Types
@@ -20,6 +21,22 @@ interface EodbFileInfo {
   size: number;
   type: 'current' | 'snapshot' | 'backup';
   key?: string;
+  region?: string;
+  bucket?: string;
+}
+
+interface FilePreview {
+  header: {
+    type: string;
+    space_id: string;
+    space_name: string;
+    from_seq: number;
+    to_seq: number;
+    created_by: string;
+    created_at: string;
+    event_count: number;
+  };
+  firstEvents: any[];
 }
 
 // ==========================================
@@ -56,6 +73,8 @@ export function FilenStorageWidget() {
 
   const [files, setFiles] = useState<EodbFileInfo[]>([]);
   const [loading, setLoading] = useState(false);
+  const [previews, setPreviews] = useState<Record<string, FilePreview | { error: string } | 'loading'>>({});
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
   // Resolve the current space's folder UUID
   const folderUuid = currentSpaceId ? spaceFolders[currentSpaceId] : null;
@@ -78,6 +97,8 @@ export function FilenStorageWidget() {
           size: f.size || 0,
           type: parsed.type,
           key: f.key,
+          region: f.region,
+          bucket: f.bucket,
         });
       }
       // Sort: current first, then backups (newest first), then snapshots
@@ -98,6 +119,42 @@ export function FilenStorageWidget() {
   useEffect(() => {
     if (connected && folderUuid) loadFiles();
   }, [connected, folderUuid, loadFiles]);
+
+  const viewFile = useCallback(async (file: EodbFileInfo) => {
+    const isOpen = expanded[file.uuid];
+    setExpanded((p) => ({ ...p, [file.uuid]: !isOpen }));
+    if (isOpen) return;
+    if (previews[file.uuid] && previews[file.uuid] !== 'loading' && !('error' in (previews[file.uuid] as any))) return;
+    if (!auth || !file.key) {
+      setPreviews((p) => ({ ...p, [file.uuid]: { error: 'Missing file key' } }));
+      return;
+    }
+    setPreviews((p) => ({ ...p, [file.uuid]: 'loading' }));
+    try {
+      const data = await filenDownloadFile(
+        auth.apiKey, file.uuid, file.key, file.region, file.bucket,
+      );
+      const eodb: EodbFile = unpackEodb(data);
+      setPreviews((p) => ({
+        ...p,
+        [file.uuid]: {
+          header: {
+            type: eodb.type,
+            space_id: eodb.space_id,
+            space_name: eodb.space_name,
+            from_seq: eodb.from_seq,
+            to_seq: eodb.to_seq,
+            created_by: eodb.created_by,
+            created_at: eodb.created_at,
+            event_count: eodb.events?.length ?? 0,
+          },
+          firstEvents: (eodb.events || []).slice(0, 5),
+        },
+      }));
+    } catch (e: any) {
+      setPreviews((p) => ({ ...p, [file.uuid]: { error: e?.message || 'Download failed' } }));
+    }
+  }, [auth, expanded, previews]);
 
   if (!connected) return null;
 
@@ -126,18 +183,44 @@ export function FilenStorageWidget() {
             No backups yet. Data will appear here after the first sync cycle (30s).
           </div>
         )}
-        {!loading && files.map(file => (
-          <div key={file.uuid} style={s.fileRow}>
-            <span style={s.fileIcon}>
-              {file.type === 'current' ? '\u{1F4BE}' : file.type === 'backup' ? '\u{1F4E6}' : '\u{1F4F8}'}
-            </span>
-            <span style={s.fileName}>{file.name}</span>
-            <span style={s.fileTag}>
-              {file.type === 'current' ? 'LIVE' : file.type === 'backup' ? 'BACK' : 'SNAP'}
-            </span>
-            <span style={s.fileSize}>{fmtSize(file.size)}</span>
-          </div>
-        ))}
+        {!loading && files.map(file => {
+          const preview = previews[file.uuid];
+          const isOpen = !!expanded[file.uuid];
+          return (
+            <div key={file.uuid}>
+              <div style={s.fileRow}>
+                <span style={s.fileIcon}>
+                  {file.type === 'current' ? '\u{1F4BE}' : file.type === 'backup' ? '\u{1F4E6}' : '\u{1F4F8}'}
+                </span>
+                <span style={s.fileName}>{file.name}</span>
+                <span style={s.fileTag}>
+                  {file.type === 'current' ? 'LIVE' : file.type === 'backup' ? 'BACK' : 'SNAP'}
+                </span>
+                <span style={s.fileSize}>{fmtSize(file.size)}</span>
+                <button style={s.viewBtn} onClick={() => viewFile(file)}>
+                  {isOpen ? 'hide' : 'view'}
+                </button>
+              </div>
+              {isOpen && (
+                <div style={s.previewBox}>
+                  {preview === 'loading' && <div style={s.previewMuted}>Downloading & decoding...</div>}
+                  {preview && preview !== 'loading' && 'error' in preview && (
+                    <div style={s.previewError}>Error: {preview.error}</div>
+                  )}
+                  {preview && preview !== 'loading' && 'header' in preview && (
+                    <>
+                      <pre style={s.previewPre}>{JSON.stringify(preview.header, null, 2)}</pre>
+                      <div style={s.previewMuted}>
+                        First {Math.min(preview.firstEvents.length, 5)} of {preview.header.event_count} events:
+                      </div>
+                      <pre style={s.previewPre}>{JSON.stringify(preview.firstEvents, null, 2)}</pre>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -187,5 +270,25 @@ function widgetStyles(t: Theme): Record<string, React.CSSProperties> {
       flexShrink: 0,
     },
     fileSize: { fontSize: 10, color: t.textMuted, flexShrink: 0, minWidth: 45, textAlign: 'right' as const },
+    viewBtn: {
+      background: 'transparent', border: `1px solid ${t.border}`, color: t.textSecondary,
+      padding: '2px 6px', borderRadius: 3, cursor: 'pointer',
+      fontFamily: mono, fontSize: 9, fontWeight: 600, flexShrink: 0, marginLeft: 6,
+    },
+    previewBox: {
+      margin: '4px 10px 8px 28px', padding: 8,
+      background: t.bgMuted, border: `1px solid ${t.border}`, borderRadius: 4,
+      maxHeight: 320, overflowY: 'auto' as const,
+    },
+    previewPre: {
+      margin: 0, padding: 0, fontFamily: mono, fontSize: 10,
+      color: t.textSecondary, whiteSpace: 'pre-wrap' as const, wordBreak: 'break-all' as const,
+    },
+    previewMuted: {
+      fontFamily: mono, fontSize: 9, color: t.textMuted, margin: '6px 0 2px',
+    },
+    previewError: {
+      fontFamily: mono, fontSize: 10, color: t.danger,
+    },
   };
 }
