@@ -276,6 +276,9 @@ export class SyncManager {
    * Called on beforeunload / logout so data is always persisted.
    */
   async saveSnapshot(): Promise<void> {
+    // Matrix media snapshot saves are disabled — Filen is the primary store.
+    return;
+
     const room = this.client.getRoom(this.roomId);
     if (!room) {
       console.warn('[EO-DB] Cannot save snapshot — room not available');
@@ -301,6 +304,9 @@ export class SyncManager {
    * devices can jump back in large strides.
    */
   async manualSnapshot(): Promise<{ mxc: string; seq: number }> {
+    // Matrix media snapshot saves are disabled — Filen is the primary store.
+    throw new Error('Matrix media snapshots are disabled — use Filen backup instead');
+
     const currentSeq = await this.store.getCurrentSeq();
     const lastSnapshotSeq: number = (await this.store.get('meta:snapshot_seq')) || 0;
 
