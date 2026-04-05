@@ -136,7 +136,11 @@ export function usePanelPosition(opts: UsePanelPositionOptions): UsePanelPositio
 
     setStyle({ position: 'fixed', top, left, visibility: 'visible' });
     setResolvedPlacement(placement);
-  }, [open, initialPlacement, offset, margin, estimatedWidth, estimatedHeight, virtualAnchor]);
+    // Depend on primitive x/y rather than the `virtualAnchor` object reference;
+    // callers commonly pass inline objects which would otherwise change every
+    // render and cause an infinite update loop via the layout effects below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, initialPlacement, offset, margin, estimatedWidth, estimatedHeight, virtualAnchor?.x, virtualAnchor?.y]);
 
   // Initial measurement (pre-paint)
   useLayoutEffect(() => {
