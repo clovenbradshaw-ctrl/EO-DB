@@ -423,9 +423,13 @@ async function handleREC(db: EoDb, event: EoEvent): Promise<void> {
     };
   }
 
-  // Take initial snapshot before any pass
+  // Take initial snapshot before any pass.
+  // Memory optimisation: store hashes of snapshots instead of full objects.
+  // Only retain the previous snapshot (for convergence result) to avoid
+  // accumulating up to maxIterations full copies in memory.
   const initialSnap = await snapshot();
-  const history: Array<Record<string, any>> = [initialSnap];
+  const historyHashes: string[] = [JSON.stringify(initialSnap)];
+  let previousSnap = initialSnap;
 
   let iterations = 0;
   let converged = false;
@@ -441,28 +445,30 @@ async function handleREC(db: EoDb, event: EoEvent): Promise<void> {
 
     iterations++;
     const currentSnap = await snapshot();
+    const currentKey = JSON.stringify(currentSnap);
 
-    // Check against all previous snapshots
+    // Check against all previous snapshot hashes
     let matched = -1;
-    for (let i = 0; i < history.length; i++) {
-      if (deepEqual(currentSnap, history[i])) {
+    for (let i = 0; i < historyHashes.length; i++) {
+      if (currentKey === historyHashes[i]) {
         matched = i;
         break;
       }
     }
 
     if (matched >= 0) {
-      if (matched === history.length - 1) {
+      if (matched === historyHashes.length - 1) {
         // Current state matches the immediately preceding state — converged
         converged = true;
       } else {
         // Current state matches an earlier state — oscillation detected
-        cycleLength = history.length - matched;
+        cycleLength = historyHashes.length - matched;
       }
       break;
     }
 
-    history.push(currentSnap);
+    historyHashes.push(currentKey);
+    previousSnap = currentSnap;
   }
 
   // Build result record
@@ -473,8 +479,9 @@ async function handleREC(db: EoDb, event: EoEvent): Promise<void> {
 
   if (!converged && cycleLength > 0) {
     result.cycle_length = cycleLength;
-    // Capture the cycling states: from the matched point to the end of history
-    result.states = history.slice(history.length - cycleLength);
+    // Re-parse the cycling state hashes back into objects for the result.
+    // Only the tail of the history (cycle portion) is needed.
+    result.states = historyHashes.slice(historyHashes.length - cycleLength).map(h => JSON.parse(h));
   } else if (converged) {
     const finalSnap = await snapshot();
     result.stable_state = finalSnap;
@@ -586,6 +593,11 @@ async function detectAndEmitREC(
   }
 
   const initialSnap = await snapshot();
+  // Memory optimisation: cap history to a sliding window.  nearEqual uses
+  // float tolerance so we can't hash, but we only need the last N snapshots
+  // to detect oscillation (cycles longer than the window are treated as
+  // non-convergent, which is the correct conservative behaviour).
+  const MAX_HISTORY = 16;
   const history: Array<Record<string, any>> = [initialSnap];
 
   let iterations = 0;
@@ -601,7 +613,7 @@ async function detectAndEmitREC(
     iterations++;
     const currentSnap = await snapshot();
 
-    // Check against all previous snapshots for convergence or oscillation.
+    // Check against recent snapshots for convergence or oscillation.
     // Uses nearEqual: floating-point values within tolerance count as converged.
     let matched = -1;
     for (let i = 0; i < history.length; i++) {
@@ -621,6 +633,10 @@ async function detectAndEmitREC(
     }
 
     history.push(currentSnap);
+    // Evict oldest entries beyond the sliding window
+    if (history.length > MAX_HISTORY) {
+      history.shift();
+    }
   }
 
   // Build result

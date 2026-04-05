@@ -67,7 +67,7 @@ async function removeFromCohort(db: EoDb, hash: string, target: string): Promise
   }
 }
 
-export async function getStateByPrefix(db: EoDb, prefix: string): Promise<EoState[]> {
+export async function getStateByPrefix(db: EoDb, prefix: string, limit?: number): Promise<EoState[]> {
   const states: EoState[] = [];
   const startKey = `state:${prefix}`;
   // Use prefix + high char to capture all keys starting with this prefix
@@ -78,6 +78,7 @@ export async function getStateByPrefix(db: EoDb, prefix: string): Promise<EoStat
     lte: endKey,
   })) {
     states.push(decode(value) as EoState);
+    if (limit !== undefined && states.length >= limit) break;
   }
   return states;
 }

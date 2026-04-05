@@ -69,12 +69,19 @@ export async function getDepEdgesTo(db: EoDb, dest: string): Promise<DepEdge[]> 
  * Treats dep edges as undirected — follows both fwd and rev from each node.
  * Returns the set of all targets reachable from start through any dep edge.
  */
-export async function getConnectedComponent(db: EoDb, start: string): Promise<Set<string>> {
+/**
+ * Find the connected component containing `start` in the undirected dep graph.
+ * maxNodes caps the traversal to prevent unbounded memory usage on highly
+ * connected graphs. Defaults to 10 000 which is generous for formula deps.
+ */
+export async function getConnectedComponent(db: EoDb, start: string, maxNodes: number = 10_000): Promise<Set<string>> {
   const component = new Set<string>();
   const queue: string[] = [start];
   component.add(start);
 
   while (queue.length > 0) {
+    if (component.size >= maxNodes) break;
+
     const current = queue.pop()!;
 
     // Follow forward edges (targets this node's formula references)
@@ -83,8 +90,11 @@ export async function getConnectedComponent(db: EoDb, start: string): Promise<Se
       if (!component.has(edge.dest)) {
         component.add(edge.dest);
         queue.push(edge.dest);
+        if (component.size >= maxNodes) break;
       }
     }
+
+    if (component.size >= maxNodes) break;
 
     // Follow reverse edges (targets whose formulas reference this node)
     const rev = await getDepEdgesTo(db, current);
@@ -92,6 +102,7 @@ export async function getConnectedComponent(db: EoDb, start: string): Promise<Se
       if (!component.has(edge.source)) {
         component.add(edge.source);
         queue.push(edge.source);
+        if (component.size >= maxNodes) break;
       }
     }
   }
