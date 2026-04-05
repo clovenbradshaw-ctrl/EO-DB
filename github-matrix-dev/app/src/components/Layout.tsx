@@ -5,6 +5,8 @@ import { createIdb, deleteAllEoDatabases } from '../db/idb';
 import { createStore } from '../db/encrypted-store';
 import { deriveKey } from '../lib/crypto';
 import { SyncManager } from '../matrix/sync-manager';
+import { Presence } from '../matrix/presence';
+import { OnlineUsers } from './OnlineUsers';
 import { FilenSyncService } from '../filen/filen-sync';
 import { useFilenStore } from '../filen/filen-store';
 import { resolveDataRoom } from '../matrix/event-bridge';
@@ -178,6 +180,7 @@ interface CachedSpace {
   syncManager: SyncManager | null;
   filenSync: FilenSyncService | null;
   mainRoomId: string | null;
+  presence: Presence | null;
 }
 
 export function Layout({ session, onLogout, localMode }: LayoutProps) {
@@ -217,6 +220,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   const filenSync = useEoStore((s) => s.filenSync);
   const [syncToastStatus, syncToastSeq, onSyncStatus] = useSyncToast();
   const [matrixReady, setMatrixReady] = useState(false);
+  const [presence, setPresence] = useState<Presence | null>(null);
   // Show actual sync status. Filen is the primary data store when connected —
   // Matrix SyncManager is intentionally skipped in that case (see setupSpaceStore),
   // so treat an active Filen sync as "online" too.
@@ -681,6 +685,17 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           );
           useEoStore.getState().setFilenSync(existing.filenSync);
         }
+
+        // Start a fresh presence instance for the cached space.
+        // (Previous instance was stopped on unmount; creating a new one ensures
+        // subscriber effects re-fire with fresh state.)
+        if (MATRIX_ENABLED && spaceRoomId && matrixClientRef.current) {
+          const p = new Presence(matrixClientRef.current, spaceRoomId);
+          existing.presence = p;
+          void p.start();
+          setPresence(p);
+          cleanupFns.push(() => { p.stop(); setPresence(null); });
+        }
         return;
       }
 
@@ -785,8 +800,29 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         }
       }
 
+      // Start presence heartbeat for the space room (Matrix to-device pings).
+      // Independent of SyncManager/Filen — works in all sync modes.
+      let presenceInstance: Presence | null = null;
+      if (MATRIX_ENABLED && spaceRoomId && matrixClientRef.current) {
+        try {
+          presenceInstance = new Presence(matrixClientRef.current, spaceRoomId);
+          await presenceInstance.start();
+          if (!mounted) {
+            presenceInstance.stop();
+            presenceInstance = null;
+          } else {
+            setPresence(presenceInstance);
+            const p = presenceInstance;
+            cleanupFns.push(() => { p.stop(); setPresence(null); });
+          }
+        } catch (e) {
+          console.warn('[EO-DB] Presence start failed for space', selectedSpace, e);
+          presenceInstance = null;
+        }
+      }
+
       // Cache this space's store + sync manager for fast re-access
-      cache.set(selectedSpace!, { store, syncManager, filenSync, mainRoomId: spaceRoomId });
+      cache.set(selectedSpace!, { store, syncManager, filenSync, mainRoomId: spaceRoomId, presence: presenceInstance });
     }
 
     setupSpaceStore();
@@ -1095,6 +1131,11 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             <span style={s.statSep}>{'\u00B7'}</span>
             <span title="Target count">{targetCount} targets</span>
           </div>
+          <OnlineUsers
+            presence={presence}
+            selfUserId={session.userId}
+            selfDisplayName={displayName}
+          />
           <ConnectionStatus state={connectionState} />
           <SyncToast status={syncToastStatus} seq={syncToastSeq} />
           {selectedSpace && (

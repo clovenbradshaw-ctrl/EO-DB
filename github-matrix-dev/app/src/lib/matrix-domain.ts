@@ -45,6 +45,15 @@ export function peerSyncEventTypes(prefix?: string) {
   } as const;
 }
 
+/** Presence heartbeat event type (to-device). */
+export function presenceEventTypes(prefix?: string) {
+  const p = prefix ?? _eventPrefix;
+  return {
+    /** Heartbeat ping broadcast to all room members. */
+    ping: `${p}.presence.ping`,
+  } as const;
+}
+
 /** Key distribution event types. */
 export function keyEventTypes(prefix?: string) {
   const p = prefix ?? _eventPrefix;
