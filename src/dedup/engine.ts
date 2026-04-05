@@ -49,8 +49,9 @@ export async function runDedupJob(
   await storeJob(db, job);
 
   try {
-    // 1. Scan records in scope
-    const allRecords = await getStateByPrefix(db, config.scope.collection);
+    // 1. Scan records in scope (cap to prevent loading unbounded data into memory)
+    const MAX_DEDUP_RECORDS = 50_000;
+    const allRecords = await getStateByPrefix(db, config.scope.collection, MAX_DEDUP_RECORDS);
 
     // Filter out aliases (already-merged targets) and apply optional filter
     const records: EoState[] = [];

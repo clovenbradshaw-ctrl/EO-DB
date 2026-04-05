@@ -198,25 +198,39 @@ export function damerauLevenshteinDistance(a: string, b: string): number {
   if (!la) return lb;
   if (!lb) return la;
 
-  const d: number[][] = Array.from({ length: la + 1 }, () => new Array(lb + 1).fill(0));
-  for (let i = 0; i <= la; i++) d[i][0] = i;
-  for (let j = 0; j <= lb; j++) d[0][j] = j;
+  // Use 3 rolling rows instead of full (la+1)×(lb+1) matrix — O(lb) space.
+  // Row indices: pprev = i-2, prev = i-1, curr = i
+  let pprev = new Array(lb + 1).fill(0);
+  let prev = Array.from({ length: lb + 1 }, (_, j) => j);
+  let curr = new Array(lb + 1).fill(0);
+
+  // pprev is row 0 (only used when i >= 2, initialised to row -1 sentinel)
+  // prev is row 0
+  // We swap into prev = row 0 first, then start from i = 1
+  // Re-init: prev = row 0
+  for (let j = 0; j <= lb; j++) prev[j] = j;
 
   for (let i = 1; i <= la; i++) {
+    curr[0] = i;
     for (let j = 1; j <= lb; j++) {
       const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-      d[i][j] = Math.min(
-        d[i - 1][j] + 1,
-        d[i][j - 1] + 1,
-        d[i - 1][j - 1] + cost,
+      curr[j] = Math.min(
+        prev[j] + 1,
+        curr[j - 1] + 1,
+        prev[j - 1] + cost,
       );
       if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
-        d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + cost);
+        curr[j] = Math.min(curr[j], pprev[j - 2] + cost);
       }
     }
+    // Rotate rows: pprev ← prev, prev ← curr, curr ← pprev (reused buffer)
+    const tmp = pprev;
+    pprev = prev;
+    prev = curr;
+    curr = tmp;
   }
 
-  return d[la][lb];
+  return prev[lb];
 }
 
 export function damerauLevenshteinSimilarity(a: string, b: string): number {
@@ -383,43 +397,49 @@ export function affineGapSimilarity(
   const la = a.length, lb = b.length;
   if (!la || !lb) return 0;
 
-  // D[i][j] = best alignment ending in match/mismatch
-  // P[i][j] = best alignment ending in gap in b (deletion from a)
-  // Q[i][j] = best alignment ending in gap in a (insertion from b)
-  const D: number[][] = Array.from({ length: la + 1 }, () => new Array(lb + 1).fill(-Infinity));
-  const P: number[][] = Array.from({ length: la + 1 }, () => new Array(lb + 1).fill(-Infinity));
-  const Q: number[][] = Array.from({ length: la + 1 }, () => new Array(lb + 1).fill(-Infinity));
+  // Use 2 rolling rows instead of 3 full (la+1)×(lb+1) matrices — O(lb) space.
+  let prevD = new Array(lb + 1).fill(-Infinity);
+  let prevP = new Array(lb + 1).fill(-Infinity);
+  let prevQ = new Array(lb + 1).fill(-Infinity);
+  let currD = new Array(lb + 1).fill(-Infinity);
+  let currP = new Array(lb + 1).fill(-Infinity);
+  let currQ = new Array(lb + 1).fill(-Infinity);
 
-  D[0][0] = 0;
-  for (let i = 1; i <= la; i++) {
-    D[i][0] = -(gapOpen + (i - 1) * gapExtend);
-    P[i][0] = D[i][0];
-  }
+  prevD[0] = 0;
   for (let j = 1; j <= lb; j++) {
-    D[0][j] = -(gapOpen + (j - 1) * gapExtend);
-    Q[0][j] = D[0][j];
+    prevD[j] = -(gapOpen + (j - 1) * gapExtend);
+    prevQ[j] = prevD[j];
   }
 
   for (let i = 1; i <= la; i++) {
+    currD[0] = -(gapOpen + (i - 1) * gapExtend);
+    currP[0] = currD[0];
+    currQ[0] = -Infinity;
+
     for (let j = 1; j <= lb; j++) {
       const matchScore = a[i - 1] === b[j - 1] ? 1 : -1;
-      P[i][j] = Math.max(
-        D[i - 1][j] - gapOpen,
-        P[i - 1][j] - gapExtend,
+      currP[j] = Math.max(
+        prevD[j] - gapOpen,
+        prevP[j] - gapExtend,
       );
-      Q[i][j] = Math.max(
-        D[i][j - 1] - gapOpen,
-        Q[i][j - 1] - gapExtend,
+      currQ[j] = Math.max(
+        currD[j - 1] - gapOpen,
+        currQ[j - 1] - gapExtend,
       );
-      D[i][j] = Math.max(
-        D[i - 1][j - 1] + matchScore,
-        P[i][j],
-        Q[i][j],
+      currD[j] = Math.max(
+        prevD[j - 1] + matchScore,
+        currP[j],
+        currQ[j],
       );
     }
+
+    // Swap rows
+    [prevD, currD] = [currD, prevD];
+    [prevP, currP] = [currP, prevP];
+    [prevQ, currQ] = [currQ, prevQ];
   }
 
-  const rawScore = D[la][lb];
+  const rawScore = prevD[lb];
   const maxPossible = Math.min(la, lb); // best case: all matches
   const minPossible = -Math.max(la, lb); // worst case
   if (maxPossible === minPossible) return rawScore >= 0 ? 1 : 0;
@@ -439,17 +459,21 @@ export function smithWatermanSimilarity(a: string, b: string): number {
   const mismatchPenalty = -1;
   const gapPenalty = -1;
 
-  const H: number[][] = Array.from({ length: la + 1 }, () => new Array(lb + 1).fill(0));
+  // Use 2 rolling rows instead of full (la+1)×(lb+1) matrix — O(lb) space.
+  let prev = new Array(lb + 1).fill(0);
+  let curr = new Array(lb + 1).fill(0);
   let maxScore = 0;
 
   for (let i = 1; i <= la; i++) {
+    curr[0] = 0;
     for (let j = 1; j <= lb; j++) {
-      const match = H[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? matchScore : mismatchPenalty);
-      const del = H[i - 1][j] + gapPenalty;
-      const ins = H[i][j - 1] + gapPenalty;
-      H[i][j] = Math.max(0, match, del, ins);
-      if (H[i][j] > maxScore) maxScore = H[i][j];
+      const match = prev[j - 1] + (a[i - 1] === b[j - 1] ? matchScore : mismatchPenalty);
+      const del = prev[j] + gapPenalty;
+      const ins = curr[j - 1] + gapPenalty;
+      curr[j] = Math.max(0, match, del, ins);
+      if (curr[j] > maxScore) maxScore = curr[j];
     }
+    [prev, curr] = [curr, prev];
   }
 
   const maxPossible = Math.min(la, lb) * matchScore;

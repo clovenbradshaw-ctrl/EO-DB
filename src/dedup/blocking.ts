@@ -154,8 +154,7 @@ export function lshBlocking(
     return shingles;
   });
 
-  // Generate MinHash signatures using random hash functions
-  // We use a simple hash: (a * x + b) mod p for random a, b
+  // Generate MinHash hash-function parameters
   const p = 2147483647; // large prime
   const hashParams: [number, number][] = [];
   let seed = 42;
@@ -175,32 +174,33 @@ export function lshBlocking(
     return ((a * h + b) & 0x7fffffff) % p;
   }
 
-  // Compute signatures
-  const signatures: number[][] = shingleSets.map(shingles => {
-    const sig = new Array(numHashes).fill(Infinity);
-    for (const shingle of shingles) {
-      for (let h = 0; h < numHashes; h++) {
-        const hv = hashShingle(shingle, hashParams[h][0], hashParams[h][1]);
-        if (hv < sig[h]) sig[h] = hv;
-      }
-    }
-    return sig;
-  });
-
-  // Band and bucket
+  // Memory optimisation: instead of storing a full n × numHashes signature matrix,
+  // process one band at a time. For each band we only compute the rowsPerBand
+  // hashes needed, build a single reusable signature slice per record, bucket, and
+  // discard before moving to the next band.
   const pairs: [EoState, EoState][] = [];
   const seen = new Set<string>();
+  const bandSig = new Array(rowsPerBand); // reusable per-record buffer
 
   for (let band = 0; band < bands; band++) {
     const buckets = new Map<string, number[]>();
     const start = band * rowsPerBand;
-    const end = start + rowsPerBand;
 
-    for (let i = 0; i < signatures.length; i++) {
-      const bandSig = signatures[i].slice(start, end).join(',');
-      const existing = buckets.get(bandSig);
+    for (let i = 0; i < shingleSets.length; i++) {
+      // Compute only this band's hash slice for record i
+      for (let r = 0; r < rowsPerBand; r++) {
+        const hIdx = start + r;
+        let minVal = Infinity;
+        for (const shingle of shingleSets[i]) {
+          const hv = hashShingle(shingle, hashParams[hIdx][0], hashParams[hIdx][1]);
+          if (hv < minVal) minVal = hv;
+        }
+        bandSig[r] = minVal;
+      }
+      const key = bandSig.join(',');
+      const existing = buckets.get(key);
       if (existing) existing.push(i);
-      else buckets.set(bandSig, [i]);
+      else buckets.set(key, [i]);
     }
 
     for (const bucket of buckets.values()) {
@@ -225,15 +225,18 @@ export function lshBlocking(
 // ─── Candidate Pair Generator ────────────────────────────────────────────────
 // Applies blocking rules (union of all rules) and returns unique candidate pairs.
 
+/** Hard cap on candidate pairs to prevent O(n²) memory explosion. */
+const MAX_CANDIDATE_PAIRS = 500_000;
+
 export function candidatePairs(
   records: EoState[],
   rules: BlockingRule[],
 ): [EoState, EoState][] {
   if (rules.length === 0 || rules.every(r => r.method === 'none')) {
-    // No blocking — all pairs (O(n²))
+    // No blocking — all pairs (O(n²)), capped
     const pairs: [EoState, EoState][] = [];
-    for (let i = 0; i < records.length; i++) {
-      for (let j = i + 1; j < records.length; j++) {
+    for (let i = 0; i < records.length && pairs.length < MAX_CANDIDATE_PAIRS; i++) {
+      for (let j = i + 1; j < records.length && pairs.length < MAX_CANDIDATE_PAIRS; j++) {
         pairs.push([records[i], records[j]]);
       }
     }
@@ -244,6 +247,8 @@ export function candidatePairs(
   const seen = new Set<string>();
 
   for (const rule of rules) {
+    if (allPairs.length >= MAX_CANDIDATE_PAIRS) break;
+
     let rulePairs: [EoState, EoState][];
 
     switch (rule.method) {
@@ -287,8 +292,9 @@ export function candidatePairs(
         throw new Error(`Unknown blocking method: ${rule.method}`);
     }
 
-    // Deduplicate pairs across rules
+    // Deduplicate pairs across rules, respecting the cap
     for (const [a, b] of rulePairs) {
+      if (allPairs.length >= MAX_CANDIDATE_PAIRS) break;
       const pairKey = a.target < b.target ? `${a.target}\0${b.target}` : `${b.target}\0${a.target}`;
       if (!seen.has(pairKey)) {
         seen.add(pairKey);

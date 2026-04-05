@@ -15,6 +15,7 @@ interface CacheEntry {
 
 const tokenCache = new Map<string, CacheEntry>();
 const CACHE_TTL = 300_000; // 5 minutes
+const MAX_CACHE_SIZE = 1000; // cap to prevent unbounded growth
 
 let webhookSecret = process.env.EO_WEBHOOK_SECRET || '';
 
@@ -55,6 +56,22 @@ export async function verifyMatrixToken(accessToken: string): Promise<MatrixUser
     user_id: data.user_id,
     device_id: data.device_id,
   };
+
+  // Evict expired entries when cache is at capacity
+  if (tokenCache.size >= MAX_CACHE_SIZE) {
+    const now = Date.now();
+    for (const [key, entry] of tokenCache) {
+      if (entry.expires <= now) tokenCache.delete(key);
+    }
+    // If still at capacity after evicting expired, drop oldest entries
+    if (tokenCache.size >= MAX_CACHE_SIZE) {
+      const excess = tokenCache.size - MAX_CACHE_SIZE + 1;
+      const keys = tokenCache.keys();
+      for (let i = 0; i < excess; i++) {
+        tokenCache.delete(keys.next().value!);
+      }
+    }
+  }
 
   tokenCache.set(accessToken, { user, expires: Date.now() + CACHE_TTL });
   return user;
