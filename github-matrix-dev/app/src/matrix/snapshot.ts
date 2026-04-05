@@ -240,39 +240,13 @@ export async function maybeCreateSnapshot(
   keyring?: LocalKeyring,
 ): Promise<void> {
   // Matrix media snapshot saves are disabled — Filen is the primary store.
+  // Keep the parameters referenced so TypeScript doesn't complain about unused params.
+  void client;
+  void roomId;
+  void store;
+  void myUserId;
+  void keyring;
   return;
-
-  const lastSeq = await store.getCurrentSeq();
-  const lastSnapshotSeq = (await store.get('meta:snapshot_seq')) || 0;
-
-  if (lastSeq - lastSnapshotSeq < SNAPSHOT_FREQUENCY) return;
-
-  const deviceId = client.getDeviceId();
-  if (!deviceId) return;
-
-  const won = await tryClaimSnapshotLease(client, roomId, lastSeq, deviceId, myUserId);
-  if (!won) return; // another device is handling this snapshot cycle
-
-  try {
-    const delta = await createDeltaSnapshot(store, myUserId);
-    const mxc = await uploadDeltaSnapshot(client, roomId, delta, keyring);
-    await store.put('meta:snapshot_seq', lastSeq);
-    await store.put('meta:snapshot_mxc', mxc);
-    await store.put('meta:snapshot_prev_mxcs', [mxc, ...delta.prev_mxcs].slice(0, MAX_PREV_MXCS));
-    await recordSnapshotClaimResult(client, roomId, deviceId, myUserId, {
-      status: 'success',
-      target_seq: lastSeq,
-      completed_seq: lastSeq,
-      completed_mxc: mxc,
-    });
-  } catch (err) {
-    await recordSnapshotClaimResult(client, roomId, deviceId, myUserId, {
-      status: 'failed',
-      target_seq: lastSeq,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    throw err;
-  }
 }
 
 /**
