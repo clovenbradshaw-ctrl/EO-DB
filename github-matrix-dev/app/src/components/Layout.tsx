@@ -1189,7 +1189,8 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             width: 260,
           } : {}),
         }}>
-          {/* View navigation */}
+          {/* View navigation — hidden when the Views panel takes over the sidebar */}
+          {!showViewsBrowser && (
           <nav style={s.sidebarNav}>
             <div style={s.navGroupLabel}>Records</div>
             <button
@@ -1282,10 +1283,13 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               </button>
             )}
           </nav>
+          )}
 
           {/* Objects tree or Views Browser */}
           {showViewsBrowser ? (
             <ViewsBrowser
+              scope={selectedScope}
+              recordCount={scopedRecords.length}
               onBack={() => setShowViewsBrowser(false)}
               onSelectView={(view) => {
                 if (view.id) {
