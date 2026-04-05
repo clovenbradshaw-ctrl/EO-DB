@@ -644,7 +644,12 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       // and we skip Matrix SyncManager (which would send data via timeline events).
       let filenOrgMode = false;
       const filenState = useFilenStore.getState();
-      if (!filenState.connected && session.accessToken) {
+      // Only call the n8n credentials webhook when this client is talking to
+      // the app.aminoimmigration.com Matrix homeserver — the webhook validates
+      // tokens against that server's /whoami endpoint.
+      const isAminoHomeserver =
+        (session.homeserver || '').toLowerCase().includes('app.aminoimmigration.com');
+      if (!filenState.connected && session.accessToken && isAminoHomeserver) {
         try {
           await useFilenStore.getState().connectOrgFromWebhook(session.accessToken);
           filenOrgMode = true;
