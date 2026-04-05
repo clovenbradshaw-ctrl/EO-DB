@@ -29,6 +29,7 @@ import { SpaceMembers } from './SpaceMembers';
 import { ImportView } from './ImportView';
 import { BuilderView } from './builder/BuilderView';
 import { MessagesView } from './MessagesView';
+import { PeopleView } from './PeopleView';
 import { RecordPageView } from './builder/RecordPageView';
 import { PermissionBadge } from './PermissionBadge';
 import { ViewOnlyBanner } from './ViewOnlyBanner';
@@ -39,7 +40,7 @@ import { useTheme, spaceBackgroundTint, type Theme } from '../theme';
 import type { EoState } from '../db/types';
 import type { ViewDefinition } from '../blocks/types';
 import type { ViewType } from './view-types';
-import { discoverSpacesFromMatrix, type SpaceEntry } from '../matrix/space-discovery';
+import { discoverSpacesFromMatrix, discoverPublicSpaces, type SpaceEntry } from '../matrix/space-discovery';
 import { SpaceBrowser } from './SpaceBrowser';
 import { Horizon } from './Horizon';
 import { type TimeScrubberFilter, type DateColumnOption, DEFAULT_FILTER, detectDateColumns } from './time-scrubber-utils';
@@ -56,6 +57,14 @@ import { EO_POWER_LEVEL_CONTENT } from '../permissions/types';
  *  When false, the app uses Filen as the sole sync layer. */
 const MATRIX_ENABLED = true;
 
+export interface CreateSpaceOptions {
+  /** 'public' = listed in homeserver public directory, join by knock.
+   *  'private' = invite-only, not discoverable. Defaults to 'public'. */
+  discoverability?: 'public' | 'private';
+  /** Matrix user IDs to invite immediately upon space creation. */
+  inviteUserIds?: string[];
+}
+
 /**
  * Create a Matrix room for a space and publish the space config state event.
  * Returns the new room ID, or null if creation fails.
@@ -64,29 +73,57 @@ async function createSpaceRoom(
   client: ReturnType<typeof createMatrixClient>,
   spaceName: string,
   ownerUserId: string,
+  opts: CreateSpaceOptions = {},
 ): Promise<string | null> {
-  try {
-    const result = await client.createRoom({
-      name: spaceName,
-      visibility: 'private' as any,
-      preset: 'private_chat' as any,
-      initial_state: [
-        {
-          type: 'm.room.history_visibility',
-          state_key: '',
-          content: { history_visibility: 'shared' },
-        },
-        {
-          type: 'm.room.power_levels',
-          state_key: '',
-          content: {
-            ...EO_POWER_LEVEL_CONTENT,
-            users: { [ownerUserId]: 100 },
-          },
-        },
-      ],
-    });
+  const discoverability = opts.discoverability ?? 'public';
+  const inviteUserIds = opts.inviteUserIds ?? [];
 
+  try {
+    const initialState: any[] = [
+      {
+        type: 'm.room.history_visibility',
+        state_key: '',
+        content: { history_visibility: 'shared' },
+      },
+      {
+        type: 'm.room.power_levels',
+        state_key: '',
+        content: {
+          ...EO_POWER_LEVEL_CONTENT,
+          users: { [ownerUserId]: 100 },
+        },
+      },
+    ];
+
+    const createArgs: any = {
+      name: spaceName,
+      initial_state: initialState,
+    };
+
+    if (discoverability === 'public') {
+      // Listed in homeserver's public room directory. Joining still requires
+      // owner approval via the knock flow.
+      createArgs.visibility = 'public';
+      initialState.push({
+        type: 'm.room.join_rules',
+        state_key: '',
+        content: { join_rule: 'knock' },
+      });
+      initialState.push({
+        type: 'm.room.guest_access',
+        state_key: '',
+        content: { guest_access: 'forbidden' },
+      });
+    } else {
+      // Private / invite-only (original behavior).
+      createArgs.visibility = 'private';
+      createArgs.preset = 'private_chat';
+      if (inviteUserIds.length > 0) {
+        createArgs.invite = inviteUserIds;
+      }
+    }
+
+    const result = await client.createRoom(createArgs);
     const roomId = result.room_id;
 
     // Publish space config so discoverSpacesFromMatrix() can find this room
@@ -95,9 +132,21 @@ async function createSpaceRoom(
       rooms: { main: roomId },
       field_assignments: [],
       space_settings: {},
+      discoverability,
     });
 
-    console.info('[EO-DB] Created Matrix room for space', spaceName, '→', roomId);
+    // For public spaces, still invite any pre-selected users if provided.
+    if (discoverability === 'public' && inviteUserIds.length > 0) {
+      for (const uid of inviteUserIds) {
+        try {
+          await client.invite(roomId, uid);
+        } catch (e) {
+          console.warn('[EO-DB] Failed to invite', uid, 'to space', spaceName, e);
+        }
+      }
+    }
+
+    console.info('[EO-DB] Created Matrix room for space', spaceName, '→', roomId, '(', discoverability, ')');
     return roomId;
   } catch (e) {
     console.warn('[EO-DB] Failed to create Matrix room for space', spaceName, e);
@@ -156,6 +205,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [spaces, setSpaces] = useState<EoState[]>([]);
   const [spaceEntries, setSpaceEntries] = useState<SpaceEntry[]>([]);
+  const [publicSpaceEntries, setPublicSpaceEntries] = useState<SpaceEntry[]>([]);
   const [allStates, setAllStates] = useState<EoState[]>([]);
   const [timeScrubberFilter, setTimeScrubberFilter] = useState<TimeScrubberFilter>(DEFAULT_FILTER);
   const [scopedRecords, setScopedRecords] = useState<EoState[]>([]);
@@ -486,6 +536,11 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         setSpaceEntries(entries);
       }
     } catch { /* best effort */ }
+
+    // Discover public (discoverable) spaces from the homeserver directory
+    discoverPublicSpaces(matrixClientRef.current)
+      .then((publics) => setPublicSpaceEntries(publics))
+      .catch(() => { /* best effort */ });
   }, [matrixReady]);
 
   // Build merged entries: Matrix-sourced entries + IDB fallback for spaces not found in Matrix
@@ -870,6 +925,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     builder: '\u2B1A',  // blocks
     settings: '\u2699', // gear
     messages: '\uD83D\uDCAC', // speech bubble
+    people: '\u2689', // people icon
   };
 
   // --- Permission resolution ---
@@ -951,7 +1007,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                 setShowRecycleBin(false);
               }}
               onClose={() => setSpaceOpen(false)}
-              onCreate={async (name) => {
+              onCreate={async (name, opts) => {
                 const spaceTarget = `space_${name.toLowerCase().replace(/\s+/g, '_')}`;
 
                 // Create Matrix room first (if client is ready) so sync works immediately
@@ -959,6 +1015,10 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                 if (matrixReady && matrixClientRef.current) {
                   mainRoomId = await createSpaceRoom(
                     matrixClientRef.current, name, session.userId,
+                    {
+                      discoverability: opts?.discoverability ?? 'public',
+                      inviteUserIds: opts?.inviteUserIds,
+                    },
                   );
                   // Refresh space entries so the new room is discoverable
                   if (mainRoomId) {
@@ -1030,6 +1090,18 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               onOpenRecycleBin={() => { setShowRecycleBin(true); setSpaceOpen(false); setShowMembers(false); }}
               deletedCount={deletedSpaceCount}
               archivedCount={archivedSpaceCount}
+              publicEntries={publicSpaceEntries.filter((e) =>
+                !activeEntries.some((a) => a.mainRoomId === e.mainRoomId)
+              )}
+              onRequestAccess={async (roomId) => {
+                if (!matrixClientRef.current) return;
+                try {
+                  await (matrixClientRef.current as any).knockRoom(roomId, { reason: 'Request to join space' });
+                  setPublicSpaceEntries((prev) => prev.filter((p) => p.mainRoomId !== roomId));
+                } catch (e) {
+                  console.warn('[EO-DB] knockRoom failed', e);
+                }
+              }}
             />
           )}
 
@@ -1145,6 +1217,16 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               </button>
             ))}
             <div style={s.navGroupLabel}>Collaborate</div>
+            <button
+              onClick={() => navigate({ view: 'people' })}
+              style={{
+                ...s.navItem,
+                ...(activeView === 'people' ? s.navItemActive : {}),
+              }}
+            >
+              <span style={s.navIcon}>{NAV_ICONS.people}</span>
+              People
+            </button>
             <button
               onClick={() => navigate({ view: 'messages' })}
               style={{
@@ -1305,7 +1387,20 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             ) : activeView === 'builder' ? (
               <BuilderView />
             ) : activeView === 'messages' ? (
-              <MessagesView scope={selectedScope} userId={session.userId} />
+              <MessagesView scope={selectedScope} userId={session.userId} activeRoomId={route.query.roomId ?? null} />
+            ) : activeView === 'people' ? (
+              matrixClientRef.current ? (
+                <PeopleView
+                  matrixClient={matrixClientRef.current as any}
+                  onOpenDirectMessage={(roomId) => navigate({ view: 'messages', query: { roomId } })}
+                />
+              ) : (
+                <div style={s.empty}>
+                  <div style={s.emptyIcon}>{'\u2689'}</div>
+                  <div style={s.emptyText}>Matrix client not ready</div>
+                  <div style={s.emptySub}>People discovery requires an active Matrix connection.</div>
+                </div>
+              )
             ) : activeView === 'settings' ? (
               <SettingsView session={session} matrixClient={matrixClientRef.current} roomId={spaceCacheRef.current.get(selectedSpace!)?.mainRoomId ?? null} onUnarchive={handleUnarchiveSpace} />
             ) : null}

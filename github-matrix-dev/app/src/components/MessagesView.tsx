@@ -75,19 +75,37 @@ interface MessagesViewProps {
   scope: string | null;
   /** Current user's Matrix user ID */
   userId?: string;
+  /** Optional Matrix room ID to auto-select (e.g. from a DM link) */
+  activeRoomId?: string | null;
 }
 
-export function MessagesView({ scope, userId }: MessagesViewProps) {
+export function MessagesView({ scope, userId, activeRoomId: initialRoomId }: MessagesViewProps) {
   const { theme } = useTheme();
   const dispatch = useEoStore((s) => s.dispatch);
   const ready = useEoStore((s) => s.ready);
 
   // ─── Local state (will connect to real Matrix SDK later) ────────────────
-  const [rooms] = useState<MatrixRoom[]>(() => [
-    { id: '!gen:local', name: 'General', type: 'channel', encrypted: false, members: [], unread: 0 },
-    { id: '!data:local', name: 'Data Pipeline', type: 'channel', encrypted: true, members: [], unread: 0, encryptionScope: 'room.data_pipeline' },
-  ]);
-  const [activeRoomId, setActiveRoomId] = useState<string>(rooms[0].id);
+  const [rooms, setRooms] = useState<MatrixRoom[]>(() => {
+    const base: MatrixRoom[] = [
+      { id: '!gen:local', name: 'General', type: 'channel', encrypted: false, members: [], unread: 0 },
+      { id: '!data:local', name: 'Data Pipeline', type: 'channel', encrypted: true, members: [], unread: 0, encryptionScope: 'room.data_pipeline' },
+    ];
+    if (initialRoomId) {
+      base.push({ id: initialRoomId, name: 'Direct Message', type: 'dm', encrypted: true, members: [], unread: 0 });
+    }
+    return base;
+  });
+  const [activeRoomId, setActiveRoomId] = useState<string>(initialRoomId ?? rooms[0].id);
+
+  // If the prop changes (user clicks a new DM link), surface the room and select it
+  useEffect(() => {
+    if (!initialRoomId) return;
+    setRooms((prev) => prev.some((r) => r.id === initialRoomId)
+      ? prev
+      : [...prev, { id: initialRoomId, name: 'Direct Message', type: 'dm', encrypted: true, members: [], unread: 0 }],
+    );
+    setActiveRoomId(initialRoomId);
+  }, [initialRoomId]);
   const [messages, setMessages] = useState<Record<string, MatrixMessage[]>>({});
   const [inputText, setInputText] = useState('');
   const [preserve, setPreserve] = useState<PreserveDialogState>({

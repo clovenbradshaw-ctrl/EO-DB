@@ -72,6 +72,10 @@ export interface SpaceConfig {
   };
   field_assignments: FieldAssignment[];
   space_settings: SpaceSettings;
+  /** Whether this space is listed in the homeserver's public room directory.
+   *  'public' (default) — anyone on the homeserver can discover the space and knock to request access.
+   *  'private' — only invited members know the space exists. */
+  discoverability?: 'public' | 'private';
 }
 
 // --- Field Permissions ---

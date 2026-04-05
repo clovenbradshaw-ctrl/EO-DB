@@ -58,6 +58,67 @@ export async function searchUsers(
 }
 
 /**
+ * List homeserver users discoverable to the calling user.
+ *
+ * Tries two strategies in order:
+ *   1. Empty-term directory search (`searchUserDirectory({ term: '' })`) —
+ *      Synapse returns its top users list in this mode.
+ *   2. Fallback: walk all joined rooms and collect unique joined members.
+ *
+ * Both results are merged (directory first, room members appended), deduped,
+ * and the calling user is filtered out. Returns up to `limit` users.
+ */
+export async function listAllHomeserverUsers(
+  client: MatrixClient,
+  limit = 100,
+): Promise<DiscoveredUser[]> {
+  const myUserId = client.getUserId();
+  const seen = new Set<string>();
+  const out: DiscoveredUser[] = [];
+
+  // Strategy 1: empty-term directory search
+  try {
+    const response = await client.searchUserDirectory({ term: '', limit });
+    for (const r of (response.results ?? []) as any[]) {
+      if (!r.user_id || r.user_id === myUserId || seen.has(r.user_id)) continue;
+      seen.add(r.user_id);
+      out.push({
+        userId: r.user_id,
+        displayName: r.display_name || extractLocalpart(r.user_id),
+        avatarUrl: r.avatar_url || undefined,
+      });
+    }
+  } catch (e: any) {
+    console.warn('[EO-DB] listAllHomeserverUsers: directory search failed:', e.message || e);
+  }
+
+  // Strategy 2: walk joined rooms for known members
+  if (out.length < limit) {
+    try {
+      const rooms = client.getRooms();
+      for (const room of rooms) {
+        const members = room.getJoinedMembers();
+        for (const m of members) {
+          if (!m.userId || m.userId === myUserId || seen.has(m.userId)) continue;
+          seen.add(m.userId);
+          out.push({
+            userId: m.userId,
+            displayName: m.name || extractLocalpart(m.userId),
+            avatarUrl: (m as any).getMxcAvatarUrl?.() || undefined,
+          });
+          if (out.length >= limit) break;
+        }
+        if (out.length >= limit) break;
+      }
+    } catch (e: any) {
+      console.warn('[EO-DB] listAllHomeserverUsers: room member walk failed:', e.message || e);
+    }
+  }
+
+  return out;
+}
+
+/**
  * Resolve a single Matrix user ID to a profile (display name + avatar).
  * Useful for showing profile info when the user types a full Matrix ID.
  */

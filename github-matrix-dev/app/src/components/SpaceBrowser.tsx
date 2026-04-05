@@ -13,18 +13,27 @@ import type { SpaceEntry } from '../matrix/space-discovery';
 type SortColumn = 'name' | 'owner' | 'created' | 'modified' | 'members';
 type SortDir = 'asc' | 'desc';
 
+export interface CreateSpaceUIOptions {
+  discoverability: 'public' | 'private';
+  inviteUserIds?: string[];
+}
+
 interface SpaceBrowserProps {
   entries: SpaceEntry[];
   loading: boolean;
   activeSpace: string | null;
   onSelect: (spaceTarget: string) => void;
   onClose: () => void;
-  onCreate: (name: string) => void;
+  onCreate: (name: string, opts: CreateSpaceUIOptions) => void;
   onDelete?: (spaceTarget: string) => void;
   onArchive?: (spaceTarget: string) => void;
   onOpenRecycleBin?: () => void;
   deletedCount?: number;
   archivedCount?: number;
+  /** Public spaces (not yet joined) to show as discoverable */
+  publicEntries?: SpaceEntry[];
+  /** Send a knock request to join a public space */
+  onRequestAccess?: (mainRoomId: string) => void;
 }
 
 function relativeTime(ts: number): string {
@@ -49,13 +58,16 @@ function formatDate(ts: number): string {
   });
 }
 
-export function SpaceBrowser({ entries, loading, activeSpace, onSelect, onClose, onCreate, onDelete, onArchive, onOpenRecycleBin, deletedCount = 0, archivedCount = 0 }: SpaceBrowserProps) {
+export function SpaceBrowser({ entries, loading, activeSpace, onSelect, onClose, onCreate, onDelete, onArchive, onOpenRecycleBin, deletedCount = 0, archivedCount = 0, publicEntries = [], onRequestAccess }: SpaceBrowserProps) {
   const { theme } = useTheme();
   const s = makeStyles(theme);
 
   const [sort, setSort] = useState<{ col: SortColumn; dir: SortDir }>({ col: 'modified', dir: 'desc' });
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState('');
+  const [newDiscoverability, setNewDiscoverability] = useState<'public' | 'private'>('public');
+  const [newInviteInput, setNewInviteInput] = useState('');
+  const [newInviteList, setNewInviteList] = useState<string[]>([]);
 
   const sorted = useMemo(() => {
     const list = [...entries];
@@ -84,9 +96,23 @@ export function SpaceBrowser({ entries, loading, activeSpace, onSelect, onClose,
   function handleCreate() {
     const trimmed = newName.trim();
     if (!trimmed) return;
-    onCreate(trimmed);
+    onCreate(trimmed, {
+      discoverability: newDiscoverability,
+      inviteUserIds: newInviteList.length > 0 ? newInviteList : undefined,
+    });
     setNewName('');
+    setNewDiscoverability('public');
+    setNewInviteList([]);
+    setNewInviteInput('');
     setShowCreate(false);
+  }
+
+  function addInvite() {
+    const val = newInviteInput.trim();
+    if (!/^@[^:]+:.+$/.test(val)) return;
+    if (newInviteList.includes(val)) return;
+    setNewInviteList([...newInviteList, val]);
+    setNewInviteInput('');
   }
 
   const sortArrow = (col: SortColumn) =>
@@ -281,9 +307,106 @@ export function SpaceBrowser({ entries, loading, activeSpace, onSelect, onClose,
                 placeholder="Space name..."
                 value={newName}
                 onChange={(e) => setNewName(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter') handleCreate(); if (e.key === 'Escape') setShowCreate(false); }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && newDiscoverability === 'public') handleCreate();
+                  if (e.key === 'Escape') setShowCreate(false);
+                }}
                 autoFocus
               />
+            </div>
+
+            {/* Visibility radio */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 8 }}>
+              <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, cursor: 'pointer', padding: '6px 4px' }}>
+                <input
+                  type="radio"
+                  name="space-visibility"
+                  checked={newDiscoverability === 'public'}
+                  onChange={() => setNewDiscoverability('public')}
+                  style={{ marginTop: 2 }}
+                />
+                <span style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                  <span style={{ fontSize: 11, fontWeight: 500, color: theme.text }}>Public</span>
+                  <span style={{ fontSize: 10, color: theme.textMuted }}>
+                    Anyone on your homeserver can discover this space and request access.
+                  </span>
+                </span>
+              </label>
+              <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, cursor: 'pointer', padding: '6px 4px' }}>
+                <input
+                  type="radio"
+                  name="space-visibility"
+                  checked={newDiscoverability === 'private'}
+                  onChange={() => setNewDiscoverability('private')}
+                  style={{ marginTop: 2 }}
+                />
+                <span style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                  <span style={{ fontSize: 11, fontWeight: 500, color: theme.text }}>Private</span>
+                  <span style={{ fontSize: 10, color: theme.textMuted }}>
+                    Only the people you invite can see or join this space.
+                  </span>
+                </span>
+              </label>
+            </div>
+
+            {/* Invite picker for private spaces */}
+            {newDiscoverability === 'private' && (
+              <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <div style={{ fontSize: 10, color: theme.textMuted }}>Invite (Matrix IDs):</div>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <input
+                    style={s.createInput}
+                    placeholder="@user:server"
+                    value={newInviteInput}
+                    onChange={(e) => setNewInviteInput(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addInvite(); } }}
+                  />
+                  <button
+                    style={{ ...s.newButton, opacity: /^@[^:]+:.+$/.test(newInviteInput.trim()) ? 1 : 0.5 }}
+                    onClick={addInvite}
+                    disabled={!/^@[^:]+:.+$/.test(newInviteInput.trim())}
+                  >
+                    Add
+                  </button>
+                </div>
+                {newInviteList.length > 0 && (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                    {newInviteList.map((uid) => (
+                      <span
+                        key={uid}
+                        style={{
+                          fontSize: 10,
+                          padding: '3px 8px',
+                          background: theme.bgMuted,
+                          border: `1px solid ${theme.border}`,
+                          borderRadius: 12,
+                          color: theme.text,
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: 6,
+                        }}
+                      >
+                        {uid}
+                        <button
+                          onClick={() => setNewInviteList(newInviteList.filter((u) => u !== uid))}
+                          style={{
+                            background: 'none', border: 'none', color: theme.textMuted,
+                            cursor: 'pointer', fontSize: 11, padding: 0, lineHeight: 1,
+                          }}
+                        >
+                          {'\u00D7'}
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div style={{ display: 'flex', gap: 6, marginTop: 10, justifyContent: 'flex-end' }}>
+              <button style={s.cancelButton} onClick={() => { setShowCreate(false); setNewName(''); setNewInviteList([]); setNewInviteInput(''); setNewDiscoverability('public'); }}>
+                Cancel
+              </button>
               <button
                 style={{ ...s.newButton, opacity: newName.trim() ? 1 : 0.5 }}
                 onClick={handleCreate}
@@ -291,10 +414,53 @@ export function SpaceBrowser({ entries, loading, activeSpace, onSelect, onClose,
               >
                 Create
               </button>
-              <button style={s.cancelButton} onClick={() => { setShowCreate(false); setNewName(''); }}>
-                Cancel
-              </button>
             </div>
+          </div>
+        )}
+
+        {/* Public spaces (discoverable, not yet joined) */}
+        {publicEntries.length > 0 && (
+          <div style={{ borderTop: `1px solid ${theme.borderDivider}`, marginTop: 8, paddingTop: 10 }}>
+            <div style={{ fontSize: 10, color: theme.textMuted, padding: '4px 14px', textTransform: 'uppercase', letterSpacing: 0.5 }}>
+              Public Spaces
+            </div>
+            {publicEntries.map((entry) => (
+              <div
+                key={entry.mainRoomId}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  padding: '8px 14px',
+                  gap: 10,
+                }}
+              >
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div style={{ fontSize: 12, fontWeight: 500, color: theme.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {entry.displayName}
+                  </div>
+                  <div style={{ fontSize: 10, color: theme.textMuted }}>
+                    {entry.memberCount} member{entry.memberCount === 1 ? '' : 's'}
+                  </div>
+                </div>
+                {onRequestAccess && (
+                  <button
+                    onClick={() => onRequestAccess(entry.mainRoomId)}
+                    style={{
+                      padding: '4px 10px',
+                      fontSize: 10,
+                      background: theme.accent,
+                      color: '#fff',
+                      border: 'none',
+                      borderRadius: 6,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    Request access
+                  </button>
+                )}
+              </div>
+            ))}
           </div>
         )}
 
