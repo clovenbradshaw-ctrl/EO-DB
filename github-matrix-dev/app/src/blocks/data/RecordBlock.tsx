@@ -34,6 +34,7 @@ export function RecordBlock({ block, mode }: Props) {
 
   const [record, setRecord] = useState<EoState | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   // Resolve the record — either from a direct target or via a binding
   useEffect(() => {
@@ -42,6 +43,7 @@ export function RecordBlock({ block, mode }: Props) {
 
     async function load() {
       setLoading(true);
+      setError(null);
 
       // If a binding is provided, resolve it to find the record
       if (binding && binding.mode) {
@@ -70,7 +72,12 @@ export function RecordBlock({ block, mode }: Props) {
       }
     }
 
-    load();
+    load().catch(err => {
+      if (cancelled) return;
+      console.error('[RecordBlock] load failed', err);
+      setError(err?.message ?? String(err));
+      setLoading(false);
+    });
     return () => { cancelled = true; };
   }, [ready, recordTarget, binding, getState, getStateByPrefix]);
 
@@ -102,6 +109,14 @@ export function RecordBlock({ block, mode }: Props) {
     return (
       <div style={s.container}>
         <div style={s.loading}>Loading record...</div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div style={s.container}>
+        <div style={s.empty}>Failed to load record: {error}</div>
       </div>
     );
   }

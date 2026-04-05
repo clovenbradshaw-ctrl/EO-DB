@@ -34,24 +34,37 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
   const horizon = useEoStore((s) => s.horizon);
   const [data, setData] = useState<HorizonResponse | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const { theme } = useTheme();
   const s = makeStyles(theme);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    horizon(target, { signals: true }).then((result) => {
-      if (cancelled) return;
-      if (result && !Array.isArray(result)) {
-        setData(result);
-      }
-      setLoading(false);
-    });
+    setError(null);
+    horizon(target, { signals: true })
+      .then((result) => {
+        if (cancelled) return;
+        if (result && !Array.isArray(result)) {
+          setData(result);
+        }
+        setLoading(false);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        console.error('[RecordView] horizon failed', err);
+        setError(err?.message ?? String(err));
+        setLoading(false);
+      });
     return () => { cancelled = true; };
   }, [target, horizon]);
 
   if (loading) {
     return <div style={s.loading}>Loading record...</div>;
+  }
+
+  if (error) {
+    return <div style={s.loading}>Failed to load record: {error}</div>;
   }
 
   if (!data || !data.figure) {
