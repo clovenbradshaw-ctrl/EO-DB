@@ -386,6 +386,7 @@ export function ImportView({ onImportComplete }: ImportViewProps) {
   const [haltOnError, setHaltOnError] = useState(true);
   const [message, setMessage] = useState<{ type: 'info' | 'error' | 'success'; text: string } | null>(null);
   const [progress, setProgress] = useState({ current: 0, total: 0, errors: 0 });
+  const [creationDate, setCreationDate] = useState('');
   const [dragging, setDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -445,6 +446,7 @@ export function ImportView({ onImportComplete }: ImportViewProps) {
     setFileName('');
     setFileStats('');
     setTargetPrefix('');
+    setCreationDate('');
     setMessage(null);
     setProgress({ current: 0, total: 0, errors: 0 });
     if (fileInputRef.current) fileInputRef.current.value = '';
@@ -468,7 +470,9 @@ export function ImportView({ onImportComplete }: ImportViewProps) {
         ? { ...row.operand, added: row.operand.added.map((t: string) => `${prefix}.${t}`) }
         : row.operand ?? {},
       agent: 'import',
-      ts: row.ts || new Date().toISOString(),
+      ts: creationDate
+        ? new Date(creationDate + 'T00:00:00Z').toISOString()
+        : (row.ts || new Date().toISOString()),
       acquired_ts: new Date().toISOString(),
       client_event_id: row.client_event_id,
       meta: row.meta,
@@ -616,6 +620,31 @@ export function ImportView({ onImportComplete }: ImportViewProps) {
                 + {keyedSummary.edgeCount} auto-detected {keyedSummary.edgeCount === 1 ? 'edge' : 'edges'} (CON)
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Creation date override */}
+      {status === 'parsed' && (
+        <div style={{ marginTop: 16 }}>
+          <label style={{ fontSize: 11, fontWeight: 600, color: t.textSecondary, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+            Creation Date Override
+          </label>
+          <input
+            type="date"
+            value={creationDate}
+            onChange={(e) => setCreationDate(e.target.value)}
+            style={{
+              display: 'block', width: '100%', marginTop: 4, padding: '8px 10px',
+              border: `1px solid ${t.border}`, borderRadius: 4, background: t.bg,
+              color: creationDate ? t.text : t.textMuted,
+              fontSize: 13, fontFamily: "'JetBrains Mono', monospace",
+              boxSizing: 'border-box',
+            }}
+          />
+          <div style={{ fontSize: 11, color: t.textMuted, marginTop: 4 }}>
+            Sets the creation date (ts) for all imported records. Leave blank to use each row's
+            own timestamp or current time. The ingestion timestamp is always tracked separately.
           </div>
         </div>
       )}
