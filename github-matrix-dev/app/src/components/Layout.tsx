@@ -152,6 +152,8 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   const [showMembers, setShowMembers] = useState(false);
   const [showRecycleBin, setShowRecycleBin] = useState(false);
   const [showViewsBrowser, setShowViewsBrowser] = useState(false);
+  const [viewsFilter, setViewsFilter] = useState<'recent' | 'all' | 'shared'>('all');
+  const [newViewNonce, setNewViewNonce] = useState(0);
   const isMobile = useIsMobile();
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [spaces, setSpaces] = useState<EoState[]>([]);
@@ -1113,6 +1115,57 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         }}>
           {/* View navigation */}
           <nav style={s.sidebarNav}>
+            {showViewsBrowser ? (
+              <>
+                <button
+                  onClick={() => setShowViewsBrowser(false)}
+                  style={{ ...s.navItem, color: theme.textMuted }}
+                >
+                  <span style={s.navIcon}>{'\u2190'}</span>
+                  Back
+                </button>
+                <div style={s.navGroupLabel}>Views</div>
+                <button
+                  onClick={() => setViewsFilter('recent')}
+                  style={{
+                    ...s.navItem,
+                    ...(viewsFilter === 'recent' ? s.navItemActive : {}),
+                  }}
+                >
+                  <span style={s.navIcon}>{'\u29D6'}</span>
+                  Recent Views
+                </button>
+                <button
+                  onClick={() => setViewsFilter('all')}
+                  style={{
+                    ...s.navItem,
+                    ...(viewsFilter === 'all' ? s.navItemActive : {}),
+                  }}
+                >
+                  <span style={s.navIcon}>{NAV_ICONS.records}</span>
+                  All Views
+                </button>
+                <button
+                  onClick={() => setViewsFilter('shared')}
+                  style={{
+                    ...s.navItem,
+                    ...(viewsFilter === 'shared' ? s.navItemActive : {}),
+                  }}
+                >
+                  <span style={s.navIcon}>{'\u26C2'}</span>
+                  Shared Views
+                </button>
+                <div style={s.navGroupLabel}>Actions</div>
+                <button
+                  onClick={() => setNewViewNonce((n) => n + 1)}
+                  style={s.navItem}
+                >
+                  <span style={s.navIcon}>+</span>
+                  New View
+                </button>
+              </>
+            ) : (
+              <>
             <div style={s.navGroupLabel}>Records</div>
             <button
               onClick={() => {
@@ -1193,11 +1246,15 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                 Settings
               </button>
             )}
+              </>
+            )}
           </nav>
 
           {/* Objects tree or Views Browser */}
           {showViewsBrowser ? (
             <ViewsBrowser
+              filter={viewsFilter}
+              newViewNonce={newViewNonce}
               onBack={() => setShowViewsBrowser(false)}
               onSelectView={(view) => {
                 if (view.id) {
