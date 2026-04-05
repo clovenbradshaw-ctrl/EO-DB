@@ -62,6 +62,7 @@ interface ViewStoreState {
   setRowHeight: (scope: string, height: 'compact' | 'default' | 'tall') => void;
   setCellOverflow: (scope: string, mode: 'clip' | 'wrap') => void;
   setProfileFields: (scope: string, fields: string[] | undefined) => void;
+  setDisplayField: (scope: string, field: string | undefined) => void;
 
   // --- View lifecycle ---
 
@@ -177,6 +178,10 @@ export const useViewStore = create<ViewStoreState>((set, get) => ({
 
   setProfileFields(scope, fields) {
     _updateConfig(set, get, scope, { profileFields: fields });
+  },
+
+  setDisplayField(scope, field) {
+    _updateConfig(set, get, scope, { displayField: field });
   },
 
   activateView(scope, view) {

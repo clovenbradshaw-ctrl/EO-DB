@@ -160,6 +160,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   const rowHeight = viewConfig.rowHeight || 'default';
   const cellOverflow = viewConfig.cellOverflow || 'wrap';
   const profileFields = viewConfig.profileFields;
+  const displayField = viewConfig.displayField;
   const isMobile = useIsMobile();
 
   const [showProfilePicker, setShowProfilePicker] = useState(false);
@@ -359,10 +360,10 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
       result = [...result].sort((a, b) => {
         for (const sort of sorts) {
           const aVal = sort.field === '_record'
-            ? (a.value?.name || a.target.split('.').pop() || '')
+            ? ((displayField ? getFieldValue(a, displayField, useFieldsSub) : null) ?? a.value?.name ?? a.target.split('.').pop() ?? '')
             : getFieldValue(a, sort.field, useFieldsSub);
           const bVal = sort.field === '_record'
-            ? (b.value?.name || b.target.split('.').pop() || '')
+            ? ((displayField ? getFieldValue(b, displayField, useFieldsSub) : null) ?? b.value?.name ?? b.target.split('.').pop() ?? '')
             : getFieldValue(b, sort.field, useFieldsSub);
           const aStr = aVal != null ? String(aVal) : '';
           const bStr = bVal != null ? String(bVal) : '';
@@ -378,7 +379,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
       });
     }
     return result;
-  }, [records, filterText, useFieldsSub, advancedFilters, filterConjunction, timeScrubberFilter, sorts]);
+  }, [records, filterText, useFieldsSub, advancedFilters, filterConjunction, timeScrubberFilter, sorts, displayField]);
 
   function handleColumnContextMenu(e: React.MouseEvent, col: ColumnDef) {
     e.preventDefault();
@@ -425,9 +426,17 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
       {
         label: 'Hide column',
         onClick: () => viewStore.toggleHiddenColumn(scope, colKey),
-        disabled: colKey === '_record',
       },
     ];
+    if (colKey !== '_record' && colKey !== '_last_updated') {
+      items.splice(items.length - 1, 0,
+        {
+          label: displayField === colKey ? 'Display name (active)' : 'Use as display name',
+          onClick: () => viewStore.setDisplayField(scope, displayField === colKey ? undefined : colKey),
+        },
+        { label: '', onClick: () => {}, separator: true },
+      );
+    }
     if (hiddenColumns.size > 0) {
       items.push({
         label: `Show all columns (${hiddenColumns.size} hidden)`,
@@ -803,7 +812,11 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                                 <span style={{
                                   fontFamily: "'JetBrains Mono', monospace", fontSize: 11,
                                   color: theme.accent, cursor: 'pointer',
-                                }}>{rec.value?.name || formatName(rec.target.split('.').pop() || '')}</span>
+                                }}>{(() => {
+                                  const dv = displayField ? getFieldValue(rec, displayField, useFieldsSub) : null;
+                                  if (dv != null && typeof dv !== 'object') return String(dv);
+                                  return rec.value?.name || formatName(rec.target.split('.').pop() || '');
+                                })()}</span>
                                 {rec.value?._type && <TypeBadge type={rec.value._type} />}
                               </span>
                             : col.key === '_last_updated'

@@ -30,6 +30,8 @@ export interface TableViewConfig {
   rowHeight?: 'compact' | 'default' | 'tall';
   cellOverflow?: 'clip' | 'wrap';
   profileFields?: string[];
+  /** Field key used as the record's display name (falls back to rec.value.name / target segment) */
+  displayField?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -69,7 +71,7 @@ export function createDefaultConfig(): TableViewConfig {
   return {
     columnOrder: [],
     columnWidths: {},
-    hiddenColumns: [],
+    hiddenColumns: ['_record'],
     sorts: [],
     filters: [],
     filterConjunction: 'AND',
