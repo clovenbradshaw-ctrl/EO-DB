@@ -1,7 +1,7 @@
 import { useEffect, useState, useMemo, useRef } from 'react';
 import { useEoStore } from '../store/eo-store';
 import { useViewStore } from '../store/view-store';
-import { VIEW_TYPE_META, type SavedView, type ViewType } from './view-types';
+import { VIEW_TYPE_META, type SavedView, type TableViewConfig, type ViewType } from './view-types';
 import { formatName } from './scope-picker-utils';
 import { useTheme, type Theme } from '../theme';
 
@@ -10,12 +10,15 @@ interface ViewsBrowserProps {
   scope: string | null;
   /** Number of records under the current scope (shown in the pinned chip). */
   recordCount: number;
+  /** Matrix user ID — required for attributing created views. */
+  userId: string;
   onBack: () => void;
   onSelectView: (view: SavedView) => void;
 }
 
-export function ViewsBrowser({ scope, recordCount, onBack, onSelectView }: ViewsBrowserProps) {
+export function ViewsBrowser({ scope, recordCount, userId, onBack, onSelectView }: ViewsBrowserProps) {
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
+  const dispatch = useEoStore((s) => s.dispatch);
   const ready = useEoStore((s) => s.ready);
   const lastSeq = useEoStore((s) => s.lastSeq);
   const registerSavedViews = useViewStore((s) => s.registerSavedViews);
@@ -27,6 +30,13 @@ export function ViewsBrowser({ scope, recordCount, onBack, onSelectView }: Views
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(true);
   const hasLoadedOnce = useRef(false);
+
+  // --- Create-view popover state ---
+  const [showCreate, setShowCreate] = useState(false);
+  const [newViewName, setNewViewName] = useState('');
+  const [newViewType, setNewViewType] = useState<ViewType>('grid');
+  const [newViewVisibility, setNewViewVisibility] = useState<'private' | 'shared'>('private');
+  const [creating, setCreating] = useState(false);
 
   // Load saved views for the current scope only
   useEffect(() => {
@@ -120,6 +130,67 @@ export function ViewsBrowser({ scope, recordCount, onBack, onSelectView }: Views
     return !q || 'grid view'.includes(q);
   }, [query]);
 
+  function resetCreateForm() {
+    setNewViewName('');
+    setNewViewType('grid');
+    setNewViewVisibility('private');
+  }
+
+  async function handleCreateView() {
+    if (!scope || !newViewName.trim() || creating) return;
+    setCreating(true);
+    const viewId = crypto.randomUUID().replace(/-/g, '').slice(0, 12);
+    const now = new Date().toISOString();
+    const config: TableViewConfig = {
+      columnOrder: [],
+      columnWidths: {},
+      hiddenColumns: [],
+      sorts: [],
+      filters: [],
+      filterConjunction: 'AND',
+      showLastUpdated: true,
+    };
+    const name = newViewName.trim();
+    try {
+      await dispatch({
+        op: 'INS',
+        target: `${scope}._views.${viewId}`,
+        operand: {
+          name,
+          viewType: newViewType,
+          config,
+          visibility: newViewVisibility,
+          createdBy: userId,
+          createdAt: now,
+          updatedAt: now,
+        },
+        agent: `user:${userId}`,
+        ts: now,
+        acquired_ts: now,
+        client_event_id: crypto.randomUUID(),
+      });
+      const savedView: SavedView = {
+        id: viewId,
+        name,
+        scope,
+        viewType: newViewType,
+        config,
+        visibility: newViewVisibility,
+        createdBy: userId,
+        createdAt: now,
+        updatedAt: now,
+      };
+      registerSavedViews([savedView]);
+      setShowCreate(false);
+      resetCreateForm();
+      onSelectView(savedView);
+    } catch {
+      /* ignore */
+    } finally {
+      setCreating(false);
+    }
+  }
+
   const scopeLabel = scope ? formatName(scope.split('.').pop() || scope) : '';
   const activeViewId = sig?.activeViewId ?? null;
   const defaultIsActive = scope != null && activeViewId == null;
@@ -201,7 +272,7 @@ export function ViewsBrowser({ scope, recordCount, onBack, onSelectView }: Views
             {/* Create a view */}
             <button
               style={s.createBtn}
-              onClick={() => onSelectView(makeDefaultView(scope))}
+              onClick={() => setShowCreate(true)}
               title="Create a new view for this object"
             >
               + Create a view
@@ -219,6 +290,76 @@ export function ViewsBrowser({ scope, recordCount, onBack, onSelectView }: Views
             <span style={s.scopeChipMeta}>{recordCount} records</span>
           </div>
         </div>
+      )}
+
+      {/* Create-view modal */}
+      {showCreate && scope && (
+        <>
+          <div
+            style={s.modalOverlay}
+            onClick={() => { setShowCreate(false); resetCreateForm(); }}
+          />
+          <div style={s.modal}>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10, color: theme.textHeading }}>
+              New view
+            </div>
+            <input
+              autoFocus
+              value={newViewName}
+              onChange={(e) => setNewViewName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleCreateView();
+                if (e.key === 'Escape') { setShowCreate(false); resetCreateForm(); }
+              }}
+              placeholder="View name\u2026"
+              style={s.nameInput}
+            />
+            <div style={{ display: 'flex', gap: 4, marginTop: 8, flexWrap: 'wrap' as const }}>
+              {(Object.keys(VIEW_TYPE_META) as ViewType[]).map((vt) => {
+                const meta = VIEW_TYPE_META[vt];
+                const active = newViewType === vt;
+                return (
+                  <button
+                    key={vt}
+                    onClick={() => setNewViewType(vt)}
+                    style={{
+                      display: 'inline-flex', alignItems: 'center', gap: 4,
+                      padding: '4px 8px', fontSize: 11, fontWeight: active ? 600 : 400,
+                      border: `1px solid ${active ? theme.accent : theme.border}`,
+                      borderRadius: 4, cursor: 'pointer',
+                      background: active ? theme.accentBg : 'transparent',
+                      color: active ? theme.accent : theme.textSecondary,
+                    }}
+                  >
+                    <span style={{ fontSize: 12 }}>{meta.icon}</span>
+                    {meta.label}
+                  </button>
+                );
+              })}
+            </div>
+            <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+              <button
+                style={newViewVisibility === 'private' ? s.visBtnActive : s.visBtn}
+                onClick={() => setNewViewVisibility('private')}
+              >
+                {'\uD83D\uDD12'} Private
+              </button>
+              <button
+                style={newViewVisibility === 'shared' ? s.visBtnActive : s.visBtn}
+                onClick={() => setNewViewVisibility('shared')}
+              >
+                {'\uD83D\uDD13'} Shared
+              </button>
+            </div>
+            <button
+              style={s.modalCreateBtn}
+              onClick={handleCreateView}
+              disabled={!newViewName.trim() || creating}
+            >
+              {creating ? 'Creating\u2026' : 'Create view'}
+            </button>
+          </div>
+        </>
       )}
     </div>
   );
@@ -384,6 +525,71 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
     scopeChipMeta: {
       color: t.textMuted,
       flexShrink: 0,
+    },
+    modalOverlay: {
+      position: 'fixed' as const,
+      inset: 0,
+      background: 'rgba(0,0,0,0.35)',
+      zIndex: 9998,
+    },
+    modal: {
+      position: 'fixed' as const,
+      top: '50%',
+      left: '50%',
+      transform: 'translate(-50%, -50%)',
+      zIndex: 9999,
+      background: t.bgCard,
+      border: `1px solid ${t.border}`,
+      borderRadius: 8,
+      padding: 16,
+      boxShadow: `0 8px 30px ${t.shadow}`,
+      width: 260,
+    },
+    nameInput: {
+      width: '100%',
+      height: 32,
+      fontSize: 12,
+      padding: '0 8px',
+      border: `1px solid ${t.border}`,
+      borderRadius: 4,
+      background: t.bgCard,
+      color: t.text,
+      outline: 'none',
+      boxSizing: 'border-box' as const,
+    },
+    visBtn: {
+      flex: 1,
+      padding: '6px 0',
+      fontSize: 11,
+      fontWeight: 500,
+      border: `1px solid ${t.border}`,
+      borderRadius: 4,
+      background: 'transparent',
+      color: t.textMuted,
+      cursor: 'pointer',
+    },
+    visBtnActive: {
+      flex: 1,
+      padding: '6px 0',
+      fontSize: 11,
+      fontWeight: 600,
+      border: `1px solid ${t.accent}`,
+      borderRadius: 4,
+      background: t.accentBg,
+      color: t.accent,
+      cursor: 'pointer',
+    },
+    modalCreateBtn: {
+      width: '100%',
+      marginTop: 12,
+      padding: '8px 0',
+      fontSize: 12,
+      fontWeight: 600,
+      border: `1px solid ${t.accent}`,
+      borderRadius: 6,
+      background: t.accent,
+      color: '#fff',
+      cursor: 'pointer',
     },
   };
 }
