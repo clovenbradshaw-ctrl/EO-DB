@@ -18,6 +18,7 @@ const _types = eoEventTypes();
 export const EO_EVENT_TYPE = _types.event;
 export const EO_SNAPSHOT_TYPE = _types.snapshot;
 export const EO_SNAPSHOT_STATE_TYPE = _types.snapshotState;
+export const EO_SNAPSHOT_CLAIM_TYPE = _types.snapshotClaim;
 export const EO_IMPORT_TYPE = _types.import;
 
 export const EO_SPACE_CONFIG_TYPE = 'com.eo-db.space.config';

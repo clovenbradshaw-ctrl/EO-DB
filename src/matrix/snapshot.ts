@@ -15,16 +15,23 @@ import { readLogSince } from '../db/log.js';
 import { processEvent } from '../db/fold.js';
 import type { Feed } from '../db/feed.js';
 import type { LocalKeyring } from '../db/crypto-types.js';
-import type { IMatrixClient, ImportMeta } from './types.js';
+import type { IMatrixClient, ImportMeta, SnapshotClaim } from './types.js';
 import type { DeltaSnapshot } from './types.js';
-import { EO_SNAPSHOT_TYPE, EO_SNAPSHOT_STATE_TYPE, EO_IMPORT_TYPE } from './event-bridge.js';
+import { EO_SNAPSHOT_TYPE, EO_SNAPSHOT_STATE_TYPE, EO_SNAPSHOT_CLAIM_TYPE, EO_IMPORT_TYPE } from './event-bridge.js';
 import { encryptSnapshot, decryptSnapshot } from '../crypto/snapshot-crypto.js';
 
 /** Maximum number of previous snapshot URIs carried in each snapshot. */
 const MAX_PREV_MXCS = 25;
 
-/** Auto-snapshot every 500 log entries. */
-export const SNAPSHOT_FREQUENCY = 500;
+/** Auto-snapshot every 256 log entries. */
+export const SNAPSHOT_FREQUENCY = 256;
+
+/** A pending snapshot claim older than this is considered stale and can be stolen by another device. */
+export const SNAPSHOT_CLAIM_TTL_MS = 5 * 60 * 1000;
+
+/** Jitter window before re-reading the claim to let a colliding peer's write land. */
+const SNAPSHOT_CLAIM_JITTER_MIN_MS = 300;
+const SNAPSHOT_CLAIM_JITTER_MAX_MS = 800;
 
 // ─── Meta key helpers (LevelDB) ────────────────────────────────────────────
 
@@ -63,6 +70,123 @@ export async function setSnapshotStateEvent(
     ts: new Date().toISOString(),
     ...(keyId ? { key_id: keyId } : {}),
   }, '');
+}
+
+// ─── Snapshot Claim Lease ──────────────────────────────────────────────────
+
+/** True if a pending claim is older than SNAPSHOT_CLAIM_TTL_MS. Terminal claims are never "stale". */
+export function isClaimStale(claim: SnapshotClaim, now: number = Date.now()): boolean {
+  if (claim.status !== 'pending') return false;
+  return now - claim.claimed_at > SNAPSHOT_CLAIM_TTL_MS;
+}
+
+/** Read the current snapshot-claim room state event, or null if unset. */
+export function readSnapshotClaim(
+  client: IMatrixClient,
+  roomId: string,
+): SnapshotClaim | null {
+  const room = client.getRoom(roomId);
+  if (!room) return null;
+  const stateEvent = room.currentState.getStateEvents(EO_SNAPSHOT_CLAIM_TYPE, '');
+  if (!stateEvent) return null;
+  const content = stateEvent.getContent() as Partial<SnapshotClaim>;
+  if (!content.device_id || typeof content.claimed_at !== 'number') return null;
+  return content as SnapshotClaim;
+}
+
+/** Write a snapshot-claim room state event (state_key = ''). */
+export async function writeSnapshotClaim(
+  client: IMatrixClient,
+  roomId: string,
+  claim: SnapshotClaim,
+): Promise<void> {
+  await client.sendStateEvent(roomId, EO_SNAPSHOT_CLAIM_TYPE, claim as any, '');
+}
+
+/** A claim is claimable by us when absent, terminal, stale, or already ours. */
+function isClaimableByUs(
+  existing: SnapshotClaim | null,
+  myDeviceId: string,
+  now: number = Date.now(),
+): boolean {
+  if (!existing) return true;
+  if (existing.status === 'success' || existing.status === 'failed') return true;
+  if (isClaimStale(existing, now)) return true;
+  return existing.device_id === myDeviceId;
+}
+
+async function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Attempt to acquire the snapshot-claim lease for this device.
+ *
+ * Read → check claimable → write pending → jitter → re-read → verify ownership.
+ * Returns true if we won the lease and should proceed with the upload.
+ */
+export async function tryClaimSnapshotLease(
+  client: IMatrixClient,
+  roomId: string,
+  targetSeq: number,
+  deviceId: string,
+  userId: string,
+): Promise<boolean> {
+  const existing = readSnapshotClaim(client, roomId);
+  if (!isClaimableByUs(existing, deviceId)) return false;
+
+  const claim: SnapshotClaim = {
+    device_id: deviceId,
+    user_id: userId,
+    claimed_at: Date.now(),
+    target_seq: targetSeq,
+    status: 'pending',
+  };
+  await writeSnapshotClaim(client, roomId, claim);
+
+  // Jitter so a colliding peer's write can land and Matrix can canonicalize order.
+  const jitter = SNAPSHOT_CLAIM_JITTER_MIN_MS +
+    Math.random() * (SNAPSHOT_CLAIM_JITTER_MAX_MS - SNAPSHOT_CLAIM_JITTER_MIN_MS);
+  await sleep(jitter);
+
+  const afterWrite = readSnapshotClaim(client, roomId);
+  if (!afterWrite) return true; // state not reflected yet — assume ours
+  return afterWrite.device_id === deviceId && afterWrite.status === 'pending';
+}
+
+/**
+ * Record the terminal result of a snapshot attempt — releases the lease.
+ * Only overwrites if we still hold the claim.
+ */
+export async function recordSnapshotClaimResult(
+  client: IMatrixClient,
+  roomId: string,
+  deviceId: string,
+  userId: string,
+  result: {
+    status: 'success' | 'failed';
+    target_seq: number;
+    completed_seq?: number;
+    completed_mxc?: string;
+    error?: string;
+  },
+): Promise<void> {
+  const current = readSnapshotClaim(client, roomId);
+  // Only record if we still own the claim (or it's already been stolen — don't clobber).
+  if (current && current.device_id !== deviceId) return;
+
+  const terminal: SnapshotClaim = {
+    device_id: deviceId,
+    user_id: userId,
+    claimed_at: current?.claimed_at ?? Date.now(),
+    target_seq: result.target_seq,
+    status: result.status,
+    completed_at: Date.now(),
+    ...(result.completed_seq !== undefined ? { completed_seq: result.completed_seq } : {}),
+    ...(result.completed_mxc !== undefined ? { completed_mxc: result.completed_mxc } : {}),
+    ...(result.error !== undefined ? { error: result.error } : {}),
+  };
+  await writeSnapshotClaim(client, roomId, terminal);
 }
 
 /**
@@ -141,13 +265,34 @@ export async function maybeCreateSnapshot(
   const lastSeq = await getCurrentSeq(db);
   const lastSnapshotSeq = (await getMeta<number>(db, 'meta:snapshot_seq')) || 0;
 
-  if (lastSeq - lastSnapshotSeq >= SNAPSHOT_FREQUENCY) {
+  if (lastSeq - lastSnapshotSeq < SNAPSHOT_FREQUENCY) return;
+
+  const deviceId = client.getDeviceId();
+  if (!deviceId) return;
+
+  const won = await tryClaimSnapshotLease(client, roomId, lastSeq, deviceId, myUserId);
+  if (!won) return; // another device is handling this snapshot cycle
+
+  try {
     const delta = await createDeltaSnapshot(db, myUserId);
     const mxc = await uploadDeltaSnapshot(client, roomId, delta, keyring);
     await setMeta(db, 'meta:snapshot_seq', lastSeq);
     await setMeta(db, 'meta:snapshot_mxc', mxc);
     const prevMxcs: string[] = (await getMeta<string[]>(db, 'meta:snapshot_prev_mxcs')) || [];
     await setMeta(db, 'meta:snapshot_prev_mxcs', [mxc, ...prevMxcs].slice(0, MAX_PREV_MXCS));
+    await recordSnapshotClaimResult(client, roomId, deviceId, myUserId, {
+      status: 'success',
+      target_seq: lastSeq,
+      completed_seq: lastSeq,
+      completed_mxc: mxc,
+    });
+  } catch (err) {
+    await recordSnapshotClaimResult(client, roomId, deviceId, myUserId, {
+      status: 'failed',
+      target_seq: lastSeq,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    throw err;
   }
 }
 

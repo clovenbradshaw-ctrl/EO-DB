@@ -14,7 +14,7 @@ import type { EoStore } from '../db/encrypted-store';
 import type { EoEvent } from '../db/types';
 import type { LocalKeyring } from '../db/crypto-types';
 import { processEvent } from '../db/fold';
-import { EO_SNAPSHOT_TYPE, EO_SNAPSHOT_STATE_TYPE } from './event-bridge';
+import { EO_SNAPSHOT_TYPE, EO_SNAPSHOT_STATE_TYPE, EO_SNAPSHOT_CLAIM_TYPE } from './event-bridge';
 import { readLogSince } from '../db/log';
 import { encryptSnapshot, decryptSnapshot } from '../crypto/snapshot-crypto';
 import { resolveSnapshotKeyId } from '../crypto/segment-keys';
@@ -128,10 +128,109 @@ export interface DeltaSnapshot {
 }
 
 /**
- * Auto-snapshot: create a delta every 500 log entries.
+ * Auto-snapshot: create a delta every 256 log entries.
  * Below this threshold the hydration state lives in room data only.
  */
-const SNAPSHOT_FREQUENCY = 500;
+const SNAPSHOT_FREQUENCY = 256;
+
+/** A pending claim older than this is considered stale and can be stolen by another device. */
+const SNAPSHOT_CLAIM_TTL_MS = 5 * 60 * 1000;
+const SNAPSHOT_CLAIM_JITTER_MIN_MS = 300;
+const SNAPSHOT_CLAIM_JITTER_MAX_MS = 800;
+
+/** Hand-raising lease stored as a Matrix room state event. One per room. */
+export interface SnapshotClaim {
+  device_id: string;
+  user_id: string;
+  claimed_at: number;
+  target_seq: number;
+  status: 'pending' | 'success' | 'failed';
+  completed_at?: number;
+  completed_seq?: number;
+  completed_mxc?: string;
+  error?: string;
+}
+
+function readSnapshotClaim(client: MatrixClient, roomId: string): SnapshotClaim | null {
+  const room = client.getRoom(roomId);
+  if (!room) return null;
+  const stateEvent = room.currentState.getStateEvents(EO_SNAPSHOT_CLAIM_TYPE, '');
+  if (!stateEvent) return null;
+  const content = stateEvent.getContent() as Partial<SnapshotClaim>;
+  if (!content.device_id || typeof content.claimed_at !== 'number') return null;
+  return content as SnapshotClaim;
+}
+
+function isClaimStale(claim: SnapshotClaim, now: number = Date.now()): boolean {
+  if (claim.status !== 'pending') return false;
+  return now - claim.claimed_at > SNAPSHOT_CLAIM_TTL_MS;
+}
+
+function isClaimableByUs(existing: SnapshotClaim | null, myDeviceId: string, now: number = Date.now()): boolean {
+  if (!existing) return true;
+  if (existing.status === 'success' || existing.status === 'failed') return true;
+  if (isClaimStale(existing, now)) return true;
+  return existing.device_id === myDeviceId;
+}
+
+async function tryClaimSnapshotLease(
+  client: MatrixClient,
+  roomId: string,
+  targetSeq: number,
+  deviceId: string,
+  userId: string,
+): Promise<boolean> {
+  const existing = readSnapshotClaim(client, roomId);
+  if (!isClaimableByUs(existing, deviceId)) return false;
+
+  const claim: SnapshotClaim = {
+    device_id: deviceId,
+    user_id: userId,
+    claimed_at: Date.now(),
+    target_seq: targetSeq,
+    status: 'pending',
+  };
+  await client.sendStateEvent(roomId, EO_SNAPSHOT_CLAIM_TYPE as any, claim as any, '');
+
+  // Jitter so a colliding peer's write can land and Matrix can canonicalize order.
+  const jitter = SNAPSHOT_CLAIM_JITTER_MIN_MS +
+    Math.random() * (SNAPSHOT_CLAIM_JITTER_MAX_MS - SNAPSHOT_CLAIM_JITTER_MIN_MS);
+  await new Promise<void>(resolve => setTimeout(resolve, jitter));
+
+  const afterWrite = readSnapshotClaim(client, roomId);
+  if (!afterWrite) return true;
+  return afterWrite.device_id === deviceId && afterWrite.status === 'pending';
+}
+
+async function recordSnapshotClaimResult(
+  client: MatrixClient,
+  roomId: string,
+  deviceId: string,
+  userId: string,
+  result: {
+    status: 'success' | 'failed';
+    target_seq: number;
+    completed_seq?: number;
+    completed_mxc?: string;
+    error?: string;
+  },
+): Promise<void> {
+  const current = readSnapshotClaim(client, roomId);
+  if (current && current.device_id !== deviceId) return;
+
+  const terminal: SnapshotClaim = {
+    device_id: deviceId,
+    user_id: userId,
+    claimed_at: current?.claimed_at ?? Date.now(),
+    target_seq: result.target_seq,
+    status: result.status,
+    completed_at: Date.now(),
+    ...(result.completed_seq !== undefined ? { completed_seq: result.completed_seq } : {}),
+    ...(result.completed_mxc !== undefined ? { completed_mxc: result.completed_mxc } : {}),
+    ...(result.error !== undefined ? { error: result.error } : {}),
+  };
+  await client.sendStateEvent(roomId, EO_SNAPSHOT_CLAIM_TYPE as any, terminal as any, '');
+}
 
 export async function maybeCreateSnapshot(
   client: MatrixClient,
@@ -143,12 +242,33 @@ export async function maybeCreateSnapshot(
   const lastSeq = await store.getCurrentSeq();
   const lastSnapshotSeq = (await store.get('meta:snapshot_seq')) || 0;
 
-  if (lastSeq - lastSnapshotSeq >= SNAPSHOT_FREQUENCY) {
+  if (lastSeq - lastSnapshotSeq < SNAPSHOT_FREQUENCY) return;
+
+  const deviceId = client.getDeviceId();
+  if (!deviceId) return;
+
+  const won = await tryClaimSnapshotLease(client, roomId, lastSeq, deviceId, myUserId);
+  if (!won) return; // another device is handling this snapshot cycle
+
+  try {
     const delta = await createDeltaSnapshot(store, myUserId);
     const mxc = await uploadDeltaSnapshot(client, roomId, delta, keyring);
     await store.put('meta:snapshot_seq', lastSeq);
     await store.put('meta:snapshot_mxc', mxc);
     await store.put('meta:snapshot_prev_mxcs', [mxc, ...delta.prev_mxcs].slice(0, MAX_PREV_MXCS));
+    await recordSnapshotClaimResult(client, roomId, deviceId, myUserId, {
+      status: 'success',
+      target_seq: lastSeq,
+      completed_seq: lastSeq,
+      completed_mxc: mxc,
+    });
+  } catch (err) {
+    await recordSnapshotClaimResult(client, roomId, deviceId, myUserId, {
+      status: 'failed',
+      target_seq: lastSeq,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    throw err;
   }
 }
 

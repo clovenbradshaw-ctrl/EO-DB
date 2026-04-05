@@ -13,6 +13,7 @@ const _types = eoEventTypes();
 export const EO_EVENT_TYPE = _types.event;
 export const EO_SNAPSHOT_TYPE = _types.snapshot;
 export const EO_SNAPSHOT_STATE_TYPE = _types.snapshotState;
+export const EO_SNAPSHOT_CLAIM_TYPE = _types.snapshotClaim;
 
 // --- Governance event types ---
 export const EO_SCHEMA_TYPE = 'com.eo-db.schema';

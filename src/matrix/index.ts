@@ -24,6 +24,7 @@ export type {
   DeltaSnapshot,
   ImportMeta,
   RoomDataSnapshot,
+  SnapshotClaim,
 } from './types.js';
 
 export {
@@ -37,6 +38,7 @@ export {
   EO_EVENT_TYPE,
   EO_SNAPSHOT_TYPE,
   EO_SNAPSHOT_STATE_TYPE,
+  EO_SNAPSHOT_CLAIM_TYPE,
   EO_IMPORT_TYPE,
   EO_SPACE_CONFIG_TYPE,
   EO_SCHEMA_MANIFEST_TYPE,
@@ -50,9 +52,15 @@ export {
 // Snapshot
 export {
   SNAPSHOT_FREQUENCY,
+  SNAPSHOT_CLAIM_TTL_MS,
   IMPORT_CHUNK_SIZE,
   setSnapshotStateEvent,
   findLatestSnapshot,
+  isClaimStale,
+  readSnapshotClaim,
+  writeSnapshotClaim,
+  tryClaimSnapshotLease,
+  recordSnapshotClaimResult,
   maybeCreateSnapshot,
   createDeltaSnapshot,
   uploadDeltaSnapshot,

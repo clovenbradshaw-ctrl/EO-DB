@@ -23,8 +23,17 @@ import type {
   DeltaSnapshot,
   SpaceConfig,
 } from '../src/matrix/types.js';
-import { sendEoEvent, matrixEventToEo, EO_EVENT_TYPE, EO_SPACE_CONFIG_TYPE } from '../src/matrix/event-bridge.js';
-import { createDeltaSnapshot, SNAPSHOT_FREQUENCY } from '../src/matrix/snapshot.js';
+import { sendEoEvent, matrixEventToEo, EO_EVENT_TYPE, EO_SPACE_CONFIG_TYPE, EO_SNAPSHOT_CLAIM_TYPE } from '../src/matrix/event-bridge.js';
+import {
+  createDeltaSnapshot,
+  SNAPSHOT_FREQUENCY,
+  SNAPSHOT_CLAIM_TTL_MS,
+  isClaimStale,
+  readSnapshotClaim,
+  tryClaimSnapshotLease,
+  recordSnapshotClaimResult,
+} from '../src/matrix/snapshot.js';
+import type { SnapshotClaim } from '../src/matrix/types.js';
 import { SyncManager } from '../src/matrix/sync-manager.js';
 import { PeerSync } from '../src/matrix/peer-sync.js';
 import { discoverSpacesFromMatrix } from '../src/matrix/space-discovery.js';
@@ -145,6 +154,20 @@ function createMockClient(opts?: MockClientOpts): IMatrixClient & { _sent: any[]
     },
     sendStateEvent: async (roomId, eventType, content, _stateKey) => {
       sent.push({ roomId, type: eventType, content, stateKey: _stateKey });
+      // Reflect the write into room state so subsequent reads see it.
+      const room = rooms.find(r => r.roomId === roomId);
+      if (room) {
+        const stateMap = room.currentState.events as Map<string, Map<string, IMatrixEvent>>;
+        if (stateMap instanceof Map) {
+          let typeMap = stateMap.get(eventType);
+          if (!typeMap) { typeMap = new Map(); stateMap.set(eventType, typeMap); }
+          typeMap.set(_stateKey, createMockMatrixEvent(content, {
+            type: eventType,
+            stateKey: _stateKey,
+            eventId: `$state_${sent.length}`,
+          }));
+        }
+      }
       return { event_id: `$state_${sent.length}` };
     },
     sendToDevice: async (eventType, contentMap) => {
@@ -292,8 +315,189 @@ describe('Delta Snapshot', () => {
     expect(delta.prev_mxcs).toEqual(prevMxcs);
   });
 
-  it('snapshot frequency constant is 500', () => {
-    expect(SNAPSHOT_FREQUENCY).toBe(500);
+  it('snapshot frequency constant is 256', () => {
+    expect(SNAPSHOT_FREQUENCY).toBe(256);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Snapshot Claim Lease
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('Snapshot Claim Lease', () => {
+  const MY_DEVICE = 'DEVICE_A';
+  const MY_USER = '@alice:example.com';
+  const OTHER_DEVICE = 'DEVICE_B';
+  const OTHER_USER = '@bob:example.com';
+
+  function claimStateMap(claim: SnapshotClaim | null): Map<string, Map<string, IMatrixEvent>> {
+    const map = new Map<string, Map<string, IMatrixEvent>>();
+    if (claim) {
+      const inner = new Map<string, IMatrixEvent>();
+      inner.set('', createMockMatrixEvent(claim as any, {
+        type: EO_SNAPSHOT_CLAIM_TYPE,
+        stateKey: '',
+      }));
+      map.set(EO_SNAPSHOT_CLAIM_TYPE, inner);
+    }
+    return map;
+  }
+
+  it('isClaimStale returns false for terminal claims regardless of age', () => {
+    const old: SnapshotClaim = {
+      device_id: OTHER_DEVICE,
+      user_id: OTHER_USER,
+      claimed_at: Date.now() - 10 * 60 * 1000,
+      target_seq: 100,
+      status: 'success',
+    };
+    expect(isClaimStale(old)).toBe(false);
+  });
+
+  it('isClaimStale returns true for pending claim older than TTL', () => {
+    const stale: SnapshotClaim = {
+      device_id: OTHER_DEVICE,
+      user_id: OTHER_USER,
+      claimed_at: Date.now() - (SNAPSHOT_CLAIM_TTL_MS + 1000),
+      target_seq: 100,
+      status: 'pending',
+    };
+    expect(isClaimStale(stale)).toBe(true);
+  });
+
+  it('isClaimStale returns false for fresh pending claim', () => {
+    const fresh: SnapshotClaim = {
+      device_id: OTHER_DEVICE,
+      user_id: OTHER_USER,
+      claimed_at: Date.now() - 30_000,
+      target_seq: 100,
+      status: 'pending',
+    };
+    expect(isClaimStale(fresh)).toBe(false);
+  });
+
+  it('tryClaimSnapshotLease wins on empty room', async () => {
+    const room = createMockRoom({ stateEvents: claimStateMap(null) });
+    const client = createMockClient({ rooms: [room], deviceId: MY_DEVICE, userId: MY_USER });
+    const won = await tryClaimSnapshotLease(client, ROOM_ID, 500, MY_DEVICE, MY_USER);
+    expect(won).toBe(true);
+    // pending claim written with our device_id
+    const stateWrite = client._sent.find((e: any) => e.type === EO_SNAPSHOT_CLAIM_TYPE);
+    expect(stateWrite).toBeTruthy();
+    expect(stateWrite.content.device_id).toBe(MY_DEVICE);
+    expect(stateWrite.content.status).toBe('pending');
+    expect(stateWrite.content.target_seq).toBe(500);
+    expect(stateWrite.stateKey).toBe('');
+  });
+
+  it('tryClaimSnapshotLease bails on fresh peer pending claim', async () => {
+    const peerClaim: SnapshotClaim = {
+      device_id: OTHER_DEVICE,
+      user_id: OTHER_USER,
+      claimed_at: Date.now() - 30_000,
+      target_seq: 500,
+      status: 'pending',
+    };
+    const room = createMockRoom({ stateEvents: claimStateMap(peerClaim) });
+    const client = createMockClient({ rooms: [room], deviceId: MY_DEVICE, userId: MY_USER });
+    const won = await tryClaimSnapshotLease(client, ROOM_ID, 500, MY_DEVICE, MY_USER);
+    expect(won).toBe(false);
+    // no claim write performed
+    expect(client._sent.filter((e: any) => e.type === EO_SNAPSHOT_CLAIM_TYPE)).toHaveLength(0);
+  });
+
+  it('tryClaimSnapshotLease steals stale peer pending claim', async () => {
+    const stale: SnapshotClaim = {
+      device_id: OTHER_DEVICE,
+      user_id: OTHER_USER,
+      claimed_at: Date.now() - (SNAPSHOT_CLAIM_TTL_MS + 60_000),
+      target_seq: 400,
+      status: 'pending',
+    };
+    const room = createMockRoom({ stateEvents: claimStateMap(stale) });
+    const client = createMockClient({ rooms: [room], deviceId: MY_DEVICE, userId: MY_USER });
+    const won = await tryClaimSnapshotLease(client, ROOM_ID, 500, MY_DEVICE, MY_USER);
+    expect(won).toBe(true);
+  });
+
+  it('tryClaimSnapshotLease claims when peer terminal success', async () => {
+    const done: SnapshotClaim = {
+      device_id: OTHER_DEVICE,
+      user_id: OTHER_USER,
+      claimed_at: Date.now() - 10_000,
+      target_seq: 400,
+      status: 'success',
+      completed_at: Date.now() - 5_000,
+      completed_seq: 400,
+      completed_mxc: 'mxc://example.com/prev',
+    };
+    const room = createMockRoom({ stateEvents: claimStateMap(done) });
+    const client = createMockClient({ rooms: [room], deviceId: MY_DEVICE, userId: MY_USER });
+    const won = await tryClaimSnapshotLease(client, ROOM_ID, 700, MY_DEVICE, MY_USER);
+    expect(won).toBe(true);
+  });
+
+  it('recordSnapshotClaimResult writes terminal success state', async () => {
+    const mine: SnapshotClaim = {
+      device_id: MY_DEVICE,
+      user_id: MY_USER,
+      claimed_at: Date.now() - 1_000,
+      target_seq: 500,
+      status: 'pending',
+    };
+    const room = createMockRoom({ stateEvents: claimStateMap(mine) });
+    const client = createMockClient({ rooms: [room], deviceId: MY_DEVICE, userId: MY_USER });
+    await recordSnapshotClaimResult(client, ROOM_ID, MY_DEVICE, MY_USER, {
+      status: 'success',
+      target_seq: 500,
+      completed_seq: 500,
+      completed_mxc: 'mxc://example.com/new',
+    });
+    const write = client._sent.find((e: any) => e.type === EO_SNAPSHOT_CLAIM_TYPE);
+    expect(write).toBeTruthy();
+    expect(write.content.status).toBe('success');
+    expect(write.content.completed_mxc).toBe('mxc://example.com/new');
+    expect(write.content.completed_seq).toBe(500);
+    expect(write.content.device_id).toBe(MY_DEVICE);
+  });
+
+  it('recordSnapshotClaimResult does not clobber a stolen claim', async () => {
+    const stolen: SnapshotClaim = {
+      device_id: OTHER_DEVICE,
+      user_id: OTHER_USER,
+      claimed_at: Date.now() - 1_000,
+      target_seq: 500,
+      status: 'pending',
+    };
+    const room = createMockRoom({ stateEvents: claimStateMap(stolen) });
+    const client = createMockClient({ rooms: [room], deviceId: MY_DEVICE, userId: MY_USER });
+    await recordSnapshotClaimResult(client, ROOM_ID, MY_DEVICE, MY_USER, {
+      status: 'success',
+      target_seq: 500,
+      completed_seq: 500,
+      completed_mxc: 'mxc://example.com/new',
+    });
+    expect(client._sent.filter((e: any) => e.type === EO_SNAPSHOT_CLAIM_TYPE)).toHaveLength(0);
+  });
+
+  it('readSnapshotClaim returns null when unset', () => {
+    const room = createMockRoom({ stateEvents: claimStateMap(null) });
+    const client = createMockClient({ rooms: [room], deviceId: MY_DEVICE, userId: MY_USER });
+    expect(readSnapshotClaim(client, ROOM_ID)).toBeNull();
+  });
+
+  it('readSnapshotClaim returns the current claim', () => {
+    const peer: SnapshotClaim = {
+      device_id: OTHER_DEVICE,
+      user_id: OTHER_USER,
+      claimed_at: 1234567890,
+      target_seq: 100,
+      status: 'pending',
+    };
+    const room = createMockRoom({ stateEvents: claimStateMap(peer) });
+    const client = createMockClient({ rooms: [room], deviceId: MY_DEVICE, userId: MY_USER });
+    const got = readSnapshotClaim(client, ROOM_ID);
+    expect(got).toEqual(peer);
   });
 });
 

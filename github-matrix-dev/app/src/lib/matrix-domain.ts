@@ -29,6 +29,8 @@ export function eoEventTypes(prefix?: string) {
     snapshot: `${p}.snapshot`,
     /** Room state event: stores the latest snapshot URI for fast hydration. */
     snapshotState: `${p}.snapshot_state`,
+    /** Room state event: hand-raising lease so one device at a time creates a snapshot. */
+    snapshotClaim: `${p}.snapshot.claim`,
   } as const;
 }
 
