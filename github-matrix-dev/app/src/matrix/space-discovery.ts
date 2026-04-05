@@ -29,6 +29,8 @@ export interface SpaceEntry {
   ownerDisplayName: string;
   /** Number of joined members */
   memberCount: number;
+  /** Whether the current user is joined to this space (false for discovered public spaces). */
+  joined?: boolean;
 }
 
 /**
@@ -106,9 +108,70 @@ export function discoverSpacesFromMatrix(client: MatrixClient): SpaceEntry[] {
       ownerUserId,
       ownerDisplayName: userIdToName(ownerUserId),
       memberCount,
+      joined: true,
     });
   }
 
   // Sort by last activity (most recent first)
   return Array.from(spaceMap.values()).sort((a, b) => b.lastActivity - a.lastActivity);
+}
+
+/**
+ * Discover EO-DB spaces from the homeserver's public room directory.
+ *
+ * Queries `client.publicRooms()` and attempts to read the EO-DB space config
+ * state event for each. Rooms without a valid EO-DB space config (or not
+ * peekable) are skipped. Returns entries for spaces the user has NOT joined.
+ */
+export async function discoverPublicSpaces(client: MatrixClient): Promise<SpaceEntry[]> {
+  const myUserId = client.getUserId();
+  const joinedRoomIds = new Set<string>(
+    client.getRooms()
+      .filter((r) => {
+        const m = r.getMyMembership?.();
+        return m === 'join' || m === 'invite';
+      })
+      .map((r) => r.roomId),
+  );
+
+  let response: any;
+  try {
+    response = await (client as any).publicRooms({ limit: 200 });
+  } catch (e: any) {
+    console.warn('[EO-DB] discoverPublicSpaces: publicRooms failed:', e.message || e);
+    return [];
+  }
+
+  const chunk: any[] = response?.chunk ?? [];
+  const out: SpaceEntry[] = [];
+
+  for (const room of chunk) {
+    const roomId = room.room_id;
+    if (!roomId || joinedRoomIds.has(roomId)) continue;
+
+    // Try to peek at the space config state event
+    let config: SpaceConfig | null = null;
+    try {
+      config = (await (client as any).getStateEvent(roomId, EO_SPACE_CONFIG_TYPE, '')) as SpaceConfig;
+    } catch {
+      continue; // not peekable or not an EO-DB space
+    }
+    if (!config?.name || !config?.rooms?.main) continue;
+
+    const spaceTarget = `space_${config.name.toLowerCase().replace(/\s+/g, '_')}`;
+
+    out.push({
+      spaceTarget,
+      displayName: config.name,
+      mainRoomId: config.rooms.main,
+      createdAt: 0,
+      lastActivity: 0,
+      ownerUserId: '',
+      ownerDisplayName: room.canonical_alias || userIdToName(myUserId || ''),
+      memberCount: room.num_joined_members || 0,
+      joined: false,
+    });
+  }
+
+  return out;
 }
