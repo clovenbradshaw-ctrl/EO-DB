@@ -214,15 +214,17 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   const getState = useEoStore((s) => s.getState);
   const _browserOnline = useConnectionState(); // triggers re-render on network change
   const syncManager = useEoStore((s) => s.syncManager);
+  const filenSync = useEoStore((s) => s.filenSync);
   const [syncToastStatus, syncToastSeq, onSyncStatus] = useSyncToast();
   const [matrixReady, setMatrixReady] = useState(false);
-  // Show actual sync status: "online" only when Matrix sync is connected.
-  // When Matrix is disabled, show "local" (data works, just no remote sync).
+  // Show actual sync status. Filen is the primary data store when connected —
+  // Matrix SyncManager is intentionally skipped in that case (see setupSpaceStore),
+  // so treat an active Filen sync as "online" too.
   const connectionState: ConnectionState = !navigator.onLine
     ? 'offline'
     : (!MATRIX_ENABLED || localMode)
       ? 'local'
-      : syncManager
+      : (syncManager || filenSync)
         ? 'online'
         : matrixReady
           ? 'syncing'
