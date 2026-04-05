@@ -976,7 +976,7 @@ function SortableColumnHeader({
           width: 5,
           height: '100%',
           cursor: 'col-resize',
-          background: isResizing ? theme.accent : 'transparent',
+          background: isResizing ? theme.accent : theme.border,
           zIndex: 3,
         }}
         onMouseDown={(e) => {
@@ -985,10 +985,10 @@ function SortableColumnHeader({
           onResizeStart(e.clientX);
         }}
         onMouseEnter={(e) => {
-          if (!isResizing) (e.currentTarget as HTMLElement).style.background = theme.border;
+          if (!isResizing) (e.currentTarget as HTMLElement).style.background = theme.borderDivider;
         }}
         onMouseLeave={(e) => {
-          if (!isResizing) (e.currentTarget as HTMLElement).style.background = 'transparent';
+          if (!isResizing) (e.currentTarget as HTMLElement).style.background = theme.border;
         }}
       />
     </th>
@@ -1101,6 +1101,7 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       padding: '10px 8px 10px 0',
       paddingLeft: 20,
       borderBottom: `1px solid ${t.border}`,
+      borderRight: `1px solid ${t.borderLight}`,
       verticalAlign: 'middle' as const,
       maxWidth: 300,
       overflow: 'hidden',
