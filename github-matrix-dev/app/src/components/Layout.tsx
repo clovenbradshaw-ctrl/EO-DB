@@ -1364,6 +1364,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             <ViewsBrowser
               scope={selectedScope}
               recordCount={scopedRecords.length}
+              userId={session.userId}
               onBack={() => setShowViewsBrowser(false)}
               onSelectView={(view) => {
                 if (view.id) {
