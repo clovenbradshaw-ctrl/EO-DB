@@ -1039,7 +1039,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                 // Matrix sync disabled — events fold locally, Filen handles sync
 
                 // Cache it so setupSpaceStore reuses it instead of re-opening
-                spaceCacheRef.current.set(spaceTarget, { store: spaceStore, syncManager: null, filenSync: null, mainRoomId });
+                spaceCacheRef.current.set(spaceTarget, { store: spaceStore, syncManager: null, filenSync: null, mainRoomId, presence: null });
 
                 // Now dispatch is safe — store is initialized (and sync will send to Matrix)
                 const dispatch = useEoStore.getState().dispatch;
