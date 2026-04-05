@@ -63,34 +63,140 @@ function formatScopeName(scope: string): string {
   return name || last;
 }
 
+// Absence — the field was never asserted. Render very quietly so the eye
+// skips over it; grid lines already confirm the cell exists.
+function AbsentCell({ t }: { t: Theme }) {
+  return (
+    <span
+      aria-label="empty"
+      style={{ color: t.textMuted, opacity: 0.25, fontSize: '0.85em', userSelect: 'none' }}
+    >
+      {'\u2014'}
+    </span>
+  );
+}
+
+// Intentionally-cleared — an explicit NULL assertion. Distinct from absence:
+// someone deliberately cleared this field. Uses the Unicode "symbol for null"
+// (U+2400) so it reads as a deliberate mark, not just empty text.
+function ClearedCell({ t }: { t: Theme }) {
+  return (
+    <span
+      aria-label="cleared"
+      title="Intentionally cleared"
+      style={{
+        color: t.textMuted,
+        opacity: 0.5,
+        fontFamily: "'JetBrains Mono', monospace",
+        fontSize: '0.9em',
+        userSelect: 'none',
+      }}
+    >
+      {'\u2400'}
+    </span>
+  );
+}
+
+// Back-compat shim
+function NullCell({ t }: { t: Theme }) {
+  return <AbsentCell t={t} />;
+}
+
+function humanizeLabel(s: string): string {
+  return s
+    .split(/[_-]/)
+    .filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(' ');
+}
+
+function getStatusPillStyle(value: string, t: Theme): { bg: string; color: string; border: string } {
+  const known: Record<string, { bg: string; color: string; border: string }> = {
+    active: t.statusActive,
+    archived: t.statusArchived,
+    pending: t.statusPending,
+  };
+  if (known[value]) return known[value];
+  const v = value.toLowerCase();
+  if (/review|conflict|warn|flag/.test(v)) return { bg: t.warningBg, color: t.warningText, border: t.warningBorder };
+  if (/error|fail|denied|blocked|reject/.test(v)) return { bg: t.dangerBg, color: t.dangerText, border: t.dangerBorder };
+  if (/closed|done|complete|resolved|archiv/.test(v)) return t.statusArchived;
+  if (/upcoming|scheduled|planned|briefing|prep|draft/.test(v)) return { bg: t.purpleBg, color: t.purple, border: t.purpleBorder };
+  return { bg: t.bgMuted, color: t.textSecondary, border: t.border };
+}
+
+function StatusPill({ value, t }: { value: string; t: Theme }) {
+  const sc = getStatusPillStyle(value, t);
+  return (
+    <span style={{
+      display: 'inline-block',
+      padding: '2px 10px',
+      borderRadius: 9999,
+      fontSize: 11,
+      fontWeight: 500,
+      lineHeight: 1.4,
+      background: sc.bg,
+      color: sc.color,
+      border: `1px solid ${sc.border}`,
+      whiteSpace: 'nowrap',
+    }}>
+      {humanizeLabel(value)}
+    </span>
+  );
+}
+
+function IdChip({ value, t }: { value: string; t: Theme }) {
+  return (
+    <span style={{
+      display: 'inline-block',
+      padding: '1px 6px',
+      borderRadius: 4,
+      fontSize: 11,
+      fontFamily: "'JetBrains Mono', monospace",
+      background: t.bgMuted,
+      color: t.textSecondary,
+      border: `1px solid ${t.borderLight}`,
+      marginRight: 4,
+      whiteSpace: 'nowrap',
+    }}>
+      {value}
+    </span>
+  );
+}
+
+function isCurrencyKey(key: string): boolean {
+  return /^(amount|price|cost|fee|total|subtotal|balance|rate|value)(_|$)/i.test(key)
+    || /^(amount|price|cost|fee|total|subtotal|balance|rate)$/i.test(key);
+}
+
+function isIdArrayValue(value: any): value is string[] {
+  return Array.isArray(value)
+    && value.length > 0
+    && value.every((v) => typeof v === 'string' && /^[A-Z]{2,5}-\d+$/.test(v));
+}
+
+function formatCurrency(n: number): string {
+  return n.toLocaleString('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}
+
 function renderCell(value: any, key: string, onNavigate: (t: string) => void, t: Theme): React.ReactNode {
-  if (value == null || value === '') {
-    return <span style={{ color: t.textMuted, fontStyle: 'italic' }}>{'\u2014'}</span>;
+  // Intentional clear: an explicit null assertion gets the NUL glyph.
+  if (value === null) {
+    return <ClearedCell t={t} />;
+  }
+  // Absence: undefined or empty string — never asserted. Show a faint em-dash.
+  if (value === undefined || value === '') {
+    return <AbsentCell t={t} />;
   }
 
-  // Status pill
+  // Status pill — universal for any string value on the status column
   if (key === 'status' && typeof value === 'string') {
-    const statusMap: Record<string, { bg: string; color: string; border: string }> = {
-      active: t.statusActive,
-      archived: t.statusArchived,
-      pending: t.statusPending,
-    };
-    const sc = statusMap[value];
-    if (sc) {
-      return (
-        <span style={{
-          padding: '2px 10px',
-          borderRadius: 12,
-          fontSize: 11,
-          fontWeight: 500,
-          background: sc.bg,
-          color: sc.color,
-          border: `1px solid ${sc.border}`,
-        }}>
-          {value}
-        </span>
-      );
-    }
+    return <StatusPill value={value} t={t} />;
   }
 
   // Linked objects (CON)
@@ -112,6 +218,30 @@ function renderCell(value: any, key: string, onNavigate: (t: string) => void, t:
     );
   }
 
+  // Arrays of ID-shaped strings (e.g. ["ATT-005", "ATT-003"]) — render as chips
+  if (isIdArrayValue(value)) {
+    return (
+      <span>
+        {value.map((id) => <IdChip key={id} value={id} t={t} />)}
+      </span>
+    );
+  }
+
+  // Single ID-shaped string (e.g. "ATT-006") — render as chip for consistency
+  if (typeof value === 'string' && /^[A-Z]{2,5}-\d+$/.test(value)) {
+    return <IdChip value={value} t={t} />;
+  }
+
+  // Other arrays: comma-joined primitives
+  if (Array.isArray(value)) {
+    if (value.every((v) => v == null || typeof v !== 'object')) {
+      return <span>{value.filter((v) => v != null).join(', ') || <NullCell t={t} />}</span>;
+    }
+    const json = JSON.stringify(value);
+    const display = json.length > 50 ? json.slice(0, 47) + '...' : json;
+    return <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: t.textSecondary }}>{display}</span>;
+  }
+
   // Other objects
   if (typeof value === 'object' && value !== null) {
     const json = JSON.stringify(value);
@@ -122,6 +252,35 @@ function renderCell(value: any, key: string, onNavigate: (t: string) => void, t:
   // Boolean
   if (typeof value === 'boolean') {
     return <span>{value ? 'Yes' : 'No'}</span>;
+  }
+
+  // Currency-shaped numeric keys
+  if (isCurrencyKey(key)) {
+    const n = typeof value === 'number' ? value : parseFloat(String(value));
+    if (!Number.isNaN(n)) {
+      return (
+        <span style={{
+          display: 'block',
+          textAlign: 'right',
+          fontVariantNumeric: 'tabular-nums',
+        }}>
+          {formatCurrency(n)}
+        </span>
+      );
+    }
+  }
+
+  // Plain numbers — right-align with tabular numerals and thousands separators
+  if (typeof value === 'number') {
+    return (
+      <span style={{
+        display: 'block',
+        textAlign: 'right',
+        fontVariantNumeric: 'tabular-nums',
+      }}>
+        {value.toLocaleString('en-US')}
+      </span>
+    );
   }
 
   return <span>{String(value)}</span>;
@@ -818,7 +977,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                             ? <span style={{
                                 fontFamily: "'JetBrains Mono', monospace", fontSize: 11,
                                 color: theme.textSecondary,
-                              }}>{rec.last_ts ? formatRelativeTime(rec.last_ts) : '\u2014'}</span>
+                              }}>{rec.last_ts ? formatRelativeTime(rec.last_ts) : <AbsentCell t={theme} />}</span>
                             : isLocked
                             ? <LockedCell>{renderCell(getFieldValue(rec, col.key, useFieldsSub), col.key, onSelectRecord, theme)}</LockedCell>
                             : renderCell(getFieldValue(rec, col.key, useFieldsSub), col.key, onSelectRecord, theme)
@@ -1095,8 +1254,7 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
     td: {
       padding: '10px 8px 10px 0',
       paddingLeft: 20,
-      borderBottom: `1px solid ${t.border}`,
-      borderRight: `1px solid ${t.borderLight}`,
+      borderBottom: `1px solid ${t.borderLight}`,
       verticalAlign: 'middle' as const,
       maxWidth: 300,
       overflow: 'hidden',
