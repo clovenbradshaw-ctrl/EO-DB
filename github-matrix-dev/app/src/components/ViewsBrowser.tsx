@@ -2,55 +2,51 @@ import { useEffect, useState, useMemo, useRef } from 'react';
 import { useEoStore } from '../store/eo-store';
 import { useViewStore } from '../store/view-store';
 import { VIEW_TYPE_META, type SavedView, type ViewType } from './view-types';
-import { buildTree, formatName, type TreeNode } from './scope-picker-utils';
+import { formatName } from './scope-picker-utils';
 import { useTheme, type Theme } from '../theme';
 
 interface ViewsBrowserProps {
+  /** Current scope (object path). If null, the panel shows a "select an object" state. */
+  scope: string | null;
+  /** Number of records under the current scope (shown in the pinned chip). */
+  recordCount: number;
   onBack: () => void;
   onSelectView: (view: SavedView) => void;
 }
 
-export function ViewsBrowser({ onBack, onSelectView }: ViewsBrowserProps) {
-  const [filter, setFilter] = useState<'recent' | 'all' | 'shared'>('all');
-  const [newViewNonce, setNewViewNonce] = useState(0);
+export function ViewsBrowser({ scope, recordCount, onBack, onSelectView }: ViewsBrowserProps) {
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
   const ready = useEoStore((s) => s.ready);
   const lastSeq = useEoStore((s) => s.lastSeq);
   const registerSavedViews = useViewStore((s) => s.registerSavedViews);
   const savedViews = useViewStore((s) => s.savedViews);
+  const sig = useViewStore((s) => (scope ? s.getSig(scope) : null));
   const { theme } = useTheme();
   const s = makeStyles(theme);
 
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(true);
-  const [tables, setTables] = useState<TreeNode[]>([]);
   const hasLoadedOnce = useRef(false);
 
-  // Load tables and saved views
+  // Load saved views for the current scope only
   useEffect(() => {
-    if (!ready) return;
+    if (!ready || !scope) {
+      setLoading(false);
+      return;
+    }
     if (!hasLoadedOnce.current) setLoading(true);
 
-    getStateByPrefix('').then((states) => {
-      // Build tree to discover tables
-      const tree = buildTree(states, '');
-      setTables(tree);
-
-      // Auto-expand all tables on first load
-      if (!hasLoadedOnce.current) {
-        setExpanded(new Set(tree.map((n) => n.fullPath)));
-      }
-
-      // Extract saved views
-      const viewStates = states.filter(
-        (st) => st.target.includes('._views.') && st.value?.name && !st.value?._deleted,
-      );
-      const views: SavedView[] = viewStates.map((st) => {
-        const parts = st.target.split('._views.');
-        const scope = parts[0];
-        const viewId = parts[1];
-        return {
-          id: viewId,
+    getStateByPrefix(`${scope}._views.`).then((states) => {
+      const viewDepth = scope.split('.').length + 2; // scope._views.viewId
+      const views: SavedView[] = states
+        .filter(
+          (st) =>
+            st.target.split('.').length === viewDepth &&
+            st.value?.name &&
+            !st.value?._deleted,
+        )
+        .map((st) => ({
+          id: st.target.split('.').pop()!,
           name: st.value.name,
           scope,
           viewType: st.value.viewType || 'grid',
@@ -68,68 +64,40 @@ export function ViewsBrowser({ onBack, onSelectView }: ViewsBrowserProps) {
           createdAt: st.value.createdAt || st.last_ts,
           updatedAt: st.value.updatedAt || st.last_ts,
           roomId: st.value.roomId,
-        };
-      });
+        }));
       if (views.length > 0) {
         registerSavedViews(views);
       }
       hasLoadedOnce.current = true;
       setLoading(false);
     });
-  }, [ready, lastSeq, getStateByPrefix, registerSavedViews]);
+  }, [ready, lastSeq, getStateByPrefix, scope, registerSavedViews]);
 
-  // Apply filter to saved views
-  const filteredViews = useMemo(() => {
-    const all = Object.values(savedViews);
-    switch (filter) {
-      case 'shared':
-        return all.filter((v) => v.visibility === 'shared');
-      case 'recent':
-        // TODO: proper recency tracking; for now, sort by updatedAt desc
-        return [...all].sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''));
-      case 'all':
-      default:
-        return all;
-    }
-  }, [savedViews, filter]);
-
-  // Group filtered views by scope
-  const viewsByScope = useMemo(() => {
-    const map = new Map<string, SavedView[]>();
-    for (const view of filteredViews) {
-      const list = map.get(view.scope);
-      if (list) list.push(view);
-      else map.set(view.scope, [view]);
-    }
-    // Sort each group by name
-    for (const list of map.values()) {
-      list.sort((a, b) => a.name.localeCompare(b.name));
-    }
-    return map;
-  }, [filteredViews]);
-
-  // Respond to "+ New View" signal: expand all tables so user can pick a scope to create under.
+  // Reset loaded flag when scope changes
   useEffect(() => {
-    if (newViewNonce > 0 && tables.length > 0) {
-      setExpanded(new Set(tables.map((n) => n.fullPath)));
-    }
-  }, [newViewNonce, tables]);
+    hasLoadedOnce.current = false;
+  }, [scope]);
 
-  function toggleTable(fullPath: string) {
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      if (next.has(fullPath)) next.delete(fullPath);
-      else next.add(fullPath);
-      return next;
-    });
-  }
+  // Views belonging to the current scope, filtered by search query
+  const { personalViews, collaborativeViews } = useMemo(() => {
+    if (!scope) return { personalViews: [], collaborativeViews: [] };
+    const q = query.trim().toLowerCase();
+    const all = Object.values(savedViews).filter(
+      (v) => v.scope === scope && (!q || v.name.toLowerCase().includes(q)),
+    );
+    all.sort((a, b) => a.name.localeCompare(b.name));
+    return {
+      personalViews: all.filter((v) => v.visibility === 'private'),
+      collaborativeViews: all.filter((v) => v.visibility === 'shared'),
+    };
+  }, [savedViews, scope, query]);
 
-  // Create a synthetic "default grid view" SavedView for a scope
-  function makeDefaultView(scope: string): SavedView {
+  // Synthetic default grid view (always shown under personal)
+  function makeDefaultView(s: string): SavedView {
     return {
       id: '',
       name: 'Grid view',
-      scope,
+      scope: s,
       viewType: 'grid',
       config: {
         columnOrder: [],
@@ -147,101 +115,109 @@ export function ViewsBrowser({ onBack, onSelectView }: ViewsBrowserProps) {
     };
   }
 
+  const defaultMatches = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return !q || 'grid view'.includes(q);
+  }, [query]);
+
+  const scopeLabel = scope ? formatName(scope.split('.').pop() || scope) : '';
+  const activeViewId = sig?.activeViewId ?? null;
+  const defaultIsActive = scope != null && activeViewId == null;
+
+  function renderViewRow(view: SavedView, isActive: boolean) {
+    const vtMeta = VIEW_TYPE_META[(view.viewType || 'grid') as ViewType];
+    const isPrivate = view.visibility === 'private';
+    return (
+      <div
+        key={view.id || '__default__'}
+        style={{ ...s.viewItem, ...(isActive ? s.viewItemActive : {}) }}
+        onClick={() => onSelectView(view)}
+      >
+        <span style={{ ...s.viewIcon, ...(isActive ? { color: theme.accent } : {}) }}>
+          {isPrivate ? '\uD83D\uDD12' : vtMeta.icon}
+        </span>
+        <span style={s.viewName}>{view.name}</span>
+        <span style={s.viewBadge}>
+          {isPrivate ? 'private' : vtMeta.label.toLowerCase()}
+        </span>
+      </div>
+    );
+  }
+
   return (
     <div style={s.container}>
+      {/* Header: back arrow + title */}
       <div style={s.header}>
-        <button onClick={onBack} style={s.backBtn}>{'\u2190'} Back</button>
-        <span style={s.title}>Tables</span>
-        <button
-          onClick={() => setNewViewNonce((n) => n + 1)}
-          style={s.newBtn}
-          title="Create new view"
-        >+ New</button>
-      </div>
-      <div style={s.filterTabs}>
-        {(['recent', 'all', 'shared'] as const).map((f) => (
-          <button
-            key={f}
-            onClick={() => setFilter(f)}
-            style={{
-              ...s.filterTab,
-              ...(filter === f ? s.filterTabActive : {}),
-            }}
-          >
-            {f === 'recent' ? 'Recent' : f === 'all' ? 'All' : 'Shared'}
-          </button>
-        ))}
+        <button onClick={onBack} style={s.backBtn} title="Back to navigation">
+          {'\u2190'}
+        </button>
+        <span style={s.title}>Views</span>
       </div>
 
-      {loading ? (
-        <div style={s.empty}>Loading...</div>
-      ) : tables.length === 0 ? (
-        <div style={s.empty}>
-          <span style={{ opacity: 0.4, fontSize: 18 }}>{'\u229E'}</span>
-          <span>No tables yet</span>
-          <span style={{ fontSize: 10, color: theme.textMuted }}>
-            Import data to create tables
-          </span>
-        </div>
-      ) : (
-        <div style={s.scroll}>
-          {tables.map((node) => {
-            const isExpanded = expanded.has(node.fullPath);
-            const scopeViews = viewsByScope.get(node.fullPath) || [];
+      {/* Search */}
+      <div style={s.searchWrap}>
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Find a view\u2026"
+          style={s.searchInput}
+        />
+      </div>
 
-            return (
-              <div key={node.fullPath}>
-                {/* Table row */}
-                <div
-                  style={s.tableRow}
-                  onClick={() => toggleTable(node.fullPath)}
-                >
-                  <span style={s.chevron}>
-                    {isExpanded ? '\u25BE' : '\u25B8'}
-                  </span>
-                  <span style={s.tableIcon}>{'\u229E'}</span>
-                  <span style={s.tableLabel}>
-                    {formatName(node.segment)}
-                  </span>
-                  {node.childCount > 0 && (
-                    <span style={s.badge}>{node.childCount}</span>
-                  )}
-                </div>
+      {/* Scrollable list */}
+      <div style={s.scroll}>
+        {!scope ? (
+          <div style={s.empty}>
+            <span style={{ opacity: 0.4, fontSize: 18 }}>{'\u229E'}</span>
+            <span>No object selected</span>
+            <span style={{ fontSize: 10, color: theme.textMuted, textAlign: 'center' }}>
+              Go back and select an object to browse its views.
+            </span>
+          </div>
+        ) : loading ? (
+          <div style={s.empty}>Loading\u2026</div>
+        ) : (
+          <>
+            {/* Personal views */}
+            <div style={s.sectionLabel}>Personal views</div>
+            {defaultMatches && renderViewRow(makeDefaultView(scope), defaultIsActive)}
+            {personalViews.map((v) => renderViewRow(v, v.id === activeViewId))}
+            {!defaultMatches && personalViews.length === 0 && (
+              <div style={s.sectionEmpty}>No matches</div>
+            )}
 
-                {/* Views under this table */}
-                {isExpanded && (
-                  <>
-                    {/* Default grid view — always present */}
-                    <div
-                      style={s.viewItem}
-                      onClick={() => onSelectView(makeDefaultView(node.fullPath))}
-                    >
-                      <span style={s.viewIcon}>{VIEW_TYPE_META.grid.icon}</span>
-                      <span style={s.viewName}>Grid view</span>
-                    </div>
-
-                    {/* Saved views */}
-                    {scopeViews.map((view) => {
-                      const vtMeta = VIEW_TYPE_META[(view.viewType || 'grid') as ViewType];
-                      return (
-                        <div
-                          key={view.id}
-                          style={s.viewItem}
-                          onClick={() => onSelectView(view)}
-                        >
-                          <span style={s.viewIcon}>{vtMeta.icon}</span>
-                          {view.visibility === 'private' && (
-                            <span style={{ fontSize: 10, marginRight: 2 }}>{'\uD83D\uDD12'}</span>
-                          )}
-                          <span style={s.viewName}>{view.name}</span>
-                        </div>
-                      );
-                    })}
-                  </>
+            {/* Collaborative views */}
+            {(collaborativeViews.length > 0 || query.trim() === '') && (
+              <>
+                <div style={{ ...s.sectionLabel, marginTop: 12 }}>Collaborative views</div>
+                {collaborativeViews.length > 0 ? (
+                  collaborativeViews.map((v) => renderViewRow(v, v.id === activeViewId))
+                ) : (
+                  <div style={s.sectionEmpty}>None yet</div>
                 )}
-              </div>
-            );
-          })}
+              </>
+            )}
+
+            {/* Create a view */}
+            <button
+              style={s.createBtn}
+              onClick={() => onSelectView(makeDefaultView(scope))}
+              title="Create a new view for this object"
+            >
+              + Create a view
+            </button>
+          </>
+        )}
+      </div>
+
+      {/* Pinned scope chip at bottom */}
+      {scope && (
+        <div style={s.scopeChipWrap}>
+          <div style={s.scopeChip}>
+            <span style={s.scopeChipName}>{scopeLabel}</span>
+            <span style={s.scopeChipSep}>{'\u00B7'}</span>
+            <span style={s.scopeChipMeta}>{recordCount} records</span>
+          </div>
         </div>
       )}
     </div>
@@ -255,69 +231,53 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       flexDirection: 'column',
       flex: 1,
       overflow: 'hidden',
+      minHeight: 0,
     },
     header: {
       display: 'flex',
       alignItems: 'center',
-      gap: 8,
-      padding: '10px 12px',
-      borderBottom: `1px solid ${t.border}`,
+      gap: 10,
+      padding: '12px 14px 10px',
       flexShrink: 0,
     },
     backBtn: {
       background: 'none',
       border: 'none',
-      color: t.accent,
+      color: t.text,
       cursor: 'pointer',
-      fontSize: 12,
-      fontWeight: 500,
-      padding: '2px 6px',
+      fontSize: 16,
+      lineHeight: 1,
+      padding: '4px 6px',
       borderRadius: 4,
+      display: 'flex',
+      alignItems: 'center',
     },
     title: {
-      fontSize: 11,
+      fontSize: 14,
       fontWeight: 600,
       color: t.textHeading,
-      letterSpacing: '0.3px',
       flex: 1,
     },
-    newBtn: {
-      background: t.accent,
-      border: 'none',
-      color: '#fff',
-      cursor: 'pointer',
-      fontSize: 11,
-      fontWeight: 500,
-      padding: '3px 8px',
-      borderRadius: 4,
-    },
-    filterTabs: {
-      display: 'flex',
-      gap: 4,
-      padding: '6px 12px',
-      borderBottom: `1px solid ${t.border}`,
+    searchWrap: {
+      padding: '0 12px 10px',
       flexShrink: 0,
     },
-    filterTab: {
-      flex: 1,
-      background: 'none',
+    searchInput: {
+      width: '100%',
+      padding: '6px 10px',
+      fontSize: 12,
       border: `1px solid ${t.border}`,
-      color: t.textMuted,
-      cursor: 'pointer',
-      fontSize: 11,
-      fontWeight: 500,
-      padding: '3px 6px',
-      borderRadius: 4,
-    } as React.CSSProperties,
-    filterTabActive: {
-      background: t.accentBg,
-      color: t.accent,
-      borderColor: t.accent,
+      borderRadius: 6,
+      background: t.bgMuted,
+      color: t.text,
+      outline: 'none',
+      boxSizing: 'border-box',
     } as React.CSSProperties,
     scroll: {
       flex: 1,
       overflowY: 'auto',
-      padding: '4px 0',
+      padding: '4px 0 8px',
+      minHeight: 0,
     },
     empty: {
       display: 'flex',
@@ -329,65 +289,101 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       fontSize: 12,
       color: t.textSecondary,
     },
-    tableRow: {
-      display: 'flex',
-      alignItems: 'center',
-      gap: 6,
-      padding: '8px 12px',
-      cursor: 'pointer',
-      fontSize: 12,
+    sectionLabel: {
+      fontSize: 10,
       fontWeight: 600,
-      color: t.textHeading,
-      userSelect: 'none',
-    },
-    chevron: {
-      fontSize: 10,
-      width: 12,
-      flexShrink: 0,
       color: t.textMuted,
+      letterSpacing: '0.5px',
+      textTransform: 'uppercase' as const,
+      padding: '8px 16px 4px',
     },
-    tableIcon: {
-      fontSize: 13,
-      opacity: 0.7,
-    },
-    tableLabel: {
-      flex: 1,
-      overflow: 'hidden',
-      textOverflow: 'ellipsis',
-      whiteSpace: 'nowrap',
-    },
-    badge: {
-      fontSize: 10,
+    sectionEmpty: {
+      padding: '4px 16px 4px',
+      fontSize: 11,
       color: t.textMuted,
-      fontWeight: 400,
-      background: t.border,
-      borderRadius: 8,
-      padding: '1px 6px',
-      minWidth: 18,
-      textAlign: 'center',
+      fontStyle: 'italic' as const,
     },
     viewItem: {
       display: 'flex',
       alignItems: 'center',
-      gap: 6,
-      padding: '5px 12px 5px 36px',
+      gap: 8,
+      padding: '6px 12px',
+      margin: '0 6px',
       cursor: 'pointer',
-      borderRadius: 4,
-      margin: '0 4px',
+      borderRadius: 6,
       fontSize: 12,
-      fontWeight: 400,
       color: t.text,
       transition: 'background 0.1s',
-    },
+    } as React.CSSProperties,
+    viewItemActive: {
+      background: t.accentBg,
+      color: t.accent,
+      fontWeight: 500,
+    } as React.CSSProperties,
     viewIcon: {
-      fontSize: 11,
-      opacity: 0.6,
+      fontSize: 12,
+      opacity: 0.7,
       flexShrink: 0,
+      width: 14,
+      textAlign: 'center' as const,
+      color: 'inherit',
     },
     viewName: {
+      flex: 1,
       overflow: 'hidden',
       textOverflow: 'ellipsis',
-      whiteSpace: 'nowrap',
+      whiteSpace: 'nowrap' as const,
+      color: 'inherit',
+    },
+    viewBadge: {
+      fontSize: 10,
+      color: t.textMuted,
+      flexShrink: 0,
+      fontFamily: "'JetBrains Mono', monospace",
+    },
+    createBtn: {
+      display: 'block',
+      margin: '12px 12px 4px',
+      padding: '6px 10px',
+      background: 'none',
+      border: 'none',
+      color: t.accent,
+      cursor: 'pointer',
+      fontSize: 12,
+      fontWeight: 500,
+      textAlign: 'left' as const,
+      borderRadius: 4,
+    },
+    scopeChipWrap: {
+      padding: '8px 12px 12px',
+      borderTop: `1px solid ${t.border}`,
+      flexShrink: 0,
+    },
+    scopeChip: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6,
+      padding: '6px 10px',
+      background: t.bgMuted,
+      border: `1px solid ${t.border}`,
+      borderRadius: 6,
+      fontSize: 11,
+    },
+    scopeChipName: {
+      fontFamily: "'JetBrains Mono', monospace",
+      color: t.text,
+      fontWeight: 500,
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+      whiteSpace: 'nowrap' as const,
+    },
+    scopeChipSep: {
+      color: t.textMuted,
+      flexShrink: 0,
+    },
+    scopeChipMeta: {
+      color: t.textMuted,
+      flexShrink: 0,
     },
   };
 }
