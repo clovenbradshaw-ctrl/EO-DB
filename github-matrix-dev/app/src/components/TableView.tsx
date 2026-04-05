@@ -56,6 +56,49 @@ function formatRelativeTime(ts: string): string {
   return new Date(ts).toLocaleDateString();
 }
 
+// Common name-like field keys to probe when `value.name` is not set.
+// Matches are case-insensitive and cover typical CSV/spreadsheet headers
+// ("Name", "Client Name", "Title", etc.). Ordered by preference.
+const NAME_LIKE_KEYS = [
+  'name',
+  'display_name', 'displayname', 'display name',
+  'full_name', 'fullname', 'full name',
+  'client_name', 'client name', 'client',
+  'company_name', 'company name', 'company',
+  'title',
+  'label',
+  'subject',
+];
+
+function resolveRecordName(rec: EoState): string | null {
+  const v = rec.value;
+  if (!v || typeof v !== 'object') return null;
+
+  // Top-level `name` wins.
+  if (typeof v.name === 'string' && v.name) return v.name;
+
+  // Build a case-insensitive key lookup across top-level and `fields` sub-object.
+  const sources: Record<string, any>[] = [];
+  if (typeof v === 'object' && !Array.isArray(v)) sources.push(v as Record<string, any>);
+  if (v.fields && typeof v.fields === 'object' && !Array.isArray(v.fields)) {
+    sources.push(v.fields as Record<string, any>);
+  }
+
+  for (const source of sources) {
+    const lowerMap = new Map<string, any>();
+    for (const [k, val] of Object.entries(source)) {
+      if (k.startsWith('_')) continue;
+      lowerMap.set(k.toLowerCase(), val);
+    }
+    for (const candidate of NAME_LIKE_KEYS) {
+      const val = lowerMap.get(candidate);
+      if (typeof val === 'string' && val) return val;
+    }
+  }
+
+  return null;
+}
+
 function formatScopeName(scope: string): string {
   const last = scope.split('.').pop() || scope;
   let name = last.replace(/^(tbl|rec|fld)/, '');
@@ -517,10 +560,10 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
       result = [...result].sort((a, b) => {
         for (const sort of sorts) {
           const aVal = sort.field === '_record'
-            ? ((displayField ? getFieldValue(a, displayField, useFieldsSub) : null) ?? a.value?.name ?? a.target.split('.').pop() ?? '')
+            ? ((displayField ? getFieldValue(a, displayField, useFieldsSub) : null) ?? resolveRecordName(a) ?? a.target.split('.').pop() ?? '')
             : getFieldValue(a, sort.field, useFieldsSub);
           const bVal = sort.field === '_record'
-            ? ((displayField ? getFieldValue(b, displayField, useFieldsSub) : null) ?? b.value?.name ?? b.target.split('.').pop() ?? '')
+            ? ((displayField ? getFieldValue(b, displayField, useFieldsSub) : null) ?? resolveRecordName(b) ?? b.target.split('.').pop() ?? '')
             : getFieldValue(b, sort.field, useFieldsSub);
           const aStr = aVal != null ? String(aVal) : '';
           const bStr = bVal != null ? String(bVal) : '';
@@ -969,7 +1012,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                                 }}>{(() => {
                                   const dv = displayField ? getFieldValue(rec, displayField, useFieldsSub) : null;
                                   if (dv != null && typeof dv !== 'object') return String(dv);
-                                  return rec.value?.name || formatName(rec.target.split('.').pop() || '');
+                                  return resolveRecordName(rec) || formatName(rec.target.split('.').pop() || '');
                                 })()}</span>
                                 {rec.value?._type && <TypeBadge type={rec.value._type} />}
                               </span>
