@@ -10,13 +10,19 @@
 
 import { pack, unpack } from 'msgpackr';
 import { encrypt, decrypt } from '../lib/crypto';
-import { type EoIdb, idbGet, idbPut, idbDel, idbIterator, padSeq } from './idb';
+import { type EoIdb, idbGet, idbPut, idbDel, idbIterator, padSeq, type IteratorOpts } from './idb';
+
+export type { IteratorOpts };
 
 export interface EoStore {
   get(key: string): Promise<any | null>;
   put(key: string, value: any): Promise<void>;
   del(key: string): Promise<void>;
-  iterator(prefix: string): Promise<[string, any][]>;
+  /**
+   * Range scan over a prefix. Pass `opts.limit` and/or `opts.afterKey` for
+   * cursor-based pagination — callers should avoid unbounded scans at scale.
+   */
+  iterator(prefix: string, opts?: IteratorOpts): Promise<[string, any][]>;
   nextSeq(): Promise<number>;
   getCurrentSeq(): Promise<number>;
   close(): void;
@@ -49,8 +55,8 @@ export function createStore(idb: EoIdb, cryptoKey: CryptoKey): EoStore {
       await idbDel(idb, key);
     },
 
-    async iterator(prefix: string): Promise<[string, any][]> {
-      const raw = await idbIterator(idb, prefix);
+    async iterator(prefix: string, opts?: IteratorOpts): Promise<[string, any][]> {
+      const raw = await idbIterator(idb, prefix, opts);
       const results: [string, any][] = [];
       for (const [key, data] of raw) {
         const value = await decryptValue(data);
@@ -105,8 +111,8 @@ export function createLocalStore(idb: EoIdb): EoStore {
       await idbDel(idb, key);
     },
 
-    async iterator(prefix: string): Promise<[string, any][]> {
-      const raw = await idbIterator(idb, prefix);
+    async iterator(prefix: string, opts?: IteratorOpts): Promise<[string, any][]> {
+      const raw = await idbIterator(idb, prefix, opts);
       const results: [string, any][] = [];
       for (const [key, data] of raw) {
         results.push([key, unpack(data)]);

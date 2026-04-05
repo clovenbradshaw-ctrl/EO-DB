@@ -60,21 +60,44 @@ export async function idbDel(db: EoIdb, key: string): Promise<void> {
 }
 
 /**
+ * Options for a range scan. Both fields are optional; when omitted the
+ * iterator walks the full prefix range (existing behavior).
+ *
+ * - `limit`: stop after this many entries. Undefined = unbounded.
+ * - `afterKey`: exclusive lower bound — start walking *after* this key.
+ *   Used for cursor pagination: pass the last key from the previous page.
+ */
+export interface IteratorOpts {
+  limit?: number;
+  afterKey?: string;
+}
+
+/**
  * Range scan — equivalent to LevelDB's iterator({ gte, lte }).
  * Returns all [key, value] pairs where key is in [prefix, prefix + \uffff].
+ *
+ * With `opts.limit`, stops after `limit` entries. With `opts.afterKey`,
+ * starts walking strictly after that key (cursor-based pagination, no offset
+ * math). Callers that need to page through a large prefix should pass the
+ * last returned key back as `afterKey` on the next call.
  */
 export async function idbIterator(
   db: EoIdb,
   prefix: string,
+  opts?: IteratorOpts,
 ): Promise<[string, Uint8Array][]> {
   const tx = db.transaction(STORE_NAME, 'readonly');
   const store = tx.objectStore(STORE_NAME);
-  const range = IDBKeyRange.bound(prefix, prefix + '\uffff');
+  const lower = opts?.afterKey ?? prefix;
+  const lowerOpen = opts?.afterKey !== undefined;
+  const range = IDBKeyRange.bound(lower, prefix + '\uffff', lowerOpen, false);
+  const limit = opts?.limit;
   const results: [string, Uint8Array][] = [];
 
   let cursor = await store.openCursor(range);
   while (cursor) {
     results.push([cursor.key as string, cursor.value as Uint8Array]);
+    if (limit !== undefined && results.length >= limit) break;
     cursor = await cursor.continue();
   }
 
