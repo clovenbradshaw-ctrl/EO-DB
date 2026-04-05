@@ -10,6 +10,31 @@
 
 const FILEN_GATEWAY = 'https://gateway.filen.io';
 
+/**
+ * n8n webhook that returns the shared Filen credentials to authenticated
+ * Matrix users. The webhook validates the caller's Matrix access token via
+ * /_matrix/client/v3/account/whoami and responds with
+ * `{"username": "...", "password": "..."}` on success, or plain text
+ * "invalid access attempt" on failure.
+ */
+const FILEN_CREDS_WEBHOOK =
+  'https://n8n.intelechia.com/webhook/2caa4b94-873d-4a78-9770-d73a4d5b3c79';
+
+export async function fetchFilenCredentialsFromWebhook(
+  matrixAccessToken: string,
+): Promise<{ username: string; password: string }> {
+  const res = await fetch(FILEN_CREDS_WEBHOOK, {
+    headers: { Authorization: `Bearer ${matrixAccessToken}` },
+  });
+  const text = await res.text();
+  let data: any;
+  try { data = JSON.parse(text); } catch { data = null; }
+  if (!data || !data.username || !data.password) {
+    throw new Error('Filen credentials webhook: unauthorized or malformed response');
+  }
+  return { username: data.username, password: data.password };
+}
+
 /** Ingest servers — one is chosen at random for each upload. */
 const FILEN_INGEST_SERVERS = [
   'https://ingest.filen.io',

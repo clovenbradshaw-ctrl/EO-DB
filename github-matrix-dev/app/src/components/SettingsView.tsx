@@ -8,7 +8,6 @@ import { MatrixRoomsViewer } from './MatrixRoomsViewer';
 import { UserRoomsBySpaces } from './UserRoomsBySpaces';
 import { FilenStorageWidget } from './FilenStorageWidget';
 import { OP_COLORS, TRIAD_LABELS } from './LogView';
-import { FilenAdminConfig } from './FilenAdminConfig';
 import { ArchivedSpacesSection } from './ArchivedSpaces';
 
 interface SettingsViewProps {
@@ -164,10 +163,9 @@ export function SettingsView({ session, matrixClient, roomId, onUnarchive }: Set
           </Section>
         )}
 
-        {/* Cloud Storage (shared Filen via room state) */}
+        {/* Cloud Storage (shared Filen credentials fetched from n8n webhook) */}
         {matrixClient && roomId && (
           <Section title="Cloud Storage" theme={theme}>
-            <FilenAdminConfig matrixClient={matrixClient} roomId={roomId} />
             <FilenStorageWidget />
           </Section>
         )}

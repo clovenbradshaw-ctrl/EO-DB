@@ -2,7 +2,7 @@
  * FilenStorageWidget — displays EODB backup files for the current space.
  *
  * Scoped to the active space's Filen folder only. Authentication is handled
- * by the space admin via FilenAdminConfig (stored in Matrix room state).
+ * automatically by fetching shared Filen credentials from the n8n webhook.
  */
 
 import { useState, useEffect, useCallback } from 'react';

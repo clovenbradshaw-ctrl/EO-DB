@@ -637,63 +637,21 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
 
       await init(store);
 
-      // Detect Filen org-mode from room state BEFORE starting sync layers.
-      // When org-mode is active, Filen is the primary data store and we
-      // skip Matrix SyncManager (which would send data via timeline events).
+      // Detect Filen org-mode via n8n webhook BEFORE starting sync layers.
+      // The webhook validates the Matrix access token and returns the shared
+      // Filen credentials, so clients no longer read Filen config from Matrix
+      // room state. When org-mode is active, Filen is the primary data store
+      // and we skip Matrix SyncManager (which would send data via timeline events).
       let filenOrgMode = false;
       const filenState = useFilenStore.getState();
-      if (!filenState.connected && matrixClientRef.current && spaceRoomId) {
-        const room = matrixClientRef.current.getRoom(spaceRoomId);
-        if (room) {
-          const configEvent = room.currentState.getStateEvents('eo.filen.config' as any, '');
-          if (configEvent) {
-            const config = (configEvent as any).getContent?.() ?? configEvent;
-            if (config.apiKey && config.masterKey) {
-              try {
-                await useFilenStore.getState().restoreFromRoomState({
-                  email: config.email,
-                  apiKey: config.apiKey,
-                  masterKey: config.masterKey,
-                  baseFolderUuid: config.baseFolderUuid,
-                  eodbFolderUuid: config.eodbFolderUuid,
-                  savedPassword: config.savedPassword,
-                });
-                filenOrgMode = true;
-                console.log('[EO-DB] Org-mode Filen auto-connected from room state');
-              } catch (e) {
-                console.warn('[EO-DB] Org-mode Filen auto-connect failed:', e);
-              }
-            }
-          }
+      if (!filenState.connected && session.accessToken) {
+        try {
+          await useFilenStore.getState().connectOrgFromWebhook(session.accessToken);
+          filenOrgMode = true;
+          console.log('[EO-DB] Org-mode Filen auto-connected via n8n webhook');
+        } catch (e) {
+          console.warn('[EO-DB] Org-mode Filen auto-connect via webhook failed:', e);
         }
-      }
-      // Listen for eo.filen.config room state updates so that when the admin
-      // re-saves credentials (e.g. after session expiry), all clients auto-reconnect.
-      if (matrixClientRef.current && spaceRoomId) {
-        const handleRoomStateEvent = (event: any) => {
-          if (
-            event.getType?.() === 'eo.filen.config' &&
-            event.getRoomId?.() === spaceRoomId
-          ) {
-            const config = event.getContent?.() ?? {};
-            if (config.apiKey && config.masterKey) {
-              console.log('[EO-DB] eo.filen.config updated — auto-reconnecting Filen');
-              useFilenStore.getState().restoreFromRoomState({
-                email: config.email,
-                apiKey: config.apiKey,
-                masterKey: config.masterKey,
-                baseFolderUuid: config.baseFolderUuid,
-                eodbFolderUuid: config.eodbFolderUuid,
-                savedPassword: config.savedPassword,
-              }).catch(e => console.warn('[EO-DB] Filen auto-reconnect from state update failed:', e));
-            }
-          }
-        };
-        matrixClientRef.current.on('RoomState.events' as any, handleRoomStateEvent);
-        // Store handler for cleanup
-        cleanupFns.push(() => {
-          matrixClientRef.current?.removeListener('RoomState.events' as any, handleRoomStateEvent);
-        });
       }
 
       // Also check if Filen is already in org-mode (from a previous space switch)

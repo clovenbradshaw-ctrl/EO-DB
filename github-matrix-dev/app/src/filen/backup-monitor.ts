@@ -9,6 +9,7 @@
  */
 
 import type { MatrixClient, MatrixEvent } from 'matrix-js-sdk';
+import { useFilenStore } from './filen-store';
 
 const EO_BACKUP_SIGNAL = 'eo.backup.signal';
 const EO_BACKUP_HEAD = 'eo.backup.head';
@@ -31,7 +32,7 @@ export interface UserBackupStatus {
 }
 
 export interface BackupHealth {
-  /** Whether org-mode is active (eo.filen.config exists). */
+  /** Whether org-mode is active (shared Filen connection via n8n webhook). */
   orgMode: boolean;
   /** Current head pointer. */
   headSeq: number;
@@ -61,9 +62,8 @@ export function readBackupHealth(
   const room = matrixClient.getRoom(roomId);
   if (!room) return null;
 
-  // Check org mode
-  const configEvent = room.currentState.getStateEvents('eo.filen.config' as any, '');
-  const orgMode = !!(configEvent && (configEvent as any).getContent?.()?.apiKey);
+  // Check org mode (credentials are fetched from the n8n webhook, not room state)
+  const orgMode = useFilenStore.getState().isOrgMode;
 
   // Read head state
   const headEvent = room.currentState.getStateEvents(EO_BACKUP_HEAD as any, spaceId);
