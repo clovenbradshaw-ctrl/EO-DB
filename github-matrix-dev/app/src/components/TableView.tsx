@@ -341,6 +341,9 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   const [fieldNameMap, setFieldNameMap] = useState<Map<string, string>>(new Map());
   const [scopeName, setScopeName] = useState<string | null>(null);
   const [filterText, setFilterText] = useState('');
+  // Debounced filter text — used for actual filtering so that typing remains
+  // responsive when the record set is large.
+  const [debouncedFilterText, setDebouncedFilterText] = useState('');
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; target: string } | null>(null);
   const [columnMenu, setColumnMenu] = useState<{ x: number; y: number; key: string; label: string } | null>(null);
   const [renameCol, setRenameCol] = useState<{ key: string; value: string } | null>(null);
@@ -489,8 +492,16 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   // Reset filter and loaded state when scope changes
   useEffect(() => {
     setFilterText('');
+    setDebouncedFilterText('');
     setRecordsLoaded(false);
   }, [scope]);
+
+  // Debounce filterText so that keystroke latency is bounded by a short
+  // timer rather than the cost of re-filtering the full record set.
+  useEffect(() => {
+    const id = setTimeout(() => setDebouncedFilterText(filterText), 150);
+    return () => clearTimeout(id);
+  }, [filterText]);
 
   // Detect if records use the Airtable-style fields sub-object
   const useFieldsSub = useMemo(() => hasFieldsSubObject(records), [records]);
@@ -530,8 +541,8 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     let result = records;
 
     // Text filter
-    if (filterText) {
-      const q = filterText.toLowerCase();
+    if (debouncedFilterText) {
+      const q = debouncedFilterText.toLowerCase();
       result = result.filter((rec) => {
         const target = rec.target.toLowerCase();
         if (target.includes(q)) return true;
@@ -579,7 +590,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
       });
     }
     return result;
-  }, [records, filterText, useFieldsSub, advancedFilters, filterConjunction, timeScrubberFilter, sorts, displayField]);
+  }, [records, debouncedFilterText, useFieldsSub, advancedFilters, filterConjunction, timeScrubberFilter, sorts, displayField]);
 
   function handleColumnContextMenu(e: React.MouseEvent, col: ColumnDef) {
     e.preventDefault();

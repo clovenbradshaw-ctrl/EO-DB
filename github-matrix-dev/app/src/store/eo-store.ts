@@ -5,7 +5,7 @@ import { createIdb } from '../db/idb';
 import type { EoEvent, EoEventInput, EoState, HorizonResponse } from '../db/types';
 import { processEvent } from '../db/fold';
 import { horizonGet, type HorizonOpts } from '../db/horizon';
-import { getState, getStateByPrefix } from '../db/state';
+import { getState, getStateByPrefix, getStateByPrefixPage, type StatePage } from '../db/state';
 import { readLogSince } from '../db/log';
 import { backfillFoldCaches } from '../db/fold-cache';
 import type { SyncManager } from '../matrix/sync-manager';
@@ -57,6 +57,13 @@ interface EoDbState {
 
   /** Get all states under a prefix */
   getStateByPrefix: (prefix: string) => Promise<EoState[]>;
+
+  /**
+   * Cursor-paginated variant — returns a page of rows plus a cursor for the
+   * next page. Prefer this over `getStateByPrefix` for list views that may
+   * grow large.
+   */
+  getStateByPrefixPage: (prefix: string, limit: number, afterTarget?: string) => Promise<StatePage>;
 
   /** Take a manual snapshot via Filen */
   manualSnapshot: () => Promise<{ mxc: string; seq: number }>;
@@ -198,6 +205,12 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     const { store } = get();
     if (!store) throw new Error('Store not initialized');
     return getStateByPrefix(store, prefix);
+  },
+
+  async getStateByPrefixPage(prefix: string, limit: number, afterTarget?: string) {
+    const { store } = get();
+    if (!store) throw new Error('Store not initialized');
+    return getStateByPrefixPage(store, prefix, limit, afterTarget);
   },
 
   async manualSnapshot() {
