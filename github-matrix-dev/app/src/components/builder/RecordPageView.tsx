@@ -38,19 +38,35 @@ export function RecordPageView({ recordTarget, onNavigate, onBack }: RecordPageV
 
   const [record, setRecord] = useState<EoState | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   // Load the record state
   useEffect(() => {
     if (!ready) return;
+    let cancelled = false;
     setLoading(true);
-    getState(recordTarget).then(state => {
-      setRecord(state);
-      setLoading(false);
-    });
+    setError(null);
+    getState(recordTarget)
+      .then(state => {
+        if (cancelled) return;
+        setRecord(state);
+        setLoading(false);
+      })
+      .catch(err => {
+        if (cancelled) return;
+        console.error('[RecordPageView] getState failed', err);
+        setError(err?.message ?? String(err));
+        setLoading(false);
+      });
+    return () => { cancelled = true; };
   }, [ready, lastSeq, getState, recordTarget]);
 
   if (loading) {
     return <div style={s.loading}>Loading record...</div>;
+  }
+
+  if (error) {
+    return <div style={s.error}>Failed to load record: {error}</div>;
   }
 
   if (!record) {
