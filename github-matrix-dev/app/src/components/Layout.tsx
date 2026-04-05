@@ -52,7 +52,7 @@ import { type AccessRole, powerLevelToRole, legacyAccessToRole } from '../permis
 import { resolvePermissionsFromSharing } from '../permissions/resolve';
 import { RecycleBin, addDeletedSpace, isSpaceDeleted, removeDeletedSpace, getDeletedSpaces } from './RecycleBin';
 import { addArchivedSpace, isSpaceArchived, removeArchivedSpace, getArchivedSpaces } from './ArchivedSpaces';
-import { setSpaceConfig, applyEoPowerLevels } from '../permissions/room-topology';
+import { setSpaceConfig, applyEoPowerLevels, createGovernanceRoom } from '../permissions/room-topology';
 import { EO_POWER_LEVEL_CONTENT } from '../permissions/types';
 import { listAllHomeserverUsers } from '../matrix/user-discovery';
 
@@ -149,14 +149,37 @@ async function createSpaceRoom(
     const result = await client.createRoom(createArgs);
     const roomId = result.room_id;
 
-    // Publish space config so discoverSpacesFromMatrix() can find this room
-    await setSpaceConfig(client, roomId, {
+    // A space spans multiple rooms. Create the governance room eagerly so
+    // admins have somewhere to publish policies / schema changes from day
+    // one. The restricted room stays lazy (created on first restricted
+    // field assignment) per spec. Only the owner is a member initially;
+    // admins are invited when they're granted the admin role.
+    let governanceRoomId: string | null = null;
+    try {
+      governanceRoomId = await createGovernanceRoom(client as any, spaceName, roomId);
+    } catch (e) {
+      console.warn('[EO-DB] Failed to create governance room for', spaceName, e);
+    }
+
+    // Publish space config so discoverSpacesFromMatrix() can find this room.
+    // The config is authoritative and lists every associated room.
+    const spaceConfig: any = {
       name: spaceName,
-      rooms: { main: roomId },
+      rooms: { main: roomId, ...(governanceRoomId ? { governance: governanceRoomId } : {}) },
       field_assignments: [],
       space_settings: {},
       discoverability,
-    });
+    };
+    await setSpaceConfig(client, roomId, spaceConfig);
+    // Mirror the config into the governance room as well so admins joining
+    // via the governance room can resolve the space topology.
+    if (governanceRoomId) {
+      try {
+        await setSpaceConfig(client, governanceRoomId, spaceConfig);
+      } catch (e) {
+        console.warn('[EO-DB] Failed to mirror space config to governance room:', e);
+      }
+    }
 
     // Best-effort: retry any invites that the homeserver rejected during
     // createRoom (Synapse drops invalid user IDs silently). This also
@@ -177,7 +200,12 @@ async function createSpaceRoom(
       }
     }
 
-    console.info('[EO-DB] Created Matrix room for space', spaceName, '→', roomId, '(', discoverability, ')');
+    console.info(
+      '[EO-DB] Created Matrix rooms for space', spaceName,
+      '→ main:', roomId,
+      governanceRoomId ? `governance: ${governanceRoomId}` : '(governance: skipped)',
+      '(', discoverability, ',', inviteUserIds.length, 'invited)',
+    );
     return roomId;
   } catch (e) {
     console.warn('[EO-DB] Failed to create Matrix room for space', spaceName, e);
