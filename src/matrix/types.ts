@@ -173,6 +173,25 @@ export interface ImportMeta {
   label?: string;
 }
 
+/**
+ * Snapshot claim — hand-raising lease stored as a Matrix room state event.
+ *
+ * One claim per room (state_key = ''). A pending claim held longer than
+ * SNAPSHOT_CLAIM_TTL_MS is stealable by any peer. Terminal statuses
+ * ('success' | 'failed') release the lease.
+ */
+export interface SnapshotClaim {
+  device_id: string;
+  user_id: string;
+  claimed_at: number;
+  target_seq: number;
+  status: 'pending' | 'success' | 'failed';
+  completed_at?: number;
+  completed_seq?: number;
+  completed_mxc?: string;
+  error?: string;
+}
+
 export interface DeltaSnapshot {
   version: 2;
   type: 'delta' | 'import';
