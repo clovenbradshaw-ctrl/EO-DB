@@ -3,8 +3,8 @@
  * Renders: Figure, Trajectory, Grounds, Nearby, Governance, Signals
  */
 
-import { useEffect, useState } from 'react';
-import type { HorizonResponse } from '../db/types';
+import { useCallback, useEffect, useState } from 'react';
+import type { HorizonResponse, NearbyEntry, SignalEntry, RecCycleInfo, GovernanceEntry } from '../db/types';
 import { useEoStore } from '../store/eo-store';
 import { FigureFields } from './FigureFields';
 import { Trajectory } from './Trajectory';
@@ -36,6 +36,26 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
   const [data, setData] = useState<HorizonResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Lazy section state — populated only when the user expands the section.
+  const [nearby, setNearby] = useState<NearbyEntry[] | undefined>(undefined);
+  const [nearbyLoading, setNearbyLoading] = useState(false);
+  const [nearbyError, setNearbyError] = useState<string | null>(null);
+  const [signals, setSignals] = useState<SignalEntry[] | undefined>(undefined);
+  const [signalsLoading, setSignalsLoading] = useState(false);
+  const [signalsError, setSignalsError] = useState<string | null>(null);
+  const [governance, setGovernance] = useState<GovernanceEntry[] | undefined>(undefined);
+  const [governanceLoading, setGovernanceLoading] = useState(false);
+  const [governanceError, setGovernanceError] = useState<string | null>(null);
+  const [hashCohort, setHashCohort] = useState<string[] | undefined>(undefined);
+  const [hashLoading, setHashLoading] = useState(false);
+  const [hashError, setHashError] = useState<string | null>(null);
+  const [recCycle, setRecCycle] = useState<RecCycleInfo | undefined>(undefined);
+  const [recCycleLoaded, setRecCycleLoaded] = useState(false);
+  const [recCycleLoading, setRecCycleLoading] = useState(false);
+  const [recCycleError, setRecCycleError] = useState<string | null>(null);
+  const [historyOpened, setHistoryOpened] = useState(false);
+
   const { theme } = useTheme();
   const s = makeStyles(theme);
 
@@ -44,7 +64,17 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
     let cancelled = false;
     setLoading(true);
     setError(null);
-    horizon(target, { signals: true })
+    // Reset per-section lazy state when target changes.
+    setNearby(undefined); setNearbyLoading(false); setNearbyError(null);
+    setSignals(undefined); setSignalsLoading(false); setSignalsError(null);
+    setGovernance(undefined); setGovernanceLoading(false); setGovernanceError(null);
+    setHashCohort(undefined); setHashLoading(false); setHashError(null);
+    setRecCycle(undefined); setRecCycleLoaded(false); setRecCycleLoading(false); setRecCycleError(null);
+    setHistoryOpened(false);
+
+    // Fast path: figure + ancestry + grounds + trajectory only. All expensive
+    // sections are opt-in via LazySection.
+    horizon(target, {})
       .then((result) => {
         if (cancelled) return;
         if (result && !Array.isArray(result)) {
@@ -60,6 +90,98 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
       });
     return () => { cancelled = true; };
   }, [ready, target, horizon]);
+
+  // Background fetch for the header twin-count badge. Does not block render.
+  useEffect(() => {
+    if (!ready) return;
+    let cancelled = false;
+    horizon(target, { hashCohort: true })
+      .then((result) => {
+        if (cancelled) return;
+        if (result && !Array.isArray(result)) {
+          setHashCohort(result.hashCohort ?? []);
+        }
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        console.error('[RecordView] background hashCohort failed', err);
+      });
+    return () => { cancelled = true; };
+  }, [ready, target, horizon]);
+
+  const loadNearby = useCallback(async () => {
+    if (nearby !== undefined || nearbyLoading) return;
+    setNearbyLoading(true); setNearbyError(null);
+    try {
+      const result = await horizon(target, { nearby: true });
+      if (result && !Array.isArray(result)) setNearby(result.nearby ?? []);
+    } catch (err: any) {
+      console.error('[RecordView] lazy nearby failed', err);
+      setNearbyError(err?.message ?? String(err));
+    } finally {
+      setNearbyLoading(false);
+    }
+  }, [target, horizon, nearby, nearbyLoading]);
+
+  const loadSignals = useCallback(async () => {
+    if (signals !== undefined || signalsLoading) return;
+    setSignalsLoading(true); setSignalsError(null);
+    try {
+      const result = await horizon(target, { signals: true });
+      if (result && !Array.isArray(result)) setSignals(result.signals ?? []);
+    } catch (err: any) {
+      console.error('[RecordView] lazy signals failed', err);
+      setSignalsError(err?.message ?? String(err));
+    } finally {
+      setSignalsLoading(false);
+    }
+  }, [target, horizon, signals, signalsLoading]);
+
+  const loadGovernance = useCallback(async () => {
+    if (governance !== undefined || governanceLoading) return;
+    setGovernanceLoading(true); setGovernanceError(null);
+    try {
+      const result = await horizon(target, { governance: true });
+      if (result && !Array.isArray(result)) setGovernance(result.governance ?? []);
+    } catch (err: any) {
+      console.error('[RecordView] lazy governance failed', err);
+      setGovernanceError(err?.message ?? String(err));
+    } finally {
+      setGovernanceLoading(false);
+    }
+  }, [target, horizon, governance, governanceLoading]);
+
+  const loadHashCohort = useCallback(async () => {
+    // May already be populated by the background effect.
+    if (hashCohort !== undefined || hashLoading) return;
+    setHashLoading(true); setHashError(null);
+    try {
+      const result = await horizon(target, { hashCohort: true });
+      if (result && !Array.isArray(result)) setHashCohort(result.hashCohort ?? []);
+    } catch (err: any) {
+      console.error('[RecordView] lazy hashCohort failed', err);
+      setHashError(err?.message ?? String(err));
+    } finally {
+      setHashLoading(false);
+    }
+  }, [target, horizon, hashCohort, hashLoading]);
+
+  const loadRecCycle = useCallback(async () => {
+    if (recCycleLoaded || recCycleLoading) return;
+    setRecCycleLoading(true); setRecCycleError(null);
+    try {
+      const result = await horizon(target, { recCycle: true });
+      if (result && !Array.isArray(result)) {
+        setRecCycle(result.recCycle);
+        setRecCycleLoaded(true);
+      }
+    } catch (err: any) {
+      console.error('[RecordView] lazy recCycle failed', err);
+      setRecCycleError(err?.message ?? String(err));
+    } finally {
+      setRecCycleLoading(false);
+    }
+  }, [target, horizon, recCycleLoaded, recCycleLoading]);
 
   if (loading) {
     return <div style={s.loading}>Loading record...</div>;
@@ -103,7 +225,7 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
           </span>
           {data.graphMetrics && <GraphRoleBadge metrics={data.graphMetrics} />}
           {data.cadence && <CadenceBadge cadence={data.cadence} />}
-          {data.hashCohort && data.hashCohort.length > 0 && (
+          {hashCohort && hashCohort.length > 0 && (
             <span style={s.metaItem}>
               <span style={{
                 fontSize: 10,
@@ -114,7 +236,7 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
                 borderRadius: 10,
                 padding: '2px 8px',
               }}>
-                {data.hashCohort.length} twin{data.hashCohort.length !== 1 ? 's' : ''}
+                {hashCohort.length} twin{hashCohort.length !== 1 ? 's' : ''}
               </span>
             </span>
           )}
@@ -167,10 +289,18 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
         </Section>
       )}
 
-      {/* Edit History */}
-      <Section title="Event History" subtitle="changes to this record with revert" color={theme.warning}>
-        <ElementHistory target={target} />
-      </Section>
+      {/* Edit History — lazy: full log scan, mount ElementHistory on first expand */}
+      <LazySection
+        title="Event History"
+        subtitle="changes to this record with revert"
+        color={theme.warning}
+        loaded={historyOpened}
+        loading={false}
+        error={null}
+        onLoad={() => setHistoryOpened(true)}
+      >
+        {historyOpened && <ElementHistory target={target} />}
+      </LazySection>
 
       {/* Layer 2: Grounds */}
       {data.grounds && data.grounds.length > 0 && (
@@ -179,38 +309,77 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
         </Section>
       )}
 
-      {/* Layer 3: Nearby */}
-      {data.nearby && data.nearby.length > 0 && (
-        <Section title="Similar Records" subtitle="nearby in the key-space" color={theme.teal}>
-          <Nearby entries={data.nearby} onNavigate={onNavigate} />
-        </Section>
-      )}
+      {/* Layer 3: Nearby — lazy: O(N) edge lookups across the collection */}
+      <LazySection
+        title="Similar Records"
+        subtitle="nearby in the key-space"
+        color={theme.teal}
+        loaded={nearby !== undefined}
+        loading={nearbyLoading}
+        error={nearbyError}
+        onLoad={loadNearby}
+        emptyMessage="No similar records"
+      >
+        {nearby && nearby.length > 0 && <Nearby entries={nearby} onNavigate={onNavigate} />}
+      </LazySection>
 
-      {/* Layer 4: Governance */}
-      {data.governance && data.governance.length > 0 && (
-        <Section title="Governance" subtitle="rules that apply to this record" color={theme.gold}>
-          <Governance entries={data.governance} />
-        </Section>
-      )}
+      {/* Layer 4: Governance — lazy: EVA registration scan */}
+      <LazySection
+        title="Governance"
+        subtitle="rules that apply to this record"
+        color={theme.gold}
+        loaded={governance !== undefined}
+        loading={governanceLoading}
+        error={governanceError}
+        onLoad={loadGovernance}
+        emptyMessage="No governance rules"
+      >
+        {governance && governance.length > 0 && <Governance entries={governance} />}
+      </LazySection>
 
-      {/* Layer 6: Signals */}
-      <Section title="Patterns" subtitle="what the database sees across similar records" color={theme.warning}>
-        <Signals entries={data.signals || []} />
-      </Section>
+      {/* Layer 6: Signals — lazy: full collection scan + population stats */}
+      <LazySection
+        title="Patterns"
+        subtitle="what the database sees across similar records"
+        color={theme.warning}
+        loaded={signals !== undefined}
+        loading={signalsLoading}
+        error={signalsError}
+        onLoad={loadSignals}
+        emptyMessage="No patterns detected"
+      >
+        {signals && signals.length > 0 && <Signals entries={signals} />}
+      </LazySection>
 
-      {/* Hash Cohort: Structural Twins */}
-      {data.hashCohort && data.hashCohort.length > 0 && (
-        <Section title="Structural Twins" subtitle="identical transformation journeys" color={theme.purple}>
-          <HashCohort targets={data.hashCohort} currentTarget={target} onNavigate={onNavigate} />
-        </Section>
-      )}
+      {/* Hash Cohort: Structural Twins — lazy: collection prefix scan (hydrated by background effect when possible) */}
+      <LazySection
+        title="Structural Twins"
+        subtitle="identical transformation journeys"
+        color={theme.purple}
+        loaded={hashCohort !== undefined}
+        loading={hashLoading}
+        error={hashError}
+        onLoad={loadHashCohort}
+        emptyMessage="No structural twins"
+      >
+        {hashCohort && hashCohort.length > 0 && (
+          <HashCohort targets={hashCohort} currentTarget={target} onNavigate={onNavigate} />
+        )}
+      </LazySection>
 
-      {/* REC Cycle: Dependency Cycle Visualization */}
-      {data.recCycle && (
-        <Section title="Dependency Cycle" subtitle="recursive formula resolution" color={theme.danger}>
-          <RecCycleMap cycle={data.recCycle} onNavigate={onNavigate} />
-        </Section>
-      )}
+      {/* REC Cycle: Dependency Cycle Visualization — lazy: graph walk */}
+      <LazySection
+        title="Dependency Cycle"
+        subtitle="recursive formula resolution"
+        color={theme.danger}
+        loaded={recCycleLoaded}
+        loading={recCycleLoading}
+        error={recCycleError}
+        onLoad={loadRecCycle}
+        emptyMessage="No dependency cycle"
+      >
+        {recCycle && <RecCycleMap cycle={recCycle} onNavigate={onNavigate} />}
+      </LazySection>
     </div>
   );
 }
@@ -233,6 +402,68 @@ function Section({ title, subtitle, color, children }: {
         </div>
       </div>
       {children}
+    </div>
+  );
+}
+
+function LazySection({
+  title, subtitle, color, loaded, loading, error, onLoad, defaultOpen = false,
+  emptyMessage = 'No results', children,
+}: {
+  title: string;
+  subtitle: string;
+  color: string;
+  loaded: boolean;
+  loading: boolean;
+  error: string | null;
+  onLoad: () => void;
+  defaultOpen?: boolean;
+  emptyMessage?: string;
+  children: React.ReactNode;
+}) {
+  const { theme } = useTheme();
+  const s = makeStyles(theme);
+  const [open, setOpen] = useState(defaultOpen);
+
+  const handleToggle = () => {
+    const next = !open;
+    setOpen(next);
+    if (next && !loaded && !loading) onLoad();
+  };
+
+  const hasContent = children !== undefined && children !== null && children !== false;
+
+  return (
+    <div style={s.section}>
+      <div style={{ ...s.sectionEdge, background: color }} />
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={handleToggle}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleToggle(); } }}
+        style={{ ...s.sectionHeader, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8, userSelect: 'none' }}
+      >
+        <span style={{ fontSize: 10, color: theme.textMuted, width: 10, display: 'inline-block' }}>
+          {open ? '▾' : '▸'}
+        </span>
+        <div style={{ ...s.sectionTitle, color }}>
+          {title} <span style={s.sectionSubtitle}>— {subtitle}</span>
+          {!loaded && !loading && (
+            <span style={{ ...s.sectionSubtitle, marginLeft: 6 }}>(click to load)</span>
+          )}
+        </div>
+      </div>
+      {open && loading && (
+        <div style={{ fontSize: 11, color: theme.textMuted, padding: '4px 0 0 18px' }}>Loading…</div>
+      )}
+      {open && error && (
+        <div style={{ fontSize: 11, color: theme.danger, padding: '4px 0 0 18px' }}>Failed: {error}</div>
+      )}
+      {open && loaded && !loading && !error && (
+        hasContent ? children : (
+          <div style={{ fontSize: 11, color: theme.textMuted, padding: '4px 0 0 18px' }}>{emptyMessage}</div>
+        )
+      )}
     </div>
   );
 }

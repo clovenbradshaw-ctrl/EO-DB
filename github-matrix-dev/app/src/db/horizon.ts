@@ -13,12 +13,14 @@ import { seedHash, chainHash } from './hash';
 
 export interface HorizonOpts {
   prefix?: boolean;
-  ancestry?: boolean;
-  signals?: boolean;
-  grounds?: boolean;
-  nearby?: boolean;
-  governance?: boolean;
-  trajectory?: boolean;
+  ancestry?: boolean;     // default true (fast)
+  signals?: boolean;      // default false (opt-in; expensive)
+  grounds?: boolean;      // default true (fast — from fold cache / ground prefix)
+  nearby?: boolean;       // default false (opt-in; O(N) edge lookups)
+  governance?: boolean;   // default false (opt-in; EVA registration scan)
+  trajectory?: boolean;   // default true (fast; read from fold cache)
+  hashCohort?: boolean;   // default false (opt-in; collection prefix scan)
+  recCycle?: boolean;     // default false (opt-in; graph walk)
 }
 
 export async function horizonGet(
@@ -43,16 +45,19 @@ export async function horizonGet(
   const cadence = fold?.cadence;
   const graphMetrics = figure.graphMetrics;
 
-  const ancestry = opts?.ancestry !== false ? await getAncestry(store, resolved) : undefined;
-  const grounds = opts?.grounds !== false ? await getGrounds(store, resolved) : [];
-  const nearby = opts?.nearby !== false ? await getNearby(store, resolved) : undefined;
-  const governance = opts?.governance !== false ? await getGovernance(store, resolved) : undefined;
-  const signals = opts?.signals ? await detectSignals(store, resolved) : undefined;
-
-  const hashCohort = figure?.hash
-    ? await getHashCohortFromStore(store, figure.hash, resolved)
-    : undefined;
-  const recCycle = await getRecCycleInfo(store, figure);
+  // Run independent lookups in parallel. Expensive ones are opt-in so the
+  // caller (e.g. RecordView on drawer open) can skip them for instant render.
+  const [ancestry, grounds, nearby, governance, signals, hashCohort, recCycle] = await Promise.all([
+    opts?.ancestry !== false ? getAncestry(store, resolved) : Promise.resolve(undefined),
+    opts?.grounds !== false ? getGrounds(store, resolved) : Promise.resolve([] as GroundEntry[]),
+    opts?.nearby === true ? getNearby(store, resolved) : Promise.resolve(undefined),
+    opts?.governance === true ? getGovernance(store, resolved) : Promise.resolve(undefined),
+    opts?.signals === true ? detectSignals(store, resolved) : Promise.resolve(undefined),
+    opts?.hashCohort === true && figure?.hash
+      ? getHashCohortFromStore(store, figure.hash, resolved)
+      : Promise.resolve(undefined),
+    opts?.recCycle === true ? getRecCycleInfo(store, figure) : Promise.resolve(undefined),
+  ]);
 
   return {
     target: resolved, figure, ancestry, grounds, nearby, governance, trajectory, signals,
