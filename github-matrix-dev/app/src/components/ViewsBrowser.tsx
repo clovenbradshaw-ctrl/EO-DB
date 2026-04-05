@@ -8,11 +8,11 @@ import { useTheme, type Theme } from '../theme';
 interface ViewsBrowserProps {
   onBack: () => void;
   onSelectView: (view: SavedView) => void;
-  filter?: 'recent' | 'all' | 'shared';
-  newViewNonce?: number;
 }
 
-export function ViewsBrowser({ onBack, onSelectView, filter = 'all', newViewNonce = 0 }: ViewsBrowserProps) {
+export function ViewsBrowser({ onBack, onSelectView }: ViewsBrowserProps) {
+  const [filter, setFilter] = useState<'recent' | 'all' | 'shared'>('all');
+  const [newViewNonce, setNewViewNonce] = useState(0);
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
   const ready = useEoStore((s) => s.ready);
   const lastSeq = useEoStore((s) => s.lastSeq);
@@ -152,6 +152,25 @@ export function ViewsBrowser({ onBack, onSelectView, filter = 'all', newViewNonc
       <div style={s.header}>
         <button onClick={onBack} style={s.backBtn}>{'\u2190'} Back</button>
         <span style={s.title}>Tables</span>
+        <button
+          onClick={() => setNewViewNonce((n) => n + 1)}
+          style={s.newBtn}
+          title="Create new view"
+        >+ New</button>
+      </div>
+      <div style={s.filterTabs}>
+        {(['recent', 'all', 'shared'] as const).map((f) => (
+          <button
+            key={f}
+            onClick={() => setFilter(f)}
+            style={{
+              ...s.filterTab,
+              ...(filter === f ? s.filterTabActive : {}),
+            }}
+          >
+            {f === 'recent' ? 'Recent' : f === 'all' ? 'All' : 'Shared'}
+          </button>
+        ))}
       </div>
 
       {loading ? (
@@ -260,7 +279,41 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       fontWeight: 600,
       color: t.textHeading,
       letterSpacing: '0.3px',
+      flex: 1,
     },
+    newBtn: {
+      background: t.accent,
+      border: 'none',
+      color: '#fff',
+      cursor: 'pointer',
+      fontSize: 11,
+      fontWeight: 500,
+      padding: '3px 8px',
+      borderRadius: 4,
+    },
+    filterTabs: {
+      display: 'flex',
+      gap: 4,
+      padding: '6px 12px',
+      borderBottom: `1px solid ${t.border}`,
+      flexShrink: 0,
+    },
+    filterTab: {
+      flex: 1,
+      background: 'none',
+      border: `1px solid ${t.border}`,
+      color: t.textMuted,
+      cursor: 'pointer',
+      fontSize: 11,
+      fontWeight: 500,
+      padding: '3px 6px',
+      borderRadius: 4,
+    } as React.CSSProperties,
+    filterTabActive: {
+      background: t.accentBg,
+      color: t.accent,
+      borderColor: t.accent,
+    } as React.CSSProperties,
     scroll: {
       flex: 1,
       overflowY: 'auto',
