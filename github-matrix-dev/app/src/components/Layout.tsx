@@ -54,6 +54,7 @@ import { RecycleBin, addDeletedSpace, isSpaceDeleted, removeDeletedSpace, getDel
 import { addArchivedSpace, isSpaceArchived, removeArchivedSpace, getArchivedSpaces } from './ArchivedSpaces';
 import { setSpaceConfig, applyEoPowerLevels } from '../permissions/room-topology';
 import { EO_POWER_LEVEL_CONTENT } from '../permissions/types';
+import { listAllHomeserverUsers } from '../matrix/user-discovery';
 
 /** Set to false to disable all Matrix activity (sync, room creation, discovery).
  *  When false, the app uses Filen as the sole sync layer. */
@@ -78,7 +79,22 @@ async function createSpaceRoom(
   opts: CreateSpaceOptions = {},
 ): Promise<string | null> {
   const discoverability = opts.discoverability ?? 'public';
-  const inviteUserIds = opts.inviteUserIds ?? [];
+  let inviteUserIds = opts.inviteUserIds ?? [];
+
+  // For public spaces, auto-invite every discoverable homeserver user so
+  // they receive a room invite (not just a knock-based discovery entry).
+  if (discoverability === 'public') {
+    try {
+      const all = await listAllHomeserverUsers(client as any, 500);
+      const merged = new Set<string>(inviteUserIds);
+      for (const u of all) {
+        if (u.userId && u.userId !== ownerUserId) merged.add(u.userId);
+      }
+      inviteUserIds = Array.from(merged);
+    } catch (e) {
+      console.warn('[EO-DB] Failed to enumerate homeserver users for public invite:', e);
+    }
+  }
 
   try {
     const initialState: any[] = [
@@ -103,8 +119,8 @@ async function createSpaceRoom(
     };
 
     if (discoverability === 'public') {
-      // Listed in homeserver's public room directory. Joining still requires
-      // owner approval via the knock flow.
+      // Listed in homeserver's public room directory. Anyone not already
+      // invited can still join by knocking.
       createArgs.visibility = 'public';
       initialState.push({
         type: 'm.room.join_rules',
@@ -116,6 +132,11 @@ async function createSpaceRoom(
         state_key: '',
         content: { guest_access: 'forbidden' },
       });
+      // Also send direct invites to every discovered homeserver user so
+      // they get a notification instead of having to discover+knock.
+      if (inviteUserIds.length > 0) {
+        createArgs.invite = inviteUserIds;
+      }
     } else {
       // Private / invite-only (original behavior).
       createArgs.visibility = 'private';
@@ -137,9 +158,17 @@ async function createSpaceRoom(
       discoverability,
     });
 
-    // For public spaces, still invite any pre-selected users if provided.
+    // Best-effort: retry any invites that the homeserver rejected during
+    // createRoom (Synapse drops invalid user IDs silently). This also
+    // catches users added after the initial create.
     if (discoverability === 'public' && inviteUserIds.length > 0) {
+      const room = client.getRoom?.(roomId);
+      const already = new Set<string>(
+        room?.getMembersWithMembership?.('invite')?.map((m: any) => m.userId) ?? [],
+      );
+      room?.getMembersWithMembership?.('join')?.forEach((m: any) => already.add(m.userId));
       for (const uid of inviteUserIds) {
+        if (already.has(uid)) continue;
         try {
           await client.invite(roomId, uid);
         } catch (e) {
