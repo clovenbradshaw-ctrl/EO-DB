@@ -7,6 +7,7 @@ import { processEvent } from '../db/fold';
 import { horizonGet, type HorizonOpts } from '../db/horizon';
 import { getState, getStateByPrefix } from '../db/state';
 import { readLogSince } from '../db/log';
+import { backfillFoldCaches } from '../db/fold-cache';
 import type { SyncManager } from '../matrix/sync-manager';
 import type { FilenSyncService } from '../filen/filen-sync';
 import type { ResolvedPermissions } from '../permissions/types';
@@ -88,6 +89,14 @@ export const useEoStore = create<EoDbState>((set, get) => ({
       // Log read may fail on a brand-new store — that's fine
     }
 
+    // One-time backfill of the incremental fold cache for stores created
+    // before it existed. No-op on brand-new stores and on already-backfilled ones.
+    try {
+      await backfillFoldCaches(store);
+    } catch (e) {
+      console.warn('[EO-DB] fold cache backfill failed:', e);
+    }
+
     set({ store, lastSeq, ready: true, recentEvents: hydrated });
   },
 
@@ -103,6 +112,12 @@ export const useEoStore = create<EoDbState>((set, get) => ({
       hydrated = all.slice(-100);
     } catch {
       // Brand-new store — nothing to hydrate
+    }
+
+    try {
+      await backfillFoldCaches(store);
+    } catch (e) {
+      console.warn('[EO-DB] fold cache backfill failed:', e);
     }
 
     set({ store, lastSeq, ready: true, recentEvents: hydrated });

@@ -6,6 +6,7 @@ import { resolveAlias, checkExists } from './helpers';
 import { AsyncMutex } from './mutex';
 import { eventHash } from './hash';
 import { validateEvent, formatValidationErrors } from './validate';
+import { updateFoldCache, refreshGraphMetrics } from './fold-cache';
 import type { EoEvent, EoEventInput, EoState, EvaRegistration, RecResult, ExternalOperator, DerivedEntity } from './types';
 
 /** Fold mutex — ensures only one processEvent executes at a time. */
@@ -86,7 +87,13 @@ async function processEventInner(
     return seq;
   }
 
-  // 7. Recompute fold-computed EVA-active dependents (with cycle guard)
+  // 7. Update the incrementally-maintained fold cache on the target's state
+  //    (trajectory, trajectoryFingerprint, cadence, _lastRecSeq). This is the
+  //    "current state fold" that horizonGet reads from — so views don't rescan
+  //    the event log on every click.
+  await updateFoldCache(store, fullEvent);
+
+  // 7b. Recompute fold-computed EVA-active dependents (with cycle guard)
   await recomputeDependents(store, fullEvent.target, new Set());
 
   // 8. Detect dependency cycles and emit system-generated REC if found
@@ -206,6 +213,12 @@ async function handleCON(store: EoStore, event: EoEvent): Promise<void> {
     level: sourceState?.level ?? 1,
     ...stateFromEvent(event, 'CON'),
   });
+
+  // Refresh cached graphMetrics on every endpoint whose edges changed.
+  const touched = new Set<string>([event.target]);
+  if (operand.added) for (const d of operand.added) touched.add(d);
+  if (operand.removed) for (const d of operand.removed) touched.add(d);
+  for (const t of touched) await refreshGraphMetrics(store, t);
 }
 
 // --- SYN: Synthesis (Merge) ---
@@ -261,6 +274,12 @@ async function handleSYN(store: EoStore, event: EoEvent): Promise<void> {
         ...stateFromEvent(event, 'SYN'),
       });
     }
+
+    // Refresh graphMetrics for the merged target and every endpoint of a rewired edge.
+    const touched = new Set<string>([mergedTarget]);
+    for (const e of [...edgesFromA, ...edgesFromB]) touched.add(e.dest);
+    for (const e of [...edgesToA, ...edgesToB]) touched.add(e.source);
+    for (const t of touched) await refreshGraphMetrics(store, t);
   }
 }
 
@@ -566,6 +585,7 @@ async function detectAndEmitREC(
     level: existingPivot?.level ?? 1,
     ...stateFromEvent(recEvent, 'REC'),
   });
+  await updateFoldCache(store, recEvent);
 
   if (onEvent) onEvent(recEvent);
 
@@ -599,6 +619,7 @@ async function detectAndEmitREC(
       level: existingDerived.level,
       ...stateFromEvent(updateEvent, 'DEF'),
     });
+    await updateFoldCache(store, updateEvent);
     if (onEvent) onEvent(updateEvent);
   } else {
     const insSeq = await store.nextSeq();
@@ -620,6 +641,7 @@ async function detectAndEmitREC(
       level: derivedLevel,
       ...stateFromEvent(insEvent, 'INS'),
     });
+    await updateFoldCache(store, insEvent);
 
     const derived: DerivedEntity = {
       target: derivedTargetId,
@@ -738,6 +760,7 @@ async function cascadeUpward(
         level: existingDerived.level,
         ...stateFromEvent(reEvalEvent, 'REC'),
       });
+      await updateFoldCache(store, reEvalEvent);
     }
 
     if (onEvent) onEvent(reEvalEvent);

@@ -32,6 +32,7 @@ interface RecordViewProps {
 
 export function RecordView({ target, onNavigate, permissions, profileFields }: RecordViewProps) {
   const horizon = useEoStore((s) => s.horizon);
+  const ready = useEoStore((s) => s.ready);
   const [data, setData] = useState<HorizonResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -39,6 +40,7 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
   const s = makeStyles(theme);
 
   useEffect(() => {
+    if (!ready) return; // store is hydrating — keep loading, retry when ready flips true
     let cancelled = false;
     setLoading(true);
     setError(null);
@@ -57,7 +59,7 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
         setLoading(false);
       });
     return () => { cancelled = true; };
-  }, [target, horizon]);
+  }, [ready, target, horizon]);
 
   if (loading) {
     return <div style={s.loading}>Loading record...</div>;
