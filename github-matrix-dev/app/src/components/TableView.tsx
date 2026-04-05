@@ -782,7 +782,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
           <div style={{ display: 'flex', gap: 2 }}>
             {(['clip', 'wrap'] as const).map((mode, i) => {
               const isActive = cellOverflow === mode;
-              const icon = mode === 'clip' ? '\u2014\u2026' : '\u21B5';
+              const icon = mode === 'clip' ? '\u2014' : '\u21B5';
               const label = mode === 'clip'
                 ? 'Truncate cell text with ellipsis'
                 : 'Wrap cell text across multiple lines';
