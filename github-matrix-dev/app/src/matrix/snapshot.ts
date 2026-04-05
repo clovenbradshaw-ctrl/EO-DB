@@ -239,6 +239,9 @@ export async function maybeCreateSnapshot(
   myUserId: string,
   keyring?: LocalKeyring,
 ): Promise<void> {
+  // Matrix media snapshot saves are disabled — Filen is the primary store.
+  return;
+
   const lastSeq = await store.getCurrentSeq();
   const lastSnapshotSeq = (await store.get('meta:snapshot_seq')) || 0;
 
