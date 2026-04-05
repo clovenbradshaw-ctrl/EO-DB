@@ -154,7 +154,6 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   const filterConjunction = viewConfig.filterConjunction;
   const hiddenColumnsArr = viewConfig.hiddenColumns;
   const hiddenColumns = useMemo(() => new Set(hiddenColumnsArr), [hiddenColumnsArr]);
-  const showLastUpdated = viewConfig.showLastUpdated;
   const columnOrder = viewConfig.columnOrder;
   const columnWidths = viewConfig.columnWidths;
   const rowHeight = viewConfig.rowHeight || 'default';
@@ -171,7 +170,6 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     const next = typeof fn === 'function' ? fn(hiddenColumns) : fn;
     viewStore.setHiddenColumns(scope, [...next]);
   }, [scope, viewStore, hiddenColumns]);
-  const setShowLastUpdated = useCallback((show: boolean) => viewStore.setShowLastUpdated(scope, show), [scope, viewStore]);
 
   // --- Column resize state ---
   const [resizing, setResizing] = useState<{ key: string; startX: number; startWidth: number } | null>(null);
@@ -299,11 +297,11 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     const all = [
       { key: '_record', label: 'record', type: 'text' as const },
       ...entityColumns,
-      ...(showLastUpdated ? [{ key: '_last_updated', label: 'last updated', type: 'text' as const }] : []),
+      { key: '_last_updated', label: 'last updated', type: 'text' as const },
     ];
     if (hiddenColumns.size === 0) return all;
     return all.filter((col) => !hiddenColumns.has(col.key));
-  }, [entityColumns, hiddenColumns, showLastUpdated]);
+  }, [entityColumns, hiddenColumns]);
 
   // Apply column ordering from view store
   const orderedColumns = useMemo<ColumnDef[]>(() => {
@@ -578,18 +576,6 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
             sorts={sorts}
             onSortsChange={setSorts}
           />
-          <button
-            onClick={() => setShowLastUpdated(!showLastUpdated)}
-            style={{
-              ...s.toggleBtn,
-              background: showLastUpdated ? theme.accentBg : 'transparent',
-              color: showLastUpdated ? theme.accent : theme.textMuted,
-              border: `1px solid ${showLastUpdated ? theme.accentBorder : theme.border}`,
-            }}
-            title={showLastUpdated ? 'Hide last updated column' : 'Show last updated column'}
-          >
-            Last updated
-          </button>
           <input
             value={filterText}
             onChange={(e) => setFilterText(e.target.value)}
@@ -628,13 +614,22 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
           <div style={{ display: 'flex', gap: 2 }}>
             {(['clip', 'wrap'] as const).map((mode, i) => {
               const isActive = cellOverflow === mode;
+              const icon = mode === 'clip' ? '\u2014\u2026' : '\u21B5';
+              const label = mode === 'clip'
+                ? 'Truncate cell text with ellipsis'
+                : 'Wrap cell text across multiple lines';
               return (
                 <button
                   key={mode}
                   onClick={() => viewStore.setCellOverflow(scope, mode)}
+                  title={label}
+                  aria-label={label}
+                  aria-pressed={isActive}
                   style={{
                     ...s.toggleBtn,
                     padding: '0 8px',
+                    minWidth: 28,
+                    fontWeight: isActive ? 600 : 400,
                     background: isActive ? theme.accentBg : 'transparent',
                     color: isActive ? theme.accent : theme.textMuted,
                     border: `1px solid ${isActive ? theme.accentBorder : theme.border}`,
@@ -642,7 +637,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                     borderRight: i === 0 ? 'none' : undefined,
                   }}
                 >
-                  {mode.charAt(0).toUpperCase() + mode.slice(1)}
+                  {icon}
                 </button>
               );
             })}
@@ -658,9 +653,9 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                 color: profileFields ? theme.accent : theme.textMuted,
                 border: `1px solid ${profileFields ? theme.accentBorder : theme.border}`,
               }}
-              title="Configure which fields appear in the record detail drawer"
+              title="Choose which fields appear in the record detail drawer"
             >
-              {'\u229E'} Profile
+              {'\u229E'} Detail fields
             </button>
             {showProfilePicker && (
               <>
@@ -675,7 +670,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                   minWidth: 200, maxHeight: 320, overflowY: 'auto',
                 }}>
                   <div style={{ fontSize: 11, fontWeight: 600, marginBottom: 8, color: theme.textHeading }}>
-                    Profile Fields
+                    Detail Fields
                   </div>
                   {entityColumns.map((col) => {
                     const isChecked = !profileFields || profileFields.includes(col.key);
