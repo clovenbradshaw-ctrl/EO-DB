@@ -1,9 +1,9 @@
 /**
- * Filen session store — Zustand store with localStorage persistence.
+ * Filen session store — Zustand store for the shared org-mode Filen session.
  *
- * Keeps the user logged into Filen across page reloads. Manages the /EO-DB/
- * root folder and per-space subfolders so the sync service can just call
- * `ensureSpaceFolder()` and start uploading.
+ * Credentials are fetched at runtime from the n8n webhook using the caller's
+ * Matrix access token (see `connectOrgFromWebhook`). No credentials are
+ * persisted to localStorage or to Matrix room state.
  */
 
 import { create } from 'zustand';
@@ -13,38 +13,14 @@ import {
   filenEnsureFolder,
   filenFindFolder,
   filenCreateFolder,
+  fetchFilenCredentialsFromWebhook,
   type FilenAuth,
-  type LoginResult,
 } from './filen-api';
 
-const STORAGE_KEY = 'eo-filen-session';
 const EODB_ROOT_FOLDER = 'EO-DB';
-const FILEN_GATEWAY = 'https://gateway.filen.io';
-/** Only re-validate Filen API key if last check was more than 5 minutes ago. */
-const VALIDATION_INTERVAL_MS = 5 * 60 * 1000;
-
-interface PersistedSession {
-  auth: FilenAuth;
-  masterKeys: string[];
-  baseFolderUuid: string;
-  eodbFolderUuid: string;
-  /** Base64-encoded password for automatic re-login on API key expiry. */
-  savedPassword?: string;
-}
 
 /** Timestamp of the last successful API key validation. */
 let lastValidatedAt = 0;
-
-/** Config stored in Matrix room state event `eo.filen.config`. */
-export interface FilenOrgConfig {
-  email: string;
-  apiKey: string;
-  masterKey: string;
-  baseFolderUuid: string;
-  eodbFolderUuid: string;
-  /** Base64-encoded password for automatic re-login on API key expiry. */
-  savedPassword?: string;
-}
 
 export interface FilenStoreState {
   /** Current auth (null = not logged in). */
@@ -67,21 +43,17 @@ export interface FilenStoreState {
   error: string | null;
   /** Last successful sync timestamp per space. */
   lastSyncAt: Record<string, string>;
-  /** True when creds come from Matrix room state (shared org account). */
+  /** True when creds come from the n8n webhook (shared org account). */
   isOrgMode: boolean;
-  /** Admin's email in org mode (for display). */
+  /** Shared account email in org mode (for display). */
   orgEmail: string | null;
   /** Currently active spaceId (set by ensureSpaceFolder). */
   currentSpaceId: string | null;
 
-  /** Login to Filen and persist session. */
-  login: (email: string, password: string, twofa?: string) => Promise<void>;
-  /** Logout and clear persisted session. */
-  logout: () => void;
-  /** Restore session from localStorage (call on app mount). */
-  restore: () => boolean;
-  /** Restore from Matrix room state (org mode — no localStorage). */
-  restoreFromRoomState: (config: FilenOrgConfig) => Promise<void>;
+  /** Fetch shared Filen creds from the n8n webhook and connect in org mode. */
+  connectOrgFromWebhook: (matrixAccessToken: string) => Promise<void>;
+  /** Reset the session (in-memory only — no persisted state). */
+  disconnect: () => void;
   /** Ensure the /EO-DB/ root folder exists on Filen. */
   ensureEodbFolder: () => Promise<string>;
   /** Ensure a space subfolder exists under /EO-DB/. */
@@ -115,44 +87,7 @@ export const useFilenStore = create<FilenStoreState>((set, get) => ({
   orgEmail: null,
   currentSpaceId: null,
 
-  async login(email: string, password: string, twofa?: string) {
-    set({ connecting: true, error: null });
-    try {
-      const result: LoginResult = await apiLogin(email, password, twofa);
-      const auth: FilenAuth = { apiKey: result.apiKey, email };
-      const baseFolderUuid = await filenGetBaseFolder(result.apiKey);
-
-      // Ensure /EO-DB/ folder exists
-      const eodbFolderUuid = await filenEnsureFolder(
-        result.apiKey, baseFolderUuid, EODB_ROOT_FOLDER, result.masterKeys,
-      );
-
-      const session: PersistedSession = {
-        auth,
-        masterKeys: result.masterKeys,
-        baseFolderUuid,
-        eodbFolderUuid,
-        savedPassword: btoa(password),
-      };
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(session));
-      lastValidatedAt = Date.now();
-
-      set({
-        auth,
-        masterKeys: result.masterKeys,
-        baseFolderUuid,
-        eodbFolderUuid,
-        connected: true,
-        connecting: false,
-      });
-    } catch (e: any) {
-      set({ connecting: false, error: e.message });
-      throw e;
-    }
-  },
-
-  logout() {
-    localStorage.removeItem(STORAGE_KEY);
+  disconnect() {
     set({
       auth: null,
       masterKeys: [],
@@ -169,128 +104,25 @@ export const useFilenStore = create<FilenStoreState>((set, get) => ({
     });
   },
 
-  restore(): boolean {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (!raw) return false;
-      const session: PersistedSession = JSON.parse(raw);
-      if (!session.auth?.apiKey || !session.masterKeys?.length) {
-        localStorage.removeItem(STORAGE_KEY);
-        return false;
-      }
-      // Optimistically set connected so the UI shows the session immediately,
-      // then validate the API key in the background. If expired, try re-login.
-      set({
-        auth: session.auth,
-        masterKeys: session.masterKeys,
-        baseFolderUuid: session.baseFolderUuid,
-        eodbFolderUuid: session.eodbFolderUuid,
-        connected: true,
-      });
-
-      // Skip validation if we checked recently (avoids hammering on re-mounts)
-      if (Date.now() - lastValidatedAt < VALIDATION_INTERVAL_MS) {
-        return true;
-      }
-
-      // Background validation — try re-login on API key expiry
-      fetch(`${FILEN_GATEWAY}/v3/user/info`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${session.auth.apiKey}`,
-        },
-        body: '{}',
-      })
-        .then(r => r.json())
-        .then(async (d) => {
-          if (d.status) {
-            lastValidatedAt = Date.now();
-            return;
-          }
-          // API key expired — attempt automatic re-login with saved credentials
-          console.warn('[EO-DB] Filen API key expired — attempting re-login');
-          if (session.savedPassword && session.auth.email) {
-            try {
-              await get().login(session.auth.email, atob(session.savedPassword));
-              console.log('[EO-DB] Filen re-login successful');
-            } catch (e) {
-              console.warn('[EO-DB] Filen re-login failed — clearing session:', e);
-              localStorage.removeItem(STORAGE_KEY);
-              set({
-                auth: null,
-                masterKeys: [],
-                baseFolderUuid: '',
-                eodbFolderUuid: '',
-                spaceFolders: {},
-                connected: false,
-                error: 'Filen session expired — please log in again',
-              });
-            }
-          } else {
-            console.warn('[EO-DB] Filen session expired — no saved credentials for re-login');
-            localStorage.removeItem(STORAGE_KEY);
-            set({
-              auth: null,
-              masterKeys: [],
-              baseFolderUuid: '',
-              eodbFolderUuid: '',
-              spaceFolders: {},
-              connected: false,
-              error: 'Filen session expired — please log in again',
-            });
-          }
-        })
-        .catch(() => {
-          // Network error — keep session, will retry on next sync cycle
-        });
-
-      return true;
-    } catch {
-      localStorage.removeItem(STORAGE_KEY);
-      return false;
-    }
-  },
-
-  async restoreFromRoomState(config: FilenOrgConfig): Promise<void> {
+  async connectOrgFromWebhook(matrixAccessToken: string): Promise<void> {
     set({ connecting: true, error: null });
     try {
-      // Verify session is still valid
-      const res = await fetch(`${FILEN_GATEWAY}/v3/user/info`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${config.apiKey}`,
-        },
-        body: '{}',
-      });
-      const data = await res.json();
-
-      let apiKey = config.apiKey;
-      let masterKeys = [config.masterKey];
-
-      if (!data.status) {
-        // Token expired — auto re-login if saved password is available
-        if (config.savedPassword) {
-          console.log('[EO-DB] Filen API key expired — auto re-logging in');
-          const result = await apiLogin(config.email, atob(config.savedPassword));
-          apiKey = result.apiKey;
-          masterKeys = result.masterKeys;
-        } else {
-          throw new Error('Filen API key expired — admin needs to update credentials');
-        }
-      }
-
-      const auth: FilenAuth = { apiKey, email: config.email };
+      const { username, password } = await fetchFilenCredentialsFromWebhook(matrixAccessToken);
+      const result = await apiLogin(username, password);
+      const baseFolderUuid = await filenGetBaseFolder(result.apiKey);
+      const eodbFolderUuid = await filenEnsureFolder(
+        result.apiKey, baseFolderUuid, EODB_ROOT_FOLDER, result.masterKeys,
+      );
+      const auth: FilenAuth = { apiKey: result.apiKey, email: username };
       set({
         auth,
-        masterKeys,
-        baseFolderUuid: config.baseFolderUuid,
-        eodbFolderUuid: config.eodbFolderUuid,
+        masterKeys: result.masterKeys,
+        baseFolderUuid,
+        eodbFolderUuid,
         connected: true,
         connecting: false,
         isOrgMode: true,
-        orgEmail: config.email,
+        orgEmail: username,
       });
       lastValidatedAt = Date.now();
     } catch (e: any) {

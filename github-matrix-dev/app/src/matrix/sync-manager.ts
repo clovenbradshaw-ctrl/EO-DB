@@ -1,7 +1,7 @@
 /**
  * Sync manager — orchestrates snapshot persistence, offline queue, and deduplication.
  *
- * NOTE: When Filen org-mode is active (eo.filen.config room state exists),
+ * NOTE: When Filen org-mode is active (creds fetched from the n8n webhook),
  * Filen is the primary data store and SyncManager is NOT created. The
  * FilenSyncService handles all data persistence and signaling. SyncManager
  * remains available as a fallback for spaces without Filen org-mode, where
