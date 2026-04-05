@@ -20,9 +20,12 @@
  *     is encrypted in the log via the room's encryption scope)
  */
 import { useState, useRef, useEffect, useCallback, type CSSProperties } from 'react';
+import type { MatrixClient, MatrixEvent, Room } from 'matrix-js-sdk';
 import { useTheme, type Theme } from '../theme';
 import { useEoStore } from '../store/eo-store';
 import type { EoEventInput, EoState } from '../db/types';
+import { searchUsers, listAllHomeserverUsers, type DiscoveredUser } from '../matrix/user-discovery';
+import { findOrCreateDirectMessage } from '../matrix/dm';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -77,68 +80,196 @@ interface MessagesViewProps {
   userId?: string;
   /** Optional Matrix room ID to auto-select (e.g. from a DM link) */
   activeRoomId?: string | null;
+  /** Active Matrix client (required for real send/receive) */
+  matrixClient?: MatrixClient | null;
 }
 
-export function MessagesView({ scope, userId, activeRoomId: initialRoomId }: MessagesViewProps) {
+/** Convert a Matrix timeline event into our UI message shape. */
+function toMatrixMessage(ev: MatrixEvent, roomId: string, room: Room | null): MatrixMessage | null {
+  const type = ev.getType();
+  // 'm.room.encrypted' events are shown with a placeholder until decryption lands
+  if (type !== 'm.room.message' && type !== 'm.room.encrypted') return null;
+  const content = ev.getContent() as { body?: string; msgtype?: string };
+  const sender = ev.getSender() ?? '';
+  const member = room && sender ? room.getMember(sender) : null;
+  const senderName = member?.name || (sender.startsWith('@') ? sender.slice(1).split(':')[0] : sender);
+  const isEncryptedPending = type === 'm.room.encrypted' && !content.body;
+  return {
+    id: ev.getId() ?? `${ev.getTs()}_${sender}`,
+    roomId,
+    sender,
+    senderName,
+    body: isEncryptedPending ? '[decrypting…]' : String(content.body ?? ''),
+    timestamp: ev.getTs() ?? Date.now(),
+  };
+}
+
+function listDirectRoomIds(client: MatrixClient): Set<string> {
+  const set = new Set<string>();
+  try {
+    const ev = client.getAccountData('m.direct');
+    if (!ev) return set;
+    const map = ev.getContent() as Record<string, string[]>;
+    for (const ids of Object.values(map ?? {})) {
+      for (const id of ids ?? []) set.add(id);
+    }
+  } catch {
+    /* no direct map yet */
+  }
+  return set;
+}
+
+function loadRoomsFromClient(client: MatrixClient): MatrixRoom[] {
+  const directIds = listDirectRoomIds(client);
+  const joined = client.getRooms().filter((r) => r.getMyMembership() === 'join');
+  return joined.map((r) => {
+    const isDm = directIds.has(r.roomId);
+    let encrypted = false;
+    try { encrypted = client.isRoomEncrypted(r.roomId); } catch { /* ignore */ }
+    return {
+      id: r.roomId,
+      name: r.name || (isDm ? 'Direct Message' : r.roomId),
+      type: isDm ? 'dm' as const : 'channel' as const,
+      encrypted,
+      members: [],
+      unread: r.getUnreadNotificationCount() ?? 0,
+    };
+  }).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export function MessagesView({ scope, userId, activeRoomId: initialRoomId, matrixClient }: MessagesViewProps) {
   const { theme } = useTheme();
   const dispatch = useEoStore((s) => s.dispatch);
   const ready = useEoStore((s) => s.ready);
 
-  // ─── Local state (will connect to real Matrix SDK later) ────────────────
-  const [rooms, setRooms] = useState<MatrixRoom[]>(() => {
-    const base: MatrixRoom[] = [
-      { id: '!gen:local', name: 'General', type: 'channel', encrypted: false, members: [], unread: 0 },
-      { id: '!data:local', name: 'Data Pipeline', type: 'channel', encrypted: true, members: [], unread: 0, encryptionScope: 'room.data_pipeline' },
-    ];
-    if (initialRoomId) {
-      base.push({ id: initialRoomId, name: 'Direct Message', type: 'dm', encrypted: true, members: [], unread: 0 });
-    }
-    return base;
-  });
-  const [activeRoomId, setActiveRoomId] = useState<string>(initialRoomId ?? rooms[0].id);
-
-  // If the prop changes (user clicks a new DM link), surface the room and select it
-  useEffect(() => {
-    if (!initialRoomId) return;
-    setRooms((prev) => prev.some((r) => r.id === initialRoomId)
-      ? prev
-      : [...prev, { id: initialRoomId, name: 'Direct Message', type: 'dm', encrypted: true, members: [], unread: 0 }],
-    );
-    setActiveRoomId(initialRoomId);
-  }, [initialRoomId]);
+  const [rooms, setRooms] = useState<MatrixRoom[]>([]);
+  const [activeRoomId, setActiveRoomId] = useState<string | null>(initialRoomId ?? null);
   const [messages, setMessages] = useState<Record<string, MatrixMessage[]>>({});
   const [inputText, setInputText] = useState('');
+  const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
+  const [newDmOpen, setNewDmOpen] = useState(false);
   const [preserve, setPreserve] = useState<PreserveDialogState>({
     message: null, visible: false, linkTarget: '', edgeType: 'references',
     edges: [], preserving: false,
   });
 
+  // ─── Load rooms from Matrix client + keep in sync ───────────────────────
+  useEffect(() => {
+    if (!matrixClient) { setRooms([]); return; }
+    const refresh = () => setRooms(loadRoomsFromClient(matrixClient));
+    refresh();
+    const onRoom = () => refresh();
+    const onMembership = () => refresh();
+    const onAccountData = (ev: MatrixEvent) => {
+      if (ev.getType() === 'm.direct') refresh();
+    };
+    matrixClient.on('Room' as any, onRoom);
+    matrixClient.on('Room.myMembership' as any, onMembership);
+    matrixClient.on('Room.name' as any, onRoom);
+    matrixClient.on('accountData' as any, onAccountData);
+    return () => {
+      matrixClient.off('Room' as any, onRoom);
+      matrixClient.off('Room.myMembership' as any, onMembership);
+      matrixClient.off('Room.name' as any, onRoom);
+      matrixClient.off('accountData' as any, onAccountData);
+    };
+  }, [matrixClient]);
+
+  // When a deep-linked roomId arrives, select it once it's in the list
+  useEffect(() => {
+    if (initialRoomId) setActiveRoomId(initialRoomId);
+  }, [initialRoomId]);
+
+  // Auto-select first room when nothing selected
+  useEffect(() => {
+    if (activeRoomId || rooms.length === 0) return;
+    setActiveRoomId(rooms[0].id);
+  }, [rooms, activeRoomId]);
+
+  // ─── Load timeline + subscribe to new events for active room ────────────
+  useEffect(() => {
+    if (!matrixClient || !activeRoomId) return;
+    const room = matrixClient.getRoom(activeRoomId);
+    if (!room) return;
+
+    const initial = room.getLiveTimeline().getEvents()
+      .map((ev) => toMatrixMessage(ev, activeRoomId, room))
+      .filter((m): m is MatrixMessage => m !== null);
+    setMessages((prev) => ({ ...prev, [activeRoomId]: initial }));
+
+    const onTimeline = (ev: MatrixEvent, tRoom: Room | undefined, _toStart: boolean | undefined, removed: boolean, data: any) => {
+      if (removed) return;
+      if (tRoom?.roomId !== activeRoomId) return;
+      if (!data?.liveEvent) return; // only live events, not backfill
+      const msg = toMatrixMessage(ev, activeRoomId, tRoom);
+      if (!msg) return;
+      setMessages((prev) => {
+        const list = prev[activeRoomId] ?? [];
+        if (list.some((m) => m.id === msg.id)) return prev;
+        return { ...prev, [activeRoomId]: [...list, msg] };
+      });
+    };
+    const onDecrypted = (ev: MatrixEvent) => {
+      if (ev.getRoomId() !== activeRoomId) return;
+      const tRoom = matrixClient.getRoom(activeRoomId);
+      const msg = toMatrixMessage(ev, activeRoomId, tRoom);
+      if (!msg) return;
+      setMessages((prev) => {
+        const list = prev[activeRoomId] ?? [];
+        const idx = list.findIndex((m) => m.id === msg.id);
+        if (idx < 0) return { ...prev, [activeRoomId]: [...list, msg] };
+        const next = [...list];
+        next[idx] = msg;
+        return { ...prev, [activeRoomId]: next };
+      });
+    };
+    matrixClient.on('Room.timeline' as any, onTimeline);
+    matrixClient.on('Event.decrypted' as any, onDecrypted);
+    return () => {
+      matrixClient.off('Room.timeline' as any, onTimeline);
+      matrixClient.off('Event.decrypted' as any, onDecrypted);
+    };
+  }, [matrixClient, activeRoomId]);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const activeRoom = rooms.find((r) => r.id === activeRoomId) ?? rooms[0];
-  const roomMessages = messages[activeRoomId] ?? [];
+  const activeRoom = rooms.find((r) => r.id === activeRoomId) ?? null;
+  const roomMessages = activeRoomId ? (messages[activeRoomId] ?? []) : [];
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [activeRoomId, roomMessages.length]);
 
-  // ─── Send message (normal Matrix send) ──────────────────────────────────
-  const sendMessage = useCallback(() => {
+  // ─── Send message (real Matrix send; SDK encrypts automatically for E2EE rooms) ──
+  const sendMessage = useCallback(async () => {
     const text = inputText.trim();
-    if (!text) return;
-    const msg: MatrixMessage = {
-      id: `msg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-      roomId: activeRoomId,
-      sender: userId ?? '@local:localhost',
-      senderName: userId?.split(':')[0].replace('@', '') ?? 'you',
-      body: text,
-      timestamp: Date.now(),
-    };
-    setMessages((prev) => ({
-      ...prev,
-      [activeRoomId]: [...(prev[activeRoomId] ?? []), msg],
-    }));
+    if (!text || !matrixClient || !activeRoomId || sending) return;
+    setSending(true);
+    setSendError(null);
+    const prevText = text;
     setInputText('');
-  }, [inputText, activeRoomId, userId]);
+    try {
+      await matrixClient.sendMessage(activeRoomId, {
+        msgtype: 'm.text',
+        body: prevText,
+      } as any);
+    } catch (e: any) {
+      setSendError(e?.message || 'Failed to send message');
+      setInputText(prevText);
+    } finally {
+      setSending(false);
+    }
+  }, [inputText, matrixClient, activeRoomId, sending]);
+
+  // ─── Start a new direct message with a homeserver user ──────────────────
+  const startDirectMessage = useCallback(async (otherUserId: string) => {
+    if (!matrixClient) return;
+    const roomId = await findOrCreateDirectMessage(matrixClient, otherUserId);
+    // refresh rooms list immediately so the new DM appears
+    setRooms(loadRoomsFromClient(matrixClient));
+    setActiveRoomId(roomId);
+    setNewDmOpen(false);
+  }, [matrixClient]);
 
   // ─── Preserve message → INS into DB ────────────────────────────────────
   const preserveMessage = useCallback(async (msg: MatrixMessage, edges: Array<{ target: string; edgeType: string }>) => {
@@ -171,7 +302,7 @@ export function MessagesView({ scope, userId, activeRoomId: initialRoomId }: Mes
       meta: {
         source: 'message_preserve',
         roomId: msg.roomId,
-        encrypted: activeRoom.encrypted,
+        encrypted: activeRoom?.encrypted ?? false,
       },
     };
     await dispatch(insEvent);
@@ -183,7 +314,7 @@ export function MessagesView({ scope, userId, activeRoomId: initialRoomId }: Mes
     //    - Metadata (target path, timestamps, sender) is also scoped
     //    - Users without room membership see NOTHING — not even that
     //      a preserved record exists
-    if (activeRoom.encrypted && activeRoom.encryptionScope) {
+    if (activeRoom?.encrypted && activeRoom.encryptionScope) {
       const defEvent: EoEventInput = {
         op: 'DEF',
         target: `${target}._encryption`,
@@ -290,7 +421,25 @@ export function MessagesView({ scope, userId, activeRoomId: initialRoomId }: Mes
               {room.unread > 0 && <span style={s.unreadBadge}>{room.unread}</span>}
             </button>
           ))}
-          <div style={{ ...s.sectionLabel, marginTop: 12 }}>Direct Messages</div>
+          <div style={{ ...s.sectionLabel, marginTop: 12, display: 'flex', alignItems: 'center', justifyContent: 'space-between', paddingRight: 4 }}>
+            <span>Direct Messages</span>
+            {matrixClient && (
+              <button
+                onClick={() => setNewDmOpen(true)}
+                title="Start a new direct message"
+                style={{
+                  border: 'none', background: 'transparent', cursor: 'pointer',
+                  color: theme.textMuted, fontSize: 16, lineHeight: 1, padding: '0 4px',
+                  fontWeight: 600,
+                }}
+              >+</button>
+            )}
+          </div>
+          {rooms.filter((r) => r.type === 'dm').length === 0 && matrixClient && (
+            <div style={{ padding: '6px 10px', fontSize: 11, color: theme.textMuted }}>
+              No DMs yet. Click + to start one.
+            </div>
+          )}
           {rooms.filter((r) => r.type === 'dm').map((room) => (
             <button
               key={room.id}
@@ -300,7 +449,8 @@ export function MessagesView({ scope, userId, activeRoomId: initialRoomId }: Mes
                 ...(room.id === activeRoomId ? s.roomItemActive : {}),
               }}
             >
-              <span style={{ flex: 1 }}>{room.name}</span>
+              <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>{room.name}</span>
+              {room.encrypted && <span style={{ fontSize: 10, opacity: 0.5 }}>E2EE</span>}
               {room.unread > 0 && <span style={s.unreadBadge}>{room.unread}</span>}
             </button>
           ))}
@@ -311,16 +461,24 @@ export function MessagesView({ scope, userId, activeRoomId: initialRoomId }: Mes
       <div style={s.chatArea}>
         {/* Chat header */}
         <div style={s.chatHeader}>
-          <span style={{ fontSize: 14, color: theme.textMuted }}>{activeRoom.type === 'dm' ? '' : '#'}</span>
-          <span style={{ fontSize: 14, fontWeight: 600, color: theme.textHeading }}>{activeRoom.name}</span>
-          {activeRoom.encrypted && (
-            <span style={{
-              fontSize: 10, padding: '1px 6px', borderRadius: 3,
-              background: theme.accentBg, color: theme.accent, fontWeight: 500,
-            }}>E2EE</span>
+          {activeRoom ? (
+            <>
+              <span style={{ fontSize: 14, color: theme.textMuted }}>{activeRoom.type === 'dm' ? '' : '#'}</span>
+              <span style={{ fontSize: 14, fontWeight: 600, color: theme.textHeading }}>{activeRoom.name}</span>
+              {activeRoom.encrypted && (
+                <span style={{
+                  fontSize: 10, padding: '1px 6px', borderRadius: 3,
+                  background: theme.accentBg, color: theme.accent, fontWeight: 500,
+                }}>E2EE</span>
+              )}
+              <div style={{ flex: 1 }} />
+              <span style={{ fontSize: 11, color: theme.textMuted, fontFamily: 'var(--mono, monospace)' }}>{activeRoom.id}</span>
+            </>
+          ) : (
+            <span style={{ fontSize: 13, color: theme.textMuted }}>
+              {matrixClient ? 'Select or start a conversation' : 'Matrix not connected'}
+            </span>
           )}
-          <div style={{ flex: 1 }} />
-          <span style={{ fontSize: 11, color: theme.textMuted, fontFamily: 'var(--mono, monospace)' }}>{activeRoom.id}</span>
         </div>
 
         {/* Messages */}
@@ -344,34 +502,52 @@ export function MessagesView({ scope, userId, activeRoomId: initialRoomId }: Mes
 
         {/* Composer */}
         <div style={s.composer}>
+          {sendError && (
+            <div style={{
+              padding: '6px 10px', marginBottom: 6, borderRadius: 6,
+              background: theme.dangerBg, color: theme.danger, fontSize: 11,
+              border: `1px solid ${theme.danger}`,
+            }}>{sendError}</div>
+          )}
           <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
             <input
               value={inputText}
               onChange={(e) => setInputText(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } }}
-              placeholder={`Message ${activeRoom.name}...`}
+              onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void sendMessage(); } }}
+              placeholder={activeRoom ? `Message ${activeRoom.name}...` : 'Select a room to message'}
+              disabled={!activeRoom || !matrixClient}
               style={s.composerInput}
             />
             <button
-              onClick={sendMessage}
-              disabled={!inputText.trim()}
+              onClick={() => void sendMessage()}
+              disabled={!inputText.trim() || !activeRoom || !matrixClient || sending}
               style={{
                 ...s.sendButton,
-                background: inputText.trim() ? theme.accent : theme.border,
-                color: inputText.trim() ? '#fff' : theme.textMuted,
-                cursor: inputText.trim() ? 'pointer' : 'default',
+                background: (inputText.trim() && activeRoom && !sending) ? theme.accent : theme.border,
+                color: (inputText.trim() && activeRoom && !sending) ? '#fff' : theme.textMuted,
+                cursor: (inputText.trim() && activeRoom && !sending) ? 'pointer' : 'default',
               }}
-            >Send</button>
+            >{sending ? 'Sending…' : 'Send'}</button>
           </div>
         </div>
       </div>
+
+      {/* ── New DM picker ── */}
+      {newDmOpen && matrixClient && (
+        <NewDmPicker
+          theme={theme}
+          matrixClient={matrixClient}
+          onPick={startDirectMessage}
+          onClose={() => setNewDmOpen(false)}
+        />
+      )}
 
       {/* ── Preserve dialog ── */}
       {preserve.visible && preserve.message && (
         <PreserveDialog
           theme={theme}
           state={preserve}
-          roomEncrypted={activeRoom.encrypted}
+          roomEncrypted={activeRoom?.encrypted ?? false}
           onAddEdge={() => {
             if (!preserve.linkTarget.trim()) return;
             setPreserve((p) => ({
@@ -397,6 +573,140 @@ export function MessagesView({ scope, userId, activeRoomId: initialRoomId }: Mes
           onCancel={() => setPreserve({ message: null, visible: false, linkTarget: '', edgeType: 'references', edges: [], preserving: false })}
         />
       )}
+    </div>
+  );
+}
+
+// ─── New DM picker ────────────────────────────────────────────────────────
+
+function NewDmPicker({ theme, matrixClient, onPick, onClose }: {
+  theme: Theme;
+  matrixClient: MatrixClient;
+  onPick: (userId: string) => void | Promise<void>;
+  onClose: () => void;
+}) {
+  const [query, setQuery] = useState('');
+  const [all, setAll] = useState<DiscoveredUser[]>([]);
+  const [results, setResults] = useState<DiscoveredUser[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [starting, setStarting] = useState<string | null>(null);
+  const debounceRef = useRef<ReturnType<typeof setTimeout>>();
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    listAllHomeserverUsers(matrixClient, 200)
+      .then((u) => { if (!cancelled) setAll(u); })
+      .catch(() => { /* ignore */ })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [matrixClient]);
+
+  function onQueryChange(v: string) {
+    setQuery(v);
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(async () => {
+      if (v.trim().length < 1) { setResults([]); return; }
+      try {
+        const r = await searchUsers(matrixClient, v, 50);
+        setResults(r);
+      } catch { /* ignore */ }
+    }, 200);
+  }
+
+  const list = query.trim() ? results : all;
+
+  async function handlePick(userId: string) {
+    setStarting(userId);
+    try { await onPick(userId); } finally { setStarting(null); }
+  }
+
+  return (
+    <div
+      style={{
+        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000,
+      }}
+      onClick={onClose}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: 460, maxHeight: '70vh', background: theme.bgCard, borderRadius: 12,
+          border: `1px solid ${theme.border}`, boxShadow: theme.shadowOverlay,
+          display: 'flex', flexDirection: 'column', overflow: 'hidden',
+        }}
+      >
+        <div style={{
+          padding: '14px 18px', borderBottom: `1px solid ${theme.border}`,
+          display: 'flex', alignItems: 'center', gap: 10,
+        }}>
+          <span style={{ fontSize: 14, fontWeight: 600, color: theme.textHeading }}>New Direct Message</span>
+          <div style={{ flex: 1 }} />
+          <button onClick={onClose} style={{
+            background: 'none', border: 'none', cursor: 'pointer',
+            fontSize: 16, color: theme.textMuted, padding: 4,
+          }}>x</button>
+        </div>
+        <div style={{ padding: '10px 18px', borderBottom: `1px solid ${theme.border}` }}>
+          <input
+            autoFocus
+            value={query}
+            onChange={(e) => onQueryChange(e.target.value)}
+            placeholder="Search by name or @user:server..."
+            style={{
+              width: '100%', boxSizing: 'border-box', padding: '8px 10px', borderRadius: 6,
+              border: `1px solid ${theme.border}`, background: theme.bg, color: theme.text,
+              fontSize: 12, outline: 'none', fontFamily: 'var(--mono, monospace)',
+            }}
+          />
+        </div>
+        <div style={{ overflow: 'auto', padding: '6px 10px', flex: 1 }}>
+          {loading && (
+            <div style={{ padding: 20, textAlign: 'center', color: theme.textMuted, fontSize: 12 }}>Loading users…</div>
+          )}
+          {!loading && list.length === 0 && (
+            <div style={{ padding: 20, textAlign: 'center', color: theme.textMuted, fontSize: 12 }}>
+              {query.trim() ? `No users match "${query}".` : 'No users found.'}
+            </div>
+          )}
+          {list.map((u) => {
+            const localpart = u.userId.startsWith('@') ? u.userId.slice(1).split(':')[0] : u.userId;
+            const isStarting = starting === u.userId;
+            return (
+              <button
+                key={u.userId}
+                onClick={() => handlePick(u.userId)}
+                disabled={isStarting}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 10, width: '100%',
+                  padding: '8px 10px', border: 'none', borderRadius: 6,
+                  background: isStarting ? theme.bgMuted : 'transparent',
+                  color: theme.text, textAlign: 'left' as const,
+                  cursor: isStarting ? 'default' : 'pointer', fontSize: 12,
+                  fontFamily: 'var(--mono, monospace)',
+                }}
+                onMouseEnter={(e) => { if (!isStarting) (e.currentTarget.style.background = theme.bgHover); }}
+                onMouseLeave={(e) => { if (!isStarting) (e.currentTarget.style.background = 'transparent'); }}
+              >
+                <div style={{
+                  width: 28, height: 28, borderRadius: '50%',
+                  background: theme.accentBg, color: theme.accent,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontSize: 11, fontWeight: 700, flexShrink: 0,
+                }}>
+                  {(u.displayName || localpart).charAt(0).toUpperCase()}
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 12, fontWeight: 500, color: theme.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{u.displayName || localpart}</div>
+                  <div style={{ fontSize: 10, color: theme.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{u.userId}</div>
+                </div>
+                {isStarting && <span style={{ fontSize: 10, color: theme.textMuted }}>Opening…</span>}
+              </button>
+            );
+          })}
+        </div>
+      </div>
     </div>
   );
 }
