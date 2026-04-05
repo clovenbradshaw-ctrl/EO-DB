@@ -468,7 +468,24 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       try {
         const client = createMatrixClient(session);
         matrixClientRef.current = client;
-        await client.startClient({ initialSyncLimit: 0 });
+
+        // Initialize Rust crypto so E2EE rooms can send/receive decrypted messages.
+        // Uses IndexedDB to persist device keys & megolm sessions across reloads.
+        try {
+          await client.initRustCrypto({ useIndexedDB: true });
+          // Bootstrap cross-signing if missing so this device can trust itself
+          // and send to encrypted rooms. auth is empty for servers that don't
+          // require UIA for already-authenticated sessions; failure is non-fatal.
+          try {
+            await client.getCrypto()?.bootstrapCrossSigning({});
+          } catch (e) {
+            console.warn('[EO-DB] cross-signing bootstrap skipped:', e);
+          }
+        } catch (e) {
+          console.warn('[EO-DB] rust crypto init failed — E2EE rooms will not work:', e);
+        }
+
+        await client.startClient({ initialSyncLimit: 20 });
 
         await new Promise<void>((resolve) => {
           if (client.isInitialSyncComplete()) {
@@ -1454,7 +1471,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             ) : activeView === 'builder' ? (
               <BuilderView />
             ) : activeView === 'messages' ? (
-              <MessagesView scope={selectedScope} userId={session.userId} activeRoomId={route.query.roomId ?? null} />
+              <MessagesView scope={selectedScope} userId={session.userId} activeRoomId={route.query.roomId ?? null} matrixClient={matrixClientRef.current as any} />
             ) : activeView === 'people' ? (
               matrixClientRef.current ? (
                 <PeopleView

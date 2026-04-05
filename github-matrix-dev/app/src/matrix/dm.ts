@@ -39,12 +39,21 @@ export async function findOrCreateDirectMessage(
     }
   }
 
-  // 3. Create a new 1:1 room
+  // 3. Create a new 1:1 room with E2EE enabled from the start.
+  //    trusted_private_chat sets member power levels so the invitee is promoted,
+  //    and the initial_state below flips on megolm encryption at room creation.
   const result = await client.createRoom({
     is_direct: true,
     preset: 'trusted_private_chat' as any,
     invite: [otherUserId],
     visibility: 'private' as any,
+    initial_state: [
+      {
+        type: 'm.room.encryption',
+        state_key: '',
+        content: { algorithm: 'm.megolm.v1.aes-sha2' },
+      },
+    ],
   });
   const roomId = result.room_id;
 
