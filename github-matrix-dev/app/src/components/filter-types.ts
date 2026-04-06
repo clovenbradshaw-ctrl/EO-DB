@@ -1,4 +1,5 @@
 import type { EoState } from '../db/types';
+import { formatName } from './scope-picker-utils';
 
 // --- Filter Types ---
 
@@ -175,6 +176,7 @@ export function deriveColumns(
   records: EoState[],
   fieldNameMap?: Map<string, string>,
   columnTypeOverrides?: Map<string, any>,
+  showFieldIds?: boolean,
 ): ColumnDef[] {
   const keyValues = new Map<string, any[]>();
   const useFieldsSub = hasFieldsSubObject(records);
@@ -210,7 +212,9 @@ export function deriveColumns(
   for (const [key, values] of keyValues) {
     const typeOverride = columnTypeOverrides?.get(key);
     const type = (typeOverride?.type as ColumnDef['type']) ?? inferColumnType(values);
-    const prettyName = fieldNameMap?.get(key) ?? key;
+    const prettyName = showFieldIds
+      ? key
+      : (fieldNameMap?.get(key) ?? (key.startsWith('fld') ? formatName(key) : key));
     const col: ColumnDef = {
       key,
       label: prettyName,

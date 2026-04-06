@@ -35,6 +35,8 @@ export interface TableViewConfig {
   displayField?: string;
   /** Field key used to group records into kanban columns */
   kanbanField?: string;
+  /** When true, show raw field IDs instead of display names. Defaults to false. */
+  showFieldIds?: boolean;
 }
 
 // ---------------------------------------------------------------------------

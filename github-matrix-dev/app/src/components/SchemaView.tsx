@@ -3,6 +3,7 @@ import { useEoStore } from '../store/eo-store';
 import { groupSchemaStates, schemaFieldTarget, type FieldSchema } from '../db/schema-rules';
 import { readLogForPrefix } from '../db/log';
 import { useTheme, type Theme } from '../theme';
+import { formatName } from './scope-picker-utils';
 import type { EoEvent, EoState } from '../db/types';
 
 // ─── Operator colors (matches LogView) ──────────────────────────────────
@@ -344,11 +345,11 @@ export function SchemaView({ scope }: SchemaViewProps) {
         <table style={s.table}>
           <thead>
             <tr>
-              <th style={s.th} onClick={() => handleSort('fieldKey')}>
-                Field Key{sortIndicator('fieldKey')}
-              </th>
               <th style={s.th} onClick={() => handleSort('name')}>
                 Display Name{sortIndicator('name')}
+              </th>
+              <th style={s.th} onClick={() => handleSort('fieldKey')}>
+                Field Key{sortIndicator('fieldKey')}
               </th>
               <th style={s.th} onClick={() => handleSort('type')}>
                 Type{sortIndicator('type')}
@@ -384,10 +385,10 @@ export function SchemaView({ scope }: SchemaViewProps) {
                     >
                       <div style={s.cell}>
                         <span style={s.expandIcon}>{isExpanded ? '\u25BE' : '\u25B8'}</span>
-                        <span style={s.fieldKey}>{fs.fieldKey}</span>
+                        <span style={s.cellText}>{fs.name || formatName(fs.fieldKey)}</span>
                       </div>
                       <div style={s.cell}>
-                        <span style={s.cellText}>{fs.name || '\u2014'}</span>
+                        <span style={s.fieldKey}>{fs.fieldKey}</span>
                       </div>
                       <div style={s.cell}>
                         <span style={s.typeBadge}>{typeDisplay}{formatDisplay}</span>

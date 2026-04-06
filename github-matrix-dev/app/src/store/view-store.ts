@@ -82,6 +82,7 @@ interface ViewStoreState {
   setCellOverflow: (scope: string, mode: 'clip' | 'wrap') => void;
   setProfileFields: (scope: string, fields: string[] | undefined) => void;
   setDisplayField: (scope: string, field: string | undefined) => void;
+  setShowFieldIds: (scope: string, show: boolean) => void;
 
   // --- View lifecycle ---
 
@@ -201,6 +202,10 @@ export const useViewStore = create<ViewStoreState>((set, get) => ({
 
   setDisplayField(scope, field) {
     _updateConfig(set, get, scope, { displayField: field });
+  },
+
+  setShowFieldIds(scope, show) {
+    _updateConfig(set, get, scope, { showFieldIds: show });
   },
 
   activateView(scope, view) {
