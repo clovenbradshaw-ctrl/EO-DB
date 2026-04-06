@@ -59,6 +59,11 @@ export class Presence {
   private toDeviceHandler: ((event: MatrixEvent) => void) | null = null;
   private stopped = false;
 
+  /** Cached snapshot to avoid rebuilding when nothing changed. */
+  private cachedSnapshot: PresenceUser[] | null = null;
+  /** Dirty flag set when the seen map is modified. */
+  private dirty = false;
+
   constructor(client: MatrixClient, roomId: string) {
     this.client = client;
     this.roomId = roomId;
@@ -92,6 +97,8 @@ export class Presence {
     }
     this.seen.clear();
     this.subscribers.clear();
+    this.cachedSnapshot = null;
+    this.dirty = false;
   }
 
   /** Subscribe to online-user list changes. Returns unsubscribe fn. */
@@ -104,6 +111,8 @@ export class Presence {
 
   /** Current online users (most-recent-first). */
   snapshot(): PresenceUser[] {
+    if (this.cachedSnapshot && !this.dirty) return this.cachedSnapshot;
+
     const now = Date.now();
     const users: PresenceUser[] = [];
     const room = this.client.getRoom(this.roomId);
@@ -126,6 +135,8 @@ export class Presence {
       });
     }
     users.sort((a, b) => b.lastSeen - a.lastSeen);
+    this.cachedSnapshot = users;
+    this.dirty = false;
     return users;
   }
 
@@ -174,6 +185,7 @@ export class Presence {
       this.seen.set(sender, devices);
     }
     devices.set(deviceId, Date.now());
+    this.dirty = true;
     this.notify();
   }
 
@@ -193,7 +205,10 @@ export class Presence {
         changed = true;
       }
     }
-    if (changed) this.notify();
+    if (changed) {
+      this.dirty = true;
+      this.notify();
+    }
   }
 
   private notify(): void {

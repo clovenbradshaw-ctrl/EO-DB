@@ -2,6 +2,7 @@ import { useEffect, useState, useMemo, useRef } from 'react';
 import { useEoStore } from '../store/eo-store';
 import { useViewStore } from '../store/view-store';
 import { VIEW_TYPE_META, type SavedView, type TableViewConfig, type ViewType } from './view-types';
+import { deriveColumns, type ColumnDef } from './filter-types';
 import { formatName } from './scope-picker-utils';
 import { useTheme, type Theme } from '../theme';
 
@@ -36,7 +37,44 @@ export function ViewsBrowser({ scope, recordCount, userId, onBack, onSelectView 
   const [newViewName, setNewViewName] = useState('');
   const [newViewType, setNewViewType] = useState<ViewType>('grid');
   const [newViewVisibility, setNewViewVisibility] = useState<'private' | 'shared'>('private');
+  const [newKanbanField, setNewKanbanField] = useState('');
   const [creating, setCreating] = useState(false);
+
+  // Derive available columns and unique value counts from scope records for kanban field selection
+  const [scopeColumns, setScopeColumns] = useState<ColumnDef[]>([]);
+  const [fieldUniqueCounts, setFieldUniqueCounts] = useState<Record<string, number>>({});
+  useEffect(() => {
+    if (!ready || !scope || !showCreate) return;
+    const scopeDepth = scope.split('.').length + 1;
+    getStateByPrefix(scope + '.').then((states) => {
+      const records = states.filter(
+        (st) =>
+          st.target.split('.').length === scopeDepth &&
+          !st.target.includes('._') &&
+          st.value != null,
+      );
+      setScopeColumns(deriveColumns(records));
+
+      // Count unique values per field for kanban warning
+      const counts: Record<string, Set<string>> = {};
+      for (const rec of records) {
+        if (!rec.value || typeof rec.value !== 'object') continue;
+        const source = rec.value.fields && typeof rec.value.fields === 'object' && !Array.isArray(rec.value.fields)
+          ? rec.value.fields as Record<string, any>
+          : rec.value;
+        for (const [key, val] of Object.entries(source)) {
+          if (key.startsWith('_')) continue;
+          if (!counts[key]) counts[key] = new Set();
+          if (val != null) counts[key].add(String(val));
+        }
+      }
+      const numericCounts: Record<string, number> = {};
+      for (const [key, set] of Object.entries(counts)) {
+        numericCounts[key] = set.size;
+      }
+      setFieldUniqueCounts(numericCounts);
+    });
+  }, [ready, scope, showCreate, getStateByPrefix]);
 
   // Load saved views for the current scope only
   useEffect(() => {
@@ -134,6 +172,7 @@ export function ViewsBrowser({ scope, recordCount, userId, onBack, onSelectView 
     setNewViewName('');
     setNewViewType('grid');
     setNewViewVisibility('private');
+    setNewKanbanField('');
   }
 
   async function handleCreateView() {
@@ -149,6 +188,7 @@ export function ViewsBrowser({ scope, recordCount, userId, onBack, onSelectView 
       filters: [],
       filterConjunction: 'AND',
       showLastUpdated: true,
+      ...(newViewType === 'kanban' && newKanbanField ? { kanbanField: newKanbanField } : {}),
     };
     const name = newViewName.trim();
     try {
@@ -334,6 +374,51 @@ export function ViewsBrowser({ scope, recordCount, userId, onBack, onSelectView 
                     );
                   })}
                 </div>
+                {/* Kanban field selection */}
+                {newViewType === 'kanban' && (
+                  <div style={{ marginTop: 8 }}>
+                    <div style={{ fontSize: 11, fontWeight: 500, color: theme.textSecondary, marginBottom: 4 }}>
+                      Group by field
+                    </div>
+                    <select
+                      value={newKanbanField}
+                      onChange={(e) => setNewKanbanField(e.target.value)}
+                      style={{
+                        width: '100%',
+                        height: 32,
+                        fontSize: 12,
+                        padding: '0 8px',
+                        border: `1px solid ${theme.border}`,
+                        borderRadius: 4,
+                        background: theme.bgCard,
+                        color: theme.text,
+                        outline: 'none',
+                        boxSizing: 'border-box' as const,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      <option value="">Select a field{'\u2026'}</option>
+                      {scopeColumns.map((col) => (
+                        <option key={col.key} value={col.key}>
+                          {col.label}{fieldUniqueCounts[col.key] != null ? ` (${fieldUniqueCounts[col.key]} values)` : ''}
+                        </option>
+                      ))}
+                    </select>
+                    {newKanbanField && fieldUniqueCounts[newKanbanField] > 15 && (
+                      <div style={{
+                        marginTop: 4,
+                        padding: '4px 8px',
+                        fontSize: 11,
+                        color: '#b45309',
+                        background: '#fef3c7',
+                        border: '1px solid #fde68a',
+                        borderRadius: 4,
+                      }}>
+                        This field has {fieldUniqueCounts[newKanbanField]} unique values. Kanban boards work best with 15 or fewer columns.
+                      </div>
+                    )}
+                  </div>
+                )}
                 <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
                   <button
                     style={newViewVisibility === 'private' ? s.visBtnActive : s.visBtn}
@@ -356,9 +441,9 @@ export function ViewsBrowser({ scope, recordCount, userId, onBack, onSelectView 
                     Cancel
                   </button>
                   <button
-                    style={(!newViewName.trim() || creating) ? s.modalCreateBtnDisabled : s.modalCreateBtn}
+                    style={(!newViewName.trim() || creating || (newViewType === 'kanban' && !newKanbanField)) ? s.modalCreateBtnDisabled : s.modalCreateBtn}
                     onClick={handleCreateView}
-                    disabled={!newViewName.trim() || creating}
+                    disabled={!newViewName.trim() || creating || (newViewType === 'kanban' && !newKanbanField)}
                   >
                     {creating ? 'Creating\u2026' : 'Create view'}
                   </button>

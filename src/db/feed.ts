@@ -31,6 +31,13 @@ export class Feed {
 }
 
 export function globMatch(pattern: string, target: string): boolean {
+  // Fast path: '**' matches everything
+  if (pattern === '**') return true;
+  // Fast path: exact match
+  if (pattern === target) return true;
+  // Fast path: single '*' matches any single-segment target
+  if (pattern === '*') return !target.includes('.');
+
   const patternParts = pattern.split('.');
   const targetParts = target.split('.');
   return matchParts(patternParts, 0, targetParts, 0);
@@ -42,7 +49,10 @@ function matchParts(
 ): boolean {
   while (pi < pattern.length && ti < target.length) {
     if (pattern[pi] === '**') {
-      // ** matches zero or more segments
+      // Collapse consecutive ** segments
+      while (pi + 1 < pattern.length && pattern[pi + 1] === '**') pi++;
+      // If ** is the last pattern segment, it matches everything remaining
+      if (pi + 1 === pattern.length) return true;
       // Try matching the rest of the pattern from every remaining position
       for (let k = ti; k <= target.length; k++) {
         if (matchParts(pattern, pi + 1, target, k)) return true;
