@@ -31,7 +31,10 @@ export interface HistorySectionConfig {
 
 export type SectionConfig = FieldsSectionConfig | ConnectionSectionConfig | HistorySectionConfig;
 
+export type LayoutDisplayType = 'drawer' | 'modal';
+
 export interface DetailLayout {
+  layoutType?: LayoutDisplayType;
   sections: SectionConfig[];
 }
 
@@ -63,7 +66,7 @@ export function defaultLayout(connectionTypes: string[]): DetailLayout {
 
   sections.push({ type: 'history' });
 
-  return { sections };
+  return { sections } as DetailLayout;
 }
 
 // ─── Mutations ──────────────────────────────────────────────────────────────
@@ -75,6 +78,7 @@ export function addColumn(
   column: ConnectionColumnDef,
 ): DetailLayout {
   return {
+    ...layout,
     sections: layout.sections.map(s => {
       if (s.type === 'connection' && s.entity === entity) {
         const existing = s.columns.find(c => c.key === column.key);
@@ -93,6 +97,7 @@ export function removeColumn(
   columnKey: string,
 ): DetailLayout {
   return {
+    ...layout,
     sections: layout.sections.map(s => {
       if (s.type === 'connection' && s.entity === entity) {
         return { ...s, columns: s.columns.filter(c => c.key !== columnKey) };
@@ -108,6 +113,7 @@ export function toggleSectionHidden(
   entity: string,
 ): DetailLayout {
   return {
+    ...layout,
     sections: layout.sections.map(s => {
       if (s.type === 'connection' && s.entity === entity) {
         return { ...s, hidden: !s.hidden };
@@ -115,6 +121,29 @@ export function toggleSectionHidden(
       return s;
     }),
   };
+}
+
+/** Set the layout display type (drawer vs full modal) */
+export function setLayoutType(layout: DetailLayout, type: LayoutDisplayType): DetailLayout {
+  return { ...layout, layoutType: type };
+}
+
+/** Set visible fields in the fields section */
+export function setVisibleFields(layout: DetailLayout, fields: string[] | undefined): DetailLayout {
+  return {
+    ...layout,
+    sections: layout.sections.map(s =>
+      s.type === 'fields' ? { ...s, visible: fields } : s,
+    ),
+  };
+}
+
+/** Reorder sections by moving one from fromIndex to toIndex */
+export function reorderSections(layout: DetailLayout, fromIndex: number, toIndex: number): DetailLayout {
+  const sections = [...layout.sections];
+  const [moved] = sections.splice(fromIndex, 1);
+  sections.splice(toIndex, 0, moved);
+  return { ...layout, sections };
 }
 
 /** Ensure a connection type has a section (for "+ Add section") */
@@ -141,5 +170,5 @@ export function addSection(
   } else {
     sections.push(newSection);
   }
-  return { sections };
+  return { ...layout, sections };
 }

@@ -9,12 +9,14 @@ import { Presence } from '../matrix/presence';
 import { OnlineUsers } from './OnlineUsers';
 import { FilenSyncService } from '../filen/filen-sync';
 import { useFilenStore } from '../filen/filen-store';
+import { useAirtableStore } from '../ingestion/airtable-store';
 import { resolveDataRoom } from '../matrix/event-bridge';
 import { configureMatrixDomain } from '../lib/matrix-domain';
 import { HolonNav } from './HolonNav';
 import { TableView } from './TableView';
 import { ViewTabs } from './ViewTabs';
 import { RecordDetailDrawer } from './RecordDetailDrawer';
+import { detailLayoutTarget, type LayoutDisplayType } from './detail-layout';
 import { RecordView } from './RecordView';
 import { useIsMobile, useIsTablet, useIsNarrow } from '../hooks/useIsMobile';
 import { formatName } from './scope-picker-utils';
@@ -537,8 +539,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     [scopedRecords, useFieldsSub, scopeFieldNameMap],
   );
 
-  // Compute target count from recent events — all events belong to this space now
-  const targetCount = new Set(recentEvents.map((e) => e.target)).size;
   const edgeCount = recentEvents.filter((e) => e.op === 'CON').length;
 
   // --- Matrix client (lives for the entire session, not per-space) ---
@@ -908,6 +908,13 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           await useFilenStore.getState().connectOrgFromWebhook(session.accessToken);
           filenOrgMode = true;
           console.log('[EO-DB] Org-mode Filen auto-connected via n8n webhook');
+
+          // Piggyback: if the webhook returned an Airtable API key, connect the Airtable store too
+          const webhookAtKey = useFilenStore.getState().webhookAirtableKey;
+          if (webhookAtKey && !useAirtableStore.getState().connected) {
+            useAirtableStore.getState().connectWithKey(webhookAtKey);
+            console.log('[EO-DB] Airtable auto-connected via n8n webhook');
+          }
         } catch (e) {
           console.warn('[EO-DB] Org-mode Filen auto-connect via webhook failed:', e);
         }
@@ -1326,17 +1333,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         <div style={s.topBarRight}>
           {/* Stats — hidden on mobile, compact on tablet */}
           {!isMobile && (
-            <div style={s.stats}>
-              <span title="Sequence number">{lastSeq} seq</span>
-              {!isTablet && <>
-                <span style={s.statSep}>{'\u00B7'}</span>
-                <span title="Event count">{recentEvents.length} events</span>
-                <span style={s.statSep}>{'\u00B7'}</span>
-                <span title="Target count">{targetCount} targets</span>
-              </>}
-            </div>
-          )}
-          {!isMobile && (
             <OnlineUsers
               presence={presence}
               selfUserId={session.userId}
@@ -1635,6 +1631,20 @@ function RecordPageOrDrawer({ recordTarget, allStates, onClose, onNavigate, prof
   isMobile?: boolean;
 }) {
   const loadView = useBuilderStore((s) => s.loadView);
+  const getState = useEoStore((s) => s.getState);
+  const [layoutType, setLayoutType] = useState<LayoutDisplayType>('drawer');
+
+  // Read layout type from the detail layout DEF
+  useEffect(() => {
+    const parts = recordTarget.split('.');
+    const scope = parts.length >= 2 ? parts.slice(0, -1).join('.') : recordTarget;
+    getState(detailLayoutTarget(scope))
+      .then((state) => {
+        if (state?.value?.layoutType) setLayoutType(state.value.layoutType as LayoutDisplayType);
+        else setLayoutType('drawer');
+      })
+      .catch(() => {});
+  }, [recordTarget, getState]);
 
   // Find a record page view whose recordSource.scope matches this record's parent
   const recordPageView = useMemo(() => {
@@ -1690,6 +1700,7 @@ function RecordPageOrDrawer({ recordTarget, allStates, onClose, onNavigate, prof
       onNavigate={onNavigate}
       profileFields={profileFields}
       isMobile={isMobile}
+      layoutType={layoutType}
     />
   );
 }
@@ -1811,21 +1822,6 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       fontWeight: 600,
     },
 
-    // Stats — subtle, monospace
-    stats: {
-      display: 'flex',
-      alignItems: 'center',
-      gap: 6,
-      fontSize: 10,
-      color: t.textMuted,
-      fontFamily: "'JetBrains Mono', monospace",
-      whiteSpace: 'nowrap' as const,
-      flexShrink: 1,
-      overflow: 'hidden',
-    },
-    statSep: {
-      opacity: 0.3,
-    },
 
     // Sidebar navigation — cleaner with group labels
     sidebarNav: {

@@ -10,6 +10,7 @@ import { RedactedCell, LockIcon, LockedCell } from './RedactedCell';
 import { FilterBar } from './FilterBar';
 import { SortPanel, type SortRule } from './SortPanel';
 import type { ResolvedPermissions } from '../permissions/types';
+import { syncEditToAirtable } from '../ingestion/airtable-writeback';
 import { useViewStore } from '../store/view-store';
 import { defaultColumnWidth, MIN_COLUMN_WIDTH } from './view-types';
 import { formatName } from './scope-picker-utils';
@@ -377,6 +378,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   const [fieldSchemas, setFieldSchemas] = useState<Map<string, FieldSchema>>(new Map());
   const [columnTypeOverrides, setColumnTypeOverrides] = useState<Map<string, any>>(new Map());
   const [columnTypeSelector, setColumnTypeSelector] = useState<{ x: number; y: number; key: string } | null>(null);
+  const [editingCell, setEditingCell] = useState<{ target: string; fieldKey: string; value: string } | null>(null);
   const prevRecordsKeyRef = useRef<string>('');
   const prevSchemaKeyRef = useRef<string>('');
   const prevScopeNameRef = useRef<string | null>(null);
@@ -875,6 +877,43 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     } catch { /* ignore */ }
   }
 
+  const canEdit = permissions ? (permissions.can_edit_any_record || permissions.can_edit_own_records) : true;
+
+  function handleCellDoubleClick(rec: EoState, colKey: string) {
+    if (!canEdit) return;
+    if (colKey === '_record' || colKey === '_last_updated') return;
+    if (permissions?.locked_fields?.includes(colKey)) return;
+    if (permissions?.redacted_fields?.includes(colKey)) return;
+
+    const raw = getFieldValue(rec, colKey, useFieldsSub);
+    const strVal = raw != null && typeof raw === 'object'
+      ? JSON.stringify(raw, null, 2)
+      : String(raw ?? '');
+    setEditingCell({ target: rec.target, fieldKey: colKey, value: strVal });
+  }
+
+  async function handleCellSave(target: string, fieldKey: string, rawValue: string) {
+    let parsed: any = rawValue;
+    try { parsed = JSON.parse(rawValue); } catch { /* keep as string */ }
+
+    const operand = useFieldsSub
+      ? { fields: { [fieldKey]: parsed } }
+      : { [fieldKey]: parsed };
+
+    try {
+      await dispatch({
+        op: 'DEF',
+        target,
+        operand,
+        agent: `user:${session.userId}`,
+        ts: new Date().toISOString(),
+        acquired_ts: new Date().toISOString(),
+      });
+      syncEditToAirtable({ target, fieldKey, value: parsed, getStateByPrefix }).catch(console.warn);
+    } catch { /* ignore */ }
+    setEditingCell(null);
+  }
+
   function handleContextMenu(e: React.MouseEvent, target: string) {
     e.preventDefault();
     e.stopPropagation();
@@ -1266,15 +1305,54 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                       const tdStyle = colIndex === 0
                         ? { ...s.td, borderLeft: `3px solid ${theme.accent}` }
                         : s.td;
+                      const isEditingThis = editingCell?.target === rec.target && editingCell?.fieldKey === col.key;
+                      const isEditableCol = col.key !== '_record' && col.key !== '_last_updated' && !isRedacted && !isLocked && canEdit;
                       return (
-                        <td key={col.key} style={{
-                          ...tdStyle,
-                          padding: `${rowHeight === 'compact' ? 4 : rowHeight === 'tall' ? 18 : 10}px 8px ${rowHeight === 'compact' ? 4 : rowHeight === 'tall' ? 18 : 10}px 20px`,
-                          ...(cellOverflow === 'clip'
-                            ? { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', wordBreak: 'normal' as const }
-                            : { whiteSpace: 'normal', wordBreak: 'break-word' as const }),
-                        }}>
-                          {isRedacted
+                        <td
+                          key={col.key}
+                          style={{
+                            ...tdStyle,
+                            padding: `${rowHeight === 'compact' ? 4 : rowHeight === 'tall' ? 18 : 10}px 8px ${rowHeight === 'compact' ? 4 : rowHeight === 'tall' ? 18 : 10}px 20px`,
+                            ...(cellOverflow === 'clip'
+                              ? { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', wordBreak: 'normal' as const }
+                              : { whiteSpace: 'normal', wordBreak: 'break-word' as const }),
+                            ...(isEditableCol && !isEditingThis ? { cursor: 'text' } : {}),
+                          }}
+                          onDoubleClick={isEditableCol ? (e) => {
+                            e.stopPropagation();
+                            handleCellDoubleClick(rec, col.key);
+                          } : undefined}
+                        >
+                          {isEditingThis
+                            ? <input
+                                autoFocus
+                                defaultValue={editingCell.value}
+                                style={{
+                                  width: '100%',
+                                  padding: '2px 4px',
+                                  fontSize: 12,
+                                  border: `1px solid ${theme.accent}`,
+                                  borderRadius: 3,
+                                  background: theme.bg,
+                                  color: theme.text,
+                                  outline: 'none',
+                                  boxSizing: 'border-box' as const,
+                                  fontFamily: "'JetBrains Mono', monospace",
+                                }}
+                                onClick={(e) => e.stopPropagation()}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') {
+                                    e.preventDefault();
+                                    handleCellSave(rec.target, col.key, (e.target as HTMLInputElement).value);
+                                  }
+                                  if (e.key === 'Escape') {
+                                    setEditingCell(null);
+                                  }
+                                }}
+                                onBlur={(e) => handleCellSave(rec.target, col.key, e.target.value)}
+                                onFocus={(e) => e.target.select()}
+                              />
+                          : isRedacted
                             ? <RedactedCell />
                             : col.key === '_record'
                             ? <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>

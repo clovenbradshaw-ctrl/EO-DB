@@ -1,19 +1,19 @@
 /**
  * Airtable integration settings panel.
  *
- * Manages API keys (stored in room data via EO events), sharing scope
- * (org-wide vs private to current user), and sync triggers.
+ * The Airtable API key is delivered via the n8n webhook (same one used for
+ * Filen credentials) and held in-memory only. No key management UI — the
+ * webhook handles authentication.
  *
- * API keys stored as:
- *   - Org-shared:  system.ingestion.airtable.keys.{label}
- *   - Private:     user.{userId}.ingestion.airtable.keys.{label}
+ * Sync runs entirely in the browser — Airtable API calls go directly from
+ * the browser, records fold into IndexedDB via processEvent.
  *
- * Sync runs entirely in the browser — Airtable API calls go directly
- * from the browser, records fold into IndexedDB via processEvent.
- * No backend server involved.
+ * Continuous sync is coordinated via Matrix room state events
+ * (eo.airtable.head) so only one client calls the Airtable API at a time.
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useRef } from 'react';
+import type { MatrixClient } from 'matrix-js-sdk';
 import { useEoStore } from '../store/eo-store';
 import type { MatrixSession } from '../matrix/client';
 import { AirtableClient } from '../ingestion/airtable-client';
@@ -24,18 +24,11 @@ import {
   type HydrationManifest,
   type SyncCustomization,
 } from '../ingestion/airtable-sync';
+import { useAirtableStore } from '../ingestion/airtable-store';
+import { AirtableSyncService } from '../ingestion/airtable-sync-service';
 import { useTheme, type Theme } from '../theme';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
-
-interface StoredKey {
-  label: string;
-  shared: boolean;
-  addedBy: string;
-  addedAt: string;
-  lastSyncAt?: string;
-  redactedKey: string;
-}
 
 interface SyncStatus {
   state: 'idle' | 'syncing' | 'discovering' | 'done' | 'error';
@@ -46,31 +39,35 @@ interface SyncStatus {
 interface AirtableSettingsProps {
   session: MatrixSession;
   onClose: () => void;
+  matrixClient?: MatrixClient | null;
+  roomId?: string | null;
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-const ORG_PREFIX = 'system.ingestion.airtable.keys.';
-function userPrefix(userId: string) {
-  // Matrix user IDs contain colons — sanitize for target paths
-  const safe = userId.replace(/[^a-zA-Z0-9_-]/g, '_');
-  return `user.${safe}.ingestion.airtable.keys.`;
-}
-
-function redact(key: string): string {
-  if (key.length <= 8) return '***';
-  return key.slice(0, 4) + '...' + key.slice(-4);
-}
-
-function labelFromTarget(target: string, userId: string): { label: string; shared: boolean } {
-  if (target.startsWith(ORG_PREFIX)) {
-    return { label: target.slice(ORG_PREFIX.length), shared: true };
+function guessNameField(fields: Array<{ id: string; name: string; type: string }>): string | undefined {
+  const namePatterns = [
+    /^name$/i,
+    /^full[\s_-]?name$/i,
+    /^display[\s_-]?name$/i,
+    /^title$/i,
+    /^label$/i,
+    /^client[\s_-]?name$/i,
+    /^company[\s_-]?name$/i,
+    /^project[\s_-]?name$/i,
+    /^subject$/i,
+    /name/i,
+    /title/i,
+  ];
+  for (const pattern of namePatterns) {
+    const match = fields.find(f => pattern.test(f.name) && (f.type === 'singleLineText' || f.type === 'multilineText' || f.type === 'richText'));
+    if (match) return match.id;
   }
-  const up = userPrefix(userId);
-  if (target.startsWith(up)) {
-    return { label: target.slice(up.length), shared: false };
+  for (const pattern of namePatterns) {
+    const match = fields.find(f => pattern.test(f.name));
+    if (match) return match.id;
   }
-  return { label: target, shared: false };
+  return undefined;
 }
 
 // ─── Component ──────────────────────────────────────────────────────────────
@@ -79,306 +76,188 @@ function labelFromTarget(target: string, userId: string): { label: string; share
  * Standalone Airtable settings section (no overlay wrapper).
  * Used inside the Settings page.
  */
-export function AirtableSettingsSection({ session }: { session: MatrixSession }) {
-  const dispatch = useEoStore((s) => s.dispatch);
-  const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
+export function AirtableSettingsSection({
+  session,
+  matrixClient,
+  roomId,
+}: {
+  session: MatrixSession;
+  matrixClient?: MatrixClient | null;
+  roomId?: string | null;
+}) {
+  const store = useEoStore((s) => s.store);
   const { theme } = useTheme();
   const s = makeStyles(theme);
 
-  // ── Form state ──
-  const [label, setLabel] = useState('');
-  const [apiKey, setApiKey] = useState('');
-  const [shared, setShared] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState('');
-
-  // ── Stored keys ──
-  const [keys, setKeys] = useState<StoredKey[]>([]);
-  const [loadingKeys, setLoadingKeys] = useState(true);
+  // ── Airtable store ──
+  const connected = useAirtableStore((st) => st.connected);
+  const connecting = useAirtableStore((st) => st.connecting);
+  const apiKey = useAirtableStore((st) => st.apiKey);
+  const storeError = useAirtableStore((st) => st.error);
+  const isSyncing = useAirtableStore((st) => st.isSyncing);
+  const isPrimarySyncer = useAirtableStore((st) => st.isPrimarySyncer);
+  const lastSyncAt = useAirtableStore((st) => st.lastSyncAt);
+  const continuousSyncEnabled = useAirtableStore((st) => st.continuousSyncEnabled);
+  const manifest = useAirtableStore((st) => st.manifest);
 
   // ── Sync state ──
   const [syncStatus, setSyncStatus] = useState<Record<string, SyncStatus>>({});
 
-  // ── Discovery manifest (for table picker) ──
-  const [manifests, setManifests] = useState<Record<string, HydrationManifest>>({});
+  // ── Table selection: { baseId: [tableId, ...] } ──
+  const [tableSelections, setTableSelections] = useState<Record<string, string[]>>({});
 
-  // ── Table selection per key: { keyLabel: { baseId: [tableId, ...] } } ──
-  const [tableSelections, setTableSelections] = useState<Record<string, Record<string, string[]>>>({});
+  // ── Preserve existing toggle ──
+  const [preserveExisting, setPreserveExisting] = useState(true);
 
-  // ── Preserve existing toggle per key ──
-  const [preserveFlags, setPreserveFlags] = useState<Record<string, boolean>>({});
+  // ── Record limit (0 = no limit) ──
+  const [recordLimit, setRecordLimit] = useState(0);
 
-  // ── Record limit per key (0 = no limit) ──
-  const [recordLimits, setRecordLimits] = useState<Record<string, number>>({});
+  // ── Display field per table: { tableId: fieldId } ──
+  const [displayFieldSelections, setDisplayFieldSelections] = useState<Record<string, string>>({});
 
-  // ── Display field per table: { keyLabel: { tableId: fieldId } } ──
-  const [displayFieldSelections, setDisplayFieldSelections] = useState<Record<string, Record<string, string>>>({});
-
-  // ── Expanded tables (for field preview): Set of "keyLabel:tableId" ──
+  // ── Expanded tables (for field preview): Set of tableId ──
   const [expandedTables, setExpandedTables] = useState<Set<string>>(new Set());
 
-  // ── Load stored keys ──
-  const loadKeys = useCallback(async () => {
-    setLoadingKeys(true);
+  // ── Sync service ref ──
+  const syncServiceRef = useRef<AirtableSyncService | null>(null);
+
+  // ── Cleanup sync service on unmount ──
+  useEffect(() => {
+    return () => {
+      syncServiceRef.current?.stop();
+    };
+  }, []);
+
+  // ── Connect via webhook ──
+  async function handleConnect() {
     try {
-      const orgStates = await getStateByPrefix(ORG_PREFIX);
-      const userStates = await getStateByPrefix(userPrefix(session.userId));
-
-      const all: StoredKey[] = [];
-
-      for (const state of orgStates) {
-        const { label: lbl } = labelFromTarget(state.target, session.userId);
-        const val = state.value || {};
-        all.push({
-          label: lbl,
-          shared: true,
-          addedBy: val.added_by || state.last_agent || 'unknown',
-          addedAt: val.added_at || state.last_ts || '',
-          lastSyncAt: val.last_sync_at,
-          redactedKey: val.redacted_key || '***',
-        });
-      }
-
-      for (const state of userStates) {
-        const { label: lbl } = labelFromTarget(state.target, session.userId);
-        const val = state.value || {};
-        all.push({
-          label: lbl,
-          shared: false,
-          addedBy: val.added_by || state.last_agent || 'unknown',
-          addedAt: val.added_at || state.last_ts || '',
-          lastSyncAt: val.last_sync_at,
-          redactedKey: val.redacted_key || '***',
-        });
-      }
-
-      setKeys(all);
-    } finally {
-      setLoadingKeys(false);
-    }
-  }, [getStateByPrefix, session.userId]);
-
-  useEffect(() => { loadKeys(); }, [loadKeys]);
-
-  // ── Save a new API key ──
-  async function handleSave() {
-    if (!label.trim() || !apiKey.trim()) return;
-
-    // Validate label (alphanumeric, hyphens, underscores)
-    if (!/^[a-zA-Z0-9_-]+$/.test(label.trim())) {
-      setError('Label must be alphanumeric with hyphens/underscores only');
-      return;
-    }
-
-    setSaving(true);
-    setError('');
-
-    try {
-      const target = shared
-        ? `${ORG_PREFIX}${label.trim()}`
-        : `${userPrefix(session.userId)}${label.trim()}`;
-
-      await dispatch({
-        op: 'DEF',
-        target,
-        operand: {
-          api_key: apiKey.trim(),
-          redacted_key: redact(apiKey.trim()),
-          added_by: session.userId,
-          added_at: new Date().toISOString(),
-          shared,
-        },
-        agent: session.userId,
-        ts: new Date().toISOString(),
-        acquired_ts: new Date().toISOString(),
-        client_event_id: crypto.randomUUID(),
-      });
-
-      setLabel('');
-      setApiKey('');
-      await loadKeys();
-    } catch (e: any) {
-      setError(e.message || 'Failed to save key');
-    } finally {
-      setSaving(false);
+      await useAirtableStore.getState().connectFromWebhook(session.accessToken);
+    } catch {
+      // Error is set in the store
     }
   }
 
-  // ── Delete a key ──
-  async function handleDelete(key: StoredKey) {
-    const target = key.shared
-      ? `${ORG_PREFIX}${key.label}`
-      : `${userPrefix(session.userId)}${key.label}`;
-
-    await dispatch({
-      op: 'DEF',
-      target,
-      operand: null,
-      agent: session.userId,
-      ts: new Date().toISOString(),
-      acquired_ts: new Date().toISOString(),
-      client_event_id: crypto.randomUUID(),
-    });
-
-    await loadKeys();
-  }
-
-  // ── Retrieve the actual API key from IndexedDB for a stored key entry ──
-  async function getApiKey(key: StoredKey): Promise<string | null> {
-    const target = key.shared
-      ? `${ORG_PREFIX}${key.label}`
-      : `${userPrefix(session.userId)}${key.label}`;
-    const state = await useEoStore.getState().getState(target);
-    return state?.value?.api_key ?? null;
-  }
-
-  // ── Auto-guess the best display name field for a table ──
-  function guessNameField(fields: Array<{ id: string; name: string; type: string }>): string | undefined {
-    const namePatterns = [
-      /^name$/i,
-      /^full[\s_-]?name$/i,
-      /^display[\s_-]?name$/i,
-      /^title$/i,
-      /^label$/i,
-      /^client[\s_-]?name$/i,
-      /^company[\s_-]?name$/i,
-      /^project[\s_-]?name$/i,
-      /^subject$/i,
-      /name/i,
-      /title/i,
-    ];
-    for (const pattern of namePatterns) {
-      const match = fields.find(f => pattern.test(f.name) && (f.type === 'singleLineText' || f.type === 'multilineText' || f.type === 'richText'));
-      if (match) return match.id;
-    }
-    // Also check non-text fields with name patterns
-    for (const pattern of namePatterns) {
-      const match = fields.find(f => pattern.test(f.name));
-      if (match) return match.id;
-    }
-    return undefined;
+  // ── Disconnect ──
+  function handleDisconnect() {
+    syncServiceRef.current?.stop();
+    syncServiceRef.current = null;
+    useAirtableStore.getState().disconnect();
   }
 
   // ── Resolve which display field to use for a table ──
   function resolveDisplayField(
-    keyLabel: string,
     table: { id: string; primaryFieldId?: string; fields: Array<{ id: string; name: string; type: string }> },
   ): string | undefined {
-    // User override takes priority
-    const override = displayFieldSelections[keyLabel]?.[table.id];
+    const override = displayFieldSelections[table.id];
     if (override) return override;
-    // Auto-guess, falling back to primaryFieldId
     return guessNameField(table.fields) || table.primaryFieldId;
   }
 
   // ── Toggle expanded table for field preview ──
-  function toggleExpandedTable(keyLabel: string, tableId: string) {
-    const key = `${keyLabel}:${tableId}`;
+  function toggleExpandedTable(tableId: string) {
     setExpandedTables((prev) => {
       const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
+      if (next.has(tableId)) next.delete(tableId);
+      else next.add(tableId);
       return next;
     });
   }
 
   // ── Set display field for a table ──
-  function setDisplayField(keyLabel: string, tableId: string, fieldId: string) {
-    setDisplayFieldSelections((prev) => ({
-      ...prev,
-      [keyLabel]: { ...(prev[keyLabel] || {}), [tableId]: fieldId },
-    }));
+  function setDisplayField(tableId: string, fieldId: string) {
+    setDisplayFieldSelections((prev) => ({ ...prev, [tableId]: fieldId }));
   }
 
   // ── Build customization from current UI state ──
-  function buildCustomization(keyLabel: string, manifest?: HydrationManifest): SyncCustomization {
-    const selection = tableSelections[keyLabel];
-    const hasSelection = selection && Object.values(selection).some(t => t.length > 0);
-    const limit = recordLimits[keyLabel] || 0;
+  function buildCustomization(): SyncCustomization {
+    const hasSelection = Object.values(tableSelections).some(t => t.length > 0);
 
-    // Build display fields map from resolved values
     const displayFieldsMap: Record<string, string> = {};
     if (manifest) {
       for (const base of manifest.bases) {
         for (const table of base.tables) {
-          const resolved = resolveDisplayField(keyLabel, table);
+          const resolved = resolveDisplayField(table);
           if (resolved) displayFieldsMap[table.id] = resolved;
         }
       }
     }
 
     return {
-      selectedTables: hasSelection ? selection : undefined,
-      preserveExisting: preserveFlags[keyLabel] ?? true,
-      recordLimit: limit > 0 ? limit : undefined,
+      selectedTables: hasSelection ? tableSelections : undefined,
+      preserveExisting,
+      recordLimit: recordLimit > 0 ? recordLimit : undefined,
       displayFields: Object.keys(displayFieldsMap).length > 0 ? displayFieldsMap : undefined,
     };
   }
 
   // ── Toggle table selection ──
-  function toggleTable(keyLabel: string, baseId: string, tableId: string) {
+  function toggleTable(baseId: string, tableId: string) {
     setTableSelections((prev) => {
-      const keySelection = { ...(prev[keyLabel] || {}) };
-      const baseTables = [...(keySelection[baseId] || [])];
+      const baseTables = [...(prev[baseId] || [])];
       const idx = baseTables.indexOf(tableId);
-      if (idx >= 0) {
-        baseTables.splice(idx, 1);
-      } else {
-        baseTables.push(tableId);
-      }
-      keySelection[baseId] = baseTables;
-      return { ...prev, [keyLabel]: keySelection };
+      if (idx >= 0) baseTables.splice(idx, 1);
+      else baseTables.push(tableId);
+      return { ...prev, [baseId]: baseTables };
     });
   }
 
   // ── Select/deselect all tables in a base ──
-  function toggleAllTablesInBase(keyLabel: string, baseId: string, allTableIds: string[]) {
+  function toggleAllTablesInBase(baseId: string, allTableIds: string[]) {
     setTableSelections((prev) => {
-      const keySelection = { ...(prev[keyLabel] || {}) };
-      const current = keySelection[baseId] || [];
-      keySelection[baseId] = current.length === allTableIds.length ? [] : [...allTableIds];
-      return { ...prev, [keyLabel]: keySelection };
+      const current = prev[baseId] || [];
+      return { ...prev, [baseId]: current.length === allTableIds.length ? [] : [...allTableIds] };
     });
   }
 
-  // ── Trigger sync (runs entirely in the browser) ──
-  async function handleSync(key: StoredKey, mode: 'hydrate' | 'sync') {
-    const statusKey = `${key.label}-${mode}`;
-    const modeLabel = mode === 'hydrate' ? 'Full Sync' : 'Update Sync';
-    setSyncStatus((prev) => ({
-      ...prev,
-      [statusKey]: { state: 'syncing', message: `Starting ${modeLabel}...` },
-    }));
+  // ── Discover schema ──
+  async function handleDiscover() {
+    if (!apiKey) return;
+    setSyncStatus((prev) => ({ ...prev, discover: { state: 'discovering', message: 'Discovering bases & tables...' } }));
 
     try {
-      const rawKey = await getApiKey(key);
-      if (!rawKey) {
-        setSyncStatus((prev) => ({
-          ...prev,
-          [statusKey]: { state: 'error', message: 'API key not found in store' },
-        }));
-        return;
-      }
+      const client = new AirtableClient(apiKey);
+      const disc = await discoverSchema(client);
 
-      const store = useEoStore.getState().store;
-      if (!store) {
-        setSyncStatus((prev) => ({
-          ...prev,
-          [statusKey]: { state: 'error', message: 'Store not initialized' },
-        }));
-        return;
-      }
+      useAirtableStore.getState().setManifest(disc);
 
-      const client = new AirtableClient(rawKey);
-      const customization = buildCustomization(key.label, manifests[key.label]);
+      // Default: select all tables
+      const selection: Record<string, string[]> = {};
+      for (const base of disc.bases) {
+        selection[base.id] = base.tables.map(t => t.id);
+      }
+      setTableSelections(selection);
+
+      const baseCount = disc.bases.length;
+      const tableCount = disc.bases.reduce((t, b) => t + b.tables.length, 0);
+
+      setSyncStatus((prev) => ({
+        ...prev,
+        discover: {
+          state: 'done',
+          message: `Found ${baseCount} base${baseCount !== 1 ? 's' : ''}, ${tableCount} table${tableCount !== 1 ? 's' : ''}`,
+        },
+      }));
+    } catch (e: any) {
+      setSyncStatus((prev) => ({ ...prev, discover: { state: 'error', message: e.message || 'Discovery failed' } }));
+    }
+  }
+
+  // ── Trigger one-shot sync ──
+  async function handleSync(mode: 'hydrate' | 'sync') {
+    if (!apiKey || !store) return;
+
+    const statusKey = mode;
+    const modeLabel = mode === 'hydrate' ? 'Full Sync' : 'Update Sync';
+    setSyncStatus((prev) => ({ ...prev, [statusKey]: { state: 'syncing', message: `Starting ${modeLabel}...` } }));
+
+    try {
+      const client = new AirtableClient(apiKey);
+      const customization = buildCustomization();
       const onProgress = (p: { phase: string; table?: string; records_so_far?: number }) => {
         const msg = p.table
           ? `Syncing ${p.table}${p.records_so_far ? ` (${p.records_so_far} records)` : ''}...`
           : 'Discovering schema...';
-        setSyncStatus((prev) => ({
-          ...prev,
-          [statusKey]: { state: 'syncing', message: msg },
-        }));
+        setSyncStatus((prev) => ({ ...prev, [statusKey]: { state: 'syncing', message: msg } }));
       };
 
       const result = mode === 'hydrate'
@@ -389,28 +268,8 @@ export function AirtableSettingsSection({ session }: { session: MatrixSession })
       const skipped = result.total_records_skipped;
       const duration = `${(result.duration_ms / 1000).toFixed(1)}s`;
 
-      // Update last sync time in room data
-      const target = key.shared
-        ? `${ORG_PREFIX}${key.label}`
-        : `${userPrefix(session.userId)}${key.label}`;
-
-      try {
-        const currentState = await useEoStore.getState().getState(target);
-        if (currentState?.value) {
-          await dispatch({
-            op: 'DEF',
-            target,
-            operand: {
-              ...currentState.value,
-              last_sync_at: new Date().toISOString(),
-            },
-            agent: session.userId,
-            ts: new Date().toISOString(),
-            acquired_ts: new Date().toISOString(),
-            client_event_id: crypto.randomUUID(),
-          });
-        }
-      } catch { /* best-effort update */ }
+      useAirtableStore.getState().setLastSyncResult(result);
+      useAirtableStore.getState().setLastSyncAt(new Date().toISOString());
 
       setSyncStatus((prev) => ({
         ...prev,
@@ -420,8 +279,6 @@ export function AirtableSettingsSection({ session }: { session: MatrixSession })
           detail: `${skipped} unchanged, ${duration}`,
         },
       }));
-
-      await loadKeys();
     } catch (e: any) {
       setSyncStatus((prev) => ({
         ...prev,
@@ -430,414 +287,358 @@ export function AirtableSettingsSection({ session }: { session: MatrixSession })
     }
   }
 
-  // ── Discover schema (browser-side) ──
-  async function handleDiscover(key: StoredKey) {
-    const statusKey = `${key.label}-discover`;
-    setSyncStatus((prev) => ({
-      ...prev,
-      [statusKey]: { state: 'discovering', message: 'Discovering bases & tables...' },
-    }));
-
-    try {
-      const rawKey = await getApiKey(key);
-      if (!rawKey) {
-        setSyncStatus((prev) => ({
-          ...prev,
-          [statusKey]: { state: 'error', message: 'API key not found in store' },
-        }));
-        return;
-      }
-
-      const client = new AirtableClient(rawKey);
-      const manifest = await discoverSchema(client);
-
-      // Store the manifest for table picker
-      setManifests((prev) => ({ ...prev, [key.label]: manifest }));
-
-      // Default: select all tables
-      const selection: Record<string, string[]> = {};
-      for (const base of manifest.bases) {
-        selection[base.id] = base.tables.map(t => t.id);
-      }
-      setTableSelections((prev) => ({ ...prev, [key.label]: selection }));
-
-      const baseCount = manifest.bases.length;
-      const tableCount = manifest.bases.reduce((t, b) => t + b.tables.length, 0);
-
-      setSyncStatus((prev) => ({
-        ...prev,
-        [statusKey]: {
-          state: 'done',
-          message: `Found ${baseCount} base${baseCount !== 1 ? 's' : ''}, ${tableCount} table${tableCount !== 1 ? 's' : ''}`,
-        },
-      }));
-    } catch (e: any) {
-      setSyncStatus((prev) => ({
-        ...prev,
-        [statusKey]: { state: 'error', message: e.message || 'Discovery failed' },
-      }));
+  // ── Toggle continuous sync ──
+  function handleToggleContinuousSync() {
+    if (continuousSyncEnabled) {
+      // Stop
+      syncServiceRef.current?.stop();
+      syncServiceRef.current = null;
+    } else {
+      // Start
+      if (!matrixClient || !roomId || !store) return;
+      const service = new AirtableSyncService(
+        matrixClient,
+        roomId,
+        store,
+        session.userId,
+        () => useAirtableStore.getState().apiKey,
+        buildCustomization(),
+      );
+      syncServiceRef.current = service;
+      useAirtableStore.getState().setContinuousSync(true);
+      service.start();
     }
   }
 
   return (
     <div>
-        {/* Add new key */}
-        <div style={s.section}>
-          <div style={s.sectionTitle}>Airtable Integration</div>
-          <div style={s.form}>
-            <input
-              type="text"
-              placeholder="Label (e.g. immigration-base)"
-              value={label}
-              onChange={(e) => setLabel(e.target.value)}
-              style={s.input}
-              disabled={saving}
-            />
-            <input
-              type="password"
-              placeholder="Airtable Personal Access Token"
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-              style={s.input}
-              disabled={saving}
-              autoComplete="off"
-            />
-            <div style={s.shareRow}>
-              <label style={s.shareLabel}>
-                <input
-                  type="checkbox"
-                  checked={shared}
-                  onChange={(e) => setShared(e.target.checked)}
-                  disabled={saving}
-                />
-                <span style={{ marginLeft: 6 }}>Share with all users in the org</span>
-              </label>
-              <span style={s.shareHint}>
-                {shared
-                  ? 'All users in this room can use this key to sync'
-                  : 'Only you and your devices can use this key'}
-              </span>
+      {/* Connection status */}
+      <div style={s.section}>
+        <div style={s.sectionTitle}>Airtable Integration</div>
+
+        {!connected ? (
+          <div>
+            <div style={{ fontSize: 12, color: theme.textSecondary, marginBottom: 10 }}>
+              Connect to Airtable using your organization credentials. The API key is
+              fetched securely and held in memory only — it is never stored.
             </div>
-            {error && <div style={s.error}>{error}</div>}
+            {storeError && <div style={s.error}>{storeError}</div>}
             <button
-              onClick={handleSave}
-              disabled={saving || !label.trim() || !apiKey.trim()}
-              style={{
-                ...s.saveBtn,
-                opacity: saving || !label.trim() || !apiKey.trim() ? 0.5 : 1,
-              }}
+              onClick={handleConnect}
+              disabled={connecting}
+              style={{ ...s.connectBtn, opacity: connecting ? 0.5 : 1 }}
             >
-              {saving ? 'Saving...' : 'Save Key'}
+              {connecting ? 'Connecting...' : 'Connect to Airtable'}
             </button>
           </div>
-        </div>
-
-        {/* Stored keys */}
-        <div style={s.section}>
-          <div style={s.sectionTitle}>
-            Stored Keys
-            {loadingKeys && <span style={s.loadingDot}> loading...</span>}
-          </div>
-
-          {!loadingKeys && keys.length === 0 && (
-            <div style={s.emptyKeys}>
-              No API keys configured yet. Add one above to get started.
+        ) : (
+          <div>
+            <div style={s.connectedRow}>
+              <div style={s.connectedDot} />
+              <span style={{ fontSize: 12, color: theme.successText }}>Connected</span>
+              <button onClick={handleDisconnect} style={s.disconnectBtn}>Disconnect</button>
             </div>
-          )}
 
-          {keys.map((key) => (
-            <div key={`${key.label}-${key.shared}`} style={s.keyCard}>
-              <div style={s.keyHeader}>
-                <div style={s.keyLabel}>{key.label}</div>
-                <div style={s.keyBadges}>
-                  <span style={key.shared ? s.badgeShared : s.badgePrivate}>
-                    {key.shared ? 'org' : 'private'}
-                  </span>
+            {lastSyncAt && (
+              <div style={{ fontSize: 11, color: theme.textMuted, marginTop: 4 }}>
+                Last sync: {new Date(lastSyncAt).toLocaleString()}
+                {isPrimarySyncer && <span style={{ marginLeft: 8, color: theme.accent }}>(this device is syncing)</span>}
+              </div>
+            )}
+
+            {/* Actions */}
+            <div style={{ ...s.keyActions, marginTop: 10 }}>
+              <button
+                onClick={handleDiscover}
+                disabled={syncStatus.discover?.state === 'discovering'}
+                style={s.actionBtn}
+              >
+                Discover
+              </button>
+            </div>
+
+            {/* Discovery status */}
+            {(() => {
+              const status = syncStatus.discover;
+              if (!status || status.state === 'idle') return null;
+              return (
+                <div style={{
+                  ...s.statusMsg,
+                  color: status.state === 'error' ? theme.dangerText : status.state === 'done' ? theme.successText : theme.textSecondary,
+                }}>
+                  {status.state === 'discovering' && <span style={s.spinner} />}
+                  {status.message}
                 </div>
-              </div>
-              <div style={s.keyMeta}>
-                <span>Key: {key.redactedKey}</span>
-                <span style={s.keyMetaDivider} />
-                <span>Added by {key.addedBy}</span>
-                {key.lastSyncAt && (
-                  <>
-                    <span style={s.keyMetaDivider} />
-                    <span>Last sync: {new Date(key.lastSyncAt).toLocaleString()}</span>
-                  </>
-                )}
-              </div>
+              );
+            })()}
 
-              {/* Actions row: Discover + Remove */}
-              <div style={s.keyActions}>
-                <button
-                  onClick={() => handleDiscover(key)}
-                  disabled={syncStatus[`${key.label}-discover`]?.state === 'discovering'}
-                  style={s.actionBtn}
-                >
-                  Discover
-                </button>
-                <button
-                  onClick={() => handleDelete(key)}
-                  style={s.deleteBtn}
-                >
-                  Remove
-                </button>
-              </div>
+            {/* Table picker (shown after discovery) */}
+            {manifest && (
+              <div style={s.tablePickerSection}>
+                <div style={s.tablePickerTitle}>Select tables to sync</div>
+                {manifest.bases.map((base) => {
+                  const selection = tableSelections[base.id] || [];
+                  const allIds = base.tables.map(t => t.id);
+                  const allSelected = allIds.length > 0 && selection.length === allIds.length;
+                  return (
+                    <div key={base.id} style={s.baseGroup}>
+                      <div style={s.baseHeader}>
+                        <label style={s.checkLabel}>
+                          <input
+                            type="checkbox"
+                            checked={allSelected}
+                            onChange={() => toggleAllTablesInBase(base.id, allIds)}
+                          />
+                          <span style={s.baseName}>{base.name}</span>
+                        </label>
+                        <span style={s.baseCount}>{base.tables.length} tables</span>
+                      </div>
+                      <div style={s.tableList}>
+                        {base.tables.map((table) => {
+                          const isExpanded = expandedTables.has(table.id);
+                          const resolvedField = resolveDisplayField(table);
+                          const resolvedFieldName = table.fields.find(f => f.id === resolvedField)?.name;
 
-              {/* Discovery status */}
-              {(() => {
-                const status = syncStatus[`${key.label}-discover`];
-                if (!status || status.state === 'idle') return null;
-                return (
-                  <div style={{
-                    ...s.statusMsg,
-                    color: status.state === 'error' ? theme.dangerText : status.state === 'done' ? theme.successText : theme.textSecondary,
-                  }}>
-                    {status.state === 'discovering' && <span style={s.spinner} />}
-                    {status.message}
-                  </div>
-                );
-              })()}
-
-              {/* Table picker (shown after discovery) */}
-              {manifests[key.label] && (
-                <div style={s.tablePickerSection}>
-                  <div style={s.tablePickerTitle}>Select tables to sync</div>
-                  {manifests[key.label].bases.map((base) => {
-                    const selection = tableSelections[key.label]?.[base.id] || [];
-                    const allIds = base.tables.map(t => t.id);
-                    const allSelected = allIds.length > 0 && selection.length === allIds.length;
-                    return (
-                      <div key={base.id} style={s.baseGroup}>
-                        <div style={s.baseHeader}>
-                          <label style={s.checkLabel}>
-                            <input
-                              type="checkbox"
-                              checked={allSelected}
-                              onChange={() => toggleAllTablesInBase(key.label, base.id, allIds)}
-                            />
-                            <span style={s.baseName}>{base.name}</span>
-                          </label>
-                          <span style={s.baseCount}>{base.tables.length} tables</span>
-                        </div>
-                        <div style={s.tableList}>
-                          {base.tables.map((table) => {
-                            const expandKey = `${key.label}:${table.id}`;
-                            const isExpanded = expandedTables.has(expandKey);
-                            const resolvedField = resolveDisplayField(key.label, table);
-                            const resolvedFieldName = table.fields.find(f => f.id === resolvedField)?.name;
-
-                            return (
-                              <div key={table.id}>
-                                <div style={s.tableItem}>
-                                  <input
-                                    type="checkbox"
-                                    checked={selection.includes(table.id)}
-                                    onChange={() => toggleTable(key.label, base.id, table.id)}
-                                  />
-                                  <span
-                                    style={{ ...s.tableName, cursor: 'pointer' }}
-                                    onClick={() => toggleExpandedTable(key.label, table.id)}
-                                  >
-                                    <span style={{ marginRight: 4, fontSize: 10, opacity: 0.6 }}>
-                                      {isExpanded ? '\u25BE' : '\u25B8'}
-                                    </span>
-                                    {table.name}
+                          return (
+                            <div key={table.id}>
+                              <div style={s.tableItem}>
+                                <input
+                                  type="checkbox"
+                                  checked={selection.includes(table.id)}
+                                  onChange={() => toggleTable(base.id, table.id)}
+                                />
+                                <span
+                                  style={{ ...s.tableName, cursor: 'pointer' }}
+                                  onClick={() => toggleExpandedTable(table.id)}
+                                >
+                                  <span style={{ marginRight: 4, fontSize: 10, opacity: 0.6 }}>
+                                    {isExpanded ? '\u25BE' : '\u25B8'}
                                   </span>
-                                  <span style={s.fieldCount}>{table.fieldCount} fields</span>
-                                  {resolvedFieldName && (
-                                    <span style={{
-                                      fontSize: 10,
-                                      color: theme.accent,
-                                      marginLeft: 8,
-                                      opacity: 0.8,
-                                    }}>
-                                      name: {resolvedFieldName}
-                                    </span>
-                                  )}
-                                </div>
-
-                                {/* Expanded field preview + name field picker */}
-                                {isExpanded && (
-                                  <div style={s.fieldPreview}>
-                                    <div style={s.nameFieldPicker}>
-                                      <span style={s.nameFieldLabel}>Display name field:</span>
-                                      <select
-                                        value={displayFieldSelections[key.label]?.[table.id] || '_auto'}
-                                        onChange={(e) => {
-                                          const val = e.target.value;
-                                          if (val === '_auto') {
-                                            // Clear override, use auto-guess
-                                            setDisplayFieldSelections((prev) => {
-                                              const next = { ...prev, [key.label]: { ...(prev[key.label] || {}) } };
-                                              delete next[key.label][table.id];
-                                              return next;
-                                            });
-                                          } else if (val === '_first') {
-                                            // Use first field
-                                            if (table.fields.length > 0) {
-                                              setDisplayField(key.label, table.id, table.fields[0].id);
-                                            }
-                                          } else {
-                                            setDisplayField(key.label, table.id, val);
-                                          }
-                                        }}
-                                        style={s.nameFieldSelect}
-                                      >
-                                        <option value="_auto">Auto-guess{guessNameField(table.fields) ? ` (${table.fields.find(f => f.id === guessNameField(table.fields))?.name})` : ''}</option>
-                                        <option value="_first">First column ({table.fields[0]?.name || '?'})</option>
-                                        <optgroup label="Manual select">
-                                          {table.fields.map((f) => (
-                                            <option key={f.id} value={f.id}>
-                                              {f.name} ({f.type})
-                                            </option>
-                                          ))}
-                                        </optgroup>
-                                      </select>
-                                    </div>
-                                    <div style={s.fieldList}>
-                                      {table.fields.map((f) => (
-                                        <div key={f.id} style={{
-                                          ...s.fieldItem,
-                                          ...(f.id === resolvedField ? { background: theme.bgHover, fontWeight: 600 } : {}),
-                                        }}>
-                                          <span style={s.fieldItemName}>{f.name}</span>
-                                          <span style={s.fieldItemType}>{f.type}</span>
-                                          {f.id === resolvedField && (
-                                            <span style={{ fontSize: 10, color: theme.accent, marginLeft: 'auto' }}>name field</span>
-                                          )}
-                                        </div>
-                                      ))}
-                                    </div>
-                                  </div>
+                                  {table.name}
+                                </span>
+                                <span style={s.fieldCount}>{table.fieldCount} fields</span>
+                                {resolvedFieldName && (
+                                  <span style={{
+                                    fontSize: 10,
+                                    color: theme.accent,
+                                    marginLeft: 8,
+                                    opacity: 0.8,
+                                  }}>
+                                    name: {resolvedFieldName}
+                                  </span>
                                 )}
                               </div>
-                            );
-                          })}
+
+                              {/* Expanded field preview + name field picker */}
+                              {isExpanded && (
+                                <div style={s.fieldPreview}>
+                                  <div style={s.nameFieldPicker}>
+                                    <span style={s.nameFieldLabel}>Display name field:</span>
+                                    <select
+                                      value={displayFieldSelections[table.id] || '_auto'}
+                                      onChange={(e) => {
+                                        const val = e.target.value;
+                                        if (val === '_auto') {
+                                          setDisplayFieldSelections((prev) => {
+                                            const next = { ...prev };
+                                            delete next[table.id];
+                                            return next;
+                                          });
+                                        } else if (val === '_first') {
+                                          if (table.fields.length > 0) {
+                                            setDisplayField(table.id, table.fields[0].id);
+                                          }
+                                        } else {
+                                          setDisplayField(table.id, val);
+                                        }
+                                      }}
+                                      style={s.nameFieldSelect}
+                                    >
+                                      <option value="_auto">Auto-guess{guessNameField(table.fields) ? ` (${table.fields.find(f => f.id === guessNameField(table.fields))?.name})` : ''}</option>
+                                      <option value="_first">First column ({table.fields[0]?.name || '?'})</option>
+                                      <optgroup label="Manual select">
+                                        {table.fields.map((f) => (
+                                          <option key={f.id} value={f.id}>
+                                            {f.name} ({f.type})
+                                          </option>
+                                        ))}
+                                      </optgroup>
+                                    </select>
+                                  </div>
+                                  <div style={s.fieldList}>
+                                    {table.fields.map((f) => (
+                                      <div key={f.id} style={{
+                                        ...s.fieldItem,
+                                        ...(f.id === resolvedField ? { background: theme.bgHover, fontWeight: 600 } : {}),
+                                      }}>
+                                        <span style={s.fieldItemName}>{f.name}</span>
+                                        <span style={s.fieldItemType}>{f.type}</span>
+                                        {f.id === resolvedField && (
+                                          <span style={{ fontSize: 10, color: theme.accent, marginLeft: 'auto' }}>name field</span>
+                                        )}
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })}
+
+                {/* Preserve existing toggle */}
+                <div style={s.preserveRow}>
+                  <label style={s.checkLabel}>
+                    <input
+                      type="checkbox"
+                      checked={preserveExisting}
+                      onChange={(e) => setPreserveExisting(e.target.checked)}
+                    />
+                    <span>Preserve existing data in EO-DB</span>
+                  </label>
+                  <span style={s.preserveHint}>
+                    {preserveExisting
+                      ? 'New records and empty fields are filled; existing values are never overwritten'
+                      : 'Airtable values will overwrite EO-DB values on every sync'}
+                  </span>
+                </div>
+
+                {/* Record limit */}
+                <div style={s.recordLimitRow}>
+                  <label style={s.recordLimitLabel}>
+                    Record limit per table
+                  </label>
+                  <div style={s.recordLimitInputRow}>
+                    <input
+                      type="number"
+                      min={0}
+                      step={1}
+                      placeholder="No limit"
+                      value={recordLimit || ''}
+                      onChange={(e) => {
+                        const val = parseInt(e.target.value, 10);
+                        setRecordLimit(isNaN(val) ? 0 : Math.max(0, val));
+                      }}
+                      style={s.recordLimitInput}
+                    />
+                    {recordLimit > 0 && (
+                      <button
+                        onClick={() => setRecordLimit(0)}
+                        style={s.recordLimitClear}
+                      >
+                        Clear
+                      </button>
+                    )}
+                  </div>
+                  <span style={s.recordLimitHint}>
+                    {recordLimit > 0
+                      ? `Import up to ${recordLimit} records from each selected table`
+                      : 'Import all records from each selected table'}
+                  </span>
+                </div>
+
+                {/* Sync mode buttons */}
+                <div style={s.syncModes}>
+                  <div style={s.syncModeCard}>
+                    <div style={s.syncModeTitle}>Full Sync</div>
+                    <div style={s.syncModeDesc}>
+                      Pull all records from selected tables. Skips records that already exist
+                      {preserveExisting ? ' and never overwrites existing data' : ''}.
+                    </div>
+                    <button
+                      onClick={() => handleSync('hydrate')}
+                      disabled={syncStatus.hydrate?.state === 'syncing'}
+                      style={s.syncModeBtn}
+                    >
+                      {syncStatus.hydrate?.state === 'syncing' ? 'Syncing...' : 'Run Full Sync'}
+                    </button>
+                    {(() => {
+                      const status = syncStatus.hydrate;
+                      if (!status || status.state === 'idle') return null;
+                      return (
+                        <div style={{
+                          ...s.statusMsg,
+                          color: status.state === 'error' ? theme.dangerText : status.state === 'done' ? theme.successText : theme.textSecondary,
+                        }}>
+                          {status.state === 'syncing' && <span style={s.spinner} />}
+                          {status.message}
+                          {status.detail && <span style={s.statusDetail}> {status.detail}</span>}
                         </div>
-                      </div>
-                    );
-                  })}
-
-                  {/* Preserve existing toggle */}
-                  <div style={s.preserveRow}>
-                    <label style={s.checkLabel}>
-                      <input
-                        type="checkbox"
-                        checked={preserveFlags[key.label] ?? true}
-                        onChange={(e) => setPreserveFlags((prev) => ({ ...prev, [key.label]: e.target.checked }))}
-                      />
-                      <span>Preserve existing data in EO-DB</span>
-                    </label>
-                    <span style={s.preserveHint}>
-                      {(preserveFlags[key.label] ?? true)
-                        ? 'New records and empty fields are filled; existing values are never overwritten'
-                        : 'Airtable values will overwrite EO-DB values on every sync'}
-                    </span>
+                      );
+                    })()}
                   </div>
 
-                  {/* Record limit */}
-                  <div style={s.recordLimitRow}>
-                    <label style={s.recordLimitLabel}>
-                      Record limit per table
-                    </label>
-                    <div style={s.recordLimitInputRow}>
-                      <input
-                        type="number"
-                        min={0}
-                        step={1}
-                        placeholder="No limit"
-                        value={recordLimits[key.label] || ''}
-                        onChange={(e) => {
-                          const val = parseInt(e.target.value, 10);
-                          setRecordLimits((prev) => ({
-                            ...prev,
-                            [key.label]: isNaN(val) ? 0 : Math.max(0, val),
-                          }));
-                        }}
-                        style={s.recordLimitInput}
-                      />
-                      {(recordLimits[key.label] || 0) > 0 && (
-                        <button
-                          onClick={() => setRecordLimits((prev) => ({ ...prev, [key.label]: 0 }))}
-                          style={s.recordLimitClear}
-                        >
-                          Clear
-                        </button>
-                      )}
+                  <div style={s.syncModeCard}>
+                    <div style={s.syncModeTitle}>Update Sync</div>
+                    <div style={s.syncModeDesc}>
+                      Pull only records modified since last sync. Requires a prior Full Sync
+                      {preserveExisting ? '. Never overwrites existing data' : ''}.
                     </div>
-                    <span style={s.recordLimitHint}>
-                      {(recordLimits[key.label] || 0) > 0
-                        ? `Import up to ${recordLimits[key.label]} records from each selected table`
-                        : 'Import all records from each selected table'}
-                    </span>
-                  </div>
-
-                  {/* Sync mode buttons */}
-                  <div style={s.syncModes}>
-                    <div style={s.syncModeCard}>
-                      <div style={s.syncModeTitle}>Full Sync</div>
-                      <div style={s.syncModeDesc}>
-                        Pull all records from selected tables. Skips records that already exist
-                        {(preserveFlags[key.label] ?? true) ? ' and never overwrites existing data' : ''}.
-                      </div>
-                      <button
-                        onClick={() => handleSync(key, 'hydrate')}
-                        disabled={syncStatus[`${key.label}-hydrate`]?.state === 'syncing'}
-                        style={s.syncModeBtn}
-                      >
-                        {syncStatus[`${key.label}-hydrate`]?.state === 'syncing' ? 'Syncing...' : 'Run Full Sync'}
-                      </button>
-                      {(() => {
-                        const status = syncStatus[`${key.label}-hydrate`];
-                        if (!status || status.state === 'idle') return null;
-                        return (
-                          <div style={{
-                            ...s.statusMsg,
-                            color: status.state === 'error' ? theme.dangerText : status.state === 'done' ? theme.successText : theme.textSecondary,
-                          }}>
-                            {status.state === 'syncing' && <span style={s.spinner} />}
-                            {status.message}
-                            {status.detail && <span style={s.statusDetail}> {status.detail}</span>}
-                          </div>
-                        );
-                      })()}
-                    </div>
-
-                    <div style={s.syncModeCard}>
-                      <div style={s.syncModeTitle}>Update Sync</div>
-                      <div style={s.syncModeDesc}>
-                        Pull only records modified since last sync. Requires a prior Full Sync
-                        {(preserveFlags[key.label] ?? true) ? '. Never overwrites existing data' : ''}.
-                      </div>
-                      <button
-                        onClick={() => handleSync(key, 'sync')}
-                        disabled={syncStatus[`${key.label}-sync`]?.state === 'syncing'}
-                        style={s.syncModeBtn}
-                      >
-                        {syncStatus[`${key.label}-sync`]?.state === 'syncing' ? 'Syncing...' : 'Run Update Sync'}
-                      </button>
-                      {(() => {
-                        const status = syncStatus[`${key.label}-sync`];
-                        if (!status || status.state === 'idle') return null;
-                        return (
-                          <div style={{
-                            ...s.statusMsg,
-                            color: status.state === 'error' ? theme.dangerText : status.state === 'done' ? theme.successText : theme.textSecondary,
-                          }}>
-                            {status.state === 'syncing' && <span style={s.spinner} />}
-                            {status.message}
-                            {status.detail && <span style={s.statusDetail}> {status.detail}</span>}
-                          </div>
-                        );
-                      })()}
-                    </div>
+                    <button
+                      onClick={() => handleSync('sync')}
+                      disabled={syncStatus.sync?.state === 'syncing'}
+                      style={s.syncModeBtn}
+                    >
+                      {syncStatus.sync?.state === 'syncing' ? 'Syncing...' : 'Run Update Sync'}
+                    </button>
+                    {(() => {
+                      const status = syncStatus.sync;
+                      if (!status || status.state === 'idle') return null;
+                      return (
+                        <div style={{
+                          ...s.statusMsg,
+                          color: status.state === 'error' ? theme.dangerText : status.state === 'done' ? theme.successText : theme.textSecondary,
+                        }}>
+                          {status.state === 'syncing' && <span style={s.spinner} />}
+                          {status.message}
+                          {status.detail && <span style={s.statusDetail}> {status.detail}</span>}
+                        </div>
+                      );
+                    })()}
                   </div>
                 </div>
-              )}
-            </div>
-          ))}
-        </div>
+
+                {/* Continuous sync toggle */}
+                {matrixClient && roomId && (
+                  <div style={s.continuousSyncSection}>
+                    <div style={s.continuousSyncRow}>
+                      <label style={s.checkLabel}>
+                        <input
+                          type="checkbox"
+                          checked={continuousSyncEnabled}
+                          onChange={handleToggleContinuousSync}
+                          disabled={isSyncing && !continuousSyncEnabled}
+                        />
+                        <span>Continuous sync (every 30s)</span>
+                      </label>
+                      {continuousSyncEnabled && (
+                        <span style={{
+                          fontSize: 10,
+                          padding: '2px 8px',
+                          borderRadius: 10,
+                          background: isPrimarySyncer ? theme.successBg : theme.bgMuted,
+                          color: isPrimarySyncer ? theme.successText : theme.textMuted,
+                          border: `1px solid ${isPrimarySyncer ? theme.successBorder : theme.borderLight}`,
+                        }}>
+                          {isPrimarySyncer ? 'active syncer' : 'standby'}
+                        </span>
+                      )}
+                    </div>
+                    <span style={s.continuousSyncHint}>
+                      {continuousSyncEnabled
+                        ? 'This device will automatically pull changes from Airtable. Only one device syncs at a time — others receive data via the shared data store.'
+                        : 'Enable to automatically pull Airtable changes every 30 seconds'}
+                    </span>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -846,7 +647,7 @@ export function AirtableSettingsSection({ session }: { session: MatrixSession })
  * Overlay wrapper for backward compatibility.
  * Opens AirtableSettingsSection in a slide-out panel.
  */
-export function AirtableSettings({ session, onClose }: AirtableSettingsProps) {
+export function AirtableSettings({ session, onClose, matrixClient, roomId }: AirtableSettingsProps) {
   const { theme } = useTheme();
   const s = makeStyles(theme);
 
@@ -860,7 +661,7 @@ export function AirtableSettings({ session, onClose }: AirtableSettingsProps) {
           </div>
           <button onClick={onClose} style={s.closeBtn}>&times;</button>
         </div>
-        <AirtableSettingsSection session={session} />
+        <AirtableSettingsSection session={session} matrixClient={matrixClient} roomId={roomId} />
       </div>
     </div>
   );
@@ -929,45 +730,14 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       marginBottom: 12,
     },
 
-    form: {
-      display: 'flex',
-      flexDirection: 'column' as const,
-      gap: 10,
-    },
-    input: {
-      padding: '10px 12px',
-      fontSize: 13,
-      border: `1px solid ${t.border}`,
-      borderRadius: 6,
-      background: t.bg,
-      color: t.text,
-      outline: 'none',
-      fontFamily: "'JetBrains Mono', monospace",
-    },
-    shareRow: {
-      display: 'flex',
-      flexDirection: 'column' as const,
-      gap: 4,
-    },
-    shareLabel: {
-      display: 'flex',
-      alignItems: 'center',
-      fontSize: 13,
-      color: t.text,
-      cursor: 'pointer',
-    },
-    shareHint: {
-      fontSize: 11,
-      color: t.textMuted,
-      paddingLeft: 22,
-    },
     error: {
       color: t.dangerText,
       fontSize: 12,
       padding: '2px 0',
+      marginBottom: 8,
     },
-    saveBtn: {
-      padding: '10px 0',
+    connectBtn: {
+      padding: '10px 20px',
       fontSize: 13,
       fontWeight: 600,
       border: 'none',
@@ -976,67 +746,27 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       color: '#fff',
       cursor: 'pointer',
     },
-
-    emptyKeys: {
-      fontSize: 13,
-      color: t.textMuted,
-      padding: '12px 0',
-    },
-
-    keyCard: {
-      background: t.bg,
-      border: `1px solid ${t.border}`,
-      borderRadius: 8,
-      padding: 14,
-      marginBottom: 10,
-    },
-    keyHeader: {
-      display: 'flex',
-      justifyContent: 'space-between',
-      alignItems: 'center',
-      marginBottom: 6,
-    },
-    keyLabel: {
-      fontFamily: "'JetBrains Mono', monospace",
-      fontSize: 13,
-      fontWeight: 600,
-      color: t.textHeading,
-    },
-    keyBadges: {
-      display: 'flex',
-      gap: 6,
-    },
-    badgeShared: {
-      fontSize: 10,
-      fontWeight: 600,
-      padding: '2px 8px',
-      borderRadius: 10,
-      background: t.badgeSharedBg,
-      color: t.badgeSharedText,
-    },
-    badgePrivate: {
-      fontSize: 10,
-      fontWeight: 600,
-      padding: '2px 8px',
-      borderRadius: 10,
-      background: t.badgePrivateBg,
-      color: t.badgePrivateText,
-    },
-    keyMeta: {
-      fontSize: 11,
-      color: t.textSecondary,
+    connectedRow: {
       display: 'flex',
       alignItems: 'center',
-      flexWrap: 'wrap' as const,
-      gap: 4,
-      marginBottom: 10,
+      gap: 8,
     },
-    keyMetaDivider: {
-      display: 'inline-block',
-      width: 3,
-      height: 3,
+    connectedDot: {
+      width: 8,
+      height: 8,
       borderRadius: '50%',
-      background: t.borderDivider,
+      background: t.success,
+    },
+    disconnectBtn: {
+      padding: '4px 10px',
+      fontSize: 10,
+      fontWeight: 500,
+      border: `1px solid ${t.dangerBorder}`,
+      borderRadius: 5,
+      background: t.bgCard,
+      color: t.dangerText,
+      cursor: 'pointer',
+      marginLeft: 'auto',
     },
 
     keyActions: {
@@ -1053,17 +783,6 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       background: t.bgCard,
       color: t.text,
       cursor: 'pointer',
-    },
-    deleteBtn: {
-      padding: '6px 12px',
-      fontSize: 11,
-      fontWeight: 500,
-      border: `1px solid ${t.dangerBorder}`,
-      borderRadius: 5,
-      background: t.bgCard,
-      color: t.dangerText,
-      cursor: 'pointer',
-      marginLeft: 'auto',
     },
 
     statusMsg: {
@@ -1084,11 +803,6 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       borderTopColor: '#2563eb',
       borderRadius: '50%',
       animation: 'spin 0.6s linear infinite',
-    },
-    loadingDot: {
-      fontWeight: 400,
-      textTransform: 'none' as const,
-      letterSpacing: 0,
     },
 
     // ── Table picker ──
@@ -1304,6 +1018,27 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       background: t.bg,
       color: t.text,
       cursor: 'pointer',
+    },
+
+    // ── Continuous sync ──
+    continuousSyncSection: {
+      marginTop: 12,
+      padding: '10px 0',
+      borderTop: `1px solid ${t.borderLight}`,
+      display: 'flex',
+      flexDirection: 'column' as const,
+      gap: 6,
+    },
+    continuousSyncRow: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+    },
+    continuousSyncHint: {
+      fontSize: 10,
+      color: t.textMuted,
+      paddingLeft: 22,
+      lineHeight: 1.4,
     },
   };
 }
