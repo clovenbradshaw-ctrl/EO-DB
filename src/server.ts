@@ -13,6 +13,8 @@ import { registerIngestionRoutes } from './api/ingestion.js';
 import { registerLogImportRoutes } from './api/log-import.js';
 import { registerRoomSyncRoutes } from './api/room-sync.js';
 import { registerDedupRoutes } from './api/dedup.js';
+import { registerChatRoutes } from './api/chat.js';
+import { ChatFeed } from './chat/feed.js';
 import { configureMatrixDomain } from './config/matrix-domain.js';
 import { RoomSyncCoordinator } from './ingestion/room-sync-coordinator.js';
 import { MatrixConnectionMonitor } from './matrix/connection-resilience.js';
@@ -63,6 +65,9 @@ async function start(): Promise<void> {
   // Auth proxy routes (login/whoami/profile — no EO auth required)
   registerAuthRoutes(app, HOMESERVER, DATA_DIR);
 
+  // Chat feed — real-time pub/sub for space-agnostic chat messages
+  const chatFeed = new ChatFeed();
+
   // Room sync coordinator — manages continuous Airtable sync per room
   const coordinator = new RoomSyncCoordinator(db, feed);
 
@@ -73,7 +78,7 @@ async function start(): Promise<void> {
   const syncManager = undefined;
 
   // WebSocket sync (has its own auth via query param)
-  registerSyncRoute(app, db, feed, coordinator);
+  registerSyncRoute(app, db, feed, coordinator, chatFeed);
 
   // Auth-protected routes
   app.register(async (protectedApp) => {
@@ -86,6 +91,7 @@ async function start(): Promise<void> {
     registerLogImportRoutes(protectedApp, db, feed, syncManager);
     registerRoomSyncRoutes(protectedApp, db, coordinator);
     registerDedupRoutes(protectedApp, db, feed);
+    registerChatRoutes(protectedApp, db, chatFeed);
   });
 
   // Start the room sync coordinator after routes are registered

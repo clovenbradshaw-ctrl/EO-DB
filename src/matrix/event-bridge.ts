@@ -25,6 +25,10 @@ export const EO_SPACE_CONFIG_TYPE = 'com.eo-db.space.config';
 export const EO_SCHEMA_MANIFEST_TYPE = 'com.eo-db.schema.manifest';
 export const EO_KEY_ANNOUNCE_TYPE = 'com.eo-db.key.announce';
 
+// ─── Chat (space-agnostic messaging) ──────────────────────────────────────
+export const EO_CHAT_ROOM_TYPE = 'com.eo-db.chat.room';
+export const EO_CHAT_MESSAGE_TYPE = 'com.eo-db.chat.message';
+
 /** Room alias — configured at runtime via `configureMatrixDomain()`. */
 export function getDataRoom(): string {
   return getDataRoomAlias();
