@@ -7,6 +7,7 @@ import { verifyMatrixToken } from '../auth/matrix.js';
 import { isAccountAllowed } from '../auth/matrix-auth-config.js';
 import type { EoEvent, Operator } from '../db/types.js';
 import type { RoomSyncCoordinator } from '../ingestion/room-sync-coordinator.js';
+import type { ChatFeed, ChatEvent } from '../chat/feed.js';
 import websocketPlugin from '@fastify/websocket';
 
 interface SyncMessage {
@@ -16,6 +17,8 @@ interface SyncMessage {
   ops?: Operator[];
   /** Room ID the user is joining (for room sync coordinator). */
   room_id?: string;
+  /** Chat room ID for subscribing to chat messages. */
+  chat_room_id?: string;
 }
 
 /** Tracks all connected WebSocket users for presence. */
@@ -74,6 +77,7 @@ export function registerSyncRoute(
   db: EoDb,
   feed: Feed,
   coordinator?: RoomSyncCoordinator,
+  chatFeed?: ChatFeed,
 ): void {
   app.register(websocketPlugin);
 
@@ -115,11 +119,17 @@ export function registerSyncRoute(
 
         // Register close handler BEFORE sending messages to avoid race conditions
         let feedSubId: string | null = null;
+        const chatSubIds: string[] = [];
 
         socket.on('close', () => {
           if (feedSubId) {
             feed.unsubscribe(feedSubId);
             feedSubId = null;
+          }
+          // Unsubscribe from all chat feeds
+          if (chatFeed) {
+            for (const subId of chatSubIds) chatFeed.unsubscribe(subId);
+            chatSubIds.length = 0;
           }
           // Notify coordinator that this user left all their rooms
           if (coordinator) {
@@ -225,6 +235,26 @@ export function registerSyncRoute(
                 type: 'room_left',
                 room_id: msg.room_id,
               }));
+            }
+
+            // ── Chat: subscribe to a chat room's real-time messages ──
+            if (msg.type === 'chat_subscribe' && msg.chat_room_id && chatFeed) {
+              const subId = chatFeed.subscribe(msg.chat_room_id, (event: ChatEvent) => {
+                if (socket.readyState === 1) {
+                  socket.send(JSON.stringify({ type: 'chat_event', event }));
+                }
+              });
+              chatSubIds.push(subId);
+              socket.send(JSON.stringify({
+                type: 'chat_subscribed',
+                chat_room_id: msg.chat_room_id,
+              }));
+            }
+
+            if (msg.type === 'chat_unsubscribe' && chatFeed) {
+              for (const subId of chatSubIds) chatFeed.unsubscribe(subId);
+              chatSubIds.length = 0;
+              socket.send(JSON.stringify({ type: 'chat_unsubscribed' }));
             }
           } catch (e) {
             socket.send(JSON.stringify({ type: 'error', message: 'Invalid message' }));
