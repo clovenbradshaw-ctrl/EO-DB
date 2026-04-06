@@ -89,6 +89,7 @@ export function defaultColumnWidth(type: string): number {
     case 'boolean': return 80;
     case 'date': return 150;
     case 'select': return 150;
+    case 'formula': return 150;
     case 'object': return 200;
     default: return 200;
   }

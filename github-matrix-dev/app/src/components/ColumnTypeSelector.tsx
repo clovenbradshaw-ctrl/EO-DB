@@ -6,6 +6,7 @@ const COLUMN_TYPES = [
   { value: 'date', label: 'Date', color: '#e67e22' },
   { value: 'select', label: 'Select', color: '#9b59b6' },
   { value: 'boolean', label: 'Boolean', color: '#27ae60' },
+  { value: 'formula', label: 'Formula', color: '#e74c8b' },
   { value: 'object', label: 'Object', color: '#6b7280' },
 ] as const;
 

@@ -14,8 +14,9 @@ import { useViewStore } from '../store/view-store';
 import { defaultColumnWidth, MIN_COLUMN_WIDTH } from './view-types';
 import { formatName } from './scope-picker-utils';
 import { useIdResolver, isEntityId, isEntityIdArray, type IdResolver } from '../hooks/useIdResolver';
-import { groupSchemaStates, extractColumnTypeOverrides, schemaTypeTarget, schemaConstraintTarget, schemaResolveTarget, type FieldSchema } from '../db/schema-rules';
+import { groupSchemaStates, extractColumnTypeOverrides, schemaTypeTarget, schemaConstraintTarget, schemaResolveTarget, schemaFormulaTarget, type FieldSchema } from '../db/schema-rules';
 import { ColumnTypeSelector } from './ColumnTypeSelector';
+import { useFormulaEngine } from '../formulas/useFormulaEngine';
 import { useIsMobile, useIsNarrow } from '../hooks/useIsMobile';
 import { ColumnManagerPanel } from './ColumnManagerPanel';
 import {
@@ -561,8 +562,11 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     return () => clearTimeout(id);
   }, [filterText]);
 
-  // Detect if records use the Airtable-style fields sub-object
+  // Detect if records use the ingested fields sub-object
   const useFieldsSub = useMemo(() => hasFieldsSubObject(records), [records]);
+
+  // Formula engine — compiled once per schema change, cached per record
+  const formulaEngine = useFormulaEngine(fieldSchemas, fieldNameMap);
 
   const entityColumns = useMemo(() => deriveColumns(records, fieldNameMap, columnTypeOverrides), [records, fieldNameMap, columnTypeOverrides]);
   const columns = useMemo<ColumnDef[]>(() => {
@@ -713,6 +717,12 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
             setColumnMenu(null);
           },
         },
+        // Formula expression (for formula columns)
+        ...(fs?.formulaDef?.value ? [{
+          label: `Formula: ${String(fs.formulaDef.value).length > 30 ? String(fs.formulaDef.value).slice(0, 27) + '...' : fs.formulaDef.value}`,
+          disabled: true,
+          onClick: () => {},
+        }] : []),
         // List existing constraints
         ...fs?.constraints.map(c => ({
           label: `Constraint: ${c.name}`,
@@ -807,6 +817,37 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
         ts: new Date().toISOString(),
         acquired_ts: new Date().toISOString(),
       });
+      // For formula type: prompt for expression and store as a DEF
+      if (type === 'formula') {
+        const expression = window.prompt('Formula expression (e.g. {Price} * {Quantity})');
+        if (expression) {
+          await dispatch({
+            op: 'DEF',
+            target: schemaFormulaTarget(scope, fieldKey),
+            operand: expression,
+            agent: `user:${session.userId}`,
+            ts: new Date().toISOString(),
+            acquired_ts: new Date().toISOString(),
+          });
+          setFieldSchemas((prev) => {
+            const next = new Map(prev);
+            const existing = next.get(fieldKey) ?? { fieldKey, constraints: [] };
+            next.set(fieldKey, {
+              ...existing,
+              typeDef: { target: schemaTypeTarget(scope, fieldKey), value: { type } },
+              formulaDef: { target: schemaFormulaTarget(scope, fieldKey), value: expression },
+            });
+            return next;
+          });
+          setColumnTypeOverrides((prev) => {
+            const next = new Map(prev);
+            next.set(fieldKey, { type });
+            return next;
+          });
+          setColumnTypeSelector(null);
+          return;
+        }
+      }
       // Update local state immediately
       setColumnTypeOverrides((prev) => {
         const next = new Map(prev);
@@ -1294,8 +1335,8 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                                 color: theme.textSecondary,
                               }}>{rec.last_ts ? formatRelativeTime(rec.last_ts) : <AbsentCell t={theme} />}</span>
                             : isLocked
-                            ? <LockedCell>{renderCell(getFieldValue(rec, col.key, useFieldsSub), col.key, onSelectRecord, theme, idResolver)}</LockedCell>
-                            : renderCell(getFieldValue(rec, col.key, useFieldsSub), col.key, onSelectRecord, theme, idResolver)
+                            ? <LockedCell>{renderCell(formulaEngine.formulaFields.has(col.key) ? formulaEngine.getFormulaValue(rec, col.key, useFieldsSub) : getFieldValue(rec, col.key, useFieldsSub), col.key, onSelectRecord, theme, idResolver)}</LockedCell>
+                            : renderCell(formulaEngine.formulaFields.has(col.key) ? formulaEngine.getFormulaValue(rec, col.key, useFieldsSub) : getFieldValue(rec, col.key, useFieldsSub), col.key, onSelectRecord, theme, idResolver)
                           }
                         </td>
                       );

@@ -36,6 +36,10 @@ export function schemaResolveTarget(scope: string, fieldKey: string): string {
   return `${scope}._schema.${fieldKey}.resolve`;
 }
 
+export function schemaFormulaTarget(scope: string, fieldKey: string): string {
+  return `${scope}._schema.${fieldKey}.formula`;
+}
+
 // ─── Schema grouping ─────────────────────────────────────────────────────
 
 /** Aggregated schema information for a single field. */
@@ -43,10 +47,12 @@ export interface FieldSchema {
   fieldKey: string;
   /** Display name — from parent _schema.{field} value.name or value._label */
   name?: string;
-  /** Airtable-provided type — from parent _schema.{field} value.type */
+  /** Ingested type — from parent _schema.{field} value.type */
   ingestedType?: string;
   /** User-declared type definition — from .type child (full operand preserved) */
   typeDef?: { target: string; value: any };
+  /** Formula expression DEF — from .formula child */
+  formulaDef?: { target: string; value: string };
   /** Individually addressable constraints — from .constraint.* children */
   constraints: Array<{ target: string; name: string; value: any }>;
   /** Resolution policy — from .resolve child (EVA) */
@@ -85,6 +91,8 @@ export function groupSchemaStates(
       if (state.value?.type) fs.ingestedType = state.value.type;
     } else if (parts.length === 2 && parts[1] === 'type') {
       fs.typeDef = { target: state.target, value: state.value };
+    } else if (parts.length === 2 && parts[1] === 'formula') {
+      fs.formulaDef = { target: state.target, value: state.value };
     } else if (parts.length === 2 && parts[1] === 'resolve') {
       fs.resolve = { target: state.target, value: state.value };
     } else if (parts.length === 3 && parts[1] === 'constraint') {

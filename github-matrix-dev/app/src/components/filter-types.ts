@@ -19,8 +19,10 @@ export interface FilterRule {
 export interface ColumnDef {
   key: string;
   label: string;
-  type: 'text' | 'number' | 'date' | 'select' | 'boolean' | 'object';
+  type: 'text' | 'number' | 'date' | 'select' | 'boolean' | 'formula' | 'object';
   selectOptions?: string[];
+  /** For formula columns: the expression string (DEF). Computed values are EVAs. */
+  formulaExpression?: string;
 }
 
 export interface FilterDefinition {
@@ -46,6 +48,7 @@ export function operatorsForType(type: ColumnDef['type']): FilterOperator[] {
     case 'date': return DATE_OPS;
     case 'select': return SELECT_OPS;
     case 'boolean': return BOOLEAN_OPS;
+    case 'formula': return TEXT_OPS; // formula results are polymorphic; text ops are safest default
     case 'object': return OBJECT_OPS;
     default: return TEXT_OPS;
   }
@@ -112,7 +115,7 @@ export function inferColumnType(values: any[]): ColumnDef['type'] {
 /**
  * Build a map from field ID → display name using field metadata stored on the
  * table (scope) state.  The table DEF stores `fields` as an array of
- * `{ id, name, type }` objects from the Airtable schema.
+ * `{ id, name, type }` objects from the ingested schema.
  */
 export function buildFieldNameMap(
   fieldMeta: Array<{ id: string; name: string }> | undefined,
@@ -126,7 +129,7 @@ export function buildFieldNameMap(
 
 /**
  * Build a field name map from per-field schema entities (stored under _schema).
- * Each schema entity has `value.name` (Airtable field name) and optionally
+ * Each schema entity has `value.name` (ingested field name) and optionally
  * `value._label` (user-set display name override).
  * The last segment of the target path is the field ID.
  */
@@ -144,7 +147,7 @@ export function buildFieldNameMapFromSchema(
 }
 
 /**
- * Check whether the records use the Airtable-style `fields` sub-object
+ * Check whether the records use the `fields` sub-object layout
  * (i.e. `value.fields` is a plain object whose keys are field IDs).
  */
 export function hasFieldsSubObject(records: EoState[]): boolean {
@@ -182,7 +185,7 @@ export function deriveColumns(
   for (const rec of records) {
     if (!rec.value || typeof rec.value !== 'object') continue;
 
-    // If records use the Airtable-style `fields` sub-object, iterate its keys
+    // If records use the `fields` sub-object layout, iterate its keys
     const source = useFieldsSub
       ? (rec.value.fields && typeof rec.value.fields === 'object' && !Array.isArray(rec.value.fields)
           ? rec.value.fields as Record<string, any>
