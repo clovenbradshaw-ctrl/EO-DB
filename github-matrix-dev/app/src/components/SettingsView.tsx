@@ -9,6 +9,7 @@ import { UserRoomsBySpaces } from './UserRoomsBySpaces';
 import { FilenStorageWidget } from './FilenStorageWidget';
 import { OP_COLORS, TRIAD_LABELS } from './LogView';
 import { ArchivedSpacesSection } from './ArchivedSpaces';
+import { AirtableSettingsSection } from './AirtableSettings';
 
 interface SettingsViewProps {
   session: MatrixSession;
@@ -169,6 +170,15 @@ export function SettingsView({ session, matrixClient, roomId, onUnarchive }: Set
             <FilenStorageWidget />
           </Section>
         )}
+
+        {/* Airtable Importer */}
+        <Section title="Airtable Importer" theme={theme}>
+          <AirtableSettingsSection
+            session={session}
+            matrixClient={matrixClient}
+            roomId={roomId}
+          />
+        </Section>
 
         {/* EO Operator Reference */}
         <Section title="EO Operator Reference" theme={theme}>
