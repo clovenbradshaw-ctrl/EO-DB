@@ -127,7 +127,17 @@ export function FigureFields({ figure, onNavigate, profileFields }: FigureFields
               <span style={s.evaBadge}>EVA</span>
             )}
           </div>
-          <div style={s.value}>
+          <div
+            style={{ ...s.value, cursor: editing?.fieldKey === key ? 'auto' : 'text' }}
+            onDoubleClick={() => {
+              if (editing?.fieldKey === key) return;
+              const currentVal = value[key];
+              const strVal = currentVal != null && typeof currentVal === 'object'
+                ? JSON.stringify(currentVal, null, 2)
+                : String(currentVal ?? '');
+              setEditing({ fieldKey: key, value: strVal });
+            }}
+          >
             {editing?.fieldKey === key ? (
               <form
                 style={{ width: '100%' }}
