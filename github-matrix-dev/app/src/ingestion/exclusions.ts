@@ -1,5 +1,5 @@
 /**
- * Sync exclusion policies for Airtable → EO ingestion.
+ * Sync exclusion policies for data ingestion.
  */
 
 export interface SyncExclusions {

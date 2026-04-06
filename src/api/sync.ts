@@ -6,7 +6,6 @@ import { Feed } from '../db/feed.js';
 import { verifyMatrixToken } from '../auth/matrix.js';
 import { isAccountAllowed } from '../auth/matrix-auth-config.js';
 import type { EoEvent, Operator } from '../db/types.js';
-import type { RoomSyncCoordinator } from '../ingestion/room-sync-coordinator.js';
 import type { ChatFeed, ChatEvent } from '../chat/feed.js';
 import websocketPlugin from '@fastify/websocket';
 
@@ -76,7 +75,7 @@ export function registerSyncRoute(
   app: FastifyInstance,
   db: EoDb,
   feed: Feed,
-  coordinator?: RoomSyncCoordinator,
+  coordinator?: { userJoined(roomId: string, userId: string): void; userLeft(userId: string): void; userLeftRoom(roomId: string, userId: string): void },
   chatFeed?: ChatFeed,
 ): void {
   app.register(websocketPlugin);

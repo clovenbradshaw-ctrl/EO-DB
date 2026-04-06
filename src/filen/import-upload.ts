@@ -27,7 +27,7 @@ const EODB_MAGIC = new Uint8Array([0x45, 0x4F, 0x44, 0x42]); // "EODB"
 export interface ImportArchive {
   version: 1;
   type: 'import-archive';
-  source: 'json' | 'csv' | 'airtable';
+  source: 'json' | 'csv';
   agent: string;
   created_at: string;
   content_hash: string;
@@ -57,7 +57,7 @@ export function unpackImportArchive(data: Uint8Array): ImportArchive {
 
 export interface ImportJob {
   job_id: string;
-  source: 'json' | 'csv' | 'airtable';
+  source: 'json' | 'csv';
   status: 'uploading' | 'uploaded' | 'processing' | 'completed' | 'failed';
   agent: string;
   started_at: string;
@@ -115,7 +115,7 @@ export async function findImportJobByHash(
 }
 
 export function createImportJob(
-  source: 'json' | 'csv' | 'airtable',
+  source: 'json' | 'csv',
   agent: string,
   contentHash: string,
 ): ImportJob {

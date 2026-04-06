@@ -986,7 +986,7 @@ Matrix login only. No separate user management. No separate auth system. The Mat
 
 ## 14. n8n Integration (Optional)
 
-The GitHub Pages app doesn't receive webhooks — it's static. For Airtable sync via n8n, two options:
+The GitHub Pages app doesn't receive webhooks — it's static. For external data sync via n8n, two options:
 
 ### Option A: n8n has its own Matrix account
 
@@ -1088,7 +1088,7 @@ A minimal serverless function (Cloudflare Worker, Vercel Edge Function):
 - The Matrix homeserver at app.aminoimmigration.com (already running)
 - GitHub Pages (free)
 - The nine operators, the fold, the Horizon — unchanged, running in the browser
-- n8n (if Airtable sync is needed) — posts to Matrix room instead of a webhook endpoint
+- n8n (if external data sync is needed) — posts to Matrix room instead of a webhook endpoint
 
 ---
 

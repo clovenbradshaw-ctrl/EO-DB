@@ -561,7 +561,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     return () => clearTimeout(id);
   }, [filterText]);
 
-  // Detect if records use the Airtable-style fields sub-object
+  // Detect if records use the nested fields sub-object
   const useFieldsSub = useMemo(() => hasFieldsSubObject(records), [records]);
 
   const entityColumns = useMemo(() => deriveColumns(records, fieldNameMap, columnTypeOverrides), [records, fieldNameMap, columnTypeOverrides]);

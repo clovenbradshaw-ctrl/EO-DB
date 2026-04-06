@@ -484,7 +484,7 @@ This is the domain-invariance claim applied to storage: the same transformation 
 
 ## 14. Practical Path
 
-The EO database replaces Postgres for `amino-eo`. The source of truth is Airtable. The Postgres tables are already a downstream projection — events arrive via n8n, get appended to `eo_events`, get projected into `eo_state` by a trigger. The EO database takes over both tables. n8n writes to the EO database instead. Same flow, one system instead of two. Postgres goes away.
+The EO database replaces Postgres for `amino-eo`. The Postgres tables are already a downstream projection — events arrive via n8n, get appended to `eo_events`, get projected into `eo_state` by a trigger. The EO database takes over both tables. n8n writes to the EO database instead. Same flow, one system instead of two. Postgres goes away.
 
 The specification is already written in application code. The path is extraction and unification.
 
@@ -496,7 +496,7 @@ The specification is already written in application code. The path is extraction
 
 **Phase 4: Add the type registry.** Make operand types pluggable. Register handlers for vector, spatial, temporal, blob, and tensor types. Each handler declares its storage backend (HNSW, R-tree, interval tree, CAS, tiled storage) and its query interface. The fold dispatches to the appropriate handler based on the operator and the registered type.
 
-**What blocks this today:** not the code. The blocker is real Airtable fixture data to test against. The database is only as trustworthy as the test coverage, and the test coverage depends on capturing the actual data shapes coming through n8n. This is the same blocker that stalls amino-eo Stage 3 (EO Classifier).
+**What blocks this today:** not the code. The blocker is real fixture data to test against. The database is only as trustworthy as the test coverage, and the test coverage depends on capturing the actual data shapes coming through n8n.
 
 ---
 
@@ -523,12 +523,12 @@ Every EO event has an agent field. The log records not just what changed but who
 The EO database runs as a Node server on a VM with three jobs: store EO events, serve projected state, and provide a visual admin interface. It replaces both Postgres and the need for a separate admin tool.
 
 ```
-Airtable → n8n → EO database app (VM) → WebSocket → amino-eo (browser)
+Source → n8n → EO database app (VM) → WebSocket → amino-eo (browser)
                        ↑
                   admin interface (browser)
 ```
 
-**Inbound.** n8n sends Airtable changes as EO events via webhook. The app authenticates the webhook (Matrix token or shared secret), appends to the log, runs the fold (updates projected state, CON graph, EVA-active formulas), and notifies connected clients via the changefeed.
+**Inbound.** n8n sends data changes as EO events via webhook. The app authenticates the webhook (Matrix token or shared secret), appends to the log, runs the fold (updates projected state, CON graph, EVA-active formulas), and notifies connected clients via the changefeed.
 
 **Outbound.** amino-eo connects via WebSocket, sends its last known sequence number. The app streams all events since that sequence, then pushes new events as they arrive. amino-eo runs its own fold client-side for local state — the Zustand store stays, the only change is the event source (WebSocket instead of SSE from the Postgres stack).
 

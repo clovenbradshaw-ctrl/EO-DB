@@ -92,7 +92,7 @@ export function peerSyncEventTypes(prefix?: string) {
  * Room sync event types.
  *
  * These are used for coordinator-to-client communication about the
- * Airtable sync status within a room. The actual data flows as normal
+ * sync status within a room. The actual data flows as normal
  * EO events through the changefeed — these types are metadata only.
  */
 export function roomSyncEventTypes(prefix?: string) {

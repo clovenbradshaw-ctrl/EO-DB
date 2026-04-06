@@ -6,7 +6,7 @@ EO-DB currently has a basic 3-tier sharing model at the space level (`read` / `w
 
 **Problem:** There's no way for users to control who can create fields, who can edit specific columns, who can add records, or who can build views/pages within a space. The current 3-tier model is too coarse for real collaboration.
 
-**Goal:** A governance model that feels familiar (Google Docs, Drive, Canva, Airtable) while using **Matrix power levels as the source of truth** for roles, **Matrix rooms as permission boundaries** for data access, and **segment key distribution as read-access control**. No application-level trust — if you can't read it, you're not in the room and don't have the key.
+**Goal:** A governance model that uses **Matrix power levels as the source of truth** for roles, **Matrix rooms as permission boundaries** for data access, and **segment key distribution as read-access control**. No application-level trust — if you can't read it, you're not in the room and don't have the key.
 
 ---
 
@@ -23,29 +23,19 @@ Instead of storing permissions in `_sharing` and enforcing in the fold (applicat
 
 If someone shouldn't read data, it lives in a room they're not in, encrypted with a key they don't have. No trust required — it's cryptographic.
 
-### Comparable Systems Reference
-
-| Platform | Roles | Granularity |
-|----------|-------|-------------|
-| **Google Docs** | Owner, Editor, Commenter, Viewer | Document-level |
-| **Google Drive** | Manager, Content Manager, Contributor, Commenter, Viewer | Folder cascading |
-| **Canva** | Owner, Admin, Template Editor, Member, Viewer + "Can share" toggle | Team/folder |
-| **Airtable** | Owner, Creator, Editor, Commenter, Read-only + per-field locks | Base/table/field |
-| **Notion** | Full access, Can edit, Can comment, Can view + page locks | Page/database |
-
 ### EO-DB Roles → Matrix Power Levels
 
 ```
 Owner (100) > Admin (50) > Editor (25) > Creator (10) > Viewer (0)
 ```
 
-| Role | Label (UI) | Matrix PL | Description | Familiar Comp |
-|------|-----------|-----------|-------------|---------------|
-| `owner` | **Owner** | 100 | Full control, manage rooms, manage keys, delete space | Google Drive Owner |
-| `admin` | **Full access** | 50 | Manage people (invite/kick), create/modify fields, set policies, build views | Google Drive Manager |
-| `editor` | **Can edit** | 25 | Edit any record's fields, add/remove records, create relationships | Google Docs Editor |
-| `creator` | **Can add** | 10 | Add new records, edit only records they created | Airtable Creator |
-| `viewer` | **Can view** | 0 | Read-only access to data they have keys for | Google Docs Viewer |
+| Role | Label (UI) | Matrix PL | Description |
+|------|-----------|-----------|-------------|
+| `owner` | **Owner** | 100 | Full control, manage rooms, manage keys, delete space |
+| `admin` | **Full access** | 50 | Manage people (invite/kick), create/modify fields, set policies, build views |
+| `editor` | **Can edit** | 25 | Edit any record's fields, add/remove records, create relationships |
+| `creator` | **Can add** | 10 | Add new records, edit only records they created |
+| `viewer` | **Can view** | 0 | Read-only access to data they have keys for |
 
 ### Matrix Power Level Configuration (per room)
 
@@ -90,7 +80,7 @@ power_levels:
 
 **Note on Creator vs Editor:** Both have PL 10 and can send `com.eo-db.event`. The distinction between "edit any" vs "edit own" requires a **thin fold-layer check**: when a Creator submits a DEF on a record they didn't create, the fold rejects it. This is the *only* application-level permission check needed — everything else is Matrix-native.
 
-### "Can share" Toggle (Canva-style)
+### "Can share" Toggle
 
 Admins (PL 50+) can invite to the room. Optionally, an admin can temporarily elevate a user's PL to 50 to let them invite others, or use a separate "invite room" pattern.
 
@@ -374,7 +364,7 @@ The UI reads `resolvedPermissions` and adjusts what the user sees:
 | Members panel "Invite" bar | Hidden for PL < 50 |
 | Compose view operator list | Filtered to event types the user's PL allows |
 | Record delete in context menu | Hidden for Viewer; "own only" label for Creator |
-| "View only" banner | Shown persistently at top for Viewer role (like Google Docs) |
+| "View only" banner | Shown persistently at top for Viewer role |
 | Role badge in top bar | Shows role label next to user name |
 
 **Why UI enforcement too?** Matrix prevents the event from being sent, but the user experience should make it clear *before* they try. Disabled buttons with tooltips ("You need Editor access to edit records") are better than error messages after the fact.
@@ -440,7 +430,7 @@ Next to the user's name in the top bar, show their role in the current space:
 EO///DB  [Client Tracker ▾]  [Members]  ──  seq:42 evt:38 tgt:12  ──  alice · Editor
 ```
 
-For Viewer role, show a persistent banner below the top bar (like Google Docs):
+For Viewer role, show a persistent banner below the top bar:
 
 ```
 ┌──────────────────────────────────────────────┐

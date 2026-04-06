@@ -4,7 +4,7 @@ import { getFieldValue, hasFieldsSubObject } from './filter-types';
 // --- Types ---
 
 export interface DateColumnOption {
-  key: string;   // field key, or '__last_ts__' / '__airtable_created__'
+  key: string;   // field key, or '__last_ts__'
   label: string;
 }
 
@@ -46,14 +46,6 @@ export function detectDateColumns(
   const options: DateColumnOption[] = [
     { key: '__last_ts__', label: 'Operation date' },
   ];
-
-  // Check for _airtable.created_time
-  const hasAirtableCreated = records.some(
-    (r) => r.value?._airtable?.created_time,
-  );
-  if (hasAirtableCreated) {
-    options.push({ key: '__airtable_created__', label: 'Airtable created' });
-  }
 
   // Sample up to 100 records for performance
   const sample = records.slice(0, 100);
@@ -113,9 +105,6 @@ export function getDateValue(
       break;
     case '__last_acquired_ts__':
       raw = rec.last_acquired_ts;
-      break;
-    case '__airtable_created__':
-      raw = rec.value?._airtable?.created_time;
       break;
     default:
       raw = getFieldValue(rec, dateField, useFieldsSub);

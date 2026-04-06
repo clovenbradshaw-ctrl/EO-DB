@@ -2,7 +2,7 @@
  * Sync exclusion policies.
  *
  * Allows configurable filtering of specific fields or field name patterns
- * during Airtable → EO ingestion. Exclusions are cumulative across levels
+ * during data ingestion. Exclusions are cumulative across levels
  * (system + base + table).
  */
 
