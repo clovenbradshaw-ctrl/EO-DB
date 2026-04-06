@@ -4,6 +4,7 @@ import { useEoStore } from '../store/eo-store';
 import { useTheme, type Theme } from '../theme';
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 import { useIdResolver, isEntityId, isEntityIdArray, type IdResolver } from '../hooks/useIdResolver';
+import { syncEditToAirtable } from '../ingestion/airtable-writeback';
 
 interface FigureFieldsProps {
   figure: EoState;
@@ -13,6 +14,7 @@ interface FigureFieldsProps {
 
 export function FigureFields({ figure, onNavigate, profileFields }: FigureFieldsProps) {
   const dispatch = useEoStore((s) => s.dispatch);
+  const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
   const { theme } = useTheme();
   const s = makeStyles(theme);
   const value = figure.value;
@@ -87,6 +89,7 @@ export function FigureFields({ figure, onNavigate, profileFields }: FigureFields
         ts: new Date().toISOString(),
         acquired_ts: new Date().toISOString(),
       });
+      syncEditToAirtable({ target: figure.target, fieldKey, value: parsed, getStateByPrefix }).catch(console.warn);
     } catch { /* ignore */ }
     setEditing(null);
   }

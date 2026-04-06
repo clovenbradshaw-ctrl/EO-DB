@@ -10,6 +10,7 @@ import { RedactedCell, LockIcon, LockedCell } from './RedactedCell';
 import { FilterBar } from './FilterBar';
 import { SortPanel, type SortRule } from './SortPanel';
 import type { ResolvedPermissions } from '../permissions/types';
+import { syncEditToAirtable } from '../ingestion/airtable-writeback';
 import { useViewStore } from '../store/view-store';
 import { defaultColumnWidth, MIN_COLUMN_WIDTH } from './view-types';
 import { formatName } from './scope-picker-utils';
@@ -908,6 +909,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
         ts: new Date().toISOString(),
         acquired_ts: new Date().toISOString(),
       });
+      syncEditToAirtable({ target, fieldKey, value: parsed, getStateByPrefix }).catch(console.warn);
     } catch { /* ignore */ }
     setEditingCell(null);
   }

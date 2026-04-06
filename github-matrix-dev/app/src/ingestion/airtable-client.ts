@@ -98,14 +98,16 @@ export class AirtableClient {
     this.bucket = new TokenBucket(ratePerSec, ratePerSec);
   }
 
-  private async request<T>(url: string, retries = 3): Promise<T> {
+  private async request<T>(url: string, init?: RequestInit, retries = 3): Promise<T> {
     await this.bucket.acquire();
 
     for (let attempt = 0; attempt <= retries; attempt++) {
       const res = await fetch(url, {
+        ...init,
         headers: {
           'Authorization': `Bearer ${this.apiKey}`,
           'Content-Type': 'application/json',
+          ...init?.headers,
         },
       });
 
@@ -147,6 +149,27 @@ export class AirtableClient {
       `${AIRTABLE_META_API}/bases/${baseId}/tables`,
     );
     return res.tables;
+  }
+
+  /**
+   * Update a single record's fields via PATCH.
+   * Returns the updated Airtable record.
+   */
+  async updateRecord(
+    baseId: string,
+    tableIdOrName: string,
+    recordId: string,
+    fields: Record<string, any>,
+    opts?: { returnFieldsByFieldId?: boolean },
+  ): Promise<AirtableRecord> {
+    const params = new URLSearchParams();
+    if (opts?.returnFieldsByFieldId) params.set('returnFieldsByFieldId', 'true');
+    const qs = params.toString();
+    const url = `${AIRTABLE_API}/${baseId}/${encodeURIComponent(tableIdOrName)}/${recordId}${qs ? `?${qs}` : ''}`;
+    return this.request<AirtableRecord>(url, {
+      method: 'PATCH',
+      body: JSON.stringify({ fields }),
+    });
   }
 
   async *paginateRecords(
