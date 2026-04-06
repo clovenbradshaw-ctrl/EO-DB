@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import type { EoDb } from '../db/level.js';
 import type { AuthenticatedRequest } from '../auth/matrix.js';
 import type { AccessLevel, ServerAccessMode } from '../auth/matrix-auth-config.js';
+import { softDeleteByPrefix, restoreByPrefix } from '../db/soft-delete.js';
 import {
   getMatrixAuthConfig,
   setMatrixAuthEnabled,
@@ -56,6 +57,38 @@ export function registerAdminRoutes(app: FastifyInstance, db: EoDb): void {
     await batch.write();
     return reply.send({ deleted: keys.length });
   });
+
+  // ─── Soft-delete a table (by target prefix) ────────────────────────────
+  // DELETE /admin/tables/:prefix — marks all entities under prefix as deleted.
+  // Edges crossing the boundary are left as tombstones. No hard delete.
+  app.delete('/admin/tables/:prefix', async (request: AuthenticatedRequest, reply) => {
+    const { prefix } = request.params as { prefix: string };
+    if (!prefix) {
+      return reply.code(400).send({ error: 'Missing prefix parameter' });
+    }
+    const agent = request.matrixUser?.user_id || 'unknown';
+    try {
+      const result = await softDeleteByPrefix(db, decodeURIComponent(prefix), agent);
+      return reply.send(result);
+    } catch (e: any) {
+      return reply.code(404).send({ error: e.message });
+    }
+  });
+
+  // POST /admin/tables/:prefix/restore — restores soft-deleted entities under prefix.
+  app.post('/admin/tables/:prefix/restore', async (request: AuthenticatedRequest, reply) => {
+    const { prefix } = request.params as { prefix: string };
+    if (!prefix) {
+      return reply.code(400).send({ error: 'Missing prefix parameter' });
+    }
+    try {
+      const result = await restoreByPrefix(db, decodeURIComponent(prefix));
+      return reply.send(result);
+    } catch (e: any) {
+      return reply.code(400).send({ error: e.message });
+    }
+  });
+
   // ─── Config ──────────────────────────────────────────────────────────────
 
   // GET /admin/matrix-auth — read current config
