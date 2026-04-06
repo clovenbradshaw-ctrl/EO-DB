@@ -28,6 +28,113 @@ export async function processEvent(
   return foldMutex.run(() => processEventInner(store, event, onEvent));
 }
 
+/**
+ * Bulk-import mode: process events quickly by deferring expensive
+ * recomputation (recomputeDependents, detectAndEmitREC, cascadeUpward)
+ * until after all events are ingested.  Runs the deferred work once
+ * per unique target instead of once per event.
+ */
+export async function processEventsBulk(
+  store: EoStore,
+  events: EoEventInput[],
+  onProgress?: (current: number, total: number) => void,
+  onEvent?: (event: EoEvent) => void,
+): Promise<number> {
+  return foldMutex.run(async () => {
+    const touchedTargets = new Set<string>();
+    let lastSeq = 0;
+
+    // Phase 1: ingest all events (skip deferred recomputation)
+    for (let i = 0; i < events.length; i++) {
+      lastSeq = await processEventCore(store, events[i], onEvent);
+      touchedTargets.add(events[i].target);
+      onProgress?.(i + 1, events.length);
+    }
+
+    // Phase 2: run deferred recomputation once per unique target
+    for (const target of touchedTargets) {
+      await recomputeDependents(store, target, new Set());
+    }
+
+    // Phase 3: detect cycles once per unique target
+    // Build a synthetic triggering event for cascading
+    const now = new Date().toISOString();
+    const syntheticTrigger: EoEvent = {
+      seq: lastSeq,
+      op: 'INS',
+      target: '__bulk_import__',
+      operand: {},
+      agent: 'system:bulk',
+      ts: now,
+      acquired_ts: now,
+    };
+    for (const target of touchedTargets) {
+      await detectAndEmitREC(store, target, syntheticTrigger, onEvent);
+      await cascadeUpward(store, target, syntheticTrigger, onEvent);
+    }
+
+    return lastSeq;
+  });
+}
+
+/**
+ * Core event processing — steps 1-7 only (no deferred recomputation).
+ * Used by bulk import to defer steps 7b-9 until after all events are ingested.
+ */
+async function processEventCore(
+  store: EoStore,
+  event: EoEventInput,
+  onEvent?: (event: EoEvent) => void,
+): Promise<number> {
+  if (event.op === 'REC') {
+    throw new Error('REC is system-generated and cannot be submitted externally');
+  }
+  const validationErrors = validateEvent(event);
+  if (validationErrors) {
+    throw new Error(`Invalid event: ${formatValidationErrors(validationErrors)}`);
+  }
+
+  if (!event.client_event_id) {
+    event = { ...event, client_event_id: await eventHash(event) };
+  }
+
+  // Idempotency check
+  const existing = await store.get(`idem:${event.client_event_id}`);
+  if (existing != null) {
+    return existing as number;
+  }
+
+  const seq = await store.nextSeq();
+  const fullEvent: EoEvent = { ...event, seq };
+
+  await appendToLog(store, fullEvent);
+  await store.put(`idem:${event.client_event_id!}`, seq);
+
+  try {
+    await executeOperator(store, fullEvent);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    await store.put(`error:${seq}`, {
+      seq,
+      client_event_id: event.client_event_id,
+      op: event.op,
+      target: event.target,
+      error: message,
+      ts: new Date().toISOString(),
+    });
+    if (onEvent) onEvent({ ...fullEvent, meta: { ...fullEvent.meta, _error: message } });
+    return seq;
+  }
+
+  await updateFoldCache(store, fullEvent);
+
+  if (onEvent) {
+    onEvent(fullEvent);
+  }
+
+  return seq;
+}
+
 async function processEventInner(
   store: EoStore,
   event: EoEventInput,
@@ -209,7 +316,10 @@ async function handleCON(store: EoStore, event: EoEvent): Promise<void> {
   const sourceState = await getState(store, event.target);
   await setState(store, {
     target: event.target,
-    value: { linked: currentEdges.map(e => e.dest), edge_type: operand.edge_type },
+    value: {
+      ...(sourceState?.value ?? {}),
+      _edges: currentEdges.map(e => ({ dest: e.dest, edge_type: e.edge_type })),
+    },
     level: sourceState?.level ?? 1,
     ...stateFromEvent(event, 'CON'),
   });

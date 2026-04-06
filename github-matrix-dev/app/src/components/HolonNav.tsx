@@ -252,10 +252,6 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
 
   return (
     <div style={s.container}>
-      <div style={s.header}>
-        <span style={s.title}>Objects</span>
-        {tree.length > 0 && <span style={s.objectCount}>{tree.length}</span>}
-      </div>
       <div style={s.scroll}>
         {allStates.length === 0 && (
           <div style={s.empty}>
