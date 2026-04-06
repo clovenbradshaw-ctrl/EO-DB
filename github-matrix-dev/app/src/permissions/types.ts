@@ -76,6 +76,12 @@ export interface SpaceConfig {
    *  'public' (default) — anyone on the homeserver can discover the space and knock to request access.
    *  'private' — only invited members know the space exists. */
   discoverability?: 'public' | 'private';
+  /** Soft-lifecycle status. Absent or 'active' means normal. */
+  status?: 'active' | 'archived' | 'deleted';
+  /** Epoch ms when the status was last changed. */
+  status_changed_at?: number;
+  /** Matrix user ID who changed the status. */
+  status_changed_by?: string;
 }
 
 // --- Field Permissions ---

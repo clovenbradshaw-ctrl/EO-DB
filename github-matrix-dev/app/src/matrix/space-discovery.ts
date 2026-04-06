@@ -11,6 +11,16 @@
 import type { MatrixClient } from 'matrix-js-sdk';
 import { EO_SPACE_CONFIG_TYPE } from './event-bridge';
 import type { SpaceConfig } from '../permissions/types';
+import {
+  addArchivedSpace,
+  removeArchivedSpace,
+  getArchivedSpaces,
+} from '../components/ArchivedSpaces';
+import {
+  addDeletedSpace,
+  removeDeletedSpace,
+  getDeletedSpaces,
+} from '../components/RecycleBin';
 
 export interface SpaceEntry {
   /** Internal space target, e.g. "space_amino" */
@@ -31,6 +41,12 @@ export interface SpaceEntry {
   memberCount: number;
   /** Whether the current user is joined to this space (false for discovered public spaces). */
   joined?: boolean;
+  /** Lifecycle status from SpaceConfig. Defaults to 'active'. */
+  status?: 'active' | 'archived' | 'deleted';
+  /** Epoch ms when status was last changed. */
+  statusChangedAt?: number;
+  /** Matrix user ID who changed the status. */
+  statusChangedBy?: string;
 }
 
 /**
@@ -109,11 +125,68 @@ export function discoverSpacesFromMatrix(client: MatrixClient): SpaceEntry[] {
       ownerDisplayName: userIdToName(ownerUserId),
       memberCount,
       joined: true,
+      status: config.status ?? 'active',
+      statusChangedAt: config.status_changed_at,
+      statusChangedBy: config.status_changed_by,
     });
   }
 
+  // Reconcile localStorage caches with Matrix state (source of truth)
+  reconcileLocalStorageFromMatrix(Array.from(spaceMap.values()));
+
   // Sort by last activity (most recent first)
   return Array.from(spaceMap.values()).sort((a, b) => b.lastActivity - a.lastActivity);
+}
+
+/**
+ * Reconcile localStorage archive/delete caches with Matrix state.
+ * Matrix is the source of truth; localStorage is a synchronous read cache.
+ */
+function reconcileLocalStorageFromMatrix(entries: SpaceEntry[]): void {
+  const archivedLocal = new Set(getArchivedSpaces().map((s) => s.target));
+  const deletedLocal = new Set(getDeletedSpaces().map((s) => s.target));
+
+  for (const entry of entries) {
+    const status = entry.status ?? 'active';
+
+    if (status === 'archived') {
+      if (!archivedLocal.has(entry.spaceTarget)) {
+        addArchivedSpace({
+          target: entry.spaceTarget,
+          name: entry.displayName,
+          archivedAt: entry.statusChangedAt ?? Date.now(),
+          archivedBy: entry.statusChangedBy ?? '',
+          memberCount: entry.memberCount,
+        });
+      }
+      // Ensure it's not in the deleted cache
+      if (deletedLocal.has(entry.spaceTarget)) {
+        removeDeletedSpace(entry.spaceTarget);
+      }
+    } else if (status === 'deleted') {
+      if (!deletedLocal.has(entry.spaceTarget)) {
+        addDeletedSpace({
+          target: entry.spaceTarget,
+          name: entry.displayName,
+          deletedAt: entry.statusChangedAt ?? Date.now(),
+          deletedBy: entry.statusChangedBy ?? '',
+          memberCount: entry.memberCount,
+        });
+      }
+      // Ensure it's not in the archived cache
+      if (archivedLocal.has(entry.spaceTarget)) {
+        removeArchivedSpace(entry.spaceTarget);
+      }
+    } else {
+      // status === 'active': clear from both caches if present
+      if (archivedLocal.has(entry.spaceTarget)) {
+        removeArchivedSpace(entry.spaceTarget);
+      }
+      if (deletedLocal.has(entry.spaceTarget)) {
+        removeDeletedSpace(entry.spaceTarget);
+      }
+    }
+  }
 }
 
 /**
