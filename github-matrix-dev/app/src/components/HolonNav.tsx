@@ -29,6 +29,8 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; target: string } | null>(null);
   const [typeSelector, setTypeSelector] = useState<{ x: number; y: number; target: string; currentType?: string } | null>(null);
   const [renaming, setRenaming] = useState<{ target: string; currentName: string } | null>(null);
+  /** When set, only this top-level entity type is shown (drill-down mode) */
+  const [focusedEntity, setFocusedEntity] = useState<string | null>(null);
   const viewStore = useViewStore();
   const { theme } = useTheme();
   const s = makeStyles(theme);
@@ -45,9 +47,10 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
     getStateByPrefix(statePrefix).then(setAllStates);
   }, [ready, lastSeq, getStateByPrefix, statePrefix]);
 
-  // Reset expansion when space changes
+  // Reset expansion and drill-down when space changes
   useEffect(() => {
     setExpanded(new Set());
+    setFocusedEntity(null);
   }, [statePrefix]);
 
   const tree = useMemo(() => buildTree(allStates, statePrefix), [allStates, statePrefix]);
@@ -58,6 +61,17 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
       setExpanded(new Set(tree.map(n => n.fullPath)));
     }
   }, [tree, expanded.size]);
+
+  // When entering drill-down mode, auto-expand the focused entity
+  useEffect(() => {
+    if (focusedEntity) {
+      setExpanded((prev) => {
+        const next = new Set(prev);
+        next.add(focusedEntity);
+        return next;
+      });
+    }
+  }, [focusedEntity]);
 
   function toggleExpand(path: string) {
     setExpanded((prev) => {
@@ -143,7 +157,7 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
     return formatName(node.segment);
   }
 
-  function renderNode(node: TreeNode, depth: number, parentDisplayField?: string) {
+  function renderNode(node: TreeNode, depth: number, parentDisplayField?: string, isTopLevel?: boolean) {
     const isActive = selectedScope === node.fullPath;
     const isExpanded = expanded.has(node.fullPath);
     const hasChildren = node.children.length > 0;
@@ -156,7 +170,13 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
             paddingLeft: 12 + depth * 16,
             ...(isActive ? s.itemActive : {}),
           }}
-          onClick={() => onSelectScope(node.fullPath)}
+          onClick={() => {
+            onSelectScope(node.fullPath);
+            // Drill-down: clicking a top-level entity focuses it
+            if (isTopLevel && !focusedEntity) {
+              setFocusedEntity(node.fullPath);
+            }
+          }}
           onContextMenu={(e) => handleContextMenu(e, node.fullPath)}
         >
           {/* Expand/collapse chevron */}
@@ -244,11 +264,14 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
 
         {/* Children — pass this node's _displayField so children can resolve names */}
         {isExpanded && node.children.map(child =>
-          renderNode(child, depth + 1, node.state?.value?._displayField)
+          renderNode(child, depth + 1, node.state?.value?._displayField, false)
         )}
       </div>
     );
   }
+
+  // Find the focused top-level node
+  const focusedNode = focusedEntity ? tree.find(n => n.fullPath === focusedEntity) : null;
 
   return (
     <div style={s.container}>
@@ -259,7 +282,28 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
             No objects yet
           </div>
         )}
-        {tree.map(node => renderNode(node, 0))}
+
+        {/* Drill-down mode: show back button + focused entity only */}
+        {focusedNode ? (
+          <>
+            <div
+              style={{
+                ...s.item,
+                paddingLeft: 12,
+                color: theme.textMuted,
+                fontSize: 11,
+                gap: 4,
+              }}
+              onClick={() => setFocusedEntity(null)}
+            >
+              <span style={{ fontSize: 10 }}>{'\u2190'}</span>
+              <span>All records</span>
+            </div>
+            {renderNode(focusedNode, 0, undefined, false)}
+          </>
+        ) : (
+          tree.map(node => renderNode(node, 0, undefined, true))
+        )}
       </div>
 
       {/* Right-click context menu */}
