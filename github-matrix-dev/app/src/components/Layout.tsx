@@ -920,11 +920,15 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           filenOrgMode = true;
           console.log('[EO-DB] Org-mode Filen auto-connected via n8n webhook');
 
-          // Piggyback: if the webhook returned an Airtable API key, connect the Airtable store too
+          // Piggyback: if the webhook returned an Airtable API key, verify and connect the Airtable store too
           const webhookAtKey = useFilenStore.getState().webhookAirtableKey;
           if (webhookAtKey && !useAirtableStore.getState().connected) {
-            useAirtableStore.getState().connectWithKey(webhookAtKey);
-            console.log('[EO-DB] Airtable auto-connected via n8n webhook');
+            try {
+              await useAirtableStore.getState().connectWithKey(webhookAtKey);
+              console.log('[EO-DB] Airtable auto-connected via n8n webhook (key verified)');
+            } catch (e) {
+              console.warn('[EO-DB] Airtable API key from webhook failed verification:', e);
+            }
           }
         } catch (e) {
           console.warn('[EO-DB] Org-mode Filen auto-connect via webhook failed:', e);
