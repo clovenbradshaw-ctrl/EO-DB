@@ -272,6 +272,18 @@ export function ViewTabs({ scope, session }: ViewTabsProps) {
           <span style={{ fontSize: 11, opacity: 0.7 }}>{VIEW_TYPE_META.grid.icon}</span> Grid view
         </button>
 
+        {/* Schema tab — always visible, not removable */}
+        <button
+          style={sig.activeViewId === '__schema' ? s.tabActive : s.tab}
+          onClick={() => viewStore.activateView(scope, {
+            id: '__schema', name: 'Schema', scope, viewType: 'schema',
+            config: { columnOrder: [], columnWidths: {}, hiddenColumns: [], sorts: [], filters: [], filterConjunction: 'AND', showLastUpdated: false },
+            visibility: 'shared', createdBy: '', createdAt: '', updatedAt: '',
+          })}
+        >
+          <span style={{ fontSize: 11, opacity: 0.7 }}>{VIEW_TYPE_META.schema.icon}</span> Schema
+        </button>
+
         {/* Saved view tabs */}
         {savedViews.filter((v) => !viewStore.savedViews[v.id]?.scope || viewStore.savedViews[v.id]?.scope === scope).map((view) => {
           const vtMeta = VIEW_TYPE_META[view.viewType || 'grid'];

@@ -37,3 +37,13 @@ export async function readLogForTarget(
     .map(([, value]) => value as EoEvent)
     .filter((event) => event.target === target);
 }
+
+export async function readLogForPrefix(
+  store: EoStore,
+  prefix: string,
+): Promise<EoEvent[]> {
+  const entries = await store.iterator('log:');
+  return entries
+    .map(([, value]) => value as EoEvent)
+    .filter((event) => event.target.startsWith(prefix));
+}
