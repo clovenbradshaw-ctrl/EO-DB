@@ -21,6 +21,7 @@ export const EO_GOVERNANCE_TYPE = 'com.eo-db.governance';
 export const EO_KEY_ANNOUNCE_TYPE = 'com.eo-db.key.announce';
 export const EO_SCHEMA_MANIFEST_TYPE = 'com.eo-db.schema.manifest';
 export const EO_SPACE_CONFIG_TYPE = 'com.eo-db.space.config';
+export const EO_CHAT_ROOM_TYPE = 'com.eo-db.chat.room';
 
 /** Room alias — configured at runtime via `configureMatrixDomain()`. */
 export function getDataRoom(): string {
