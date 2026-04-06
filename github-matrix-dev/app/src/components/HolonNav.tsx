@@ -258,6 +258,12 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
           }}
           onClick={() => {
             onSelectScope(node.fullPath);
+            // Default to schema view when clicking a collection
+            viewStore.activateView(node.fullPath, {
+              id: '__schema', name: 'Schema', scope: node.fullPath, viewType: 'schema',
+              config: { columnOrder: [], columnWidths: {}, hiddenColumns: [], sorts: [], filters: [], filterConjunction: 'AND', showLastUpdated: false },
+              visibility: 'shared', createdBy: '', createdAt: '', updatedAt: '',
+            });
             // Drill-down: clicking a top-level entity focuses it
             if (isTopLevel && !focusedEntity) {
               setFocusedEntity(node.fullPath);
@@ -321,6 +327,28 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
             <span style={s.segName}>{name}</span>
           </div>
         ))}
+
+        {/* Built-in Grid view */}
+        {isExpanded && (() => {
+          const sig = viewStore.getSig(node.fullPath);
+          const isGridActive = sig.activeViewId === null && selectedScope === node.fullPath;
+          return (
+            <div
+              style={{
+                ...s.segItem,
+                paddingLeft: 28 + depth * 16,
+                ...(isGridActive ? { color: theme.accent, fontWeight: 600 } : {}),
+              }}
+              onClick={() => {
+                viewStore.resetToDefault(node.fullPath);
+                onSelectScope(node.fullPath);
+              }}
+            >
+              <span style={{ marginRight: 4, fontSize: 10, opacity: 0.6 }}>{VIEW_TYPE_META.grid.icon}</span>
+              <span style={s.segName}>Grid view</span>
+            </div>
+          );
+        })()}
 
         {/* Saved views */}
         {isExpanded && (() => {

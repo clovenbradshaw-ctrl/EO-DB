@@ -3,7 +3,7 @@ import { useEoStore } from '../store/eo-store';
 import { groupSchemaStates, schemaFieldTarget, type FieldSchema } from '../db/schema-rules';
 import { readLogForPrefix } from '../db/log';
 import { useTheme, type Theme } from '../theme';
-import type { EoEvent } from '../db/types';
+import type { EoEvent, EoState } from '../db/types';
 
 // ─── Operator colors (matches LogView) ──────────────────────────────────
 
@@ -194,7 +194,11 @@ export function SchemaView({ scope }: SchemaViewProps) {
   const [expandedField, setExpandedField] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<SortKey>('fieldKey');
   const [sortDir, setSortDir] = useState<SortDir>('asc');
+  const [recordCount, setRecordCount] = useState(0);
+  const [lastUpdated, setLastUpdated] = useState<string | null>(null);
+  const [rollups, setRollups] = useState<Array<{ id: string; name: string; value: any; unit?: string }>>([]);
 
+  // Load schema fields
   useEffect(() => {
     if (!ready) return;
     setLoading(true);
@@ -203,6 +207,56 @@ export function SchemaView({ scope }: SchemaViewProps) {
       const grouped = groupSchemaStates(states, schemaPrefix);
       setFieldSchemas(grouped);
       setLoading(false);
+    });
+  }, [ready, lastSeq, scope, getStateByPrefix]);
+
+  // Load record count and last updated
+  useEffect(() => {
+    if (!ready) return;
+    getStateByPrefix(scope + '.').then((states: EoState[]) => {
+      const scopeDepth = scope.split('.').length;
+      // Count direct children, excluding internal (_-prefixed) targets
+      let count = 0;
+      let latestTs: string | null = null;
+      const seen = new Set<string>();
+      for (const st of states) {
+        const parts = st.target.split('.');
+        if (parts.length <= scopeDepth) continue;
+        const childSeg = parts[scopeDepth];
+        if (childSeg.startsWith('_')) continue;
+        // Only count direct children (unique first segment after scope)
+        const directChild = parts.slice(0, scopeDepth + 1).join('.');
+        if (!seen.has(directChild)) {
+          seen.add(directChild);
+          count++;
+        }
+        if (!latestTs || st.last_ts > latestTs) latestTs = st.last_ts;
+      }
+      setRecordCount(count);
+      setLastUpdated(latestTs);
+    });
+  }, [ready, lastSeq, scope, getStateByPrefix]);
+
+  // Load rollup metrics
+  useEffect(() => {
+    if (!ready) return;
+    const rollupPrefix = `${scope}._rollups.`;
+    getStateByPrefix(rollupPrefix).then((states: EoState[]) => {
+      const rollupDepth = rollupPrefix.split('.').length - 1; // depth of scope._rollups
+      const metrics: Array<{ id: string; name: string; value: any; unit?: string }> = [];
+      for (const st of states) {
+        const parts = st.target.split('.');
+        // Only top-level rollup entities (scope._rollups.metricId)
+        if (parts.length !== rollupDepth + 1) continue;
+        if (!st.value?.name) continue;
+        metrics.push({
+          id: parts[parts.length - 1],
+          name: st.value.name,
+          value: st.value.value ?? '\u2014',
+          unit: st.value.unit,
+        });
+      }
+      setRollups(metrics);
     });
   }, [ready, lastSeq, scope, getStateByPrefix]);
 
@@ -241,14 +295,46 @@ export function SchemaView({ scope }: SchemaViewProps) {
         <div style={{ fontSize: 24, opacity: 0.3, marginBottom: 8 }}>{'\u2261'}</div>
         <div style={{ fontSize: 13, fontWeight: 500 }}>No schema defined</div>
         <div style={{ fontSize: 11, opacity: 0.7, marginTop: 4 }}>
-          This table has no schema metadata yet
+          This collection has no schema defined yet
         </div>
       </div>
     );
   }
 
+  const collectionName = scope.split('.').pop() || scope;
+
   return (
     <div style={s.container}>
+      {/* Dashboard header */}
+      <div style={s.dashboard}>
+        <div style={s.dashboardTitle}>{collectionName}</div>
+        <div style={s.dashboardSubtitle}>Collection</div>
+
+        {/* Built-in stats */}
+        <div style={s.statsRow}>
+          <div style={s.statCard}>
+            <div style={s.statValue}>{recordCount}</div>
+            <div style={s.statLabel}>Records</div>
+          </div>
+          <div style={s.statCard}>
+            <div style={s.statValue}>{sortedFields.length}</div>
+            <div style={s.statLabel}>Fields</div>
+          </div>
+          <div style={s.statCard}>
+            <div style={s.statValue}>{lastUpdated ? formatTime(lastUpdated) : '\u2014'}</div>
+            <div style={s.statLabel}>Last updated</div>
+          </div>
+          {/* Rollup metric cards */}
+          {rollups.map((r) => (
+            <div key={r.id} style={s.statCard}>
+              <div style={s.statValue}>{String(r.value)}</div>
+              <div style={s.statLabel}>{r.name}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Schema field table */}
       <div style={s.header}>
         <span style={s.headerTitle}>Schema</span>
         <span style={s.headerCount}>{sortedFields.length} field{sortedFields.length !== 1 ? 's' : ''}</span>
@@ -352,6 +438,53 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       justifyContent: 'center',
       color: t.textMuted,
       gap: 4,
+    },
+    dashboard: {
+      padding: '20px 20px 16px',
+      borderBottom: `1px solid ${t.border}`,
+      background: t.bgCard,
+      flexShrink: 0,
+    },
+    dashboardTitle: {
+      fontSize: 18,
+      fontWeight: 700,
+      color: t.textHeading,
+      marginBottom: 2,
+    },
+    dashboardSubtitle: {
+      fontSize: 11,
+      color: t.textMuted,
+      textTransform: 'uppercase' as const,
+      letterSpacing: 0.5,
+      fontWeight: 500,
+      marginBottom: 14,
+    },
+    statsRow: {
+      display: 'flex',
+      gap: 10,
+      flexWrap: 'wrap' as const,
+    },
+    statCard: {
+      flex: '0 0 auto',
+      minWidth: 100,
+      padding: '10px 14px',
+      background: t.bg,
+      border: `1px solid ${t.border}`,
+      borderRadius: 8,
+    },
+    statValue: {
+      fontSize: 16,
+      fontWeight: 700,
+      color: t.textHeading,
+      fontFamily: "'JetBrains Mono', monospace",
+      marginBottom: 2,
+    },
+    statLabel: {
+      fontSize: 10,
+      color: t.textMuted,
+      textTransform: 'uppercase' as const,
+      letterSpacing: 0.3,
+      fontWeight: 500,
     },
     header: {
       display: 'flex',
