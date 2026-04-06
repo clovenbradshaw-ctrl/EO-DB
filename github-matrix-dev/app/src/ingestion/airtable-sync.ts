@@ -472,6 +472,51 @@ export async function hydrationSync(
         }, opts?.onEvent);
       } catch { /* idempotent */ }
 
+      // Create per-field schema entities under _schema container
+      const tblT = tableTarget(base.id, table.id);
+      const schemaTarget = `${tblT}._schema`;
+      try {
+        await processEvent(store, {
+          op: 'INS',
+          target: schemaTarget,
+          operand: { _airtable: { type: 'schema', base_id: base.id, table_id: table.id } },
+          agent,
+          ts: new Date().toISOString(),
+          acquired_ts: new Date().toISOString(),
+          client_event_id: `at-ins-schema:${base.id}:${table.id}`,
+        }, opts?.onEvent);
+      } catch { /* idempotent */ }
+
+      for (const field of table.fields) {
+        const fieldTarget = `${schemaTarget}.${field.id}`;
+        try {
+          await processEvent(store, {
+            op: 'INS',
+            target: fieldTarget,
+            operand: { _airtable: { type: 'field', field_id: field.id, table_id: table.id } },
+            agent,
+            ts: new Date().toISOString(),
+            acquired_ts: new Date().toISOString(),
+            client_event_id: `at-ins-field:${base.id}:${table.id}:${field.id}`,
+          }, opts?.onEvent);
+        } catch { /* idempotent */ }
+        try {
+          await processEvent(store, {
+            op: 'DEF',
+            target: fieldTarget,
+            operand: {
+              name: field.name,
+              type: field.type,
+              _airtable: { field_id: field.id, table_id: table.id, base_id: base.id },
+            },
+            agent,
+            ts: new Date().toISOString(),
+            acquired_ts: new Date().toISOString(),
+            client_event_id: `at-field:${base.id}:${table.id}:${field.id}`,
+          }, opts?.onEvent);
+        } catch { /* idempotent */ }
+      }
+
       opts?.onProgress?.({ phase: 'syncing', base: base.name, table: table.name });
 
       const exclusions = fieldExclusions?.[table.id] ?? EMPTY_EXCLUSIONS;
@@ -536,6 +581,51 @@ export async function updateSync(
 
       const cursor = await getCursor(store, base.id, table.id);
       if (!cursor) continue; // Not hydrated yet — skip
+
+      // Refresh per-field schema entities (handles field adds/renames)
+      const tblT = tableTarget(base.id, table.id);
+      const schemaTarget = `${tblT}._schema`;
+      try {
+        await processEvent(store, {
+          op: 'INS',
+          target: schemaTarget,
+          operand: { _airtable: { type: 'schema', base_id: base.id, table_id: table.id } },
+          agent,
+          ts: new Date().toISOString(),
+          acquired_ts: new Date().toISOString(),
+          client_event_id: `at-ins-schema:${base.id}:${table.id}`,
+        }, opts?.onEvent);
+      } catch { /* idempotent — already exists */ }
+
+      for (const field of table.fields) {
+        const fieldTarget = `${schemaTarget}.${field.id}`;
+        try {
+          await processEvent(store, {
+            op: 'INS',
+            target: fieldTarget,
+            operand: { _airtable: { type: 'field', field_id: field.id, table_id: table.id } },
+            agent,
+            ts: new Date().toISOString(),
+            acquired_ts: new Date().toISOString(),
+            client_event_id: `at-ins-field:${base.id}:${table.id}:${field.id}`,
+          }, opts?.onEvent);
+        } catch { /* idempotent */ }
+        try {
+          await processEvent(store, {
+            op: 'DEF',
+            target: fieldTarget,
+            operand: {
+              name: field.name,
+              type: field.type,
+              _airtable: { field_id: field.id, table_id: table.id, base_id: base.id },
+            },
+            agent,
+            ts: new Date().toISOString(),
+            acquired_ts: new Date().toISOString(),
+            client_event_id: `at-field-upd:${base.id}:${table.id}:${field.id}`,
+          }, opts?.onEvent);
+        } catch { /* idempotent */ }
+      }
 
       opts?.onProgress?.({ phase: 'syncing', base: base.name, table: table.name });
 
