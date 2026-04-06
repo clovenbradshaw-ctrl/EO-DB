@@ -8,7 +8,7 @@
 **Storage:** LevelDB via `classic-level`.
 **Auth:** Matrix token verification against `https://app.aminoimmigration.com`.
 **Primary consumer:** amino-eo (React/Vite PWA).
-**Primary producer:** n8n (Airtable webhook relay).
+**Primary producer:** n8n (webhook relay).
 
 ---
 
@@ -938,7 +938,7 @@ Body: single event or array of events
   "target": "app.tblClients.rec123.fldEmail",
   "operand": "hello@email.com",
   "client_event_id": "n8n-evt-abc123",
-  "meta": { "source": "airtable", "table": "tblClients" }
+  "meta": { "source": "import", "table": "tblClients" }
 }
 
 Response 200:
@@ -1185,9 +1185,9 @@ Body (single event):
   "op": "DEF",
   "target": "appXkR9w.tblClients.rec123.fldEmail",
   "operand": { "email": "new@example.com" },
-  "client_event_id": "n8n-{{ $json.airtable_webhook_id }}",
+  "client_event_id": "n8n-{{ $json.webhook_id }}",
   "meta": {
-    "source": "airtable",
+    "source": "webhook",
     "base": "appXkR9w",
     "table": "tblClients"
   }
@@ -1284,7 +1284,7 @@ Add:
 
 ### 15.2 Fixture Data
 
-Create test fixtures that simulate Airtable webhook payloads classified by the EO classifier:
+Create test fixtures that simulate webhook payloads classified by the EO classifier:
 
 ```typescript
 // tests/fixtures.ts

@@ -1,6 +1,6 @@
 /**
  * Persistent "View only" banner for users with Viewer role (PL 0).
- * Similar to Google Docs' read-only indicator.
+ * Persistent read-only indicator for Viewer role.
  */
 
 import { useTheme, type Theme } from '../theme';

@@ -335,7 +335,7 @@ export function ViewsBrowser({ scope, recordCount, userId, onBack, onSelectView 
               </>
             )}
 
-            {/* Create a view — inline like Airtable */}
+            {/* Create a view — inline */}
             {!showCreate ? (
               <button
                 style={s.createBtn}

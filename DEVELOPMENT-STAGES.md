@@ -123,41 +123,7 @@ Devices network through an E2EE Matrix room for real-time event sync. There is n
 
 ---
 
-## Stage 5: Airtable Browser-Based Ingestion
-
-**Goal:** Airtable data is ingested directly from the browser with full transparency into what is being fetched and how it maps to EO events.
-
-### Deliverables
-
-- **Browser Airtable client** — Port from `src/ingestion/airtable-client.ts`. Uses browser `fetch()` directly against Airtable API. Rate limiting and pagination adapted for browser.
-- **Sync engine** — Port from `src/ingestion/airtable-sync.ts`. Records fold locally via IndexedDB. Field classification rules (`field-rules.ts`), value extraction (`value-extract.ts`), and exclusions (`exclusions.ts`) ported directly.
-- **Ingestion tab** — New tab in nav bar. Two modes:
-  - **Discover** — Full pull of bases/tables, renders manifest before ingestion. User confirms.
-  - **Sync** — Incremental pull using stored cursors per table.
-- **Transparency panel** — Live feed showing:
-  - Each Airtable API call (endpoint, response status, record count)
-  - Each record's mapping to EO target path
-  - Field classification decisions (which Airtable field types → which EO operators)
-  - Skip decisions for unchanged records
-- **API key management** — Airtable API key stored encrypted in IndexedDB `meta` store. Never sent to any server other than Airtable's API.
-- **Events flow through fold + sync** — Ingested events go through local fold (Stage 1) and Matrix room sync (Stage 3).
-
-### Port From
-- `src/ingestion/airtable-client.ts` — API client
-- `src/ingestion/airtable-sync.ts` — sync engine
-- `src/ingestion/field-rules.ts` — field-aware filtering
-- `src/ingestion/value-extract.ts` — structured field extraction
-- `src/ingestion/exclusions.ts` — exclusion rules
-
-### Verification
-- [ ] Configure Airtable API key. Click "Discover Bases." Transparency panel shows API calls and manifest.
-- [ ] Ingest a table. Panel shows each record → EO event mapping. Events appear in Log and Horizon tabs.
-- [ ] Ingested events sync to Matrix room and appear on other devices.
-- [ ] Re-ingest same table. Panel shows "skipped: no change" for unchanged records.
-
----
-
-## Stage 6: Admin-Configurable Settings
+## Stage 5: Admin-Configurable Settings
 
 **Goal:** Per-device configuration for snapshot intervals, sync behavior, and storage management. All settings stored locally.
 
@@ -168,7 +134,6 @@ Devices network through an E2EE Matrix room for real-time event sync. There is n
   - **Sync** — Sync poll interval, offline queue retry interval
   - **Encryption** — Show encryption status, device ID, option to re-derive key
   - **Storage** — IndexedDB usage (event count, approximate size), export/import local database
-  - **Ingestion** — Airtable API key management, rate limit config, excluded tables/fields
   - **Backup targets** (future) — Placeholder for 3rd-party backup configuration (S3, IPFS)
 - **Persistent settings** — Stored in IndexedDB `meta` store with keys like `settings:snapshot_interval`, `settings:sync_poll_ms`.
 - **Per-device** — Settings are local. Not synced via Matrix. Each device can have its own preferences.
@@ -183,7 +148,7 @@ Devices network through an E2EE Matrix room for real-time event sync. There is n
 
 ---
 
-## Stage 7: Polish + Offline Hardening
+## Stage 6: Polish + Offline Hardening
 
 **Goal:** Production-quality offline experience. Zero server dependency confirmed. Graceful error handling throughout.
 
@@ -221,19 +186,14 @@ Stage 2  Direct Matrix Auth
   v
 Stage 3  Matrix Room Sync          (requires Stages 1 + 2)
   |
-  +-------+-------+
-  |               |
-  v               v
-Stage 4          Stage 5            (can run in parallel)
-Snapshots        Airtable Ingestion
-  |               |
-  +-------+-------+
-          |
-          v
-Stage 6  Admin Settings             (configures features from 4 + 5)
-          |
-          v
-Stage 7  Polish + Offline Hardening (requires all previous stages)
+  v
+Stage 4  Snapshots
+  |
+  v
+Stage 5  Admin Settings             (configures features from 3 + 4)
+  |
+  v
+Stage 6  Polish + Offline Hardening (requires all previous stages)
 ```
 
 ## Architecture Decision: Build Tooling
@@ -294,15 +254,6 @@ Stages 1-2 can remain as modifications to the existing single HTML file (they us
 | 100,000 | 10–50 MB | 5–15 sec | 5–15 sec | Matrix media upload limit may apply |
 | 1,000,000 | 100–500 MB | Minutes | Minutes | Chunked upload needed. Consider incremental snapshots |
 
-### Airtable Ingestion
-
-| Table Size | Records | Ingestion Time | Notes |
-|------------|---------|----------------|-------|
-| Small | < 100 | 2–5 sec | Single API page, all records fold immediately |
-| Medium | 100–1,000 | 10–30 sec | Multiple API pages (100 records/page), 5 req/sec rate limit |
-| Large | 1,000–10,000 | 2–10 min | Airtable API rate limiting is the bottleneck, not fold speed |
-| Very Large | 10,000+ | 10+ min | Consider chunked ingestion across sessions |
-
 ### Where Lag Becomes Perceptible
 
 | Component | Comfort Zone | Caution Zone | Danger Zone |
@@ -316,7 +267,7 @@ Stages 1-2 can remain as modifications to the existing single HTML file (they us
 
 ### Mitigation Strategies
 
-- **Snapshots** are the primary defense against scale lag. Auto-snapshot every 1,000 events (configurable in Stage 6). New devices hydrate from snapshot, never replay full history.
+- **Snapshots** are the primary defense against scale lag. Auto-snapshot every 1,000 events (configurable in Stage 5). New devices hydrate from snapshot, never replay full history.
 - **Nearby layer** is the most expensive Horizon component at scale (prefix scan + field comparison). Cap at 10 results. Consider lazy loading at > 5K records in a collection.
 - **Signals layer** is on-demand only (`opts.signals === true`). Never computed by default. Population analytics over numeric fields is O(collection size).
 - **EVA recomputation cascade** is the fold's primary scaling concern. A single DEF that affects 50 formulas produces 50 state writes. Monitor cascade depth.

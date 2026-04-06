@@ -112,7 +112,7 @@ export function inferColumnType(values: any[]): ColumnDef['type'] {
 /**
  * Build a map from field ID → display name using field metadata stored on the
  * table (scope) state.  The table DEF stores `fields` as an array of
- * `{ id, name, type }` objects from the Airtable schema.
+ * `{ id, name, type }` objects from the source schema.
  */
 export function buildFieldNameMap(
   fieldMeta: Array<{ id: string; name: string }> | undefined,
@@ -126,7 +126,7 @@ export function buildFieldNameMap(
 
 /**
  * Build a field name map from per-field schema entities (stored under _schema).
- * Each schema entity has `value.name` (Airtable field name) and optionally
+ * Each schema entity has `value.name` (source field name) and optionally
  * `value._label` (user-set display name override).
  * The last segment of the target path is the field ID.
  */
@@ -144,7 +144,7 @@ export function buildFieldNameMapFromSchema(
 }
 
 /**
- * Check whether the records use the Airtable-style `fields` sub-object
+ * Check whether the records use a nested `fields` sub-object
  * (i.e. `value.fields` is a plain object whose keys are field IDs).
  */
 export function hasFieldsSubObject(records: EoState[]): boolean {
@@ -182,7 +182,7 @@ export function deriveColumns(
   for (const rec of records) {
     if (!rec.value || typeof rec.value !== 'object') continue;
 
-    // If records use the Airtable-style `fields` sub-object, iterate its keys
+    // If records use the nested `fields` sub-object, iterate its keys
     const source = useFieldsSub
       ? (rec.value.fields && typeof rec.value.fields === 'object' && !Array.isArray(rec.value.fields)
           ? rec.value.fields as Record<string, any>

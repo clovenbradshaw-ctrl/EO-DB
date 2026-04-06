@@ -180,7 +180,7 @@ export interface SpaceRooms {
 // ─── Snapshot ──────────────────────────────────────────────────────────────
 
 export interface ImportMeta {
-  source: string;        // 'airtable' | 'csv' | 'json' | custom
+  source: string;        // 'csv' | 'json' | custom
   record_count: number;
   label?: string;
 }

@@ -13,7 +13,7 @@
  *     grounded imports through the normal snapshot chain.
  *
  * Usage:
- *   const sink = new GroundedSink(db, feed, syncManager, { source: 'airtable' });
+ *   const sink = new GroundedSink(db, feed, syncManager, { source: 'json' });
  *   await sink.emit({ op: 'INS', target: '...', operand: {...}, agent, ts, acquired_ts });
  *   await sink.emit({ op: 'DEF', target: '...', operand: {...}, agent, ts, acquired_ts });
  *   const result = await sink.flush();

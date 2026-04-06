@@ -9,14 +9,11 @@ import { registerOpsRoutes } from './api/ops.js';
 import { registerSyncRoute } from './api/sync.js';
 import { registerAdminRoutes } from './api/admin.js';
 import { registerAuthRoutes } from './api/auth.js';
-import { registerIngestionRoutes } from './api/ingestion.js';
 import { registerLogImportRoutes } from './api/log-import.js';
-import { registerRoomSyncRoutes } from './api/room-sync.js';
 import { registerDedupRoutes } from './api/dedup.js';
 import { registerChatRoutes } from './api/chat.js';
 import { ChatFeed } from './chat/feed.js';
 import { configureMatrixDomain } from './config/matrix-domain.js';
-import { RoomSyncCoordinator } from './ingestion/room-sync-coordinator.js';
 import { MatrixConnectionMonitor } from './matrix/connection-resilience.js';
 import { loadFilenConfig, configureFilenListener } from './filen/config.js';
 import { FilenSocketListener } from './filen/listener.js';
@@ -71,9 +68,6 @@ async function start(): Promise<void> {
   // Chat feed — real-time pub/sub for space-agnostic chat messages
   const chatFeed = new ChatFeed();
 
-  // Room sync coordinator — manages continuous Airtable sync per room
-  const coordinator = new RoomSyncCoordinator(db, feed);
-
   // SyncManager (requires Matrix client) — when available, batch operations
   // use the media store instead of posting individual timeline events.
   // Set via coordinator.setSyncManager() and passed to routes below.
@@ -81,7 +75,7 @@ async function start(): Promise<void> {
   const syncManager = undefined;
 
   // WebSocket sync (has its own auth via query param)
-  registerSyncRoute(app, db, feed, coordinator, chatFeed);
+  registerSyncRoute(app, db, feed, undefined, chatFeed);
 
   // Auth-protected routes
   app.register(async (protectedApp) => {
@@ -90,15 +84,10 @@ async function start(): Promise<void> {
     registerOpsRoutes(protectedApp, db, feed);
     registerQueryRoutes(protectedApp, db);
     registerAdminRoutes(protectedApp, db);
-    registerIngestionRoutes(protectedApp, db, feed, syncManager);
     registerLogImportRoutes(protectedApp, db, feed, syncManager);
-    registerRoomSyncRoutes(protectedApp, db, coordinator);
     registerDedupRoutes(protectedApp, db, feed);
     registerChatRoutes(protectedApp, db, chatFeed);
   });
-
-  // Start the room sync coordinator after routes are registered
-  await coordinator.start();
 
   // Filen socket listener — optional, enabled when FILEN_FOLDER_UUID is set
   let filenListener: FilenSocketListener | undefined;
@@ -124,7 +113,6 @@ async function start(): Promise<void> {
     app.log.info('Shutting down...');
     connectionMonitor?.stop();
     await filenListener?.stop();
-    coordinator.stop();
     await app.close();
     await db.close();
     process.exit(0);
