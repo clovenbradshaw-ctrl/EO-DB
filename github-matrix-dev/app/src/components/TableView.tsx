@@ -427,7 +427,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   const columnOrder = viewConfig.columnOrder;
   const columnWidths = viewConfig.columnWidths;
   const rowHeight = viewConfig.rowHeight || 'default';
-  const cellOverflow = viewConfig.cellOverflow || 'wrap';
+  const cellOverflow = viewConfig.cellOverflow || 'clip';
   const showFieldIds = viewConfig.showFieldIds || false;
   const profileFields = viewConfig.profileFields;
   const displayField = auditableDisplayField ?? viewConfig.displayField ?? null;
