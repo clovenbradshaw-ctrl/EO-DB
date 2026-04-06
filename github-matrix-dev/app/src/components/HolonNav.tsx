@@ -623,8 +623,6 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       background: t.accentBg,
       color: t.accent,
       borderRadius: 6,
-      margin: '1px 8px',
-      padding: '6px 8px',
       fontWeight: 500,
     } as React.CSSProperties,
     chevron: {
