@@ -70,7 +70,7 @@ export const useAirtableStore = create<AirtableSyncState>((set, get) => ({
     set({ connecting: true, error: null });
     try {
       const result = await fetchFilenCredentialsFromWebhook(matrixAccessToken);
-      const key = result.airtable_api_key;
+      const key = result.airtablePat;
       if (!key) {
         throw new Error('Webhook did not return an Airtable API key');
       }

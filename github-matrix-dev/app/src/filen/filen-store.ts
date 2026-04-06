@@ -114,8 +114,8 @@ export const useFilenStore = create<FilenStoreState>((set, get) => ({
       const webhookResult = await fetchFilenCredentialsFromWebhook(matrixAccessToken);
       const { username, password } = webhookResult;
       // Surface the Airtable API key so callers can pass it to the Airtable store.
-      if (webhookResult.airtable_api_key) {
-        set({ webhookAirtableKey: webhookResult.airtable_api_key });
+      if (webhookResult.airtablePat) {
+        set({ webhookAirtableKey: webhookResult.airtablePat });
       }
       const result = await apiLogin(username, password);
       const baseFolderUuid = await filenGetBaseFolder(result.apiKey);
