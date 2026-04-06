@@ -3,7 +3,7 @@ import type { EoStore } from '../db/encrypted-store';
 import { createLocalStore } from '../db/encrypted-store';
 import { createIdb } from '../db/idb';
 import type { EoEvent, EoEventInput, EoState, HorizonResponse } from '../db/types';
-import { processEvent } from '../db/fold';
+import { processEvent, processEventsBulk } from '../db/fold';
 import { horizonGet, type HorizonOpts } from '../db/horizon';
 import { getState, getStateByPrefix, getStateByPrefixPage, type StatePage } from '../db/state';
 import { readLogSince } from '../db/log';
@@ -168,15 +168,12 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     if (!store) throw new Error('Store not initialized');
 
     let lastSeq = 0;
-    for (let i = 0; i < events.length; i++) {
-      lastSeq = await processEvent(store, events[i], (fullEvent) => {
-        set((state) => ({
-          recentEvents: [...state.recentEvents.slice(-99), fullEvent],
-          lastSeq: fullEvent.seq,
-        }));
-      });
-      onProgress?.(i + 1, events.length);
-    }
+    lastSeq = await processEventsBulk(store, events, onProgress, (fullEvent) => {
+      set((state) => ({
+        recentEvents: [...state.recentEvents.slice(-99), fullEvent],
+        lastSeq: fullEvent.seq,
+      }));
+    });
 
     // Upload to Filen immediately after import (don't wait for 30s timer)
     const { filenSync } = get();

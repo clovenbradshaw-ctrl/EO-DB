@@ -235,12 +235,15 @@ async function handleCON(db: EoDb, event: EoEvent): Promise<void> {
     }
   }
 
-  // Update state to reflect current link set
+  // Update state — merge edges into existing value to preserve INS fields
   const currentEdges = await getEdgesFrom(db, event.target);
   const sourceState = await getState(db, event.target);
   await setState(db, {
     target: event.target,
-    value: { linked: currentEdges.map(e => e.dest), edge_type: operand.edge_type },
+    value: {
+      ...(sourceState?.value ?? {}),
+      _edges: currentEdges.map(e => ({ dest: e.dest, edge_type: e.edge_type })),
+    },
     hash: chainHash(sourceState!.hash, event),
     level: sourceState!.level,
     ...stateFromEvent(event, 'CON'),

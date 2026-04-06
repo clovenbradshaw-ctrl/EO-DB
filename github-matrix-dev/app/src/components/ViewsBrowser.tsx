@@ -287,7 +287,7 @@ export function ViewsBrowser({ scope, recordCount, userId, onBack, onSelectView 
         <input
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="Find a view\u2026"
+          placeholder="Find a view…"
           style={s.searchInput}
         />
       </div>
@@ -348,7 +348,7 @@ export function ViewsBrowser({ scope, recordCount, userId, onBack, onSelectView 
                     if (e.key === 'Enter') handleCreateView();
                     if (e.key === 'Escape') { setShowCreate(false); resetCreateForm(); }
                   }}
-                  placeholder="View name\u2026"
+                  placeholder="View name…"
                   style={s.nameInput}
                 />
                 <div style={{ display: 'flex', gap: 4, marginTop: 8, flexWrap: 'wrap' as const }}>

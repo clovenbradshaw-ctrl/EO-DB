@@ -12,7 +12,6 @@ import { useFilenStore } from '../filen/filen-store';
 import { resolveDataRoom } from '../matrix/event-bridge';
 import { configureMatrixDomain } from '../lib/matrix-domain';
 import { HolonNav } from './HolonNav';
-import { ViewsBrowser } from './ViewsBrowser';
 import { TableView } from './TableView';
 import { ViewTabs } from './ViewTabs';
 import { RecordDetailDrawer } from './RecordDetailDrawer';
@@ -278,7 +277,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   const [spaceOpen, setSpaceOpen] = useState(false);
   const [showMembers, setShowMembers] = useState(false);
   const [showRecycleBin, setShowRecycleBin] = useState(false);
-  const [showViewsBrowser, setShowViewsBrowser] = useState(false);
   const isMobile = useIsMobile();
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [spaces, setSpaces] = useState<EoState[]>([]);
@@ -1281,31 +1279,31 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             width: 260,
           } : {}),
         }}>
-          {/* View navigation — hidden when the Views panel takes over the sidebar */}
-          {!showViewsBrowser && (
           <nav style={s.sidebarNav}>
             <div style={s.navGroupLabel}>Records</div>
-            <button
-              onClick={() => {
-                if (activeView !== 'records') {
-                  navigate({ view: 'records' });
-                }
-                setShowViewsBrowser((prev) => !prev);
-                if (isMobile) setMobileSidebarOpen(false);
-              }}
-              style={{
-                ...s.navItem,
-                ...(activeView === 'records' ? s.navItemActive : {}),
-              }}
-            >
-              <span style={s.navIcon}>{NAV_ICONS.records}</span>
-              Views
-            </button>
+          </nav>
+
+          {/* Objects tree — integrated under Records */}
+          {ready ? (
+            <HolonNav
+              selectedScope={selectedScope}
+              onSelectScope={(scope) => { navigate({ view: 'records', scope, record: null }); }}
+              onSelectSegment={(_scope, _seg) => { navigate({ view: 'records', scope: _scope }); }}
+            />
+          ) : !selectedSpace ? (
+            <div style={{ padding: '16px 12px', fontSize: 13, color: theme.textMuted }}>
+              No space selected. Open the space browser above to create or select a space.
+            </div>
+          ) : (
+            <SyncProgress message="Initializing store..." detail="Deriving encryption key" />
+          )}
+
+          <nav style={s.sidebarNav}>
             <div style={s.navGroupLabel}>Actions</div>
             {(['compose', 'import'] as View[]).map((view) => (
               <button
                 key={view}
-                onClick={() => { setShowViewsBrowser(false); navigate({ view }); }}
+                onClick={() => { navigate({ view }); }}
                 style={{
                   ...s.navItem,
                   ...(activeView === view ? s.navItemActive : {}),
@@ -1337,9 +1335,8 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               Messages
             </button>
             <div style={s.navGroupLabel}>System</div>
-            {/* Log */}
             <button
-              onClick={() => { setShowViewsBrowser(false); navigate({ view: 'log' }); }}
+              onClick={() => { navigate({ view: 'log' }); }}
               style={{
                 ...s.navItem,
                 ...(activeView === 'log' ? s.navItemActive : {}),
@@ -1348,10 +1345,9 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               <span style={s.navIcon}>{NAV_ICONS.log}</span>
               Log
             </button>
-            {/* Builder — Admin+ only (PL >= 50) */}
             {currentPermissions?.can_build_views !== false && (
               <button
-                onClick={() => { setShowViewsBrowser(false); navigate({ view: 'builder', builderViewId: null, customPageId: null }); }}
+                onClick={() => { navigate({ view: 'builder', builderViewId: null, customPageId: null }); }}
                 style={{
                   ...s.navItem,
                   ...(activeView === 'builder' ? s.navItemActive : {}),
@@ -1361,10 +1357,9 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                 Builder
               </button>
             )}
-            {/* Settings — Admin+ only (PL >= 50) */}
             {currentPermissions?.can_set_governance !== false && (
               <button
-                onClick={() => { setShowViewsBrowser(false); navigate({ view: 'settings' }); }}
+                onClick={() => { navigate({ view: 'settings' }); }}
                 style={{
                   ...s.navItem,
                   ...(activeView === 'settings' ? s.navItemActive : {}),
@@ -1375,38 +1370,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               </button>
             )}
           </nav>
-          )}
-
-          {/* Objects tree or Views Browser */}
-          {showViewsBrowser ? (
-            <ViewsBrowser
-              scope={selectedScope}
-              recordCount={scopedRecords.length}
-              userId={session.userId}
-              onBack={() => setShowViewsBrowser(false)}
-              onSelectView={(view) => {
-                if (view.id) {
-                  viewStore.activateView(view.scope, view);
-                } else {
-                  viewStore.resetToDefault(view.scope);
-                }
-                navigate({ view: 'records', scope: view.scope });
-                setShowViewsBrowser(false);
-              }}
-            />
-          ) : ready ? (
-            <HolonNav
-              selectedScope={selectedScope}
-              onSelectScope={(scope) => { navigate({ scope, record: null }); }}
-              onSelectSegment={(_scope, _seg) => { navigate({ scope: _scope }); }}
-            />
-          ) : !selectedSpace ? (
-            <div style={{ padding: '16px 12px', fontSize: 13, color: theme.textMuted }}>
-              No space selected. Open the space browser above to create or select a space.
-            </div>
-          ) : (
-            <SyncProgress message="Initializing store..." detail="Deriving encryption key" />
-          )}
         </aside>
 
         <main style={s.main} key={selectedSpace ?? '__all__'}>
