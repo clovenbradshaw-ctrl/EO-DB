@@ -122,13 +122,17 @@ export function DataSyncDashboard({ session, matrixClient, roomId, spaceId }: Da
     }
   }, [ready, lastSeq, offlineQueueSize, lastSnapshotSeq]);
 
-  // Poll offline queue size
+  // Poll offline queue size (only update state when value changes)
   useEffect(() => {
     if (!ready || !store) return;
+    let lastSize = -1;
     const interval = setInterval(async () => {
       const queue: any[] = (await store.get('meta:offline_queue')) || [];
-      useSyncStore.getState().setOfflineQueueSize(queue.length);
-    }, 5000);
+      if (queue.length !== lastSize) {
+        lastSize = queue.length;
+        useSyncStore.getState().setOfflineQueueSize(queue.length);
+      }
+    }, 10_000);
     return () => clearInterval(interval);
   }, [ready, store]);
 
