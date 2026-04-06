@@ -63,7 +63,7 @@ export async function createRestrictedRoom(
 
 /**
  * Create a governance room for a space.
- * Contains EVA policies, schema changes, field permission config, view definitions.
+ * Contains EVA policies, schema changes, field permission config, slice definitions.
  * Membership: Owner + Admin only.
  */
 export async function createGovernanceRoom(
@@ -102,19 +102,19 @@ export async function createGovernanceRoom(
 }
 
 /**
- * Create a private room for a single view.
+ * Create a private room for a single slice.
  * Only the owner can write (events_default: 100). Others can be invited
- * with lower power levels to share the view read-only or with edit access.
- * Each private view gets its own room for maximum isolation.
+ * with lower power levels to share the slice read-only or with edit access.
+ * Each private slice gets its own room for maximum isolation.
  */
-export async function createViewRoom(
+export async function createSliceRoom(
   client: MatrixClient,
   spaceName: string,
-  viewName: string,
+  sliceName: string,
   ownerUserId: string,
 ): Promise<string> {
   const result = await client.createRoom({
-    name: `${spaceName} — view: ${viewName}`,
+    name: `${spaceName} — slice: ${sliceName}`,
     room_alias_name: undefined,
     visibility: 'private' as any,
     preset: 'private_chat' as any,

@@ -2,12 +2,12 @@ import type { SortRule } from './SortPanel';
 import type { FilterRule } from './filter-types';
 
 // ---------------------------------------------------------------------------
-// ViewType — the kind of visualization for a saved view
+// SliceType — the kind of visualization for a saved slice
 // ---------------------------------------------------------------------------
 
-export type ViewType = 'grid' | 'graph' | 'kanban' | 'calendar' | 'gallery' | 'schema';
+export type SliceType = 'grid' | 'graph' | 'kanban' | 'calendar' | 'gallery' | 'schema';
 
-export const VIEW_TYPE_META: Record<ViewType, { label: string; icon: string }> = {
+export const SLICE_TYPE_META: Record<SliceType, { label: string; icon: string }> = {
   grid: { label: 'Grid', icon: '\u229E' },
   graph: { label: 'Graph', icon: '\u2B21' },
   kanban: { label: 'Kanban', icon: '\u25A5' },
@@ -17,10 +17,10 @@ export const VIEW_TYPE_META: Record<ViewType, { label: string; icon: string }> =
 };
 
 // ---------------------------------------------------------------------------
-// TableViewConfig — the full column/filter/sort layout state for a table view
+// TableSliceConfig — the full column/filter/sort layout state for a table slice
 // ---------------------------------------------------------------------------
 
-export interface TableViewConfig {
+export interface TableSliceConfig {
   columnOrder: string[];                // ordered column keys
   columnWidths: Record<string, number>; // key → px width
   hiddenColumns: string[];
@@ -40,35 +40,35 @@ export interface TableViewConfig {
 }
 
 // ---------------------------------------------------------------------------
-// SavedView — an INS entity stored at {scope}._views.{viewId}
+// SavedSlice — an INS entity stored at {scope}._slices.{sliceId}
 // ---------------------------------------------------------------------------
 
-export interface SavedView {
+export interface SavedSlice {
   id: string;
   name: string;
-  scope: string;                        // which table this view belongs to
-  viewType?: ViewType;                  // visualization type (defaults to 'grid')
-  config: TableViewConfig;
+  scope: string;                        // which table this slice belongs to
+  sliceType?: SliceType;                // visualization type (defaults to 'grid')
+  config: TableSliceConfig;
   visibility: 'private' | 'shared';
   createdBy: string;                    // Matrix user ID
   createdAt: string;
   updatedAt: string;
-  roomId?: string;                      // Matrix room for private views
-  /** User type IDs that can see this view. Empty/absent = visible to all. */
+  roomId?: string;                      // Matrix room for private slices
+  /** User type IDs that can see this slice. Empty/absent = visible to all. */
   visibleToTypes?: string[];
-  /** User type IDs for which this view is read-only (can see but not edit). */
+  /** User type IDs for which this slice is read-only (can see but not edit). */
   readOnlyForTypes?: string[];
 }
 
 // ---------------------------------------------------------------------------
-// ViewSig — local-only signal stored in localStorage (pre-save state)
-// Keyed by `eo-view-sig:{scope}`
+// SliceSig — local-only signal stored in localStorage (pre-save state)
+// Keyed by `eo-slice-sig:{scope}`
 // ---------------------------------------------------------------------------
 
-export interface ViewSig {
+export interface SliceSig {
   scope: string;
-  activeViewId: string | null;          // null = default/unsaved
-  config: TableViewConfig;
+  activeSliceId: string | null;          // null = default/unsaved
+  config: TableSliceConfig;
   dirty: boolean;
 }
 
@@ -76,7 +76,7 @@ export interface ViewSig {
 // Helpers
 // ---------------------------------------------------------------------------
 
-export function createDefaultConfig(): TableViewConfig {
+export function createDefaultConfig(): TableSliceConfig {
   return {
     columnOrder: [],
     columnWidths: {},

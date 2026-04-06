@@ -11,8 +11,8 @@ import { FilterBar } from './FilterBar';
 import { SortPanel, type SortRule } from './SortPanel';
 import type { ResolvedPermissions } from '../permissions/types';
 import { syncEditToAirtable } from '../ingestion/airtable-writeback';
-import { useViewStore } from '../store/view-store';
-import { defaultColumnWidth, MIN_COLUMN_WIDTH } from './view-types';
+import { useSliceStore } from '../store/slice-store';
+import { defaultColumnWidth, MIN_COLUMN_WIDTH } from './slice-types';
 import { formatName } from './scope-picker-utils';
 import { useIdResolver, isEntityId, isEntityIdArray, type IdResolver } from '../hooks/useIdResolver';
 import { groupSchemaStates, extractColumnTypeOverrides, schemaTypeTarget, schemaConstraintTarget, schemaResolveTarget, type FieldSchema } from '../db/schema-rules';
@@ -44,8 +44,8 @@ interface TableViewProps {
   session: { userId: string };
   timeScrubberFilter?: TimeScrubberFilter;
   permissions?: ResolvedPermissions | null;
-  /** When true, the current view is read-only for this user's type */
-  viewReadOnly?: boolean;
+  /** When true, the current slice is read-only for this user's type */
+  sliceReadOnly?: boolean;
 }
 
 function formatRelativeTime(ts: string): string {
@@ -378,7 +378,7 @@ function renderCell(value: any, key: string, onNavigate: (t: string) => void, t:
   return <span>{String(value)}</span>;
 }
 
-export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, activeRecord, session, timeScrubberFilter, permissions, viewReadOnly }: TableViewProps) {
+export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, activeRecord, session, timeScrubberFilter, permissions, sliceReadOnly }: TableViewProps) {
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
   const getState = useEoStore((s) => s.getState);
   const dispatch = useEoStore((s) => s.dispatch);
@@ -411,9 +411,9 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   const { theme } = useTheme();
   const s = makeStyles(theme);
 
-  // --- View store (SIG) ---
-  const viewStore = useViewStore();
-  const viewConfig = viewStore.getConfig(scope);
+  // --- Slice store (SIG) ---
+  const sliceStore = useSliceStore();
+  const viewConfig = sliceStore.getConfig(scope);
   const sorts = viewConfig.sorts;
   const advancedFilters = viewConfig.filters;
   const filterConjunction = viewConfig.filterConjunction;
@@ -437,13 +437,13 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   const [showProfilePicker, setShowProfilePicker] = useState(false);
   const [showColumnManager, setShowColumnManager] = useState(false);
 
-  const setSorts = useCallback((s: SortRule[]) => viewStore.setSorts(scope, s), [scope, viewStore]);
-  const setAdvancedFilters = useCallback((f: FilterRule[]) => viewStore.setFilters(scope, f), [scope, viewStore]);
-  const setFilterConjunction = useCallback((c: 'AND' | 'OR') => viewStore.setFilterConjunction(scope, c), [scope, viewStore]);
+  const setSorts = useCallback((s: SortRule[]) => sliceStore.setSorts(scope, s), [scope, sliceStore]);
+  const setAdvancedFilters = useCallback((f: FilterRule[]) => sliceStore.setFilters(scope, f), [scope, sliceStore]);
+  const setFilterConjunction = useCallback((c: 'AND' | 'OR') => sliceStore.setFilterConjunction(scope, c), [scope, sliceStore]);
   const setHiddenColumns = useCallback((fn: Set<string> | ((prev: Set<string>) => Set<string>)) => {
     const next = typeof fn === 'function' ? fn(hiddenColumns) : fn;
-    viewStore.setHiddenColumns(scope, [...next]);
-  }, [scope, viewStore, hiddenColumns]);
+    sliceStore.setHiddenColumns(scope, [...next]);
+  }, [scope, sliceStore, hiddenColumns]);
 
   // --- Column resize state ---
   const [resizing, setResizing] = useState<{ key: string; startX: number; startWidth: number } | null>(null);
@@ -462,7 +462,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     const handleMouseMove = (e: MouseEvent) => {
       const delta = e.clientX - resizing.startX;
       const newWidth = Math.max(MIN_COLUMN_WIDTH, resizing.startWidth + delta);
-      viewStore.setColumnWidth(scope, resizing.key, newWidth);
+      sliceStore.setColumnWidth(scope, resizing.key, newWidth);
     };
     const handleMouseUp = () => setResizing(null);
     document.addEventListener('mousemove', handleMouseMove);
@@ -471,7 +471,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [resizing, scope, viewStore]);
+  }, [resizing, scope, sliceStore]);
 
   // --- Column drag-end handler ---
   function handleColumnDragEnd(event: DragEndEvent) {
@@ -482,7 +482,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     const newIndex = currentOrder.indexOf(over.id as string);
     if (oldIndex === -1 || newIndex === -1) return;
     const newOrder = arrayMove(currentOrder, oldIndex, newIndex);
-    viewStore.setColumnOrder(scope, newOrder);
+    sliceStore.setColumnOrder(scope, newOrder);
   }
 
   // Load records and field metadata
@@ -799,12 +799,12 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     }
     items.push({
       label: 'Hide column',
-      onClick: () => viewStore.toggleHiddenColumn(scope, colKey),
+      onClick: () => sliceStore.toggleHiddenColumn(scope, colKey),
     });
     if (hiddenColumns.size > 0) {
       items.push({
         label: `Show all columns (${hiddenColumns.size} hidden)`,
-        onClick: () => viewStore.showAllColumns(scope),
+        onClick: () => sliceStore.showAllColumns(scope),
       });
     }
     return items;
@@ -909,7 +909,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     } catch { /* ignore */ }
   }
 
-  const canEdit = viewReadOnly ? false : (permissions ? (permissions.can_edit_any_record || permissions.can_edit_own_records) : true);
+  const canEdit = sliceReadOnly ? false : (permissions ? (permissions.can_edit_any_record || permissions.can_edit_own_records) : true);
 
   function handleCellDoubleClick(rec: EoState, colKey: string) {
     if (!canEdit) return;
@@ -1108,7 +1108,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
               return (
                 <button
                   key={h}
-                  onClick={() => viewStore.setRowHeight(scope, h)}
+                  onClick={() => sliceStore.setRowHeight(scope, h)}
                   title={h.charAt(0).toUpperCase() + h.slice(1)}
                   style={{
                     ...s.toggleBtn,
@@ -1140,7 +1140,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
               return (
                 <button
                   key={mode}
-                  onClick={() => viewStore.setCellOverflow(scope, mode)}
+                  onClick={() => sliceStore.setCellOverflow(scope, mode)}
                   title={label}
                   aria-label={label}
                   aria-pressed={isActive}
@@ -1166,7 +1166,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
           {/* Field ID toggle — hidden on mobile */}
           {!isMobile && (
           <button
-            onClick={() => viewStore.setShowFieldIds(scope, !showFieldIds)}
+            onClick={() => sliceStore.setShowFieldIds(scope, !showFieldIds)}
             title={showFieldIds ? 'Showing raw field IDs — click for display names' : 'Showing display names — click for raw field IDs'}
             aria-label="Toggle field ID display"
             aria-pressed={showFieldIds}
@@ -1210,12 +1210,12 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                 ]}
                 columnOrder={columnOrder}
                 hiddenColumns={hiddenColumns}
-                onToggleColumn={(key) => viewStore.toggleHiddenColumn(scope, key)}
-                onReorder={(order) => viewStore.setColumnOrder(scope, order)}
-                onShowAll={() => viewStore.showAllColumns(scope)}
+                onToggleColumn={(key) => sliceStore.toggleHiddenColumn(scope, key)}
+                onReorder={(order) => sliceStore.setColumnOrder(scope, order)}
+                onShowAll={() => sliceStore.showAllColumns(scope)}
                 onHideAll={() => {
                   const allKeys = entityColumns.map((c) => c.key).concat(['_record', '_last_updated']);
-                  viewStore.setHiddenColumns(scope, allKeys);
+                  sliceStore.setHiddenColumns(scope, allKeys);
                 }}
                 onClose={() => setShowColumnManager(false)}
               />
@@ -1269,7 +1269,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                             const next = isChecked
                               ? current.filter((k) => k !== col.key)
                               : [...current, col.key];
-                            viewStore.setProfileFields(scope, next.length === entityColumns.length ? undefined : next);
+                            sliceStore.setProfileFields(scope, next.length === entityColumns.length ? undefined : next);
                           }}
                         />
                         {col.label}
@@ -1278,13 +1278,13 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                   })}
                   <div style={{ display: 'flex', gap: 8, marginTop: 8, borderTop: `1px solid ${theme.border}`, paddingTop: 8 }}>
                     <button
-                      onClick={() => viewStore.setProfileFields(scope, undefined)}
+                      onClick={() => sliceStore.setProfileFields(scope, undefined)}
                       style={{ fontSize: 10, background: 'none', border: 'none', color: theme.accent, cursor: 'pointer' }}
                     >
                       Select All
                     </button>
                     <button
-                      onClick={() => viewStore.setProfileFields(scope, [])}
+                      onClick={() => sliceStore.setProfileFields(scope, [])}
                       style={{ fontSize: 10, background: 'none', border: 'none', color: theme.textMuted, cursor: 'pointer' }}
                     >
                       Clear

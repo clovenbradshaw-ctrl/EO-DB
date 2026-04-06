@@ -1,43 +1,43 @@
 import { useEffect, useState, useMemo, useRef } from 'react';
 import { useEoStore } from '../store/eo-store';
-import { useViewStore } from '../store/view-store';
-import { VIEW_TYPE_META, type SavedView, type TableViewConfig, type ViewType } from './view-types';
+import { useSliceStore } from '../store/slice-store';
+import { SLICE_TYPE_META, type SavedSlice, type TableSliceConfig, type SliceType } from './slice-types';
 import { deriveColumns, type ColumnDef } from './filter-types';
 import { formatName } from './scope-picker-utils';
 import { useTheme, type Theme } from '../theme';
 
-interface ViewsBrowserProps {
+interface SlicesBrowserProps {
   /** Current scope (object path). If null, the panel shows a "select an object" state. */
   scope: string | null;
   /** Number of records under the current scope (shown in the pinned chip). */
   recordCount: number;
-  /** Matrix user ID — required for attributing created views. */
+  /** Matrix user ID — required for attributing created slices. */
   userId: string;
   onBack: () => void;
-  onSelectView: (view: SavedView) => void;
+  onSelectSlice: (slice: SavedSlice) => void;
 }
 
-export function ViewsBrowser({ scope, recordCount, userId, onBack, onSelectView }: ViewsBrowserProps) {
+export function SlicesBrowser({ scope, recordCount, userId, onBack, onSelectSlice }: SlicesBrowserProps) {
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
   const dispatch = useEoStore((s) => s.dispatch);
   const ready = useEoStore((s) => s.ready);
   const lastSeq = useEoStore((s) => s.lastSeq);
-  const registerSavedViews = useViewStore((s) => s.registerSavedViews);
-  const savedViews = useViewStore((s) => s.savedViews);
-  const sig = useViewStore((s) => (scope ? s.getSig(scope) : null));
+  const registerSavedSlices = useSliceStore((s) => s.registerSavedSlices);
+  const savedSlices = useSliceStore((s) => s.savedSlices);
+  const sig = useSliceStore((s) => (scope ? s.getSig(scope) : null));
   const { theme } = useTheme();
   const s = makeStyles(theme);
 
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(true);
   const hasLoadedOnce = useRef(false);
-  const prevViewsKeyRef = useRef<string>('');
+  const prevSlicesKeyRef = useRef<string>('');
 
-  // --- Create-view popover state ---
+  // --- Create-slice popover state ---
   const [showCreate, setShowCreate] = useState(false);
-  const [newViewName, setNewViewName] = useState('');
-  const [newViewType, setNewViewType] = useState<ViewType>('grid');
-  const [newViewVisibility, setNewViewVisibility] = useState<'private' | 'shared'>('shared');
+  const [newSliceName, setNewSliceName] = useState('');
+  const [newSliceType, setNewSliceType] = useState<SliceType>('grid');
+  const [newSliceVisibility, setNewSliceVisibility] = useState<'private' | 'shared'>('shared');
   const [newKanbanField, setNewKanbanField] = useState('');
   const [creating, setCreating] = useState(false);
 
@@ -77,7 +77,7 @@ export function ViewsBrowser({ scope, recordCount, userId, onBack, onSelectView 
     });
   }, [ready, scope, showCreate, getStateByPrefix]);
 
-  // Load saved views for the current scope only
+  // Load saved slices for the current scope only
   useEffect(() => {
     if (!ready || !scope) {
       setLoading(false);
@@ -85,20 +85,20 @@ export function ViewsBrowser({ scope, recordCount, userId, onBack, onSelectView 
     }
     if (!hasLoadedOnce.current) setLoading(true);
 
-    getStateByPrefix(`${scope}._views.`).then((states) => {
+    getStateByPrefix(`${scope}._slices.`).then((states) => {
       const key = states.map(s => s.target + ':' + s.last_seq).join('|');
-      if (key === prevViewsKeyRef.current) {
+      if (key === prevSlicesKeyRef.current) {
         hasLoadedOnce.current = true;
         setLoading(false);
         return;
       }
-      prevViewsKeyRef.current = key;
+      prevSlicesKeyRef.current = key;
 
-      const viewDepth = scope.split('.').length + 2; // scope._views.viewId
-      const views: SavedView[] = states
+      const sliceDepth = scope.split('.').length + 2; // scope._slices.sliceId
+      const slices: SavedSlice[] = states
         .filter(
           (st) =>
-            st.target.split('.').length === viewDepth &&
+            st.target.split('.').length === sliceDepth &&
             st.value?.name &&
             !st.value?._deleted,
         )
@@ -106,7 +106,7 @@ export function ViewsBrowser({ scope, recordCount, userId, onBack, onSelectView 
           id: st.target.split('.').pop()!,
           name: st.value.name,
           scope,
-          viewType: st.value.viewType || 'grid',
+          sliceType: st.value.sliceType || 'grid',
           config: st.value.config || {
             columnOrder: [],
             columnWidths: {},
@@ -122,40 +122,40 @@ export function ViewsBrowser({ scope, recordCount, userId, onBack, onSelectView 
           updatedAt: st.value.updatedAt || st.last_ts,
           roomId: st.value.roomId,
         }));
-      if (views.length > 0) {
-        registerSavedViews(views);
+      if (slices.length > 0) {
+        registerSavedSlices(slices);
       }
       hasLoadedOnce.current = true;
       setLoading(false);
     });
-  }, [ready, lastSeq, getStateByPrefix, scope, registerSavedViews]);
+  }, [ready, lastSeq, getStateByPrefix, scope, registerSavedSlices]);
 
   // Reset loaded flag when scope changes
   useEffect(() => {
     hasLoadedOnce.current = false;
   }, [scope]);
 
-  // Views belonging to the current scope, filtered by search query
-  const { personalViews, collaborativeViews } = useMemo(() => {
-    if (!scope) return { personalViews: [], collaborativeViews: [] };
+  // Slices belonging to the current scope, filtered by search query
+  const { personalSlices, collaborativeSlices } = useMemo(() => {
+    if (!scope) return { personalSlices: [], collaborativeSlices: [] };
     const q = query.trim().toLowerCase();
-    const all = Object.values(savedViews).filter(
+    const all = Object.values(savedSlices).filter(
       (v) => v.scope === scope && (!q || v.name.toLowerCase().includes(q)),
     );
     all.sort((a, b) => a.name.localeCompare(b.name));
     return {
-      personalViews: all.filter((v) => v.visibility === 'private'),
-      collaborativeViews: all.filter((v) => v.visibility === 'shared'),
+      personalSlices: all.filter((v) => v.visibility === 'private'),
+      collaborativeSlices: all.filter((v) => v.visibility === 'shared'),
     };
-  }, [savedViews, scope, query]);
+  }, [savedSlices, scope, query]);
 
-  // Synthetic default grid view (always shown under personal)
-  function makeDefaultView(s: string): SavedView {
+  // Synthetic default grid slice (always shown under personal)
+  function makeDefaultSlice(s: string): SavedSlice {
     return {
       id: '',
       name: 'Grid view',
       scope: s,
-      viewType: 'grid',
+      sliceType: 'grid',
       config: {
         columnOrder: [],
         columnWidths: {},
@@ -178,18 +178,18 @@ export function ViewsBrowser({ scope, recordCount, userId, onBack, onSelectView 
   }, [query]);
 
   function resetCreateForm() {
-    setNewViewName('');
-    setNewViewType('grid');
-    setNewViewVisibility('shared');
+    setNewSliceName('');
+    setNewSliceType('grid');
+    setNewSliceVisibility('shared');
     setNewKanbanField('');
   }
 
-  async function handleCreateView() {
-    if (!scope || !newViewName.trim() || creating) return;
+  async function handleCreateSlice() {
+    if (!scope || !newSliceName.trim() || creating) return;
     setCreating(true);
-    const viewId = crypto.randomUUID().replace(/-/g, '').slice(0, 12);
+    const sliceId = crypto.randomUUID().replace(/-/g, '').slice(0, 12);
     const now = new Date().toISOString();
-    const config: TableViewConfig = {
+    const config: TableSliceConfig = {
       columnOrder: [],
       columnWidths: {},
       hiddenColumns: [],
@@ -197,18 +197,18 @@ export function ViewsBrowser({ scope, recordCount, userId, onBack, onSelectView 
       filters: [],
       filterConjunction: 'AND',
       showLastUpdated: true,
-      ...(newViewType === 'kanban' && newKanbanField ? { kanbanField: newKanbanField } : {}),
+      ...(newSliceType === 'kanban' && newKanbanField ? { kanbanField: newKanbanField } : {}),
     };
-    const name = newViewName.trim();
+    const name = newSliceName.trim();
     try {
       await dispatch({
         op: 'INS',
-        target: `${scope}._views.${viewId}`,
+        target: `${scope}._slices.${sliceId}`,
         operand: {
           name,
-          viewType: newViewType,
+          sliceType: newSliceType,
           config,
-          visibility: newViewVisibility,
+          visibility: newSliceVisibility,
           createdBy: userId,
           createdAt: now,
           updatedAt: now,
@@ -218,63 +218,63 @@ export function ViewsBrowser({ scope, recordCount, userId, onBack, onSelectView 
         acquired_ts: now,
         client_event_id: crypto.randomUUID(),
       });
-      const savedView: SavedView = {
-        id: viewId,
+      const savedSlice: SavedSlice = {
+        id: sliceId,
         name,
         scope,
-        viewType: newViewType,
+        sliceType: newSliceType,
         config,
-        visibility: newViewVisibility,
+        visibility: newSliceVisibility,
         createdBy: userId,
         createdAt: now,
         updatedAt: now,
       };
-      registerSavedViews([savedView]);
+      registerSavedSlices([savedSlice]);
       setShowCreate(false);
       resetCreateForm();
-      onSelectView(savedView);
+      onSelectSlice(savedSlice);
     } catch (err) {
-      console.error('[ViewsBrowser] Failed to create view:', err);
-      // Still register the view optimistically — the fold may have succeeded
+      console.error('[SlicesBrowser] Failed to create slice:', err);
+      // Still register the slice optimistically — the fold may have succeeded
       // even if a downstream step (e.g. Matrix send) threw.
-      const savedView: SavedView = {
-        id: viewId,
+      const savedSlice: SavedSlice = {
+        id: sliceId,
         name,
         scope,
-        viewType: newViewType,
+        sliceType: newSliceType,
         config,
-        visibility: newViewVisibility,
+        visibility: newSliceVisibility,
         createdBy: userId,
         createdAt: now,
         updatedAt: now,
       };
-      registerSavedViews([savedView]);
+      registerSavedSlices([savedSlice]);
       setShowCreate(false);
       resetCreateForm();
-      onSelectView(savedView);
+      onSelectSlice(savedSlice);
     } finally {
       setCreating(false);
     }
   }
 
   const scopeLabel = scope ? formatName(scope.split('.').pop() || scope) : '';
-  const activeViewId = sig?.activeViewId ?? null;
-  const defaultIsActive = scope != null && activeViewId == null;
+  const activeSliceId = sig?.activeSliceId ?? null;
+  const defaultIsActive = scope != null && activeSliceId == null;
 
-  function renderViewRow(view: SavedView, isActive: boolean) {
-    const vtMeta = VIEW_TYPE_META[(view.viewType || 'grid') as ViewType];
-    const isPrivate = view.visibility === 'private';
+  function renderSliceRow(slice: SavedSlice, isActive: boolean) {
+    const vtMeta = SLICE_TYPE_META[(slice.sliceType || 'grid') as SliceType];
+    const isPrivate = slice.visibility === 'private';
     return (
       <div
-        key={view.id || '__default__'}
-        style={{ ...s.viewItem, ...(isActive ? s.viewItemActive : {}) }}
-        onClick={() => onSelectView(view)}
+        key={slice.id || '__default__'}
+        style={{ ...s.sliceItem, ...(isActive ? s.sliceItemActive : {}) }}
+        onClick={() => onSelectSlice(slice)}
       >
-        <span style={{ ...s.viewIcon, ...(isActive ? { color: theme.accent } : {}) }}>
+        <span style={{ ...s.sliceIcon, ...(isActive ? { color: theme.accent } : {}) }}>
           {isPrivate ? '\uD83D\uDD12' : vtMeta.icon}
         </span>
-        <span style={s.viewName}>{view.name}</span>
-        <span style={s.viewBadge}>
+        <span style={s.sliceName}>{slice.name}</span>
+        <span style={s.sliceBadge}>
           {isPrivate ? 'private' : vtMeta.label.toLowerCase()}
         </span>
       </div>
@@ -288,7 +288,7 @@ export function ViewsBrowser({ scope, recordCount, userId, onBack, onSelectView 
         <button onClick={onBack} style={s.backBtn} title="Back to navigation">
           {'\u2190'}
         </button>
-        <span style={s.title}>Views</span>
+        <span style={s.title}>Slices</span>
       </div>
 
       {/* Search */}
@@ -296,7 +296,7 @@ export function ViewsBrowser({ scope, recordCount, userId, onBack, onSelectView 
         <input
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="Find a view…"
+          placeholder="Find a slice…"
           style={s.searchInput}
         />
       </div>
@@ -308,66 +308,66 @@ export function ViewsBrowser({ scope, recordCount, userId, onBack, onSelectView 
             <span style={{ opacity: 0.4, fontSize: 18 }}>{'\u229E'}</span>
             <span>No object selected</span>
             <span style={{ fontSize: 10, color: theme.textMuted, textAlign: 'center' }}>
-              Go back and select an object to browse its views.
+              Go back and select an object to browse its slices.
             </span>
           </div>
         ) : loading ? (
-          <div style={s.empty}>Loading\u2026</div>
+          <div style={s.empty}>Loading{'\u2026'}</div>
         ) : (
           <>
-            {/* Personal views */}
-            <div style={s.sectionLabel}>Personal views</div>
-            {defaultMatches && renderViewRow(makeDefaultView(scope), defaultIsActive)}
-            {personalViews.map((v) => renderViewRow(v, v.id === activeViewId))}
-            {!defaultMatches && personalViews.length === 0 && (
+            {/* Personal slices */}
+            <div style={s.sectionLabel}>Personal slices</div>
+            {defaultMatches && renderSliceRow(makeDefaultSlice(scope), defaultIsActive)}
+            {personalSlices.map((v) => renderSliceRow(v, v.id === activeSliceId))}
+            {!defaultMatches && personalSlices.length === 0 && (
               <div style={s.sectionEmpty}>No matches</div>
             )}
 
-            {/* Collaborative views */}
-            {(collaborativeViews.length > 0 || query.trim() === '') && (
+            {/* Collaborative slices */}
+            {(collaborativeSlices.length > 0 || query.trim() === '') && (
               <>
-                <div style={{ ...s.sectionLabel, marginTop: 12 }}>Collaborative views</div>
-                {collaborativeViews.length > 0 ? (
-                  collaborativeViews.map((v) => renderViewRow(v, v.id === activeViewId))
+                <div style={{ ...s.sectionLabel, marginTop: 12 }}>Collaborative slices</div>
+                {collaborativeSlices.length > 0 ? (
+                  collaborativeSlices.map((v) => renderSliceRow(v, v.id === activeSliceId))
                 ) : (
                   <div style={s.sectionEmpty}>None yet</div>
                 )}
               </>
             )}
 
-            {/* Create a view — inline like Airtable */}
+            {/* Create a slice — inline like Airtable */}
             {!showCreate ? (
               <button
                 style={s.createBtn}
                 onClick={() => setShowCreate(true)}
-                title="Create a new view for this object"
+                title="Create a new slice for this object"
               >
-                + Create a view
+                + Create a slice
               </button>
             ) : (
               <div style={s.inlineCreateForm}>
                 <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 8, color: theme.textHeading }}>
-                  New view
+                  New slice
                 </div>
                 <input
                   autoFocus
-                  value={newViewName}
-                  onChange={(e) => setNewViewName(e.target.value)}
+                  value={newSliceName}
+                  onChange={(e) => setNewSliceName(e.target.value)}
                   onKeyDown={(e) => {
-                    if (e.key === 'Enter') handleCreateView();
+                    if (e.key === 'Enter') handleCreateSlice();
                     if (e.key === 'Escape') { setShowCreate(false); resetCreateForm(); }
                   }}
-                  placeholder="View name…"
+                  placeholder="Slice name…"
                   style={s.nameInput}
                 />
                 <div style={{ display: 'flex', gap: 4, marginTop: 8, flexWrap: 'wrap' as const }}>
-                  {(Object.keys(VIEW_TYPE_META) as ViewType[]).map((vt) => {
-                    const meta = VIEW_TYPE_META[vt];
-                    const active = newViewType === vt;
+                  {(Object.keys(SLICE_TYPE_META) as SliceType[]).map((vt) => {
+                    const meta = SLICE_TYPE_META[vt];
+                    const active = newSliceType === vt;
                     return (
                       <button
                         key={vt}
-                        onClick={() => setNewViewType(vt)}
+                        onClick={() => setNewSliceType(vt)}
                         style={{
                           display: 'inline-flex', alignItems: 'center', gap: 4,
                           padding: '4px 8px', fontSize: 11, fontWeight: active ? 600 : 400,
@@ -384,7 +384,7 @@ export function ViewsBrowser({ scope, recordCount, userId, onBack, onSelectView 
                   })}
                 </div>
                 {/* Kanban field selection */}
-                {newViewType === 'kanban' && (
+                {newSliceType === 'kanban' && (
                   <div style={{ marginTop: 8 }}>
                     <div style={{ fontSize: 11, fontWeight: 500, color: theme.textSecondary, marginBottom: 4 }}>
                       Group by field
@@ -430,14 +430,14 @@ export function ViewsBrowser({ scope, recordCount, userId, onBack, onSelectView 
                 )}
                 <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
                   <button
-                    style={newViewVisibility === 'private' ? s.visBtnActive : s.visBtn}
-                    onClick={() => setNewViewVisibility('private')}
+                    style={newSliceVisibility === 'private' ? s.visBtnActive : s.visBtn}
+                    onClick={() => setNewSliceVisibility('private')}
                   >
                     {'\uD83D\uDD12'} Private
                   </button>
                   <button
-                    style={newViewVisibility === 'shared' ? s.visBtnActive : s.visBtn}
-                    onClick={() => setNewViewVisibility('shared')}
+                    style={newSliceVisibility === 'shared' ? s.visBtnActive : s.visBtn}
+                    onClick={() => setNewSliceVisibility('shared')}
                   >
                     {'\uD83D\uDD13'} Shared
                   </button>
@@ -450,11 +450,11 @@ export function ViewsBrowser({ scope, recordCount, userId, onBack, onSelectView 
                     Cancel
                   </button>
                   <button
-                    style={(!newViewName.trim() || creating || (newViewType === 'kanban' && !newKanbanField)) ? s.modalCreateBtnDisabled : s.modalCreateBtn}
-                    onClick={handleCreateView}
-                    disabled={!newViewName.trim() || creating || (newViewType === 'kanban' && !newKanbanField)}
+                    style={(!newSliceName.trim() || creating || (newSliceType === 'kanban' && !newKanbanField)) ? s.modalCreateBtnDisabled : s.modalCreateBtn}
+                    onClick={handleCreateSlice}
+                    disabled={!newSliceName.trim() || creating || (newSliceType === 'kanban' && !newKanbanField)}
                   >
-                    {creating ? 'Creating\u2026' : 'Create view'}
+                    {creating ? 'Creating\u2026' : 'Create slice'}
                   </button>
                 </div>
               </div>
@@ -556,7 +556,7 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       color: t.textMuted,
       fontStyle: 'italic' as const,
     },
-    viewItem: {
+    sliceItem: {
       display: 'flex',
       alignItems: 'center',
       gap: 8,
@@ -568,12 +568,12 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       color: t.text,
       transition: 'background 0.1s',
     } as React.CSSProperties,
-    viewItemActive: {
+    sliceItemActive: {
       background: t.accentBg,
       color: t.accent,
       fontWeight: 500,
     } as React.CSSProperties,
-    viewIcon: {
+    sliceIcon: {
       fontSize: 12,
       opacity: 0.7,
       flexShrink: 0,
@@ -581,14 +581,14 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       textAlign: 'center' as const,
       color: 'inherit',
     },
-    viewName: {
+    sliceName: {
       flex: 1,
       overflow: 'hidden',
       textOverflow: 'ellipsis',
       whiteSpace: 'nowrap' as const,
       color: 'inherit',
     },
-    viewBadge: {
+    sliceBadge: {
       fontSize: 10,
       color: t.textMuted,
       flexShrink: 0,

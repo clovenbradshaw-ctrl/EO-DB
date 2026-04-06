@@ -205,7 +205,7 @@ interface FieldAssignment {
 
 interface SpaceSettings {
   creators_can_delete_own?: boolean;  // default: true
-  lock_shared_views?: boolean;        // default: false
+  lock_shared_slices?: boolean;        // default: false
 }
 ```
 
@@ -274,7 +274,7 @@ interface ResolvedPermissions {
   can_edit_any_record: boolean;        // PL >= 25
   can_edit_own_records: boolean;       // PL >= 10
   can_create_fields: boolean;          // PL >= 50
-  can_build_views: boolean;            // PL >= 50
+  can_build_slices: boolean;            // PL >= 50
   can_manage_members: boolean;         // PL >= 50 (Matrix invite/kick)
   can_set_governance: boolean;         // PL >= 50
   can_manage_keys: boolean;            // PL >= 100

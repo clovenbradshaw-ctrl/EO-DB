@@ -1,24 +1,24 @@
 import { useState, useEffect, useRef } from 'react';
-import { useViewStore } from '../store/view-store';
+import { useSliceStore } from '../store/slice-store';
 import { useEoStore } from '../store/eo-store';
 import { useTheme, type Theme } from '../theme';
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
-import { VIEW_TYPE_META, type SavedView, type TableViewConfig, type ViewType } from './view-types';
+import { SLICE_TYPE_META, type SavedSlice, type TableSliceConfig, type SliceType } from './slice-types';
 import type { UserTypeDefinition } from '../permissions/types';
 
-interface ViewTabsProps {
+interface SliceTabsProps {
   scope: string;
   session: { userId: string };
-  /** Currently active user type ID (for filtering type-scoped views) */
+  /** Currently active user type ID (for filtering type-scoped slices) */
   activeUserType?: string | null;
   /** All user type definitions for the current space (for the type selector UI) */
   userTypeDefinitions?: UserTypeDefinition[];
-  /** Whether the current user is admin+ (can set type visibility on views) */
-  canManageViews?: boolean;
+  /** Whether the current user is admin+ (can set type visibility on slices) */
+  canManageSlices?: boolean;
 }
 
-export function ViewTabs({ scope, session, activeUserType, userTypeDefinitions, canManageViews }: ViewTabsProps) {
-  const viewStore = useViewStore();
+export function SliceTabs({ scope, session, activeUserType, userTypeDefinitions, canManageSlices }: SliceTabsProps) {
+  const sliceStore = useSliceStore();
   const dispatch = useEoStore((s) => s.dispatch);
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
   const ready = useEoStore((s) => s.ready);
@@ -26,37 +26,37 @@ export function ViewTabs({ scope, session, activeUserType, userTypeDefinitions, 
   const { theme } = useTheme();
   const s = makeStyles(theme);
 
-  const sig = viewStore.getSig(scope);
-  const savedViews = viewStore.getViewsForScope(scope);
+  const sig = sliceStore.getSig(scope);
+  const savedSlices = sliceStore.getSlicesForScope(scope);
 
   const [showNameInput, setShowNameInput] = useState(false);
-  const [newViewName, setNewViewName] = useState('');
-  const [newViewType, setNewViewType] = useState<ViewType>('grid');
-  const [newViewVisibility, setNewViewVisibility] = useState<'private' | 'shared'>('shared');
+  const [newSliceName, setNewSliceName] = useState('');
+  const [newSliceType, setNewSliceType] = useState<SliceType>('grid');
+  const [newSliceVisibility, setNewSliceVisibility] = useState<'private' | 'shared'>('shared');
   const [newVisibleToTypes, setNewVisibleToTypes] = useState<string[]>([]);
   const [newReadOnlyForTypes, setNewReadOnlyForTypes] = useState<string[]>([]);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
-  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; viewId: string } | null>(null);
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; sliceId: string } | null>(null);
 
-  const prevViewsKeyRef = useRef<string>('');
+  const prevSlicesKeyRef = useRef<string>('');
 
-  // Load saved views from DB
+  // Load saved slices from DB
   useEffect(() => {
     if (!ready) return;
-    getStateByPrefix(`${scope}._views.`).then((states) => {
+    getStateByPrefix(`${scope}._slices.`).then((states) => {
       const key = states.map(s => s.target + ':' + s.last_seq).join('|');
-      if (key === prevViewsKeyRef.current) return;
-      prevViewsKeyRef.current = key;
+      if (key === prevSlicesKeyRef.current) return;
+      prevSlicesKeyRef.current = key;
 
-      const viewDepth = scope.split('.').length + 2; // scope._views.viewId
-      const views: SavedView[] = states
-        .filter((st) => st.target.split('.').length === viewDepth && st.value?.name)
+      const sliceDepth = scope.split('.').length + 2; // scope._slices.sliceId
+      const slices: SavedSlice[] = states
+        .filter((st) => st.target.split('.').length === sliceDepth && st.value?.name)
         .map((st) => ({
           id: st.target.split('.').pop()!,
           name: st.value.name,
           scope,
-          viewType: st.value.viewType || 'grid',
+          sliceType: st.value.sliceType || 'grid',
           config: st.value.config || {
             columnOrder: [],
             columnWidths: {},
@@ -74,25 +74,25 @@ export function ViewTabs({ scope, session, activeUserType, userTypeDefinitions, 
           visibleToTypes: st.value.visibleToTypes,
           readOnlyForTypes: st.value.readOnlyForTypes,
         }));
-      viewStore.registerSavedViews(views);
+      sliceStore.registerSavedSlices(slices);
     });
-  }, [ready, lastSeq, getStateByPrefix, scope, viewStore]);
+  }, [ready, lastSeq, getStateByPrefix, scope, sliceStore]);
 
   async function handleSaveNew() {
-    if (!newViewName.trim()) return;
-    const viewId = crypto.randomUUID().replace(/-/g, '').slice(0, 12);
+    if (!newSliceName.trim()) return;
+    const sliceId = crypto.randomUUID().replace(/-/g, '').slice(0, 12);
     const config = sig.config;
     const now = new Date().toISOString();
 
     try {
       await dispatch({
         op: 'INS',
-        target: `${scope}._views.${viewId}`,
+        target: `${scope}._slices.${sliceId}`,
         operand: {
-          name: newViewName.trim(),
-          viewType: newViewType,
+          name: newSliceName.trim(),
+          sliceType: newSliceType,
           config,
-          visibility: newViewVisibility,
+          visibility: newSliceVisibility,
           createdBy: session.userId,
           createdAt: now,
           updatedAt: now,
@@ -105,55 +105,55 @@ export function ViewTabs({ scope, session, activeUserType, userTypeDefinitions, 
         client_event_id: crypto.randomUUID(),
       });
 
-      const savedView: SavedView = {
-        id: viewId,
-        name: newViewName.trim(),
+      const savedSlice: SavedSlice = {
+        id: sliceId,
+        name: newSliceName.trim(),
         scope,
-        viewType: newViewType,
+        sliceType: newSliceType,
         config,
-        visibility: newViewVisibility,
+        visibility: newSliceVisibility,
         createdBy: session.userId,
         createdAt: now,
         updatedAt: now,
         visibleToTypes: newVisibleToTypes.length > 0 ? newVisibleToTypes : undefined,
         readOnlyForTypes: newReadOnlyForTypes.length > 0 ? newReadOnlyForTypes : undefined,
       };
-      viewStore.registerSavedViews([savedView]);
-      viewStore.markSaved(scope, viewId);
+      sliceStore.registerSavedSlices([savedSlice]);
+      sliceStore.markSaved(scope, sliceId);
     } catch (err) {
-      console.error('[ViewTabs] Failed to create view:', err);
+      console.error('[SliceTabs] Failed to create slice:', err);
       // Still register optimistically — the fold may have succeeded
-      const savedView: SavedView = {
-        id: viewId,
-        name: newViewName.trim(),
+      const savedSlice: SavedSlice = {
+        id: sliceId,
+        name: newSliceName.trim(),
         scope,
-        viewType: newViewType,
+        sliceType: newSliceType,
         config,
-        visibility: newViewVisibility,
+        visibility: newSliceVisibility,
         createdBy: session.userId,
         createdAt: now,
         updatedAt: now,
         visibleToTypes: newVisibleToTypes.length > 0 ? newVisibleToTypes : undefined,
         readOnlyForTypes: newReadOnlyForTypes.length > 0 ? newReadOnlyForTypes : undefined,
       };
-      viewStore.registerSavedViews([savedView]);
-      viewStore.markSaved(scope, viewId);
+      sliceStore.registerSavedSlices([savedSlice]);
+      sliceStore.markSaved(scope, sliceId);
     }
 
     setShowNameInput(false);
-    setNewViewName('');
-    setNewViewType('grid');
+    setNewSliceName('');
+    setNewSliceType('grid');
     setNewVisibleToTypes([]);
     setNewReadOnlyForTypes([]);
   }
 
-  async function handleUpdateView() {
-    if (!sig.activeViewId) return;
+  async function handleUpdateSlice() {
+    if (!sig.activeSliceId) return;
     const now = new Date().toISOString();
     try {
       await dispatch({
         op: 'DEF',
-        target: `${scope}._views.${sig.activeViewId}`,
+        target: `${scope}._slices.${sig.activeSliceId}`,
         operand: {
           config: sig.config,
           updatedAt: now,
@@ -162,54 +162,54 @@ export function ViewTabs({ scope, session, activeUserType, userTypeDefinitions, 
         ts: now,
         acquired_ts: now,
       });
-      // Update in-memory saved view
-      const existing = viewStore.savedViews[sig.activeViewId];
+      // Update in-memory saved slice
+      const existing = sliceStore.savedSlices[sig.activeSliceId];
       if (existing) {
-        viewStore.registerSavedViews([{ ...existing, config: sig.config, updatedAt: now }]);
+        sliceStore.registerSavedSlices([{ ...existing, config: sig.config, updatedAt: now }]);
       }
-      viewStore.markSaved(scope, sig.activeViewId);
-    } catch (err) { console.error('[ViewTabs] Failed to update view:', err); }
+      sliceStore.markSaved(scope, sig.activeSliceId);
+    } catch (err) { console.error('[SliceTabs] Failed to update slice:', err); }
   }
 
-  async function handleDeleteView(viewId: string) {
+  async function handleDeleteSlice(sliceId: string) {
     try {
       await dispatch({
         op: 'DEF',
-        target: `${scope}._views.${viewId}`,
+        target: `${scope}._slices.${sliceId}`,
         operand: { _deleted: true },
         agent: `user:${session.userId}`,
         ts: new Date().toISOString(),
         acquired_ts: new Date().toISOString(),
       });
-    } catch (err) { console.error('[ViewTabs] view op failed:', err); }
-    viewStore.removeSavedView(viewId);
-    if (sig.activeViewId === viewId) {
-      viewStore.resetToDefault(scope);
+    } catch (err) { console.error('[SliceTabs] slice op failed:', err); }
+    sliceStore.removeSavedSlice(sliceId);
+    if (sig.activeSliceId === sliceId) {
+      sliceStore.resetToDefault(scope);
     }
   }
 
-  async function handleRename(viewId: string) {
+  async function handleRename(sliceId: string) {
     if (!renameValue.trim()) { setRenaming(null); return; }
     const now = new Date().toISOString();
     try {
       await dispatch({
         op: 'DEF',
-        target: `${scope}._views.${viewId}`,
+        target: `${scope}._slices.${sliceId}`,
         operand: { name: renameValue.trim(), updatedAt: now },
         agent: `user:${session.userId}`,
         ts: now,
         acquired_ts: now,
       });
-      const existing = viewStore.savedViews[viewId];
+      const existing = sliceStore.savedSlices[sliceId];
       if (existing) {
-        viewStore.registerSavedViews([{ ...existing, name: renameValue.trim(), updatedAt: now }]);
+        sliceStore.registerSavedSlices([{ ...existing, name: renameValue.trim(), updatedAt: now }]);
       }
-    } catch (err) { console.error('[ViewTabs] view op failed:', err); }
+    } catch (err) { console.error('[SliceTabs] slice op failed:', err); }
     setRenaming(null);
   }
 
-  async function handleDuplicate(viewId: string) {
-    const source = viewStore.savedViews[viewId];
+  async function handleDuplicate(sliceId: string) {
+    const source = sliceStore.savedSlices[sliceId];
     if (!source) return;
     const newId = crypto.randomUUID().replace(/-/g, '').slice(0, 12);
     const now = new Date().toISOString();
@@ -217,10 +217,10 @@ export function ViewTabs({ scope, session, activeUserType, userTypeDefinitions, 
     try {
       await dispatch({
         op: 'INS',
-        target: `${scope}._views.${newId}`,
+        target: `${scope}._slices.${newId}`,
         operand: {
           name: newName,
-          viewType: source.viewType || 'grid',
+          sliceType: source.sliceType || 'grid',
           config: source.config,
           visibility: source.visibility,
           createdBy: session.userId,
@@ -232,50 +232,50 @@ export function ViewTabs({ scope, session, activeUserType, userTypeDefinitions, 
         acquired_ts: now,
         client_event_id: crypto.randomUUID(),
       });
-      viewStore.registerSavedViews([{
+      sliceStore.registerSavedSlices([{
         ...source, id: newId, name: newName, createdBy: session.userId, createdAt: now, updatedAt: now,
       }]);
-    } catch (err) { console.error('[ViewTabs] view op failed:', err); }
+    } catch (err) { console.error('[SliceTabs] slice op failed:', err); }
   }
 
-  async function handleToggleVisibility(viewId: string) {
-    const view = viewStore.savedViews[viewId];
-    if (!view) return;
-    const newVis = view.visibility === 'private' ? 'shared' : 'private';
+  async function handleToggleVisibility(sliceId: string) {
+    const slice = sliceStore.savedSlices[sliceId];
+    if (!slice) return;
+    const newVis = slice.visibility === 'private' ? 'shared' : 'private';
     const now = new Date().toISOString();
     try {
       await dispatch({
         op: 'DEF',
-        target: `${scope}._views.${viewId}`,
+        target: `${scope}._slices.${sliceId}`,
         operand: { visibility: newVis, updatedAt: now },
         agent: `user:${session.userId}`,
         ts: now,
         acquired_ts: now,
       });
-      viewStore.registerSavedViews([{ ...view, visibility: newVis, updatedAt: now }]);
-    } catch (err) { console.error('[ViewTabs] view op failed:', err); }
+      sliceStore.registerSavedSlices([{ ...slice, visibility: newVis, updatedAt: now }]);
+    } catch (err) { console.error('[SliceTabs] slice op failed:', err); }
   }
 
-  function getCtxMenuItems(viewId: string): ContextMenuItem[] {
-    const view = viewStore.savedViews[viewId];
-    if (!view) return [];
+  function getCtxMenuItems(sliceId: string): ContextMenuItem[] {
+    const slice = sliceStore.savedSlices[sliceId];
+    if (!slice) return [];
     return [
       {
         label: 'Rename',
-        onClick: () => { setRenaming(viewId); setRenameValue(view.name); setCtxMenu(null); },
+        onClick: () => { setRenaming(sliceId); setRenameValue(slice.name); setCtxMenu(null); },
       },
       {
         label: 'Duplicate',
-        onClick: () => { handleDuplicate(viewId); setCtxMenu(null); },
+        onClick: () => { handleDuplicate(sliceId); setCtxMenu(null); },
       },
       {
-        label: view.visibility === 'private' ? 'Make shared' : 'Make private',
-        onClick: () => { handleToggleVisibility(viewId); setCtxMenu(null); },
+        label: slice.visibility === 'private' ? 'Make shared' : 'Make private',
+        onClick: () => { handleToggleVisibility(sliceId); setCtxMenu(null); },
       },
       { label: '', onClick: () => {}, separator: true },
       {
-        label: 'Delete view',
-        onClick: () => { handleDeleteView(viewId); setCtxMenu(null); },
+        label: 'Delete slice',
+        onClick: () => { handleDeleteSlice(sliceId); setCtxMenu(null); },
       },
     ];
   }
@@ -283,64 +283,64 @@ export function ViewTabs({ scope, session, activeUserType, userTypeDefinitions, 
   return (
     <div style={s.wrapper}>
       <div style={s.container}>
-        {/* Default view tab */}
+        {/* Default slice tab */}
         <button
-          style={sig.activeViewId === null ? s.tabActive : s.tab}
-          onClick={() => viewStore.resetToDefault(scope)}
+          style={sig.activeSliceId === null ? s.tabActive : s.tab}
+          onClick={() => sliceStore.resetToDefault(scope)}
         >
-          <span style={{ fontSize: 11, opacity: 0.7 }}>{VIEW_TYPE_META.grid.icon}</span> Grid view
+          <span style={{ fontSize: 11, opacity: 0.7 }}>{SLICE_TYPE_META.grid.icon}</span> Grid view
         </button>
 
         {/* Schema tab — always visible, not removable */}
         <button
-          style={sig.activeViewId === '__schema' ? s.tabActive : s.tab}
-          onClick={() => viewStore.activateView(scope, {
-            id: '__schema', name: 'Schema', scope, viewType: 'schema',
+          style={sig.activeSliceId === '__schema' ? s.tabActive : s.tab}
+          onClick={() => sliceStore.activateSlice(scope, {
+            id: '__schema', name: 'Schema', scope, sliceType: 'schema',
             config: { columnOrder: [], columnWidths: {}, hiddenColumns: [], sorts: [], filters: [], filterConjunction: 'AND', showLastUpdated: false },
             visibility: 'shared', createdBy: '', createdAt: '', updatedAt: '',
           })}
         >
-          <span style={{ fontSize: 11, opacity: 0.7 }}>{VIEW_TYPE_META.schema.icon}</span> Schema
+          <span style={{ fontSize: 11, opacity: 0.7 }}>{SLICE_TYPE_META.schema.icon}</span> Schema
         </button>
 
-        {/* Saved view tabs — filtered by active user type */}
-        {savedViews.filter((v) => {
-          if (viewStore.savedViews[v.id]?.scope && viewStore.savedViews[v.id]?.scope !== scope) return false;
+        {/* Saved slice tabs — filtered by active user type */}
+        {savedSlices.filter((v) => {
+          if (sliceStore.savedSlices[v.id]?.scope && sliceStore.savedSlices[v.id]?.scope !== scope) return false;
           // Filter by type visibility
           const vt = v.visibleToTypes;
           if (vt && vt.length > 0 && activeUserType && !vt.includes(activeUserType)) return false;
           return true;
-        }).map((view) => {
-          const vtMeta = VIEW_TYPE_META[view.viewType || 'grid'];
+        }).map((slice) => {
+          const vtMeta = SLICE_TYPE_META[slice.sliceType || 'grid'];
           return (
             <button
-              key={view.id}
-              style={sig.activeViewId === view.id ? s.tabActive : s.tab}
-              onClick={() => viewStore.activateView(scope, view)}
+              key={slice.id}
+              style={sig.activeSliceId === slice.id ? s.tabActive : s.tab}
+              onClick={() => sliceStore.activateSlice(scope, slice)}
               onContextMenu={(e) => {
                 e.preventDefault();
-                setCtxMenu({ x: e.clientX, y: e.clientY, viewId: view.id });
+                setCtxMenu({ x: e.clientX, y: e.clientY, sliceId: slice.id });
               }}
             >
-              {renaming === view.id ? (
+              {renaming === slice.id ? (
                 <input
                   autoFocus
                   value={renameValue}
                   onChange={(e) => setRenameValue(e.target.value)}
                   onKeyDown={(e) => {
-                    if (e.key === 'Enter') handleRename(view.id);
+                    if (e.key === 'Enter') handleRename(slice.id);
                     if (e.key === 'Escape') setRenaming(null);
                   }}
-                  onBlur={() => handleRename(view.id)}
+                  onBlur={() => handleRename(slice.id)}
                   onClick={(e) => e.stopPropagation()}
                   style={s.renameInput}
                 />
               ) : (
                 <>
                   <span style={{ fontSize: 11, opacity: 0.7 }}>{vtMeta.icon}</span>
-                  {view.visibility === 'private' && <span style={{ marginRight: 2, fontSize: 10 }}>{'\uD83D\uDD12'}</span>}
-                  {view.name}
-                  {sig.activeViewId === view.id && sig.dirty && (
+                  {slice.visibility === 'private' && <span style={{ marginRight: 2, fontSize: 10 }}>{'\uD83D\uDD12'}</span>}
+                  {slice.name}
+                  {sig.activeSliceId === slice.id && sig.dirty && (
                     <span style={s.dirtyDot} title="Unsaved changes" />
                   )}
                 </>
@@ -351,49 +351,49 @@ export function ViewTabs({ scope, session, activeUserType, userTypeDefinitions, 
 
         {/* Save / Update button */}
         {sig.dirty && (
-          sig.activeViewId ? (
-            <button style={s.saveBtn} onClick={handleUpdateView}>
+          sig.activeSliceId ? (
+            <button style={s.saveBtn} onClick={handleUpdateSlice}>
               Save
             </button>
           ) : (
             <button style={s.saveBtn} onClick={() => setShowNameInput(true)}>
-              Save as view
+              Save as slice
             </button>
           )
         )}
 
-        {/* New view button */}
-        <button style={s.addBtn} onClick={() => setShowNameInput(true)} title="Create new view">
+        {/* New slice button */}
+        <button style={s.addBtn} onClick={() => setShowNameInput(true)} title="Create new slice">
           +
         </button>
       </div>
 
-      {/* New view name input popover — rendered outside the scrolling container so it isn't clipped */}
+      {/* New slice name input popover — rendered outside the scrolling container so it isn't clipped */}
       {showNameInput && (
         <>
           <div style={s.overlay} onClick={() => setShowNameInput(false)} />
           <div style={s.popover}>
             <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 8, color: theme.textHeading }}>
-              New view
+              New slice
             </div>
             <input
               autoFocus
-              value={newViewName}
-              onChange={(e) => setNewViewName(e.target.value)}
+              value={newSliceName}
+              onChange={(e) => setNewSliceName(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') handleSaveNew(); if (e.key === 'Escape') setShowNameInput(false); }}
-              placeholder="View name..."
+              placeholder="Slice name..."
               style={s.nameInput}
             />
-            {/* View type selector */}
+            {/* Slice type selector */}
             <div style={{ display: 'flex', gap: 4, marginTop: 8, flexWrap: 'wrap' as const }}>
-              {(Object.keys(VIEW_TYPE_META) as ViewType[]).map((vt) => {
-                const meta = VIEW_TYPE_META[vt];
-                const active = newViewType === vt;
+              {(Object.keys(SLICE_TYPE_META) as SliceType[]).map((vt) => {
+                const meta = SLICE_TYPE_META[vt];
+                const active = newSliceType === vt;
                 return (
                   <button
                     key={vt}
                     type="button"
-                    onClick={() => setNewViewType(vt)}
+                    onClick={() => setNewSliceType(vt)}
                     style={{
                       display: 'inline-flex', alignItems: 'center', gap: 4,
                       padding: '4px 8px', fontSize: 11, fontWeight: active ? 600 : 400,
@@ -413,21 +413,21 @@ export function ViewTabs({ scope, session, activeUserType, userTypeDefinitions, 
             <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
               <button
                 type="button"
-                style={newViewVisibility === 'private' ? s.visBtnActive : s.visBtn}
-                onClick={() => setNewViewVisibility('private')}
+                style={newSliceVisibility === 'private' ? s.visBtnActive : s.visBtn}
+                onClick={() => setNewSliceVisibility('private')}
               >
                 {'\uD83D\uDD12'} Private
               </button>
               <button
                 type="button"
-                style={newViewVisibility === 'shared' ? s.visBtnActive : s.visBtn}
-                onClick={() => setNewViewVisibility('shared')}
+                style={newSliceVisibility === 'shared' ? s.visBtnActive : s.visBtn}
+                onClick={() => setNewSliceVisibility('shared')}
               >
                 {'\uD83D\uDD13'} Shared
               </button>
             </div>
             {/* User type visibility — admin+ only */}
-            {canManageViews && userTypeDefinitions && userTypeDefinitions.length > 0 && (
+            {canManageSlices && userTypeDefinitions && userTypeDefinitions.length > 0 && (
               <>
                 <div style={{ fontSize: 10, fontWeight: 600, marginTop: 10, marginBottom: 4, color: theme.textMuted, textTransform: 'uppercase' as const, letterSpacing: '0.5px' }}>
                   Visible to types
@@ -459,7 +459,7 @@ export function ViewTabs({ scope, session, activeUserType, userTypeDefinitions, 
                   })}
                 </div>
                 <div style={{ fontSize: 9, color: theme.textMuted, marginTop: 2 }}>
-                  {newVisibleToTypes.length === 0 ? 'All types can see this view' : `Only selected types see this view`}
+                  {newVisibleToTypes.length === 0 ? 'All types can see this slice' : `Only selected types see this slice`}
                 </div>
 
                 <div style={{ fontSize: 10, fontWeight: 600, marginTop: 8, marginBottom: 4, color: theme.textMuted, textTransform: 'uppercase' as const, letterSpacing: '0.5px' }}>
@@ -496,8 +496,8 @@ export function ViewTabs({ scope, session, activeUserType, userTypeDefinitions, 
                 </div>
               </>
             )}
-            <button style={!newViewName.trim() ? s.createBtnDisabled : s.createBtn} onClick={handleSaveNew} disabled={!newViewName.trim()}>
-              Create view
+            <button style={!newSliceName.trim() ? s.createBtnDisabled : s.createBtn} onClick={handleSaveNew} disabled={!newSliceName.trim()}>
+              Create slice
             </button>
           </div>
         </>
@@ -508,7 +508,7 @@ export function ViewTabs({ scope, session, activeUserType, userTypeDefinitions, 
         <ContextMenu
           x={ctxMenu.x}
           y={ctxMenu.y}
-          items={getCtxMenuItems(ctxMenu.viewId)}
+          items={getCtxMenuItems(ctxMenu.sliceId)}
           onClose={() => setCtxMenu(null)}
         />
       )}
