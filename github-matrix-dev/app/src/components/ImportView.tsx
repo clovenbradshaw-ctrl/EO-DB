@@ -22,11 +22,24 @@ interface ParsedRow {
 
 type ImportMode = 'event' | 'generic' | 'keyed';
 
+interface EdgeDetail {
+  /** Field on the source collection that references the target. */
+  field: string;
+  /** Source collection name. */
+  sourceCollection: string;
+  /** Target collection name. */
+  targetCollection: string;
+  /** Number of individual CON events generated for this relationship. */
+  count: number;
+}
+
 interface KeyedSummary {
   /** Collections discovered: name → entity count. */
   collections: Array<{ name: string; count: number; idField: string }>;
   /** Number of CON edge events generated from auto-detected references. */
   edgeCount: number;
+  /** Per-relationship breakdown of detected edges. */
+  edges: EdgeDetail[];
 }
 
 type ImportStatus = 'idle' | 'parsed' | 'importing' | 'done' | 'error';
@@ -190,6 +203,8 @@ function parseKeyedCollections(obj: Record<string, any>): KeyedParse | null {
 
   // Auto-detect foreign key refs → CON events.
   let edgeCount = 0;
+  // Track per-relationship edge counts: "sourceCollection|field|targetCollection" → count
+  const edgeCountMap = new Map<string, { field: string; sourceCollection: string; targetCollection: string; count: number }>();
   for (const [name, records] of Object.entries(collections)) {
     const idField = meta.get(name)!.idField;
     for (const record of records) {
@@ -211,10 +226,20 @@ function parseKeyedCollections(obj: Record<string, any>): KeyedParse | null {
             _keyed: true,
           });
           edgeCount++;
+          const edgeKey = `${name}|${field}|${entry.collection}`;
+          const existing = edgeCountMap.get(edgeKey);
+          if (existing) {
+            existing.count++;
+          } else {
+            edgeCountMap.set(edgeKey, { field, sourceCollection: name, targetCollection: entry.collection, count: 1 });
+          }
         }
       }
     }
   }
+
+  const edges: EdgeDetail[] = Array.from(edgeCountMap.values())
+    .sort((a, b) => b.count - a.count);
 
   const summary: KeyedSummary = {
     collections: names.map(n => ({
@@ -223,6 +248,7 @@ function parseKeyedCollections(obj: Record<string, any>): KeyedParse | null {
       idField: meta.get(n)!.idField,
     })),
     edgeCount,
+    edges,
   };
 
   return { rows, summary };
@@ -593,34 +619,57 @@ export function ImportView({ onImportComplete }: ImportViewProps) {
         </div>
       )}
 
-      {/* Detected tables summary (keyed mode) */}
+      {/* Detected nodes & edges summary (keyed mode) */}
       {mode === 'keyed' && keyedSummary && status === 'parsed' && (
-        <div style={{ marginTop: 16 }}>
-          <div style={{ fontSize: 11, fontWeight: 600, color: t.textSecondary, textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 6 }}>
-            Detected Tables ({keyedSummary.collections.length})
+        <div style={{ marginTop: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
+          {/* Nodes section */}
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 600, color: t.textSecondary, textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 6 }}>
+              Nodes &mdash; {keyedSummary.collections.length} {keyedSummary.collections.length === 1 ? 'type' : 'types'}, {keyedSummary.collections.reduce((s, c) => s + c.count, 0)} entities
+            </div>
+            <div style={{ border: `1px solid ${t.border}`, borderRadius: 6, background: t.bgMuted, padding: '8px 0' }}>
+              {keyedSummary.collections.map((c) => (
+                <div key={c.name} style={{
+                  display: 'flex', justifyContent: 'space-between',
+                  padding: '4px 12px', fontSize: 12, color: t.text,
+                  fontFamily: "'JetBrains Mono', monospace",
+                }}>
+                  <span>{c.name}</span>
+                  <span style={{ color: t.textMuted }}>
+                    {c.count} {c.count === 1 ? 'entity' : 'entities'} · id: {c.idField}
+                  </span>
+                </div>
+              ))}
+            </div>
           </div>
-          <div style={{ border: `1px solid ${t.border}`, borderRadius: 6, background: t.bgMuted, padding: '8px 0' }}>
-            {keyedSummary.collections.map((c) => (
-              <div key={c.name} style={{
-                display: 'flex', justifyContent: 'space-between',
-                padding: '4px 12px', fontSize: 12, color: t.text,
-                fontFamily: "'JetBrains Mono', monospace",
-              }}>
-                <span>{c.name}</span>
-                <span style={{ color: t.textMuted }}>
-                  {c.count} {c.count === 1 ? 'entity' : 'entities'} · id: {c.idField}
-                </span>
+
+          {/* Edges section */}
+          {keyedSummary.edges.length > 0 && (
+            <div>
+              <div style={{ fontSize: 11, fontWeight: 600, color: t.textSecondary, textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 6 }}>
+                Edges &mdash; {keyedSummary.edgeCount} connections from {keyedSummary.edges.length} {keyedSummary.edges.length === 1 ? 'relationship' : 'relationships'}
               </div>
-            ))}
-            {keyedSummary.edgeCount > 0 && (
-              <div style={{
-                padding: '6px 12px 4px', fontSize: 11, color: t.textMuted,
-                borderTop: `1px solid ${t.border}`, marginTop: 4,
-              }}>
-                + {keyedSummary.edgeCount} auto-detected {keyedSummary.edgeCount === 1 ? 'edge' : 'edges'} (CON)
+              <div style={{ border: `1px solid ${t.border}`, borderRadius: 6, background: t.bgMuted, padding: '8px 0' }}>
+                {keyedSummary.edges.map((e, i) => (
+                  <div key={i} style={{
+                    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                    padding: '4px 12px', fontSize: 12, color: t.text,
+                    fontFamily: "'JetBrains Mono', monospace",
+                  }}>
+                    <span>
+                      <span>{e.sourceCollection}</span>
+                      <span style={{ color: t.textMuted }}>.{e.field}</span>
+                      <span style={{ color: t.textSecondary, margin: '0 6px' }}>&rarr;</span>
+                      <span>{e.targetCollection}</span>
+                    </span>
+                    <span style={{ color: t.textMuted, fontSize: 11 }}>
+                      {e.count} {e.count === 1 ? 'edge' : 'edges'}
+                    </span>
+                  </div>
+                ))}
               </div>
-            )}
-          </div>
+            </div>
+          )}
         </div>
       )}
 
