@@ -159,7 +159,7 @@ export function FigureFields({ figure, onNavigate, profileFields }: FigureFields
                   onBlur={(e) => handleEditSave(key, e.target.value)}
                 />
               </form>
-            ) : renderFieldValue(val, onNavigate, theme, resolver)}
+            ) : renderFieldValue(val, key, onNavigate, theme, resolver)}
           </div>
         </div>
       ))}
@@ -260,45 +260,20 @@ export function FigureFields({ figure, onNavigate, profileFields }: FigureFields
 
 function renderFieldValue(
   val: any,
+  fieldKey: string,
   onNavigate: (t: string) => void,
   t: Theme,
   resolver: IdResolver,
 ): React.ReactNode {
-  // Object with CON linked array
-  if (typeof val === 'object' && val !== null && val.linked && Array.isArray(val.linked)) {
-    return (
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-        {val.linked.map((target: string) => {
-          const resolved = resolver.resolveTarget(target);
-          const shortId = target.split('.').pop() || target;
-          return (
-            <div
-              key={target}
-              onClick={() => onNavigate(target)}
-              style={{ color: t.purple, cursor: 'pointer', fontSize: 13 }}
-            >
-              <span style={{ fontFamily: "'JetBrains Mono', monospace" }}>{shortId}</span>
-              {resolved?.name && (
-                <span style={{ color: t.text, fontWeight: 400 }}>{' · '}{resolved.name}</span>
-              )}
-            </div>
-          );
-        })}
-      </div>
-    );
-  }
+  // Don't resolve the record's own `id` field as a foreign key
+  const skipResolve = fieldKey === 'id';
 
-  // Other objects (non-linked)
-  if (typeof val === 'object' && val !== null) {
-    return <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: t.textSecondary }}>{JSON.stringify(val, null, 1)}</span>;
-  }
-
-  // Array of entity IDs
+  // Array of entity IDs (check BEFORE generic object, since arrays are objects)
   if (isEntityIdArray(val)) {
     return (
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
         {val.map((id: string) => {
-          const resolved = resolver.resolve(id);
+          const resolved = skipResolve ? null : resolver.resolve(id);
           return (
             <span
               key={id}
@@ -328,8 +303,37 @@ function renderFieldValue(
     );
   }
 
-  // Single entity ID string
-  if (typeof val === 'string' && isEntityId(val)) {
+  // Object with CON linked array
+  if (typeof val === 'object' && val !== null && val.linked && Array.isArray(val.linked)) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+        {val.linked.map((target: string) => {
+          const resolved = resolver.resolveTarget(target);
+          const shortId = target.split('.').pop() || target;
+          return (
+            <div
+              key={target}
+              onClick={() => onNavigate(target)}
+              style={{ color: t.purple, cursor: 'pointer', fontSize: 13 }}
+            >
+              <span style={{ fontFamily: "'JetBrains Mono', monospace" }}>{shortId}</span>
+              {resolved?.name && (
+                <span style={{ color: t.text, fontWeight: 400 }}>{' · '}{resolved.name}</span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+
+  // Other objects (non-linked, non-array)
+  if (typeof val === 'object' && val !== null) {
+    return <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: t.textSecondary }}>{JSON.stringify(val, null, 1)}</span>;
+  }
+
+  // Single entity ID string (not the `id` field itself)
+  if (!skipResolve && typeof val === 'string' && isEntityId(val)) {
     const resolved = resolver.resolve(val);
     if (resolved) {
       return (
