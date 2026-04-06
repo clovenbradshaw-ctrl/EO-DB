@@ -112,17 +112,17 @@ export async function createGovernanceRoom(
 /**
  * Create a private room for a single view.
  * Only the owner can write (events_default: 100). Others can be invited
- * with lower power levels to share the view read-only or with edit access.
- * Each private view gets its own room for maximum isolation.
+ * with lower power levels to share the slice read-only or with edit access.
+ * Each private slice gets its own room for maximum isolation.
  */
-export async function createViewRoom(
+export async function createSliceRoom(
   client: IMatrixClient,
   spaceName: string,
-  viewName: string,
+  sliceName: string,
   ownerUserId: string,
 ): Promise<string> {
   const result = await client.createRoom({
-    name: `${spaceName} — view: ${viewName}`,
+    name: `${spaceName} — slice: ${sliceName}`,
     visibility: 'private',
     preset: 'private_chat',
     initial_state: [

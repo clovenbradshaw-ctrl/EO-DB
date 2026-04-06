@@ -1,49 +1,49 @@
 import { create } from 'zustand';
 import type { SortRule } from '../components/SortPanel';
 import type { FilterRule } from '../components/filter-types';
-import type { TableViewConfig, ViewSig, SavedView } from '../components/view-types';
-import { createDefaultConfig } from '../components/view-types';
+import type { TableSliceConfig, SliceSig, SavedSlice } from '../components/slice-types';
+import { createDefaultConfig } from '../components/slice-types';
 
 // ---------------------------------------------------------------------------
 // localStorage helpers — SIG persistence
 // ---------------------------------------------------------------------------
 
 function sigKey(scope: string): string {
-  return `eo-view-sig:${scope}`;
+  return `eo-slice-sig:${scope}`;
 }
 
-function loadSig(scope: string): ViewSig | null {
+function loadSig(scope: string): SliceSig | null {
   try {
     const raw = localStorage.getItem(sigKey(scope));
     if (!raw) return null;
-    return JSON.parse(raw) as ViewSig;
+    return JSON.parse(raw) as SliceSig;
   } catch {
     return null;
   }
 }
 
-function persistSig(sig: ViewSig): void {
+function persistSig(sig: SliceSig): void {
   try {
     localStorage.setItem(sigKey(sig.scope), JSON.stringify(sig));
   } catch { /* quota exceeded — silently drop */ }
 }
 
 // ---------------------------------------------------------------------------
-// localStorage helpers — savedViews persistence
+// localStorage helpers — savedSlices persistence
 // ---------------------------------------------------------------------------
 
-const SAVED_VIEWS_KEY = 'eo-saved-views';
+const SAVED_SLICES_KEY = 'eo-saved-slices';
 
-function loadSavedViews(): Record<string, SavedView> {
+function loadSavedSlices(): Record<string, SavedSlice> {
   try {
-    const raw = localStorage.getItem(SAVED_VIEWS_KEY);
+    const raw = localStorage.getItem(SAVED_SLICES_KEY);
     return raw ? JSON.parse(raw) : {};
   } catch { return {}; }
 }
 
-function persistSavedViews(views: Record<string, SavedView>): void {
+function persistSavedSlices(slices: Record<string, SavedSlice>): void {
   try {
-    localStorage.setItem(SAVED_VIEWS_KEY, JSON.stringify(views));
+    localStorage.setItem(SAVED_SLICES_KEY, JSON.stringify(slices));
   } catch { /* quota exceeded — silently drop */ }
 }
 
@@ -51,20 +51,20 @@ function persistSavedViews(views: Record<string, SavedView>): void {
 // Store
 // ---------------------------------------------------------------------------
 
-interface ViewStoreState {
+interface SliceStoreState {
   /** Per-scope SIG cache (loaded lazily from localStorage) */
-  sigs: Record<string, ViewSig>;
+  sigs: Record<string, SliceSig>;
 
-  /** Saved views loaded from DB (INS entities), keyed by view ID */
-  savedViews: Record<string, SavedView>;
+  /** Saved slices loaded from DB (INS entities), keyed by slice ID */
+  savedSlices: Record<string, SavedSlice>;
 
   // --- SIG accessors ---
 
   /** Get or create the SIG for a scope */
-  getSig: (scope: string) => ViewSig;
+  getSig: (scope: string) => SliceSig;
 
   /** Get the active config for a scope (from SIG) */
-  getConfig: (scope: string) => TableViewConfig;
+  getConfig: (scope: string) => TableSliceConfig;
 
   // --- Config mutations (all mark dirty + persist SIG) ---
 
@@ -84,50 +84,50 @@ interface ViewStoreState {
   setDisplayField: (scope: string, field: string | undefined) => void;
   setShowFieldIds: (scope: string, show: boolean) => void;
 
-  // --- View lifecycle ---
+  // --- Slice lifecycle ---
 
-  /** Load a saved view's config into the SIG for a scope */
-  activateView: (scope: string, view: SavedView) => void;
+  /** Load a saved slice's config into the SIG for a scope */
+  activateSlice: (scope: string, slice: SavedSlice) => void;
 
-  /** Reset to default (no active view) */
+  /** Reset to default (no active slice) */
   resetToDefault: (scope: string) => void;
 
-  /** After saving: mark SIG clean and set activeViewId */
-  markSaved: (scope: string, viewId: string) => void;
+  /** After saving: mark SIG clean and set activeSliceId */
+  markSaved: (scope: string, sliceId: string) => void;
 
-  /** Register saved views from DB */
-  registerSavedViews: (views: SavedView[]) => void;
+  /** Register saved slices from DB */
+  registerSavedSlices: (slices: SavedSlice[]) => void;
 
-  /** Remove a saved view */
-  removeSavedView: (viewId: string) => void;
+  /** Remove a saved slice */
+  removeSavedSlice: (sliceId: string) => void;
 
-  /** Get saved views for a scope */
-  getViewsForScope: (scope: string) => SavedView[];
+  /** Get saved slices for a scope */
+  getSlicesForScope: (scope: string) => SavedSlice[];
 }
 
-export const useViewStore = create<ViewStoreState>((set, get) => ({
+export const useSliceStore = create<SliceStoreState>((set, get) => ({
   sigs: {},
-  savedViews: loadSavedViews(),
+  savedSlices: loadSavedSlices(),
 
-  getSig(scope: string): ViewSig {
+  getSig(scope: string): SliceSig {
     const existing = get().sigs[scope];
     if (existing) return existing;
 
     // Try localStorage
     const persisted = loadSig(scope);
     if (persisted) {
-      // Never restore __schema as the active view — always start on grid
-      if (persisted.activeViewId === '__schema') {
-        persisted.activeViewId = null;
+      // Never restore __schema as the active slice — always start on grid
+      if (persisted.activeSliceId === '__schema') {
+        persisted.activeSliceId = null;
       }
       set((s) => ({ sigs: { ...s.sigs, [scope]: persisted } }));
       return persisted;
     }
 
     // Create default
-    const fresh: ViewSig = {
+    const fresh: SliceSig = {
       scope,
-      activeViewId: null,
+      activeSliceId: null,
       config: createDefaultConfig(),
       dirty: false,
     };
@@ -136,7 +136,7 @@ export const useViewStore = create<ViewStoreState>((set, get) => ({
     return fresh;
   },
 
-  getConfig(scope: string): TableViewConfig {
+  getConfig(scope: string): TableSliceConfig {
     return get().getSig(scope).config;
   },
 
@@ -179,7 +179,7 @@ export const useViewStore = create<ViewStoreState>((set, get) => ({
   },
 
   setFilters(scope, filters, conjunction) {
-    const patch: Partial<TableViewConfig> = { filters };
+    const patch: Partial<TableSliceConfig> = { filters };
     if (conjunction) patch.filterConjunction = conjunction;
     _updateConfig(set, get, scope, patch);
   },
@@ -212,11 +212,11 @@ export const useViewStore = create<ViewStoreState>((set, get) => ({
     _updateConfig(set, get, scope, { showFieldIds: show });
   },
 
-  activateView(scope, view) {
-    const sig: ViewSig = {
+  activateSlice(scope, slice) {
+    const sig: SliceSig = {
       scope,
-      activeViewId: view.id,
-      config: { ...view.config },
+      activeSliceId: slice.id,
+      config: { ...slice.config },
       dirty: false,
     };
     set((s) => ({ sigs: { ...s.sigs, [scope]: sig } }));
@@ -224,9 +224,9 @@ export const useViewStore = create<ViewStoreState>((set, get) => ({
   },
 
   resetToDefault(scope) {
-    const sig: ViewSig = {
+    const sig: SliceSig = {
       scope,
-      activeViewId: null,
+      activeSliceId: null,
       config: createDefaultConfig(),
       dirty: false,
     };
@@ -234,29 +234,29 @@ export const useViewStore = create<ViewStoreState>((set, get) => ({
     persistSig(sig);
   },
 
-  markSaved(scope, viewId) {
+  markSaved(scope, sliceId) {
     const existing = get().getSig(scope);
-    const sig: ViewSig = { ...existing, activeViewId: viewId, dirty: false };
+    const sig: SliceSig = { ...existing, activeSliceId: sliceId, dirty: false };
     set((s) => ({ sigs: { ...s.sigs, [scope]: sig } }));
     persistSig(sig);
   },
 
-  registerSavedViews(views) {
-    const map: Record<string, SavedView> = { ...get().savedViews };
-    for (const v of views) map[v.id] = v;
-    set({ savedViews: map });
-    persistSavedViews(map);
+  registerSavedSlices(slices) {
+    const map: Record<string, SavedSlice> = { ...get().savedSlices };
+    for (const v of slices) map[v.id] = v;
+    set({ savedSlices: map });
+    persistSavedSlices(map);
   },
 
-  removeSavedView(viewId) {
-    const map = { ...get().savedViews };
-    delete map[viewId];
-    set({ savedViews: map });
-    persistSavedViews(map);
+  removeSavedSlice(sliceId) {
+    const map = { ...get().savedSlices };
+    delete map[sliceId];
+    set({ savedSlices: map });
+    persistSavedSlices(map);
   },
 
-  getViewsForScope(scope) {
-    return Object.values(get().savedViews).filter((v) => v.scope === scope);
+  getSlicesForScope(scope) {
+    return Object.values(get().savedSlices).filter((v) => v.scope === scope);
   },
 }));
 
@@ -265,13 +265,13 @@ export const useViewStore = create<ViewStoreState>((set, get) => ({
 // ---------------------------------------------------------------------------
 
 function _updateConfig(
-  set: (fn: (s: ViewStoreState) => Partial<ViewStoreState>) => void,
-  get: () => ViewStoreState,
+  set: (fn: (s: SliceStoreState) => Partial<SliceStoreState>) => void,
+  get: () => SliceStoreState,
   scope: string,
-  patch: Partial<TableViewConfig>,
+  patch: Partial<TableSliceConfig>,
 ): void {
   const sig = get().getSig(scope);
-  const updated: ViewSig = {
+  const updated: SliceSig = {
     ...sig,
     config: { ...sig.config, ...patch },
     dirty: true,

@@ -60,7 +60,7 @@ export interface FieldAssignment {
 
 export interface SpaceSettings {
   creators_can_delete_own?: boolean;
-  lock_shared_views?: boolean;
+  lock_shared_slices?: boolean;
 }
 
 export interface SpaceConfig {
@@ -112,7 +112,7 @@ export interface ResolvedPermissions {
   can_edit_any_record: boolean;
   can_edit_own_records: boolean;
   can_create_fields: boolean;
-  can_build_views: boolean;
+  can_build_slices: boolean;
   can_manage_members: boolean;
   can_set_governance: boolean;
   can_manage_keys: boolean;

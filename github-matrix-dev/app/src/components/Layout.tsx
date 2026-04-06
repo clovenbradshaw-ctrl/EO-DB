@@ -14,7 +14,7 @@ import { resolveDataRoom } from '../matrix/event-bridge';
 import { configureMatrixDomain } from '../lib/matrix-domain';
 import { HolonNav } from './HolonNav';
 import { TableView } from './TableView';
-import { ViewTabs } from './ViewTabs';
+import { SliceTabs } from './SliceTabs';
 import { RecordDetailDrawer } from './RecordDetailDrawer';
 import { detailLayoutTarget, type LayoutDisplayType } from './detail-layout';
 import { RecordView } from './RecordView';
@@ -38,13 +38,13 @@ import { RecordPageView } from './builder/RecordPageView';
 import { PermissionBadge } from './PermissionBadge';
 import { ViewOnlyBanner } from './ViewOnlyBanner';
 import { HeadlineMetrics } from './HeadlineMetrics';
-import { useViewStore } from '../store/view-store';
+import { useSliceStore } from '../store/slice-store';
 import { useBuilderStore } from '../store/builder-store';
 import { useSyncStore } from '../store/sync-store';
 import { useTheme, spaceBackgroundTint, type Theme } from '../theme';
 import type { EoState } from '../db/types';
 import type { ViewDefinition } from '../blocks/types';
-import type { ViewType } from './view-types';
+import type { SliceType } from './slice-types';
 import { discoverSpacesFromMatrix, discoverPublicSpaces, type SpaceEntry } from '../matrix/space-discovery';
 import { SpaceBrowser } from './SpaceBrowser';
 import { Horizon } from './Horizon';
@@ -1204,19 +1204,19 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   const currentRole: AccessRole = currentPermissions?.role ?? 'viewer';
   const isViewer = currentRole === 'viewer';
 
-  // Determine active view type from saved view
-  const viewStore = useViewStore();
-  const viewSigs = viewStore.sigs;
-  const viewSavedViews = viewStore.savedViews;
-  const activeViewType: ViewType = useMemo(() => {
+  // Determine active slice type from saved slice
+  const sliceStore = useSliceStore();
+  const sliceSigs = sliceStore.sigs;
+  const savedSlices = sliceStore.savedSlices;
+  const activeSliceType: SliceType = useMemo(() => {
     if (!selectedScope) return 'grid';
-    const sig = viewSigs[selectedScope];
+    const sig = sliceSigs[selectedScope];
     if (!sig) return 'grid';
-    if (sig.activeViewId === '__schema') return 'schema';
-    if (!sig.activeViewId) return 'grid';
-    const sv = viewSavedViews[sig.activeViewId];
-    return sv?.viewType || 'grid';
-  }, [selectedScope, viewSigs, viewSavedViews]);
+    if (sig.activeSliceId === '__schema') return 'schema';
+    if (!sig.activeSliceId) return 'grid';
+    const sv = savedSlices[sig.activeSliceId];
+    return sv?.sliceType || 'grid';
+  }, [selectedScope, sliceSigs, savedSlices]);
 
   return (
     <div style={s.container}>
@@ -1545,7 +1545,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               <span style={s.navIcon}>{NAV_ICONS.log}</span>
               Log
             </button>
-            {currentPermissions?.can_build_views !== false && (
+            {currentPermissions?.can_build_slices !== false && (
               <button
                 onClick={() => { navigate({ view: 'builder', builderViewId: null, customPageId: null }); }}
                 style={{
@@ -1604,18 +1604,18 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                   />
                 ) : selectedScope ? (
                   <>
-                    <ViewTabs
+                    <SliceTabs
                       scope={selectedScope}
                       session={{ userId: session.userId }}
                       activeUserType={activeUserType}
                       userTypeDefinitions={spaceUserTypeDefinitions}
-                      canManageViews={currentPermissions?.can_build_views}
+                      canManageSlices={currentPermissions?.can_build_slices}
                     />
-                    {activeViewType === 'schema' ? (
+                    {activeSliceType === 'schema' ? (
                       <SchemaView scope={selectedScope} />
-                    ) : activeViewType === 'graph' ? (
+                    ) : activeSliceType === 'graph' ? (
                       <GraphView allStates={allStates} />
-                    ) : activeViewType === 'grid' ? (
+                    ) : activeSliceType === 'grid' ? (
                       <TableView
                         scope={selectedScope}
                         onSelectRecord={(rec) => navigate({ record: rec })}
@@ -1624,11 +1624,11 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                         session={{ userId: session.userId }}
                         timeScrubberFilter={timeScrubberFilter}
                         permissions={currentPermissions}
-                        viewReadOnly={(() => {
+                        sliceReadOnly={(() => {
                           if (!activeUserType) return false;
-                          const sig = viewSigs[selectedScope];
-                          if (!sig?.activeViewId) return false;
-                          const sv = viewSavedViews[sig.activeViewId];
+                          const sig = sliceSigs[selectedScope];
+                          if (!sig?.activeSliceId) return false;
+                          const sv = savedSlices[sig.activeSliceId];
                           return sv?.readOnlyForTypes?.includes(activeUserType) ?? false;
                         })()}
                       />
@@ -1638,10 +1638,10 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                         flexDirection: 'column' as const, gap: 8, color: theme.textMuted,
                       }}>
                         <div style={{ fontSize: 28, opacity: 0.3 }}>
-                          {activeViewType === 'kanban' ? '\u25A5' : activeViewType === 'calendar' ? '\u25F7' : '\u25A6'}
+                          {activeSliceType === 'kanban' ? '\u25A5' : activeSliceType === 'calendar' ? '\u25F7' : '\u25A6'}
                         </div>
                         <div style={{ fontSize: 13, fontWeight: 500 }}>
-                          {activeViewType.charAt(0).toUpperCase() + activeViewType.slice(1)} view
+                          {activeSliceType.charAt(0).toUpperCase() + activeSliceType.slice(1)} slice
                         </div>
                         <div style={{ fontSize: 11, opacity: 0.7 }}>Coming soon</div>
                       </div>
@@ -1694,7 +1694,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             allStates={allStates}
             onClose={() => navigate({ record: null })}
             onNavigate={(t) => navigate({ record: t })}
-            profileFields={selectedScope ? viewStore.getConfig(selectedScope).profileFields : undefined}
+            profileFields={selectedScope ? sliceStore.getConfig(selectedScope).profileFields : undefined}
             isMobile={isMobile}
           />
         )}
