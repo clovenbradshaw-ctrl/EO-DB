@@ -1309,6 +1309,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
         <DndContext sensors={sensors} collisionDetection={closestCenter} onDragStart={handleColumnDragStart} onDragEnd={handleColumnDragEnd} onDragCancel={() => setActiveDragId(null)}>
           <table ref={tableRef} style={{ ...s.table, tableLayout: 'fixed' }}>
             <colgroup>
+              <col style={{ width: 40 }} />
               {orderedColumns.map((col) => (
                 <col key={col.key} style={{ width: columnWidths[col.key] || defaultColumnWidth(col.type) }} />
               ))}
@@ -1316,6 +1317,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
             <thead>
               <SortableContext items={orderedColumns.map((c) => c.key)} strategy={horizontalListSortingStrategy}>
                 <tr>
+                  <th style={{ ...s.th, width: 40, textAlign: 'center', padding: '8px 4px', userSelect: 'none' }}>#</th>
                   {orderedColumns.map((col) => (
                     <SortableColumnHeader
                       key={col.key}
@@ -1343,7 +1345,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
             <tbody>
               {filtered.length === 0 && (
                 <tr>
-                  <td colSpan={orderedColumns.length} style={s.emptyRow}>
+                  <td colSpan={orderedColumns.length + 1} style={s.emptyRow}>
                     {records.length === 0 ? 'No records in this scope' : 'No records match the current filter'}
                   </td>
                 </tr>
@@ -1364,12 +1366,21 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                       if (!isActive) (e.currentTarget as HTMLElement).style.background = zebraBg;
                     }}
                   >
+                    <td style={{
+                      ...s.td,
+                      width: 40,
+                      textAlign: 'center',
+                      padding: `${rowHeight === 'compact' ? 4 : rowHeight === 'tall' ? 18 : 10}px 4px`,
+                      fontFamily: "'JetBrains Mono', monospace",
+                      fontSize: 10,
+                      color: theme.textMuted,
+                      userSelect: 'none',
+                      borderLeft: `3px solid ${theme.accent}`,
+                    }}>{rowIndex + 1}</td>
                     {orderedColumns.map((col, colIndex) => {
                       const isRedacted = permissions?.redacted_fields?.includes(col.key);
                       const isLocked = permissions?.locked_fields?.includes(col.key);
-                      const tdStyle = colIndex === 0
-                        ? { ...s.td, borderLeft: `3px solid ${theme.accent}` }
-                        : s.td;
+                      const tdStyle = s.td;
                       const isEditingThis = editingCell?.target === rec.target && editingCell?.fieldKey === col.key;
                       const isEditableCol = col.key !== '_record' && col.key !== '_last_updated' && !isRedacted && !isLocked && canEdit;
                       return (
