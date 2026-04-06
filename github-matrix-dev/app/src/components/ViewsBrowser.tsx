@@ -286,14 +286,6 @@ export function ViewsBrowser({ scope, recordCount, userId, onBack, onSelectView 
               </>
             )}
 
-            {/* Create a view */}
-            <button
-              style={s.createBtn}
-              onClick={() => setShowCreate(true)}
-              title="Create a new view for this object"
-            >
-              + Create a view
-            </button>
           </>
         )}
       </div>
@@ -307,76 +299,6 @@ export function ViewsBrowser({ scope, recordCount, userId, onBack, onSelectView 
             <span style={s.scopeChipMeta}>{recordCount} records</span>
           </div>
         </div>
-      )}
-
-      {/* Create-view modal */}
-      {showCreate && scope && (
-        <>
-          <div
-            style={s.modalOverlay}
-            onClick={() => { setShowCreate(false); resetCreateForm(); }}
-          />
-          <div style={s.modal}>
-            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10, color: theme.textHeading }}>
-              New view
-            </div>
-            <input
-              autoFocus
-              value={newViewName}
-              onChange={(e) => setNewViewName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') handleCreateView();
-                if (e.key === 'Escape') { setShowCreate(false); resetCreateForm(); }
-              }}
-              placeholder="View name\u2026"
-              style={s.nameInput}
-            />
-            <div style={{ display: 'flex', gap: 4, marginTop: 8, flexWrap: 'wrap' as const }}>
-              {(Object.keys(VIEW_TYPE_META) as ViewType[]).map((vt) => {
-                const meta = VIEW_TYPE_META[vt];
-                const active = newViewType === vt;
-                return (
-                  <button
-                    key={vt}
-                    onClick={() => setNewViewType(vt)}
-                    style={{
-                      display: 'inline-flex', alignItems: 'center', gap: 4,
-                      padding: '4px 8px', fontSize: 11, fontWeight: active ? 600 : 400,
-                      border: `1px solid ${active ? theme.accent : theme.border}`,
-                      borderRadius: 4, cursor: 'pointer',
-                      background: active ? theme.accentBg : 'transparent',
-                      color: active ? theme.accent : theme.textSecondary,
-                    }}
-                  >
-                    <span style={{ fontSize: 12 }}>{meta.icon}</span>
-                    {meta.label}
-                  </button>
-                );
-              })}
-            </div>
-            <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-              <button
-                style={newViewVisibility === 'private' ? s.visBtnActive : s.visBtn}
-                onClick={() => setNewViewVisibility('private')}
-              >
-                {'\uD83D\uDD12'} Private
-              </button>
-              <button
-                style={newViewVisibility === 'shared' ? s.visBtnActive : s.visBtn}
-                onClick={() => setNewViewVisibility('shared')}
-              >
-                {'\uD83D\uDD13'} Shared
-              </button>
-            </div>
-            <button
-              style={(!newViewName.trim() || creating) ? s.modalCreateBtnDisabled : s.modalCreateBtn}
-              onClick={handleCreateView}
-              disabled={!newViewName.trim() || creating}
-            >
-              {creating ? 'Creating\u2026' : 'Create view'}
-            </button>
-          </div>
-        </>
       )}
     </div>
   );
