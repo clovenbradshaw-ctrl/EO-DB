@@ -1,13 +1,17 @@
 /**
- * Filen socket listener — watches a single folder for real-time changes.
+ * Filen socket listener — watches a folder for real-time changes.
+ *
+ * Space-aware: the watched folder can change at runtime via switchFolder()
+ * when the user switches spaces. The socket connection is maintained across
+ * switches — only the folder filter and known-item set are reset.
  *
  * On start():
- *   1. Authenticates with Filen (email/password or apiKey/masterKeys)
+ *   1. Authenticates with Filen (email/password or apiKey)
  *   2. Runs a catch-up scan to detect files added while offline
  *   3. Subscribes to socket events for live change detection
  *   4. Starts periodic health checks
  *
- * Events are folder-filtered (only events matching the configured folder UUID
+ * Events are folder-filtered (only events matching the current folder UUID
  * pass through) then dispatched to registered handlers.
  */
 
@@ -30,6 +34,11 @@ export class FilenSocketListener {
   private handlers: Set<FilenChangeHandler> = new Set();
   private boundListeners: Map<string, (...args: any[]) => void> = new Map();
 
+  /** Current folder UUID being watched (can change via switchFolder). */
+  private activeFolderUuid: string;
+  /** Current space ID (can change via switchFolder). */
+  private activeSpaceId: string | undefined;
+
   // Health monitoring
   private healthTimer: ReturnType<typeof setInterval> | null = null;
   private healthInterval: number;
@@ -41,11 +50,13 @@ export class FilenSocketListener {
     reason: 'initial',
   };
 
-  // Catch-up scan state (in-memory; persisted externally if needed)
+  // Catch-up scan state — UUIDs of items known to be in the watched folder
   private lastScanFileUuids: Set<string> = new Set();
 
   constructor(config: FilenListenerConfig) {
     this.config = config;
+    this.activeFolderUuid = config.folderUuid;
+    this.activeSpaceId = config.spaceId;
     this.healthInterval = config.healthCheckIntervalMs ?? DEFAULT_HEALTH_INTERVAL;
 
     this.sdk = new FilenSDK({
@@ -75,6 +86,35 @@ export class FilenSocketListener {
     }
   }
 
+  // ─── Space switching ───────────────────────────────────────────────────
+
+  /**
+   * Switch the watched folder (e.g. when the user changes spaces).
+   * The socket connection stays alive — only the folder filter resets.
+   * Runs a catch-up scan on the new folder to detect anything missed.
+   */
+  async switchFolder(folderUuid: string, spaceId?: string, folderPath?: string): Promise<void> {
+    this.activeFolderUuid = folderUuid;
+    this.activeSpaceId = spaceId;
+    this.lastScanFileUuids.clear();
+
+    if (folderPath !== undefined) {
+      this.config.folderPath = folderPath;
+    }
+
+    await this.catchUpScan();
+  }
+
+  /** The folder UUID currently being watched. */
+  getActiveFolderUuid(): string {
+    return this.activeFolderUuid;
+  }
+
+  /** The space ID currently being watched (if set). */
+  getActiveSpaceId(): string | undefined {
+    return this.activeSpaceId;
+  }
+
   // ─── Public API ────────────────────────────────────────────────────────
 
   /** Register a handler for filtered change events. Returns an unsubscribe fn. */
@@ -99,7 +139,7 @@ export class FilenSocketListener {
     const { email, password, twoFactorCode } = this.config;
 
     if (!email || !password) {
-      throw new Error('Filen listener requires FILEN_EMAIL and FILEN_PASSWORD');
+      throw new Error('Filen listener requires email and password');
     }
 
     await this.sdk.login({ email, password, twoFactorCode });
@@ -109,8 +149,8 @@ export class FilenSocketListener {
 
   /**
    * List the watched folder and emit events for any files not seen in the
-   * previous scan. On first run everything is treated as "already known"
-   * (no flood of events).
+   * previous scan. On first run (or after switchFolder) everything is
+   * treated as "already known" (no flood of events).
    */
   private async catchUpScan(): Promise<void> {
     const folderPath = this.config.folderPath || '/';
@@ -124,13 +164,14 @@ export class FilenSocketListener {
           const stat = await this.sdk.fs().stat({ path: `${folderPath === '/' ? '' : folderPath}/${entry}` });
           currentUuids.add(stat.uuid);
 
-          // On subsequent scans, emit events for new files
+          // On subsequent scans (not first load or switch), emit events for new files
           if (this.lastScanFileUuids.size > 0 && !this.lastScanFileUuids.has(stat.uuid)) {
             const event: FilenChangeEvent = {
               type: stat.isFile() ? 'fileNew' : 'folderSubCreated',
               uuid: stat.uuid,
               name: entry,
-              folderUuid: this.config.folderUuid,
+              folderUuid: this.activeFolderUuid,
+              spaceId: this.activeSpaceId,
               timestamp: stat.mtimeMs,
               raw: { source: 'catch-up-scan', stat },
             };
@@ -177,7 +218,7 @@ export class FilenSocketListener {
 
     if (parent) {
       // Direct folder match
-      if (parent !== this.config.folderUuid) return;
+      if (parent !== this.activeFolderUuid) return;
     } else {
       // No parent in payload — check if uuid is in our known set
       if (!this.lastScanFileUuids.has(uuid)) return;
@@ -194,7 +235,8 @@ export class FilenSocketListener {
       type,
       uuid,
       name: data?.name || data?.metadata || '',
-      folderUuid: parent || this.config.folderUuid,
+      folderUuid: parent || this.activeFolderUuid,
+      spaceId: this.activeSpaceId,
       timestamp: data?.timestamp || Date.now(),
       raw: data,
     };

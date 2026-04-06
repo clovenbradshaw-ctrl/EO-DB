@@ -49,6 +49,8 @@ export interface FilenChangeEvent {
   uuid: string;
   name: string;
   folderUuid: string;
+  /** Space ID this event belongs to (set when listener is space-aware). */
+  spaceId?: string;
   timestamp: number;
   raw: unknown;
 }
@@ -58,13 +60,21 @@ export type FilenChangeHandler = (event: FilenChangeEvent) => void;
 // ─── Configuration ─────────────────────────────────────────────────────────
 
 export interface FilenListenerConfig {
+  /** Auth: email/password login. */
   email?: string;
   password?: string;
   twoFactorCode?: string;
+  /** Auth: apiKey login (from n8n webhook / org mode). */
   apiKey?: string;
   masterKeys?: string[];
+  /**
+   * Initial folder UUID to watch. Can be changed later via switchFolder().
+   * When used with spaces, this is set to the current space's folder UUID.
+   */
   folderUuid: string;
-  /** Path within the Filen virtual FS to the watched folder (e.g. "/EO-DB"). */
+  /** Space ID associated with the folder (e.g. "space_amino"). */
+  spaceId?: string;
+  /** Path within the Filen virtual FS to the watched folder (e.g. "/EO-DB/amino"). */
   folderPath?: string;
   healthCheckIntervalMs?: number;
 }

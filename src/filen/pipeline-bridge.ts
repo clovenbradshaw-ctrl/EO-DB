@@ -72,7 +72,7 @@ export class FilenPipelineBridge {
       agent: 'system:filen',
       ts: new Date(event.timestamp).toISOString(),
       acquired_ts: now,
-      meta: { source: 'filen', event_type: event.type },
+      meta: { source: 'filen', event_type: event.type, space_id: event.spaceId },
     };
   }
 }
