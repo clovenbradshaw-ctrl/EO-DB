@@ -26,7 +26,7 @@ import { useEoStore } from '../store/eo-store';
 import type { EoEventInput, EoState } from '../db/types';
 import { searchUsers, listAllHomeserverUsers, type DiscoveredUser } from '../matrix/user-discovery';
 import { findOrCreateDirectMessage } from '../matrix/dm';
-import { EO_SPACE_CONFIG_TYPE } from '../matrix/event-bridge';
+import { EO_CHAT_ROOM_TYPE } from '../matrix/event-bridge';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -120,40 +120,16 @@ function listDirectRoomIds(client: MatrixClient): Set<string> {
   return set;
 }
 
-/**
- * Identify rooms that belong to EO-DB data spaces (main, restricted, governance).
- * These are infrastructure rooms for data replication — not chat rooms.
- */
-function getDataRoomIds(client: MatrixClient): Set<string> {
-  const dataIds = new Set<string>();
-  for (const room of client.getRooms()) {
-    // A room with a space config event is a data room (or its governance room)
-    const state = room.currentState;
-    const configEvent = state.getStateEvents(EO_SPACE_CONFIG_TYPE, '');
-    if (configEvent) {
-      dataIds.add(room.roomId);
-      // The space config also references related rooms — mark those as data rooms too
-      const content = configEvent.getContent() as {
-        rooms?: { main?: string; restricted?: string; governance?: string };
-      };
-      if (content.rooms) {
-        if (content.rooms.main) dataIds.add(content.rooms.main);
-        if (content.rooms.restricted) dataIds.add(content.rooms.restricted);
-        if (content.rooms.governance) dataIds.add(content.rooms.governance);
-      }
-    }
-  }
-  return dataIds;
-}
 
 function loadRoomsFromClient(client: MatrixClient): MatrixRoom[] {
   const directIds = listDirectRoomIds(client);
-  const dataRoomIds = getDataRoomIds(client);
   const joined = client.getRooms().filter((r) => {
     if (r.getMyMembership() !== 'join') return false;
-    // Hide EO-DB data rooms — they're for replication, not chatting
-    if (dataRoomIds.has(r.roomId)) return false;
-    return true;
+    // Only show rooms that are explicitly EO-DB chat rooms or DMs.
+    // All other Matrix rooms (data rooms, plain rooms, etc.) are hidden.
+    if (directIds.has(r.roomId)) return true;
+    const chatMarker = r.currentState.getStateEvents(EO_CHAT_ROOM_TYPE, '');
+    return !!chatMarker;
   });
   return joined.map((r) => {
     const isDm = directIds.has(r.roomId);
