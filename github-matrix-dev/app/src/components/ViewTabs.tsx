@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useViewStore } from '../store/view-store';
 import { useEoStore } from '../store/eo-store';
 import { useTheme, type Theme } from '../theme';
@@ -30,10 +30,16 @@ export function ViewTabs({ scope, session }: ViewTabsProps) {
   const [renameValue, setRenameValue] = useState('');
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; viewId: string } | null>(null);
 
+  const prevViewsKeyRef = useRef<string>('');
+
   // Load saved views from DB
   useEffect(() => {
     if (!ready) return;
     getStateByPrefix(`${scope}._views.`).then((states) => {
+      const key = states.map(s => s.target + ':' + s.last_seq).join('|');
+      if (key === prevViewsKeyRef.current) return;
+      prevViewsKeyRef.current = key;
+
       const viewDepth = scope.split('.').length + 2; // scope._views.viewId
       const views: SavedView[] = states
         .filter((st) => st.target.split('.').length === viewDepth && st.value?.name)

@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useState, useMemo, useRef } from 'react';
 import { useEoStore } from '../../store/eo-store';
 import { useBuilderStore } from '../../store/builder-store';
 import { useTheme, type Theme } from '../../theme';
@@ -20,6 +20,7 @@ export function ViewList({ onSelectView }: ViewListProps) {
   const s = makeStyles(theme);
 
   const [views, setViews] = useState<EoState[]>([]);
+  const prevViewsKeyRef = useRef<string>('');
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState('');
   const [newPageType, setNewPageType] = useState<PageType>('page');
@@ -28,7 +29,13 @@ export function ViewList({ onSelectView }: ViewListProps) {
 
   useEffect(() => {
     if (!ready) return;
-    getStateByPrefix('views.').then(setViews);
+    getStateByPrefix('views.').then((states) => {
+      const key = states.map(s => s.target + ':' + s.last_seq).join('|');
+      if (key !== prevViewsKeyRef.current) {
+        prevViewsKeyRef.current = key;
+        setViews(states);
+      }
+    });
   }, [ready, lastSeq, getStateByPrefix]);
 
   // Collect existing record pages for the "link to record page" dropdown

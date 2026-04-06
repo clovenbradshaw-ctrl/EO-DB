@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import type { EoState } from '../db/types';
 import { useEoStore } from '../store/eo-store';
 import { useTheme, type Theme } from '../theme';
@@ -13,6 +13,7 @@ export function ClientList({ selected, onSelect }: ClientListProps) {
   const ready = useEoStore((s) => s.ready);
   const lastSeq = useEoStore((s) => s.lastSeq);
   const [records, setRecords] = useState<EoState[]>([]);
+  const prevRecordsKeyRef = useRef<string>('');
   const { theme } = useTheme();
   const s = makeStyles(theme);
 
@@ -25,7 +26,11 @@ export function ClientList({ selected, onSelect }: ClientListProps) {
         const parts = st.target.split('.');
         return parts.length === 3 && !st.value?._alias;
       });
-      setRecords(filtered);
+      const key = filtered.map(r => r.target + ':' + r.last_seq).join('|');
+      if (key !== prevRecordsKeyRef.current) {
+        prevRecordsKeyRef.current = key;
+        setRecords(filtered);
+      }
     });
   }, [ready, lastSeq, getStateByPrefix]);
 

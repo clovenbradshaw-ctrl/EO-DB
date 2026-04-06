@@ -354,6 +354,9 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   const [fieldSchemas, setFieldSchemas] = useState<Map<string, FieldSchema>>(new Map());
   const [columnTypeOverrides, setColumnTypeOverrides] = useState<Map<string, any>>(new Map());
   const [columnTypeSelector, setColumnTypeSelector] = useState<{ x: number; y: number; key: string } | null>(null);
+  const prevRecordsKeyRef = useRef<string>('');
+  const prevSchemaKeyRef = useRef<string>('');
+  const prevScopeNameRef = useRef<string | null>(null);
   const { theme } = useTheme();
   const s = makeStyles(theme);
 
@@ -451,11 +454,21 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
           }
           return st;
         });
-      setRecords(direct);
+      // Only update state if records actually changed (avoids flicker from lastSeq)
+      const key = direct.map(r => r.target + ':' + r.last_seq).join('|');
+      if (key !== prevRecordsKeyRef.current) {
+        prevRecordsKeyRef.current = key;
+        setRecords(direct);
+      }
       setRecordsLoaded(true);
     });
     // Fetch field metadata: prefer per-field schema entities, fall back to array on table state
     getStateByPrefix(scope + '._schema.').then((allSchemaStates) => {
+      // Only process schema if it actually changed
+      const schemaKey = allSchemaStates.map(s => s.target + ':' + s.last_seq).join('|');
+      if (schemaKey === prevSchemaKeyRef.current) return;
+      prevSchemaKeyRef.current = schemaKey;
+
       const schemaPrefix = scope + '._schema.';
       // Filter to direct children of _schema only
       const schemaDepth = scope.split('.').length + 2; // scope._schema.fieldId
@@ -482,7 +495,11 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     });
     // Fetch scope display name
     getState(scope).then((scopeState) => {
-      setScopeName(scopeState?.value?.name ?? null);
+      const name = scopeState?.value?.name ?? null;
+      if (name !== prevScopeNameRef.current) {
+        prevScopeNameRef.current = name;
+        setScopeName(name);
+      }
     });
   }, [ready, lastSeq, getStateByPrefix, getState, scope, scopeDepth]);
 
@@ -507,6 +524,9 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     setFilterText('');
     setDebouncedFilterText('');
     setRecordsLoaded(false);
+    prevRecordsKeyRef.current = '';
+    prevSchemaKeyRef.current = '';
+    prevScopeNameRef.current = null;
   }, [scope]);
 
   // Debounce filterText so that keystroke latency is bounded by a short
