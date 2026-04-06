@@ -298,6 +298,30 @@ function renderCell(value: any, key: string, onNavigate: (t: string) => void, t:
     return <IdChip value={value} t={t} resolved={resolver?.resolve(value)} onNavigate={onNavigate} />;
   }
 
+  // Arrays of target-path strings (e.g. ["import.cases.CASE-001", "import.cases.CASE-003"]) — render as clickable links
+  if (Array.isArray(value) && value.length > 0 && value.every((v) => typeof v === 'string' && v.includes('.'))) {
+    return (
+      <span>
+        {value.map((target: string, i: number) => {
+          const resolved = resolver?.resolveTarget(target);
+          const shortId = target.split('.').pop() || target;
+          return (
+            <span key={target}>
+              {i > 0 && ', '}
+              <span
+                style={{ color: t.purple, cursor: 'pointer', textDecoration: 'underline', textDecorationColor: t.purpleBorder }}
+                onClick={(e) => { e.stopPropagation(); onNavigate(target); }}
+              >
+                {shortId}
+                {resolved?.name && <span style={{ textDecoration: 'none', color: t.text }}>{' · '}{resolved.name}</span>}
+              </span>
+            </span>
+          );
+        })}
+      </span>
+    );
+  }
+
   // Other arrays: comma-joined primitives
   if (Array.isArray(value)) {
     if (value.every((v) => v == null || typeof v !== 'object')) {
