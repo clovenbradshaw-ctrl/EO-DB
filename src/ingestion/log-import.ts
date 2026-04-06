@@ -11,7 +11,8 @@
 
 import type { EoDb } from '../db/level.js';
 import type { Feed } from '../db/feed.js';
-import { processEvent } from '../db/fold.js';
+import { processEvent, processEventBatch } from '../db/fold.js';
+import type { ProcessBatchResult } from '../db/fold.js';
 import type { ExternalOperator, EoEventInput } from '../db/types.js';
 import type { EventSink } from './event-sink.js';
 import {
@@ -369,17 +370,26 @@ export function parseCsvLines(text: string, delimiter: string = ','): string[][]
   return results;
 }
 
+/** Default chunk size for batch import processing. */
+const DEFAULT_CHUNK_SIZE = 500;
+
 /**
  * Process an array of validated import rows through the fold.
- * Events are processed sequentially in order. Errors on individual
- * rows are captured but do not halt the import (unless halt_on_error is set).
+ *
+ * When chunk_size is set (default 500), rows are processed in batches using
+ * processEventBatch — which allocates seq numbers in bulk, batches LevelDB
+ * writes, and defers dependency recomputation to chunk boundaries. This is
+ * dramatically faster for large imports (100k+ rows).
+ *
+ * Errors on individual rows are captured but do not halt the import
+ * (unless halt_on_error is set).
  */
 export async function processImport(
   db: EoDb,
   feed: Feed,
   rows: ImportEventRow[],
   agent: string,
-  options?: { halt_on_error?: boolean; sink?: EventSink },
+  options?: { halt_on_error?: boolean; sink?: EventSink; chunk_size?: number },
 ): Promise<ImportResult> {
   const result: ImportResult = {
     total: rows.length,
@@ -390,41 +400,92 @@ export async function processImport(
   };
 
   const now = new Date().toISOString();
+  const chunkSize = options?.chunk_size ?? DEFAULT_CHUNK_SIZE;
+  // Use batch path when chunk_size > 1 and halt_on_error is not set.
+  // halt_on_error needs precise per-event control, so it uses the sequential path.
+  const useBatch = chunkSize > 1 && !options?.halt_on_error;
 
-  for (let i = 0; i < rows.length; i++) {
-    const row = rows[i];
+  if (useBatch) {
+    // ── Fast path: chunked batch processing ───────────────────────────
+    for (let chunkStart = 0; chunkStart < rows.length; chunkStart += chunkSize) {
+      const chunkEnd = Math.min(chunkStart + chunkSize, rows.length);
 
-    // Validate
-    const validationError = validateRow(row, i);
-    if (validationError) {
-      result.errors.push({ index: i, error: validationError });
-      result.skipped++;
-      if (options?.halt_on_error) break;
-      continue;
+      // Validate and build events for this chunk
+      const chunkEvents: EoEventInput[] = [];
+      const chunkIndices: number[] = []; // maps chunkEvents index → original row index
+
+      for (let i = chunkStart; i < chunkEnd; i++) {
+        const row = rows[i];
+        const validationError = validateRow(row, i);
+        if (validationError) {
+          result.errors.push({ index: i, error: validationError });
+          result.skipped++;
+          continue;
+        }
+
+        chunkEvents.push({
+          op: row.op.toUpperCase() as ExternalOperator,
+          target: row.target,
+          operand: row.operand ?? {},
+          agent,
+          ts: row.ts || now,
+          acquired_ts: now,
+          client_event_id: row.client_event_id,
+          meta: row.meta,
+        });
+        chunkIndices.push(i);
+      }
+
+      if (chunkEvents.length === 0) continue;
+
+      const batchResult: ProcessBatchResult = options?.sink
+        ? await options.sink.emitBatch(chunkEvents)
+        : await processEventBatch(db, chunkEvents, feed);
+
+      for (const seq of batchResult.seqs) {
+        result.sequences.push(seq);
+        result.processed++;
+      }
+      for (const err of batchResult.errors) {
+        result.errors.push({ index: chunkIndices[err.index], error: err.error });
+        result.skipped++;
+      }
     }
+  } else {
+    // ── Original path: per-event processing (used with EventSink) ─────
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
 
-    // Build event input
-    const eventInput: EoEventInput = {
-      op: row.op.toUpperCase() as ExternalOperator,
-      target: row.target,
-      operand: row.operand ?? {},
-      agent,
-      ts: row.ts || now,
-      acquired_ts: now,
-      client_event_id: row.client_event_id,
-      meta: row.meta,
-    };
+      const validationError = validateRow(row, i);
+      if (validationError) {
+        result.errors.push({ index: i, error: validationError });
+        result.skipped++;
+        if (options?.halt_on_error) break;
+        continue;
+      }
 
-    try {
-      const seq = options?.sink
-        ? await options.sink.emit(eventInput)
-        : await processEvent(db, eventInput, feed);
-      result.sequences.push(seq);
-      result.processed++;
-    } catch (e: any) {
-      result.errors.push({ index: i, error: e.message });
-      result.skipped++;
-      if (options?.halt_on_error) break;
+      const eventInput: EoEventInput = {
+        op: row.op.toUpperCase() as ExternalOperator,
+        target: row.target,
+        operand: row.operand ?? {},
+        agent,
+        ts: row.ts || now,
+        acquired_ts: now,
+        client_event_id: row.client_event_id,
+        meta: row.meta,
+      };
+
+      try {
+        const seq = options?.sink
+          ? await options.sink.emit(eventInput)
+          : await processEvent(db, eventInput, feed);
+        result.sequences.push(seq);
+        result.processed++;
+      } catch (e: any) {
+        result.errors.push({ index: i, error: e.message });
+        result.skipped++;
+        if (options?.halt_on_error) break;
+      }
     }
   }
 

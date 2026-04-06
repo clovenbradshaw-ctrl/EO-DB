@@ -24,7 +24,7 @@
 import type { EoDb } from '../db/level.js';
 import { getCurrentSeq } from '../db/level.js';
 import type { EoEventInput } from '../db/types.js';
-import { processEvent } from '../db/fold.js';
+import { processEvent, processEventBatch, type ProcessBatchResult } from '../db/fold.js';
 import { readLogSince } from '../db/log.js';
 import type { Feed } from '../db/feed.js';
 import type { SyncManager } from '../matrix/sync-manager.js';
@@ -45,6 +45,12 @@ export interface FlushResult {
 export interface EventSink {
   /** Fold a single event locally, return its seq number. */
   emit(event: EoEventInput): Promise<number>;
+
+  /**
+   * Fold a batch of events locally using optimized batch processing.
+   * Returns seqs for successful events and per-event errors.
+   */
+  emitBatch(events: EoEventInput[]): Promise<ProcessBatchResult>;
 
   /**
    * Finalize the import batch. For grounded sinks this uploads the
@@ -74,6 +80,12 @@ export class DirectSink implements EventSink {
     const seq = await processEvent(this.db, event, this.feed);
     this.count++;
     return seq;
+  }
+
+  async emitBatch(events: EoEventInput[]): Promise<ProcessBatchResult> {
+    const result = await processEventBatch(this.db, events, this.feed);
+    this.count += result.seqs.length;
+    return result;
   }
 
   async flush(): Promise<FlushResult> {
@@ -124,6 +136,16 @@ export class GroundedSink implements EventSink {
     const seq = await processEvent(this.db, event, this.feed);
     this.count++;
     return seq;
+  }
+
+  async emitBatch(events: EoEventInput[]): Promise<ProcessBatchResult> {
+    if (this.fromSeq === null) {
+      this.fromSeq = await getCurrentSeq(this.db);
+    }
+
+    const result = await processEventBatch(this.db, events, this.feed);
+    this.count += result.seqs.length;
+    return result;
   }
 
   async flush(): Promise<FlushResult> {

@@ -27,6 +27,24 @@ export async function nextSeq(db: EoDb): Promise<number> {
   return next;
 }
 
+/**
+ * Allocate a contiguous range of sequence numbers in one DB write.
+ * Returns the first seq in the range. The range is [startSeq, startSeq + count - 1].
+ */
+export async function allocateSeqRange(db: EoDb, count: number): Promise<number> {
+  if (count <= 0) throw new Error('allocateSeqRange: count must be > 0');
+  let current = 0;
+  try {
+    const buf = await db.get('meta:seq');
+    current = unpack(buf) as number;
+  } catch (e: any) {
+    if (e.code !== 'LEVEL_NOT_FOUND') throw e;
+  }
+  const startSeq = current + 1;
+  await db.put('meta:seq', pack(current + count));
+  return startSeq;
+}
+
 export async function getCurrentSeq(db: EoDb): Promise<number> {
   try {
     const buf = await db.get('meta:seq');

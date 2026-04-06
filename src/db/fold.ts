@@ -1,4 +1,4 @@
-import { EoDb, encode, decode, nextSeq } from './level.js';
+import { EoDb, encode, decode, nextSeq, padSeq, allocateSeqRange } from './level.js';
 import { appendToLog } from './log.js';
 import { getState, setState } from './state.js';
 import { addEdge, removeEdge, getEdgesFrom, getEdgesTo } from './graph.js';
@@ -126,6 +126,217 @@ export async function processEvent(
   }
 
   return seq;
+}
+
+/**
+ * Result from batch event processing.
+ */
+export interface ProcessBatchResult {
+  /** Seq number per successfully processed event. */
+  seqs: number[];
+  /** Per-event errors (index is relative to the input array). */
+  errors: Array<{ index: number; error: string }>;
+}
+
+/**
+ * Batch-process an array of events through the fold.
+ *
+ * Optimizations over per-event processEvent():
+ *   1. Sequence numbers are allocated in a single DB write (not one per event).
+ *   2. Log entries and idempotency keys are flushed in a single LevelDB batch.
+ *   3. Dependency recomputation, REC detection, and cascade-upward are deferred
+ *      to the end of the batch instead of running after every event.
+ *   4. Feed notifications are emitted in bulk after the batch completes.
+ *
+ * Correctness: operator execution (INS/DEF/CON/etc.) still runs sequentially
+ * within the batch so that later events can see state written by earlier ones.
+ * Per-event errors are captured without aborting the batch.
+ */
+export async function processEventBatch(
+  db: EoDb,
+  events: EoEventInput[],
+  feed?: Feed,
+): Promise<ProcessBatchResult> {
+  if (events.length === 0) return { seqs: [], errors: [] };
+
+  const seqs: number[] = [];
+  const errors: Array<{ index: number; error: string }> = [];
+
+  // Track client_event_ids seen within this batch for intra-batch dedup.
+  // Maps client_event_id → index into seqs[] (placeholder filled after Phase 3).
+  const seenIds = new Set<string>();
+  // Indices in seqs[] that are waiting for an intra-batch duplicate to resolve
+  const pendingDedup: Array<{ seqsIdx: number; clientEventId: string }> = [];
+
+  // Events that pass pre-checks and need actual processing
+  const toProcess: Array<{ event: EoEventInput; idx: number }> = [];
+  // Resolved idempotency: client_event_id → seq (filled during Phase 3)
+  const resolvedSeqs = new Map<string, number>();
+
+  // ── Phase 1: pre-filter (SIG, idempotency, no-op) ──────────────────
+  for (let i = 0; i < events.length; i++) {
+    let event = events[i];
+
+    if (event.op === 'REC') {
+      throw new Error('REC is system-generated and cannot be submitted externally');
+    }
+
+    // SIG: ephemeral — track locally, no persistence
+    if (event.op === 'SIG') {
+      const sigEvent: SigEvent = {
+        op: 'SIG',
+        target: event.target,
+        operand: event.operand,
+        agent: event.agent,
+        ts: event.ts,
+        acquired_ts: event.acquired_ts,
+      };
+      sigTracker.track(sigEvent);
+      if (feed) feed.notify({ ...sigEvent, seq: -1 } as unknown as EoEvent);
+      seqs.push(-1);
+      continue;
+    }
+
+    // Assign deterministic hash if no client_event_id
+    if (!event.client_event_id) {
+      event = { ...event, client_event_id: eventHash(event) };
+    }
+
+    // Intra-batch dedup: if we've seen this id earlier in this batch,
+    // queue a placeholder that will be resolved after Phase 3.
+    if (event.client_event_id && seenIds.has(event.client_event_id)) {
+      const placeholderIdx = seqs.length;
+      seqs.push(0); // placeholder — resolved after Phase 3
+      pendingDedup.push({ seqsIdx: placeholderIdx, clientEventId: event.client_event_id });
+      continue;
+    }
+
+    // DB idempotency check
+    if (event.client_event_id) {
+      try {
+        const buf = await db.get(`idem:${event.client_event_id}`);
+        const existingSeq = decode(buf) as number;
+        seqs.push(existingSeq);
+        resolvedSeqs.set(event.client_event_id, existingSeq);
+        seenIds.add(event.client_event_id);
+        continue;
+      } catch (e: any) {
+        if (e.code !== 'LEVEL_NOT_FOUND') throw e;
+      }
+    }
+
+    // No-op check
+    const noOpSeq = await checkNoOp(db, event);
+    if (noOpSeq !== null) {
+      seqs.push(noOpSeq);
+      continue;
+    }
+
+    if (event.client_event_id) seenIds.add(event.client_event_id);
+    toProcess.push({ event, idx: i });
+  }
+
+  if (toProcess.length === 0) {
+    // Resolve any pending dedup entries from DB-resolved idempotency
+    for (const { seqsIdx, clientEventId } of pendingDedup) {
+      seqs[seqsIdx] = resolvedSeqs.get(clientEventId) ?? 0;
+    }
+    return { seqs, errors };
+  }
+
+  // ── Phase 2: allocate seq range in one write ────────────────────────
+  const startSeq = await allocateSeqRange(db, toProcess.length);
+
+  // ── Phase 3: execute operators sequentially, collect batch writes ───
+  const batchOps: Array<{ type: 'put'; key: string; value: Buffer }> = [];
+  const fullEvents: EoEvent[] = [];
+  // Placeholder positions in seqs[] for toProcess events (filled in order)
+  const seqPositions: number[] = [];
+
+  // Reserve slots in seqs for events being processed
+  for (let j = 0; j < toProcess.length; j++) {
+    seqPositions.push(seqs.length);
+    seqs.push(0); // placeholder
+  }
+
+  for (let j = 0; j < toProcess.length; j++) {
+    const { event, idx } = toProcess[j];
+    const seq = startSeq + j;
+    const fullEvent: EoEvent = { ...event, seq } as EoEvent;
+
+    try {
+      // Execute operator (reads/writes state — must be sequential)
+      await executeOperator(db, fullEvent);
+
+      // Queue log entry (write-only — never read back during the batch)
+      batchOps.push({
+        type: 'put',
+        key: `log:${padSeq(seq)}`,
+        value: encode(fullEvent),
+      });
+
+      // Queue idempotency key
+      if (event.client_event_id) {
+        batchOps.push({
+          type: 'put',
+          key: `idem:${event.client_event_id}`,
+          value: encode(seq),
+        });
+        resolvedSeqs.set(event.client_event_id, seq);
+      }
+
+      fullEvents.push(fullEvent);
+      seqs[seqPositions[j]] = seq;
+    } catch (e: any) {
+      errors.push({ index: idx, error: e.message });
+      // Remove the placeholder — shift subsequent positions
+      seqs.splice(seqPositions[j], 1);
+      for (let k = j + 1; k < seqPositions.length; k++) {
+        seqPositions[k]--;
+      }
+      // Also shift pending dedup positions
+      for (const pd of pendingDedup) {
+        if (pd.seqsIdx > seqPositions[j]) pd.seqsIdx--;
+      }
+    }
+  }
+
+  // Resolve pending intra-batch dedup entries
+  for (const { seqsIdx, clientEventId } of pendingDedup) {
+    seqs[seqsIdx] = resolvedSeqs.get(clientEventId) ?? 0;
+  }
+
+  // ── Phase 4: flush log + idem keys in a single LevelDB batch ───────
+  if (batchOps.length > 0) {
+    await db.batch(batchOps);
+  }
+
+  // ── Phase 5: deferred post-processing ──────────────────────────────
+  // Recompute dependents for all changed targets (shared cycle guard).
+  const visited = new Set<string>();
+  for (const ev of fullEvents) {
+    await recomputeDependents(db, ev.target, visited);
+  }
+
+  // Detect REC cycles and cascade upward — once per unique target,
+  // using the last event per target to capture the final state.
+  const lastEventPerTarget = new Map<string, EoEvent>();
+  for (const ev of fullEvents) {
+    lastEventPerTarget.set(ev.target, ev);
+  }
+  for (const [target, ev] of lastEventPerTarget) {
+    await detectAndEmitREC(db, target, ev, feed);
+    await cascadeUpward(db, target, ev, feed);
+  }
+
+  // ── Phase 6: batch feed notifications ──────────────────────────────
+  if (feed) {
+    for (const ev of fullEvents) {
+      feed.notify(ev);
+    }
+  }
+
+  return { seqs, errors };
 }
 
 /**
