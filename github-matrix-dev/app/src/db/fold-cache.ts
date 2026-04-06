@@ -16,6 +16,7 @@ import type {
   EoEvent, EoStateFold, TrajectoryEntry, TrajectoryFingerprint,
   CadenceInfo, CadenceClass, LoggableOperator, GraphMetrics, GraphRole,
 } from './types';
+import { extractCard, getChunkWriter, getCardBuffer } from './card-encoder';
 
 const ALL_LOGGABLE_OPS: LoggableOperator[] = ['NUL', 'INS', 'SEG', 'CON', 'SYN', 'DEF', 'EVA', 'REC'];
 const INTERVAL_WINDOW = 200;              // cap intervalsSorted length (sliding)
@@ -173,6 +174,15 @@ export async function updateFoldCache(store: EoStore, event: EoEvent): Promise<v
   }
 
   await setState(store, { ...state, _fold });
+
+  // ── Card encoder hook: extract compact card summary + persist to chunk ──
+  const writer = getChunkWriter();
+  if (writer) {
+    const card = extractCard(event.target, event, _fold, state.graphMetrics?.degree ?? 0);
+    await writer.addRecord(card);
+    const buf = getCardBuffer();
+    if (buf) buf.upsert(card);
+  }
 }
 
 /**
