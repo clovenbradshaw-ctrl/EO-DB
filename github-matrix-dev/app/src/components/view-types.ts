@@ -85,6 +85,7 @@ export function createDefaultConfig(): TableViewConfig {
     filters: [],
     filterConjunction: 'AND',
     showLastUpdated: true,
+    cellOverflow: 'clip',
   };
 }
 

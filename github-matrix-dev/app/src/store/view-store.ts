@@ -116,6 +116,10 @@ export const useViewStore = create<ViewStoreState>((set, get) => ({
     // Try localStorage
     const persisted = loadSig(scope);
     if (persisted) {
+      // Never restore __schema as the active view — always start on grid
+      if (persisted.activeViewId === '__schema') {
+        persisted.activeViewId = null;
+      }
       set((s) => ({ sigs: { ...s.sigs, [scope]: persisted } }));
       return persisted;
     }
