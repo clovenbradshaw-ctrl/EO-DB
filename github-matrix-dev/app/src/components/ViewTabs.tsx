@@ -427,6 +427,7 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       background: t.bgCard,
       overflowX: 'auto',
       flexShrink: 0,
+      position: 'relative' as const,
     },
     tab: tabBase,
     tabActive: {
