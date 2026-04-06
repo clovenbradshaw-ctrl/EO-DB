@@ -10,6 +10,7 @@
 
 import { create } from 'zustand';
 import { fetchFilenCredentialsFromWebhook } from '../filen/filen-api';
+import { AirtableClient } from './airtable-client';
 import type { HydrationManifest, HydrationResult, UpdateSyncResult } from './airtable-sync';
 
 export interface AirtableSyncState {
@@ -41,8 +42,8 @@ export interface AirtableSyncState {
   // ── Actions ──
   /** Fetch the Airtable API key from the n8n webhook using the Matrix token. */
   connectFromWebhook: (matrixAccessToken: string) => Promise<void>;
-  /** Set the API key directly (when piggybacked from Filen webhook call). */
-  connectWithKey: (apiKey: string) => void;
+  /** Set the API key directly (when piggybacked from Filen webhook call). Verifies the key first. */
+  connectWithKey: (apiKey: string) => Promise<void>;
   /** Clear the in-memory session. */
   disconnect: () => void;
   setManifest: (m: HydrationManifest | null) => void;
@@ -74,6 +75,9 @@ export const useAirtableStore = create<AirtableSyncState>((set, get) => ({
       if (!key) {
         throw new Error('Webhook did not return an Airtable API key');
       }
+      // Verify the key is valid by making a lightweight API call
+      const client = new AirtableClient(key);
+      await client.listBases();
       set({ apiKey: key, connected: true, connecting: false });
     } catch (e: any) {
       set({ connecting: false, error: e.message });
@@ -81,8 +85,16 @@ export const useAirtableStore = create<AirtableSyncState>((set, get) => ({
     }
   },
 
-  connectWithKey(apiKey: string) {
-    set({ apiKey, connected: true, connecting: false, error: null });
+  async connectWithKey(apiKey: string): Promise<void> {
+    set({ connecting: true, error: null });
+    try {
+      const client = new AirtableClient(apiKey);
+      await client.listBases();
+      set({ apiKey, connected: true, connecting: false, error: null });
+    } catch (e: any) {
+      set({ connecting: false, error: `Invalid Airtable API key: ${e.message}` });
+      throw e;
+    }
   },
 
   disconnect() {
