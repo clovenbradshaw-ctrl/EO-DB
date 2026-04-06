@@ -326,14 +326,130 @@ export function ViewsBrowser({ scope, recordCount, userId, onBack, onSelectView 
               </>
             )}
 
-            {/* Create a view */}
-            <button
-              style={s.createBtn}
-              onClick={() => setShowCreate(true)}
-              title="Create a new view for this object"
-            >
-              + Create a view
-            </button>
+            {/* Create a view — inline like Airtable */}
+            {!showCreate ? (
+              <button
+                style={s.createBtn}
+                onClick={() => setShowCreate(true)}
+                title="Create a new view for this object"
+              >
+                + Create a view
+              </button>
+            ) : (
+              <div style={s.inlineCreateForm}>
+                <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 8, color: theme.textHeading }}>
+                  New view
+                </div>
+                <input
+                  autoFocus
+                  value={newViewName}
+                  onChange={(e) => setNewViewName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') handleCreateView();
+                    if (e.key === 'Escape') { setShowCreate(false); resetCreateForm(); }
+                  }}
+                  placeholder="View name\u2026"
+                  style={s.nameInput}
+                />
+                <div style={{ display: 'flex', gap: 4, marginTop: 8, flexWrap: 'wrap' as const }}>
+                  {(Object.keys(VIEW_TYPE_META) as ViewType[]).map((vt) => {
+                    const meta = VIEW_TYPE_META[vt];
+                    const active = newViewType === vt;
+                    return (
+                      <button
+                        key={vt}
+                        onClick={() => setNewViewType(vt)}
+                        style={{
+                          display: 'inline-flex', alignItems: 'center', gap: 4,
+                          padding: '4px 8px', fontSize: 11, fontWeight: active ? 600 : 400,
+                          border: `1px solid ${active ? theme.accent : theme.border}`,
+                          borderRadius: 4, cursor: 'pointer',
+                          background: active ? theme.accentBg : 'transparent',
+                          color: active ? theme.accent : theme.textSecondary,
+                        }}
+                      >
+                        <span style={{ fontSize: 12 }}>{meta.icon}</span>
+                        {meta.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                {/* Kanban field selection */}
+                {newViewType === 'kanban' && (
+                  <div style={{ marginTop: 8 }}>
+                    <div style={{ fontSize: 11, fontWeight: 500, color: theme.textSecondary, marginBottom: 4 }}>
+                      Group by field
+                    </div>
+                    <select
+                      value={newKanbanField}
+                      onChange={(e) => setNewKanbanField(e.target.value)}
+                      style={{
+                        width: '100%',
+                        height: 32,
+                        fontSize: 12,
+                        padding: '0 8px',
+                        border: `1px solid ${theme.border}`,
+                        borderRadius: 4,
+                        background: theme.bgCard,
+                        color: theme.text,
+                        outline: 'none',
+                        boxSizing: 'border-box' as const,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      <option value="">Select a field{'\u2026'}</option>
+                      {scopeColumns.map((col) => (
+                        <option key={col.key} value={col.key}>
+                          {col.label}{fieldUniqueCounts[col.key] != null ? ` (${fieldUniqueCounts[col.key]} values)` : ''}
+                        </option>
+                      ))}
+                    </select>
+                    {newKanbanField && fieldUniqueCounts[newKanbanField] > 15 && (
+                      <div style={{
+                        marginTop: 4,
+                        padding: '4px 8px',
+                        fontSize: 11,
+                        color: '#b45309',
+                        background: '#fef3c7',
+                        border: '1px solid #fde68a',
+                        borderRadius: 4,
+                      }}>
+                        This field has {fieldUniqueCounts[newKanbanField]} unique values. Kanban boards work best with 15 or fewer columns.
+                      </div>
+                    )}
+                  </div>
+                )}
+                <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                  <button
+                    style={newViewVisibility === 'private' ? s.visBtnActive : s.visBtn}
+                    onClick={() => setNewViewVisibility('private')}
+                  >
+                    {'\uD83D\uDD12'} Private
+                  </button>
+                  <button
+                    style={newViewVisibility === 'shared' ? s.visBtnActive : s.visBtn}
+                    onClick={() => setNewViewVisibility('shared')}
+                  >
+                    {'\uD83D\uDD13'} Shared
+                  </button>
+                </div>
+                <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
+                  <button
+                    style={s.inlineCancelBtn}
+                    onClick={() => { setShowCreate(false); resetCreateForm(); }}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    style={(!newViewName.trim() || creating || (newViewType === 'kanban' && !newKanbanField)) ? s.modalCreateBtnDisabled : s.modalCreateBtn}
+                    onClick={handleCreateView}
+                    disabled={!newViewName.trim() || creating || (newViewType === 'kanban' && !newKanbanField)}
+                  >
+                    {creating ? 'Creating\u2026' : 'Create view'}
+                  </button>
+                </div>
+              </div>
+            )}
           </>
         )}
       </div>
@@ -347,121 +463,6 @@ export function ViewsBrowser({ scope, recordCount, userId, onBack, onSelectView 
             <span style={s.scopeChipMeta}>{recordCount} records</span>
           </div>
         </div>
-      )}
-
-      {/* Create-view modal */}
-      {showCreate && scope && (
-        <>
-          <div
-            style={s.modalOverlay}
-            onClick={() => { setShowCreate(false); resetCreateForm(); }}
-          />
-          <div style={s.modal}>
-            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10, color: theme.textHeading }}>
-              New view
-            </div>
-            <input
-              autoFocus
-              value={newViewName}
-              onChange={(e) => setNewViewName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') handleCreateView();
-                if (e.key === 'Escape') { setShowCreate(false); resetCreateForm(); }
-              }}
-              placeholder="View name\u2026"
-              style={s.nameInput}
-            />
-            <div style={{ display: 'flex', gap: 4, marginTop: 8, flexWrap: 'wrap' as const }}>
-              {(Object.keys(VIEW_TYPE_META) as ViewType[]).map((vt) => {
-                const meta = VIEW_TYPE_META[vt];
-                const active = newViewType === vt;
-                return (
-                  <button
-                    key={vt}
-                    onClick={() => setNewViewType(vt)}
-                    style={{
-                      display: 'inline-flex', alignItems: 'center', gap: 4,
-                      padding: '4px 8px', fontSize: 11, fontWeight: active ? 600 : 400,
-                      border: `1px solid ${active ? theme.accent : theme.border}`,
-                      borderRadius: 4, cursor: 'pointer',
-                      background: active ? theme.accentBg : 'transparent',
-                      color: active ? theme.accent : theme.textSecondary,
-                    }}
-                  >
-                    <span style={{ fontSize: 12 }}>{meta.icon}</span>
-                    {meta.label}
-                  </button>
-                );
-              })}
-            </div>
-            {/* Kanban field selection */}
-            {newViewType === 'kanban' && (
-              <div style={{ marginTop: 8 }}>
-                <div style={{ fontSize: 11, fontWeight: 500, color: theme.textSecondary, marginBottom: 4 }}>
-                  Group by field
-                </div>
-                <select
-                  value={newKanbanField}
-                  onChange={(e) => setNewKanbanField(e.target.value)}
-                  style={{
-                    width: '100%',
-                    height: 32,
-                    fontSize: 12,
-                    padding: '0 8px',
-                    border: `1px solid ${theme.border}`,
-                    borderRadius: 4,
-                    background: theme.bgCard,
-                    color: theme.text,
-                    outline: 'none',
-                    boxSizing: 'border-box' as const,
-                    cursor: 'pointer',
-                  }}
-                >
-                  <option value="">Select a field\u2026</option>
-                  {scopeColumns.map((col) => (
-                    <option key={col.key} value={col.key}>
-                      {col.label}{fieldUniqueCounts[col.key] != null ? ` (${fieldUniqueCounts[col.key]} values)` : ''}
-                    </option>
-                  ))}
-                </select>
-                {newKanbanField && fieldUniqueCounts[newKanbanField] > 15 && (
-                  <div style={{
-                    marginTop: 4,
-                    padding: '4px 8px',
-                    fontSize: 11,
-                    color: '#b45309',
-                    background: '#fef3c7',
-                    border: '1px solid #fde68a',
-                    borderRadius: 4,
-                  }}>
-                    This field has {fieldUniqueCounts[newKanbanField]} unique values. Kanban boards work best with 15 or fewer columns.
-                  </div>
-                )}
-              </div>
-            )}
-            <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-              <button
-                style={newViewVisibility === 'private' ? s.visBtnActive : s.visBtn}
-                onClick={() => setNewViewVisibility('private')}
-              >
-                {'\uD83D\uDD12'} Private
-              </button>
-              <button
-                style={newViewVisibility === 'shared' ? s.visBtnActive : s.visBtn}
-                onClick={() => setNewViewVisibility('shared')}
-              >
-                {'\uD83D\uDD13'} Shared
-              </button>
-            </div>
-            <button
-              style={(!newViewName.trim() || creating) ? s.modalCreateBtnDisabled : s.modalCreateBtn}
-              onClick={handleCreateView}
-              disabled={!newViewName.trim() || creating || (newViewType === 'kanban' && !newKanbanField)}
-            >
-              {creating ? 'Creating\u2026' : 'Create view'}
-            </button>
-          </div>
-        </>
       )}
     </div>
   );
@@ -628,24 +629,23 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       color: t.textMuted,
       flexShrink: 0,
     },
-    modalOverlay: {
-      position: 'fixed' as const,
-      inset: 0,
-      background: 'rgba(0,0,0,0.35)',
-      zIndex: 9998,
-    },
-    modal: {
-      position: 'fixed' as const,
-      top: '50%',
-      left: '50%',
-      transform: 'translate(-50%, -50%)',
-      zIndex: 9999,
+    inlineCreateForm: {
+      margin: '8px 12px 4px',
+      padding: 12,
       background: t.bgCard,
       border: `1px solid ${t.border}`,
-      borderRadius: 8,
-      padding: 16,
-      boxShadow: `0 8px 30px ${t.shadow}`,
-      width: 260,
+      borderRadius: 6,
+    },
+    inlineCancelBtn: {
+      flex: 1,
+      padding: '8px 0',
+      fontSize: 12,
+      fontWeight: 500,
+      border: `1px solid ${t.border}`,
+      borderRadius: 6,
+      background: 'transparent',
+      color: t.textSecondary,
+      cursor: 'pointer',
     },
     nameInput: {
       width: '100%',
