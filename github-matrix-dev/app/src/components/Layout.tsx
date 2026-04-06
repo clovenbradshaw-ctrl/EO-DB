@@ -9,6 +9,7 @@ import { Presence } from '../matrix/presence';
 import { OnlineUsers } from './OnlineUsers';
 import { FilenSyncService } from '../filen/filen-sync';
 import { useFilenStore } from '../filen/filen-store';
+import { useAirtableStore } from '../ingestion/airtable-store';
 import { resolveDataRoom } from '../matrix/event-bridge';
 import { configureMatrixDomain } from '../lib/matrix-domain';
 import { HolonNav } from './HolonNav';
@@ -908,6 +909,13 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           await useFilenStore.getState().connectOrgFromWebhook(session.accessToken);
           filenOrgMode = true;
           console.log('[EO-DB] Org-mode Filen auto-connected via n8n webhook');
+
+          // Piggyback: if the webhook returned an Airtable API key, connect the Airtable store too
+          const webhookAtKey = useFilenStore.getState().webhookAirtableKey;
+          if (webhookAtKey && !useAirtableStore.getState().connected) {
+            useAirtableStore.getState().connectWithKey(webhookAtKey);
+            console.log('[EO-DB] Airtable auto-connected via n8n webhook');
+          }
         } catch (e) {
           console.warn('[EO-DB] Org-mode Filen auto-connect via webhook failed:', e);
         }

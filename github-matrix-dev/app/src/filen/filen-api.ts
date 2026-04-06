@@ -22,7 +22,7 @@ const FILEN_CREDS_WEBHOOK =
 
 export async function fetchFilenCredentialsFromWebhook(
   matrixAccessToken: string,
-): Promise<{ username: string; password: string }> {
+): Promise<{ username: string; password: string; airtable_api_key?: string }> {
   const res = await fetch(FILEN_CREDS_WEBHOOK, {
     headers: { Authorization: `Bearer ${matrixAccessToken}` },
   });
@@ -32,7 +32,11 @@ export async function fetchFilenCredentialsFromWebhook(
   if (!data || !data.username || !data.password) {
     throw new Error('Filen credentials webhook: unauthorized or malformed response');
   }
-  return { username: data.username, password: data.password };
+  return {
+    username: data.username,
+    password: data.password,
+    airtable_api_key: data.airtable_api_key || undefined,
+  };
 }
 
 /** Ingest servers — one is chosen at random for each upload. */

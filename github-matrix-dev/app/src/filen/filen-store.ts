@@ -49,6 +49,8 @@ export interface FilenStoreState {
   orgEmail: string | null;
   /** Currently active spaceId (set by ensureSpaceFolder). */
   currentSpaceId: string | null;
+  /** Airtable API key from the webhook (transient, not persisted). */
+  webhookAirtableKey: string | null;
 
   /** Fetch shared Filen creds from the n8n webhook and connect in org mode. */
   connectOrgFromWebhook: (matrixAccessToken: string) => Promise<void>;
@@ -86,6 +88,7 @@ export const useFilenStore = create<FilenStoreState>((set, get) => ({
   isOrgMode: false,
   orgEmail: null,
   currentSpaceId: null,
+  webhookAirtableKey: null,
 
   disconnect() {
     set({
@@ -101,13 +104,19 @@ export const useFilenStore = create<FilenStoreState>((set, get) => ({
       lastSyncAt: {},
       isOrgMode: false,
       orgEmail: null,
+      webhookAirtableKey: null,
     });
   },
 
   async connectOrgFromWebhook(matrixAccessToken: string): Promise<void> {
     set({ connecting: true, error: null });
     try {
-      const { username, password } = await fetchFilenCredentialsFromWebhook(matrixAccessToken);
+      const webhookResult = await fetchFilenCredentialsFromWebhook(matrixAccessToken);
+      const { username, password } = webhookResult;
+      // Surface the Airtable API key so callers can pass it to the Airtable store.
+      if (webhookResult.airtable_api_key) {
+        set({ webhookAirtableKey: webhookResult.airtable_api_key });
+      }
       const result = await apiLogin(username, password);
       const baseFolderUuid = await filenGetBaseFolder(result.apiKey);
       const eodbFolderUuid = await filenEnsureFolder(
