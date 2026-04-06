@@ -2,10 +2,13 @@ import type { FastifyRequest, FastifyReply } from 'fastify';
 import type { EoDb } from '../db/level.js';
 import { checkAccess, accessSatisfies, type AccessCheckResult } from './matrix-auth-config.js';
 import { getHomeserver, getWebhookUser, configureMatrixDomain } from '../config/matrix-domain.js';
+import { fetchWithRetry, type ConnectionStatus } from '../matrix/connection-resilience.js';
 
 export interface MatrixUser {
   user_id: string;
   device_id?: string;
+  /** Whether this user was authenticated offline (from cache). */
+  offline?: boolean;
 }
 
 interface CacheEntry {
@@ -17,10 +20,25 @@ const tokenCache = new Map<string, CacheEntry>();
 const CACHE_TTL = 300_000; // 5 minutes
 const MAX_CACHE_SIZE = 1000; // cap to prevent unbounded growth
 
+/** Extended cache for offline fallback — survives longer than the hot cache. */
+const offlineTokenCache = new Map<string, { user: MatrixUser; cachedAt: number }>();
+const OFFLINE_CACHE_TTL = 7 * 24 * 60 * 60 * 1000; // 7 days
+
 let webhookSecret = process.env.EO_WEBHOOK_SECRET || '';
 
 /** The DB handle used by authMiddleware for access checks. */
 let authDb: EoDb | null = null;
+
+/** Current connection status — updated by the connection monitor. */
+let connectionStatus: ConnectionStatus = 'online';
+
+export function setConnectionStatus(status: ConnectionStatus): void {
+  connectionStatus = status;
+}
+
+export function getConnectionStatus(): ConnectionStatus {
+  return connectionStatus;
+}
 
 export function setAuthConfig(config: { homeserver?: string; webhookSecret?: string; webhookUser?: string }): void {
   if (config.homeserver) configureMatrixDomain({ homeserver: config.homeserver });
@@ -37,33 +55,70 @@ export function clearTokenCache(): void {
   tokenCache.clear();
 }
 
+/**
+ * Verify a Matrix access token — uses retry with backoff.
+ * Falls back to offline cache when the homeserver is unreachable.
+ */
 export async function verifyMatrixToken(accessToken: string): Promise<MatrixUser> {
+  // Check hot cache first
   const cached = tokenCache.get(accessToken);
   if (cached && cached.expires > Date.now()) {
     return cached.user;
   }
 
-  const response = await fetch(`${getHomeserver()}/_matrix/client/v3/account/whoami`, {
-    headers: { 'Authorization': `Bearer ${accessToken}` },
-  });
+  try {
+    const response = await fetchWithRetry(
+      `${getHomeserver()}/_matrix/client/v3/account/whoami`,
+      { headers: { 'Authorization': `Bearer ${accessToken}` } },
+      { maxRetries: 2, baseDelay: 500, maxDelay: 5000 },
+    );
 
-  if (!response.ok) {
-    throw new Error('Invalid Matrix token');
+    if (!response.ok) {
+      // 5xx = server issue, try offline cache
+      if (response.status >= 500) {
+        throw new Error(`Homeserver returned ${response.status}`);
+      }
+      // Any other non-ok (401, 403, etc.) = genuinely invalid token
+      offlineTokenCache.delete(accessToken);
+      throw new Error('Invalid Matrix token');
+    }
+
+    const data = await response.json() as { user_id: string; device_id?: string };
+    const user: MatrixUser = {
+      user_id: data.user_id,
+      device_id: data.device_id,
+    };
+
+    // Populate both caches
+    evictExpiredTokens();
+    tokenCache.set(accessToken, { user, expires: Date.now() + CACHE_TTL });
+    offlineTokenCache.set(accessToken, { user, cachedAt: Date.now() });
+
+    return user;
+  } catch (err: any) {
+    // If the error is a definitive auth rejection, don't try offline
+    if (err.message === 'Invalid Matrix token') throw err;
+
+    // Network/server error — try offline cache
+    const offlineCached = offlineTokenCache.get(accessToken);
+    if (offlineCached) {
+      const age = Date.now() - offlineCached.cachedAt;
+      if (age < OFFLINE_CACHE_TTL) {
+        return { ...offlineCached.user, offline: true };
+      }
+      offlineTokenCache.delete(accessToken);
+    }
+
+    throw new Error(`Cannot reach homeserver and no cached session: ${err.message}`);
   }
+}
 
-  const data = await response.json() as { user_id: string; device_id?: string };
-  const user: MatrixUser = {
-    user_id: data.user_id,
-    device_id: data.device_id,
-  };
-
-  // Evict expired entries when cache is at capacity
+function evictExpiredTokens(): void {
   if (tokenCache.size >= MAX_CACHE_SIZE) {
     const now = Date.now();
     for (const [key, entry] of tokenCache) {
       if (entry.expires <= now) tokenCache.delete(key);
     }
-    // If still at capacity after evicting expired, drop oldest entries
     if (tokenCache.size >= MAX_CACHE_SIZE) {
       const excess = tokenCache.size - MAX_CACHE_SIZE + 1;
       const keys = tokenCache.keys();
@@ -72,9 +127,6 @@ export async function verifyMatrixToken(accessToken: string): Promise<MatrixUser
       }
     }
   }
-
-  tokenCache.set(accessToken, { user, expires: Date.now() + CACHE_TTL });
-  return user;
 }
 
 export function verifyWebhookSecret(secret: string): MatrixUser {
@@ -92,6 +144,8 @@ export interface AuthenticatedRequest extends FastifyRequest {
   matrixUser?: MatrixUser;
   /** The resolved access check result — available after auth middleware runs. */
   accessCheck?: AccessCheckResult;
+  /** True when the request was authenticated from offline cache. */
+  offlineMode?: boolean;
 }
 
 /**
@@ -137,6 +191,7 @@ export async function authMiddleware(
     if (authHeader.startsWith('Bearer ')) {
       const token = authHeader.slice(7);
       request.matrixUser = await verifyMatrixToken(token);
+      request.offlineMode = request.matrixUser.offline ?? false;
     } else if (authHeader.startsWith('EoWebhook ')) {
       const secret = authHeader.slice(10);
       request.matrixUser = verifyWebhookSecret(secret);
