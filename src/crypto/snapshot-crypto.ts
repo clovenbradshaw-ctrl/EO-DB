@@ -80,7 +80,7 @@ export async function decryptSnapshot(
         `Request key access or trigger a key heal.`,
       );
     }
-    const iv = base64ToBuffer(outer.iv);
+    const iv = base64ToBuffer(outer.iv) as unknown as BufferSource;
     const plaintext = await crypto.subtle.decrypt(
       { name: 'AES-GCM', iv },
       entry.key,
@@ -137,7 +137,7 @@ export async function decryptPeerPayload(
   key: CryptoKey,
   payload: EncryptedPeerPayload,
 ): Promise<Uint8Array> {
-  const iv = base64ToBuffer(payload.iv);
+  const iv = base64ToBuffer(payload.iv) as unknown as BufferSource;
   const ct = base64ToBuffer(payload.ct);
   const plaintext = await crypto.subtle.decrypt(
     { name: 'AES-GCM', iv },

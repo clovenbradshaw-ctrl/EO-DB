@@ -79,7 +79,8 @@ export interface Subscription {
 }
 
 // Input event (before seq assignment — acquired_ts is system-assigned, not caller-provided)
-export type EoEventInput = Omit<EoEvent, 'seq'>;
+// Uses Operator for op since both external (incl SIG) and internal (REC) events pass through
+export type EoEventInput = Omit<EoEvent, 'seq' | 'op'> & { op: Operator };
 
 // --- Horizon: The Current State ---
 // Layers: Figure, Ground, Nearby, Governance (cheap), Signals (expensive/on-demand)

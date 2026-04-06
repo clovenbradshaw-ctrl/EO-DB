@@ -389,7 +389,15 @@ export async function processImport(
   feed: Feed,
   rows: ImportEventRow[],
   agent: string,
-  options?: { halt_on_error?: boolean; sink?: EventSink; chunk_size?: number },
+  options?: {
+    halt_on_error?: boolean;
+    sink?: EventSink;
+    chunk_size?: number;
+    /** Skip chunks before this index (for resume after crash). */
+    startFromChunk?: number;
+    /** Called after each chunk completes — used to persist resume progress. */
+    onChunkComplete?: (chunkIndex: number, result: ImportResult) => Promise<void>;
+  },
 ): Promise<ImportResult> {
   const result: ImportResult = {
     total: rows.length,
@@ -407,8 +415,17 @@ export async function processImport(
 
   if (useBatch) {
     // ── Fast path: chunked batch processing ───────────────────────────
+    const startFromChunk = options?.startFromChunk ?? 0;
+    let chunkIndex = 0;
+
     for (let chunkStart = 0; chunkStart < rows.length; chunkStart += chunkSize) {
       const chunkEnd = Math.min(chunkStart + chunkSize, rows.length);
+
+      // Skip already-processed chunks (for resume after crash)
+      if (chunkIndex < startFromChunk) {
+        chunkIndex++;
+        continue;
+      }
 
       // Validate and build events for this chunk
       const chunkEvents: EoEventInput[] = [];
@@ -436,7 +453,7 @@ export async function processImport(
         chunkIndices.push(i);
       }
 
-      if (chunkEvents.length === 0) continue;
+      if (chunkEvents.length === 0) { chunkIndex++; continue; }
 
       const batchResult: ProcessBatchResult = options?.sink
         ? await options.sink.emitBatch(chunkEvents)
@@ -450,6 +467,13 @@ export async function processImport(
         result.errors.push({ index: chunkIndices[err.index], error: err.error });
         result.skipped++;
       }
+
+      // Notify caller of chunk completion (for resume checkpoint persistence)
+      if (options?.onChunkComplete) {
+        await options.onChunkComplete(chunkIndex, result);
+      }
+
+      chunkIndex++;
     }
   } else {
     // ── Original path: per-event processing (used with EventSink) ─────

@@ -598,7 +598,7 @@ export class SyncManager {
    * @returns The final seq number
    */
   async processBatchImport(
-    events: Array<Omit<EoEventInput, 'client_event_id' | 'agent' | 'ts' | 'acquired_ts'>>,
+    events: Array<Omit<EoEventInput, 'client_event_id' | 'agent' | 'acquired_ts'> & { ts?: string }>,
     onProgress?: (current: number, total: number) => void,
   ): Promise<number> {
     const agent = this.client.getUserId()!;

@@ -98,7 +98,7 @@ export async function processEvent(
 
   // 3. Assign sequence number
   const seq = await nextSeq(db);
-  const fullEvent: EoEvent = { ...event, seq };
+  const fullEvent: EoEvent = { ...event, seq } as EoEvent;
 
   // 4. Append to log
   await appendToLog(db, fullEvent);
@@ -885,11 +885,11 @@ async function detectAndEmitREC(
     acquired_ts: now,
     triggered_by: triggeringEvent.seq,
   };
-  const recEvent: EoEvent = {
+  const recEvent = {
     ...recEventInput,
     seq: recSeq,
     client_event_id: eventHash(recEventInput),
-  };
+  } as EoEvent;
 
   // Log the REC event and store idempotency key
   await appendToLog(db, recEvent);
@@ -1085,11 +1085,11 @@ async function emitCriticalREC(
     acquired_ts: now,
     triggered_by: triggeringEvent.seq,
   };
-  const recEvent: EoEvent = {
+  const recEvent = {
     ...criticalRecInput,
     seq: recSeq,
     client_event_id: eventHash(criticalRecInput),
-  };
+  } as EoEvent;
 
   await appendToLog(db, recEvent);
   await db.put(`idem:${recEvent.client_event_id}`, encode(recSeq));
@@ -1277,11 +1277,11 @@ async function cascadeUpward(
       acquired_ts: now,
       triggered_by: triggeringEvent.seq,
     };
-    const reEvalEvent: EoEvent = {
+    const reEvalEvent = {
       ...reEvalInput,
       seq: reEvalSeq,
       client_event_id: eventHash(reEvalInput),
-    };
+    } as EoEvent;
     await appendToLog(db, reEvalEvent);
     await db.put(`idem:${reEvalEvent.client_event_id}`, encode(reEvalSeq));
 
