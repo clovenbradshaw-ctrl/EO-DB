@@ -1768,8 +1768,9 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
     },
     main: {
       flex: 1,
+      minWidth: 0,
+      overflowX: 'hidden' as const,
       overflowY: 'auto' as const,
-      overflow: 'hidden',
       display: 'flex',
       flexDirection: 'column' as const,
       background: t.bg,
