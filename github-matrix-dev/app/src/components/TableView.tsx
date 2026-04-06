@@ -14,6 +14,7 @@ import { useViewStore } from '../store/view-store';
 import { defaultColumnWidth, MIN_COLUMN_WIDTH } from './view-types';
 import { formatName } from './scope-picker-utils';
 import { useIsMobile } from '../hooks/useIsMobile';
+import { ColumnManagerPanel } from './ColumnManagerPanel';
 import {
   DndContext,
   closestCenter,
@@ -368,6 +369,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   const isMobile = useIsMobile();
 
   const [showProfilePicker, setShowProfilePicker] = useState(false);
+  const [showColumnManager, setShowColumnManager] = useState(false);
 
   const setSorts = useCallback((s: SortRule[]) => viewStore.setSorts(scope, s), [scope, viewStore]);
   const setAdvancedFilters = useCallback((f: FilterRule[]) => viewStore.setFilters(scope, f), [scope, viewStore]);
@@ -863,6 +865,41 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                 </button>
               );
             })}
+          </div>
+
+          {/* Column manager (Fields) */}
+          <div style={{ position: 'relative' as const }}>
+            <button
+              onClick={() => setShowColumnManager((prev) => !prev)}
+              style={{
+                ...s.toggleBtn,
+                background: hiddenColumns.size > 0 ? theme.accentBg : 'transparent',
+                color: hiddenColumns.size > 0 ? theme.accent : theme.textMuted,
+                border: `1px solid ${hiddenColumns.size > 0 ? theme.accentBorder : theme.border}`,
+              }}
+              title="Show/hide and reorder table columns"
+            >
+              {'\u2630'} Fields{hiddenColumns.size > 0 ? ` (${hiddenColumns.size} hidden)` : ''}
+            </button>
+            {showColumnManager && (
+              <ColumnManagerPanel
+                allColumns={[
+                  { key: '_record', label: 'record', type: 'text' as const },
+                  ...entityColumns,
+                  { key: '_last_updated', label: 'last updated', type: 'text' as const },
+                ]}
+                columnOrder={columnOrder}
+                hiddenColumns={hiddenColumns}
+                onToggleColumn={(key) => viewStore.toggleHiddenColumn(scope, key)}
+                onReorder={(order) => viewStore.setColumnOrder(scope, order)}
+                onShowAll={() => viewStore.showAllColumns(scope)}
+                onHideAll={() => {
+                  const allKeys = entityColumns.map((c) => c.key).concat(['_record', '_last_updated']);
+                  viewStore.setHiddenColumns(scope, allKeys);
+                }}
+                onClose={() => setShowColumnManager(false)}
+              />
+            )}
           </div>
 
           {/* Profile fields picker */}
