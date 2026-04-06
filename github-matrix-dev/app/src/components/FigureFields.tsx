@@ -388,9 +388,22 @@ function renderFieldValue(
     );
   }
 
-  // Other objects (non-array, non-linked)
+  // Other objects (non-array, non-linked) — render as key-value pairs
   if (typeof val === 'object' && val !== null) {
-    return <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: t.textSecondary }}>{JSON.stringify(val, null, 1)}</span>;
+    const objEntries = Object.entries(val);
+    if (objEntries.length === 0) {
+      return <span style={{ color: t.textSecondary, fontSize: 13, fontStyle: 'italic' }}>empty</span>;
+    }
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
+        {objEntries.map(([k, v]) => (
+          <div key={k} style={{ display: 'flex', alignItems: 'baseline', gap: 8, padding: '3px 0', borderBottom: `1px solid ${t.borderLight}` }}>
+            <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: t.textMuted, minWidth: 80, flexShrink: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{k}</span>
+            <span style={{ fontSize: 12, color: t.text, fontFamily: typeof v === 'number' ? "'JetBrains Mono', monospace" : 'inherit', wordBreak: 'break-word' }}>{typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v)}</span>
+          </div>
+        ))}
+      </div>
+    );
   }
 
   // Single entity ID string
