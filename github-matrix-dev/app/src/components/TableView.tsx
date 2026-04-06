@@ -13,6 +13,7 @@ import type { ResolvedPermissions } from '../permissions/types';
 import { useViewStore } from '../store/view-store';
 import { defaultColumnWidth, MIN_COLUMN_WIDTH } from './view-types';
 import { formatName } from './scope-picker-utils';
+import { useIdResolver, isEntityId, isEntityIdArray, type IdResolver } from '../hooks/useIdResolver';
 import { groupSchemaStates, extractColumnTypeOverrides, schemaTypeTarget, schemaConstraintTarget, schemaResolveTarget, type FieldSchema } from '../db/schema-rules';
 import { ColumnTypeSelector } from './ColumnTypeSelector';
 import { useIsMobile, useIsNarrow } from '../hooks/useIsMobile';
@@ -191,21 +192,34 @@ function StatusPill({ value, t }: { value: string; t: Theme }) {
   );
 }
 
-function IdChip({ value, t }: { value: string; t: Theme }) {
+function IdChip({ value, t, resolved, onNavigate }: {
+  value: string;
+  t: Theme;
+  resolved?: { target: string; name: string | null } | null;
+  onNavigate?: (target: string) => void;
+}) {
+  const clickable = !!(resolved?.target && onNavigate);
   return (
-    <span style={{
-      display: 'inline-block',
-      padding: '1px 6px',
-      borderRadius: 4,
-      fontSize: 11,
-      fontFamily: "'JetBrains Mono', monospace",
-      background: t.bgMuted,
-      color: t.textSecondary,
-      border: `1px solid ${t.borderLight}`,
-      marginRight: 4,
-      whiteSpace: 'nowrap',
-    }}>
+    <span
+      style={{
+        display: 'inline-block',
+        padding: '1px 6px',
+        borderRadius: 4,
+        fontSize: 11,
+        fontFamily: "'JetBrains Mono', monospace",
+        background: t.bgMuted,
+        color: clickable ? t.purple : t.textSecondary,
+        border: `1px solid ${t.borderLight}`,
+        marginRight: 4,
+        whiteSpace: 'nowrap',
+        cursor: clickable ? 'pointer' : 'default',
+      }}
+      onClick={clickable ? (e) => { e.stopPropagation(); onNavigate!(resolved!.target); } : undefined}
+    >
       {value}
+      {resolved?.name && (
+        <span style={{ fontFamily: 'inherit', color: t.text, fontWeight: 400 }}>{' · '}{resolved.name}</span>
+      )}
     </span>
   );
 }
@@ -230,7 +244,7 @@ function formatCurrency(n: number): string {
   });
 }
 
-function renderCell(value: any, key: string, onNavigate: (t: string) => void, t: Theme): React.ReactNode {
+function renderCell(value: any, key: string, onNavigate: (t: string) => void, t: Theme, resolver?: IdResolver): React.ReactNode {
   // Intentional clear: an explicit null assertion gets the NUL glyph.
   if (value === null) {
     return <ClearedCell t={t} />;
@@ -249,17 +263,22 @@ function renderCell(value: any, key: string, onNavigate: (t: string) => void, t:
   if (typeof value === 'object' && value !== null && value.linked && Array.isArray(value.linked)) {
     return (
       <span>
-        {value.linked.map((target: string, i: number) => (
-          <span key={target}>
-            {i > 0 && ', '}
-            <span
-              style={{ color: t.purple, cursor: 'pointer', textDecoration: 'underline', textDecorationColor: t.purpleBorder }}
-              onClick={(e) => { e.stopPropagation(); onNavigate(target); }}
-            >
-              {target}
+        {value.linked.map((target: string, i: number) => {
+          const resolved = resolver?.resolveTarget(target);
+          const shortId = target.split('.').pop() || target;
+          return (
+            <span key={target}>
+              {i > 0 && ', '}
+              <span
+                style={{ color: t.purple, cursor: 'pointer', textDecoration: 'underline', textDecorationColor: t.purpleBorder }}
+                onClick={(e) => { e.stopPropagation(); onNavigate(target); }}
+              >
+                {shortId}
+                {resolved?.name && <span style={{ textDecoration: 'none', color: t.text }}>{' · '}{resolved.name}</span>}
+              </span>
             </span>
-          </span>
-        ))}
+          );
+        })}
       </span>
     );
   }
@@ -268,14 +287,14 @@ function renderCell(value: any, key: string, onNavigate: (t: string) => void, t:
   if (isIdArrayValue(value)) {
     return (
       <span>
-        {value.map((id) => <IdChip key={id} value={id} t={t} />)}
+        {value.map((id) => <IdChip key={id} value={id} t={t} resolved={resolver?.resolve(id)} onNavigate={onNavigate} />)}
       </span>
     );
   }
 
   // Single ID-shaped string (e.g. "ATT-006") — render as chip for consistency
   if (typeof value === 'string' && /^[A-Z]{2,5}-\d+$/.test(value)) {
-    return <IdChip value={value} t={t} />;
+    return <IdChip value={value} t={t} resolved={resolver?.resolve(value)} onNavigate={onNavigate} />;
   }
 
   // Other arrays: comma-joined primitives
@@ -338,6 +357,9 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   const dispatch = useEoStore((s) => s.dispatch);
   const ready = useEoStore((s) => s.ready);
   const lastSeq = useEoStore((s) => s.lastSeq);
+
+  const scopeRoot = scope.split('.')[0];
+  const idResolver = useIdResolver(scopeRoot);
 
   const [records, setRecords] = useState<EoState[]>([]);
   const [recordsLoaded, setRecordsLoaded] = useState(false);
@@ -1256,8 +1278,8 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                                 color: theme.textSecondary,
                               }}>{rec.last_ts ? formatRelativeTime(rec.last_ts) : <AbsentCell t={theme} />}</span>
                             : isLocked
-                            ? <LockedCell>{renderCell(getFieldValue(rec, col.key, useFieldsSub), col.key, onSelectRecord, theme)}</LockedCell>
-                            : renderCell(getFieldValue(rec, col.key, useFieldsSub), col.key, onSelectRecord, theme)
+                            ? <LockedCell>{renderCell(getFieldValue(rec, col.key, useFieldsSub), col.key, onSelectRecord, theme, idResolver)}</LockedCell>
+                            : renderCell(getFieldValue(rec, col.key, useFieldsSub), col.key, onSelectRecord, theme, idResolver)
                           }
                         </td>
                       );

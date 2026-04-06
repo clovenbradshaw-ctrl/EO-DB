@@ -3,6 +3,7 @@ import type { EoState } from '../db/types';
 import { useEoStore } from '../store/eo-store';
 import { useTheme, type Theme } from '../theme';
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
+import { useIdResolver, isEntityId, isEntityIdArray, type IdResolver } from '../hooks/useIdResolver';
 
 interface FigureFieldsProps {
   figure: EoState;
@@ -15,6 +16,8 @@ export function FigureFields({ figure, onNavigate, profileFields }: FigureFields
   const { theme } = useTheme();
   const s = makeStyles(theme);
   const value = figure.value;
+  const scopeRoot = figure.target.split('.')[0];
+  const resolver = useIdResolver(scopeRoot);
 
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; fieldKey: string } | null>(null);
   const [editing, setEditing] = useState<{ fieldKey: string; value: string } | null>(null);
@@ -156,9 +159,7 @@ export function FigureFields({ figure, onNavigate, profileFields }: FigureFields
                   onBlur={(e) => handleEditSave(key, e.target.value)}
                 />
               </form>
-            ) : typeof val === 'object' && val !== null
-              ? renderObjectValue(val, onNavigate, theme)
-              : String(val)}
+            ) : renderFieldValue(val, onNavigate, theme, resolver)}
           </div>
         </div>
       ))}
@@ -257,24 +258,96 @@ export function FigureFields({ figure, onNavigate, profileFields }: FigureFields
   );
 }
 
-function renderObjectValue(val: any, onNavigate: (t: string) => void, t: Theme): React.ReactNode {
-  // CON linked array
-  if (val.linked && Array.isArray(val.linked)) {
+function renderFieldValue(
+  val: any,
+  onNavigate: (t: string) => void,
+  t: Theme,
+  resolver: IdResolver,
+): React.ReactNode {
+  // Object with CON linked array
+  if (typeof val === 'object' && val !== null && val.linked && Array.isArray(val.linked)) {
     return (
-      <div>
-        {val.linked.map((target: string) => (
-          <div
-            key={target}
-            onClick={() => onNavigate(target)}
-            style={{ color: t.purple, cursor: 'pointer', fontSize: 13 }}
-          >
-            {target}
-          </div>
-        ))}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+        {val.linked.map((target: string) => {
+          const resolved = resolver.resolveTarget(target);
+          const shortId = target.split('.').pop() || target;
+          return (
+            <div
+              key={target}
+              onClick={() => onNavigate(target)}
+              style={{ color: t.purple, cursor: 'pointer', fontSize: 13 }}
+            >
+              <span style={{ fontFamily: "'JetBrains Mono', monospace" }}>{shortId}</span>
+              {resolved?.name && (
+                <span style={{ color: t.text, fontWeight: 400 }}>{' · '}{resolved.name}</span>
+              )}
+            </div>
+          );
+        })}
       </div>
     );
   }
-  return <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: t.textSecondary }}>{JSON.stringify(val, null, 1)}</span>;
+
+  // Other objects (non-linked)
+  if (typeof val === 'object' && val !== null) {
+    return <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: t.textSecondary }}>{JSON.stringify(val, null, 1)}</span>;
+  }
+
+  // Array of entity IDs
+  if (isEntityIdArray(val)) {
+    return (
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+        {val.map((id: string) => {
+          const resolved = resolver.resolve(id);
+          return (
+            <span
+              key={id}
+              onClick={resolved ? () => onNavigate(resolved.target) : undefined}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'baseline',
+                gap: 4,
+                padding: '2px 8px',
+                borderRadius: 4,
+                fontSize: 12,
+                background: t.bgMuted,
+                border: `1px solid ${t.borderLight}`,
+                color: resolved ? t.purple : t.textSecondary,
+                cursor: resolved ? 'pointer' : 'default',
+                fontFamily: "'JetBrains Mono', monospace",
+              }}
+            >
+              {id}
+              {resolved?.name && (
+                <span style={{ fontFamily: 'inherit', fontSize: 11, color: t.text, fontWeight: 400 }}>{' · '}{resolved.name}</span>
+              )}
+            </span>
+          );
+        })}
+      </div>
+    );
+  }
+
+  // Single entity ID string
+  if (typeof val === 'string' && isEntityId(val)) {
+    const resolved = resolver.resolve(val);
+    if (resolved) {
+      return (
+        <span
+          onClick={() => onNavigate(resolved.target)}
+          style={{ color: t.purple, cursor: 'pointer', fontSize: 13 }}
+        >
+          <span style={{ fontFamily: "'JetBrains Mono', monospace" }}>{val}</span>
+          {resolved.name && (
+            <span style={{ fontWeight: 400 }}>{' · '}{resolved.name}</span>
+          )}
+        </span>
+      );
+    }
+  }
+
+  // Default: plain string
+  return <>{String(val)}</>;
 }
 
 function makeStyles(t: Theme): Record<string, React.CSSProperties> {
