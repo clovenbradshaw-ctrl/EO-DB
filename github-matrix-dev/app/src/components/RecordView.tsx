@@ -65,6 +65,7 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
   const [recCycleLoaded, setRecCycleLoaded] = useState(false);
   const [recCycleLoading, setRecCycleLoading] = useState(false);
   const [recCycleError, setRecCycleError] = useState<string | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
 
   // ─── Detail layout config (gear toggle / column picker) ─────────────
   const [editMode, setEditMode] = useState(false);
@@ -89,10 +90,12 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
     setGovernance(undefined); setGovernanceLoading(false); setGovernanceError(null);
     setHashCohort(undefined); setHashLoading(false); setHashError(null);
     setRecCycle(undefined); setRecCycleLoaded(false); setRecCycleLoading(false); setRecCycleError(null);
+    setHistoryOpen(false);
 
-    // Fast path: figure + ancestry + grounds + trajectory only. All expensive
-    // sections are opt-in via LazySection.
-    horizon(target, {})
+    // Fast path: figure + ancestry + grounds + trajectory + governance.
+    // Governance is included here so it runs in parallel inside horizonGet's
+    // Promise.all, instead of triggering a separate horizon call.
+    horizon(target, { governance: true })
       .then((result) => {
         if (cancelled) return;
         if (result && !Array.isArray(result)) {
@@ -110,10 +113,11 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
   }, [ready, target, horizon]);
 
   // Background fetch for the header twin-count badge. Does not block render.
+  // Skip ancestry/grounds/trajectory since we already have them from the main call.
   useEffect(() => {
     if (!ready) return;
     let cancelled = false;
-    horizon(target, { hashCohort: true })
+    horizon(target, { hashCohort: true, ancestry: false, grounds: false, trajectory: false })
       .then((result) => {
         if (cancelled) return;
         if (result && !Array.isArray(result)) {
@@ -201,10 +205,9 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
     }
   }, [target, horizon, recCycleLoaded, recCycleLoading]);
 
-  // Eagerly load governance for compact chip display under Fields
-  useEffect(() => {
-    if (governance === undefined && !governanceLoading) loadGovernance();
-  }, [governance, governanceLoading, loadGovernance]);
+  // Governance is now fetched as part of the initial horizon() call.
+  // Read it from `data` for the compact chip display under Fields.
+  const initialGovernance = data?.governance;
 
   // ─── Load detail layout from schema DEF (non-blocking) ─────────────
   // Derives the scope from the target: "import.clients.CLI-001" -> "import.clients"
@@ -325,7 +328,36 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
   // ─── Early returns ─────────────────────────────────────────────────
 
   if (loading) {
-    return <div style={s.loading}>Loading record...</div>;
+    return (
+      <div style={s.container}>
+        <div style={s.header}>
+          <div style={s.headerTop}>
+            <div style={{ ...s.skeletonBar, width: 180, height: 28 }} />
+            <div style={{ display: 'flex', gap: 8 }}>
+              <div style={{ ...s.skeletonBar, width: 60, height: 22, borderRadius: 10 }} />
+              <div style={{ ...s.skeletonBar, width: 70, height: 22, borderRadius: 20 }} />
+            </div>
+          </div>
+          <div style={{ ...s.meta, marginTop: 8 }}>
+            <div style={{ ...s.skeletonBar, width: 40, height: 14 }} />
+            <div style={{ ...s.skeletonBar, width: 60, height: 14, borderRadius: 10 }} />
+          </div>
+        </div>
+        {['Fields', 'Connections', 'History'].map((label) => (
+          <div key={label} style={s.section}>
+            <div style={{ ...s.sectionEdge, background: theme.accent }} />
+            <div style={s.sectionHeader}>
+              <div style={{ ...s.sectionTitle, color: theme.textMuted }}>{label}</div>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 8 }}>
+              <div style={{ ...s.skeletonBar, width: '90%', height: 12 }} />
+              <div style={{ ...s.skeletonBar, width: '70%', height: 12 }} />
+              <div style={{ ...s.skeletonBar, width: '80%', height: 12 }} />
+            </div>
+          </div>
+        ))}
+      </div>
+    );
   }
 
   if (error) {
@@ -429,9 +461,9 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
           <FigureFields figure={data.figure} onNavigate={onNavigate} profileFields={profileFields} />
         )}
         {/* Governance chips — inline under fields when available */}
-        {governance && governance.length > 0 && (
+        {(initialGovernance ?? governance) && (initialGovernance ?? governance)!.length > 0 && (
           <div style={{ marginTop: 12 }}>
-            <Governance entries={governance} />
+            <Governance entries={(initialGovernance ?? governance)!} />
           </div>
         )}
       </Section>
@@ -462,10 +494,18 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
         </div>
       )}
 
-      {/* History — visible by default as a vertical timeline */}
-      <Section title="History" subtitle={`${data.trajectory?.length ?? 0} events`} color={theme.warning}>
-        <ElementHistory target={target} />
-      </Section>
+      {/* History — lazy: full log scan deferred until user expands */}
+      <LazySection
+        title="History"
+        subtitle={`${data.trajectory?.length ?? 0} events`}
+        color={theme.warning}
+        loaded={historyOpen}
+        loading={false}
+        error={null}
+        onLoad={() => setHistoryOpen(true)}
+      >
+        {historyOpen && <ElementHistory target={target} />}
+      </LazySection>
 
       {/* Context — inherited ground conditions */}
       {data.grounds && data.grounds.length > 0 && (
@@ -623,6 +663,11 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
   return {
     container: { background: t.bg },
     loading: { padding: 40, textAlign: 'center', color: t.textSecondary, fontSize: 14 },
+    skeletonBar: {
+      background: t.bgMuted,
+      borderRadius: 4,
+      animation: 'none',
+    } as React.CSSProperties,
     header: {
       padding: '28px 36px 24px',
       background: t.bgCard,

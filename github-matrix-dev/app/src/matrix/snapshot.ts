@@ -290,7 +290,7 @@ export async function uploadDeltaSnapshot(
     ? await encryptSnapshot(raw, keyring, keyId)
     : raw;
 
-  const uploadResult = await client.uploadContent(new Blob([binary]), {
+  const uploadResult = await client.uploadContent(new Blob([new Uint8Array(binary)]), {
     name: `eo-delta-${delta.from_seq}-${delta.to_seq}.bin`,
     type: 'application/octet-stream',
   });

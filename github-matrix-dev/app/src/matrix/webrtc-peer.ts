@@ -336,7 +336,7 @@ export class WebRTCPeer {
       from_seq: fromSeq,
       to_seq: currentSeq,
     };
-    dc.send(pack(header));
+    dc.send(new Uint8Array(pack(header)));
 
     // Send chunks
     for (let i = 0; i < events.length; i += CHUNK_SIZE) {
@@ -345,7 +345,7 @@ export class WebRTCPeer {
 
       // Encrypt if keyring has keys
       const payload = keyEntry
-        ? pack(await encryptPeerPayload(keyEntry.key, keyId!, binaryBatch))
+        ? pack(await encryptPeerPayload(keyEntry.key, keyId!, new Uint8Array(binaryBatch)))
         : binaryBatch;
 
       const chunk: ChunkMessage = {
@@ -354,7 +354,7 @@ export class WebRTCPeer {
         index: Math.floor(i / CHUNK_SIZE),
         data: payload,
       };
-      dc.send(pack(chunk));
+      dc.send(new Uint8Array(pack(chunk)));
 
       // Yield to avoid blocking the main thread on large transfers
       if (i % (CHUNK_SIZE * 10) === 0 && i > 0) {
@@ -363,7 +363,7 @@ export class WebRTCPeer {
     }
 
     // Send footer with checksum
-    const allBinary = pack(events);
+    const allBinary = new Uint8Array(pack(events));
     const hashBuf = await crypto.subtle.digest('SHA-256', allBinary);
     const checksum = Array.from(new Uint8Array(hashBuf))
       .map(b => b.toString(16).padStart(2, '0')).join('');
@@ -374,7 +374,7 @@ export class WebRTCPeer {
       final_seq: currentSeq,
       checksum,
     };
-    dc.send(pack(footer));
+    dc.send(new Uint8Array(pack(footer)));
   }
 
   // ────────────────────────────────────────────────────────────
@@ -508,7 +508,7 @@ export class WebRTCPeer {
       // Start keepalive
       const timer = setInterval(() => {
         if (dc.readyState === 'open') {
-          dc.send(pack({ type: 'ping', ts: Date.now() } as PingMessage));
+          dc.send(new Uint8Array(pack({ type: 'ping', ts: Date.now() } as PingMessage)));
         }
       }, PING_INTERVAL_MS);
       this.pingTimers.set(peerKey, timer);
@@ -555,7 +555,7 @@ export class WebRTCPeer {
       case 'ping': {
         const dc = this.channels.get(peerKey);
         if (dc?.readyState === 'open') {
-          dc.send(pack({ type: 'pong', ts: msg.ts } as PongMessage));
+          dc.send(new Uint8Array(pack({ type: 'pong', ts: msg.ts } as PongMessage)));
         }
         break;
       }
