@@ -365,6 +365,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   const [recordsLoaded, setRecordsLoaded] = useState(false);
   const [fieldNameMap, setFieldNameMap] = useState<Map<string, string>>(new Map());
   const [scopeName, setScopeName] = useState<string | null>(null);
+  const [auditableDisplayField, setAuditableDisplayField] = useState<string | null>(null);
   const [filterText, setFilterText] = useState('');
   // Debounced filter text — used for actual filtering so that typing remains
   // responsive when the record set is large.
@@ -395,7 +396,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   const rowHeight = viewConfig.rowHeight || 'default';
   const cellOverflow = viewConfig.cellOverflow || 'wrap';
   const profileFields = viewConfig.profileFields;
-  const displayField = viewConfig.displayField;
+  const displayField = auditableDisplayField ?? viewConfig.displayField ?? null;
   const isMobile = useIsMobile();
   const isNarrow = useIsNarrow();
 
@@ -515,13 +516,14 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
       setFieldSchemas(grouped);
       setColumnTypeOverrides(extractColumnTypeOverrides(grouped));
     });
-    // Fetch scope display name
+    // Fetch scope display name and auditable display field
     getState(scope).then((scopeState) => {
       const name = scopeState?.value?.name ?? null;
       if (name !== prevScopeNameRef.current) {
         prevScopeNameRef.current = name;
         setScopeName(name);
       }
+      setAuditableDisplayField(scopeState?.value?._displayField ?? null);
     });
   }, [ready, lastSeq, getStateByPrefix, getState, scope, scopeDepth]);
 
@@ -549,6 +551,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     prevRecordsKeyRef.current = '';
     prevSchemaKeyRef.current = '';
     prevScopeNameRef.current = null;
+    setAuditableDisplayField(null);
   }, [scope]);
 
   // Debounce filterText so that keystroke latency is bounded by a short
@@ -742,7 +745,20 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
       items.push(
         {
           label: displayField === colKey ? 'Display name (active)' : 'Use as display name',
-          onClick: () => viewStore.setDisplayField(scope, displayField === colKey ? undefined : colKey),
+          onClick: async () => {
+            const newField = displayField === colKey ? null : colKey;
+            try {
+              await dispatch({
+                op: 'DEF',
+                target: scope,
+                operand: { _displayField: newField },
+                agent: `user:${session.userId}`,
+                ts: new Date().toISOString(),
+                acquired_ts: new Date().toISOString(),
+              });
+              setAuditableDisplayField(newField);
+            } catch { /* ignore */ }
+          },
         },
         { label: '', onClick: () => {}, separator: true },
       );

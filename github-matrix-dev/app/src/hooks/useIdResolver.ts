@@ -52,6 +52,15 @@ export function useIdResolver(scopeRoot: string): IdResolver {
         const sMap = new Map<string, ResolvedId>();
         const tMap = new Map<string, ResolvedId>();
 
+        // First pass: collect _displayField pointers from table-level states
+        const tableDisplayFields = new Map<string, string>();
+        for (const st of states) {
+          if (st.value?._displayField && !ID_PATTERN.test(st.target.split('.').pop() || '')) {
+            tableDisplayFields.set(st.target, st.value._displayField);
+          }
+        }
+
+        // Second pass: build ID maps, resolving names via _displayField when available
         for (const st of states) {
           // Skip internal targets
           if (st.target.includes('._schema.') || st.target.includes('._detail_layout')) continue;
@@ -60,7 +69,17 @@ export function useIdResolver(scopeRoot: string): IdResolver {
           const shortId = st.target.split('.').pop() || '';
           if (!ID_PATTERN.test(shortId)) continue;
 
-          const name = st.value?.name || st.value?.title || null;
+          // Try _displayField from parent table first
+          const parentTarget = st.target.split('.').slice(0, -1).join('.');
+          const displayFieldKey = tableDisplayFields.get(parentTarget);
+          let name: string | null = null;
+          if (displayFieldKey) {
+            const fieldVal = st.value?.fields?.[displayFieldKey] ?? st.value?.[displayFieldKey];
+            if (fieldVal != null) name = String(fieldVal);
+          }
+          // Fallback to existing name/title resolution
+          if (!name) name = st.value?.name || st.value?.title || null;
+
           const entry: ResolvedId = { shortId, target: st.target, name };
 
           sMap.set(shortId, entry);
