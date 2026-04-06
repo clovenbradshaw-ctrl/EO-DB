@@ -1149,14 +1149,17 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
 
   // Determine active view type from saved view
   const viewStore = useViewStore();
+  const viewSigs = viewStore.sigs;
+  const viewSavedViews = viewStore.savedViews;
   const activeViewType: ViewType = useMemo(() => {
     if (!selectedScope) return 'grid';
-    const sig = viewStore.getSig(selectedScope);
+    const sig = viewSigs[selectedScope];
+    if (!sig) return 'grid';
     if (sig.activeViewId === '__schema') return 'schema';
     if (!sig.activeViewId) return 'grid';
-    const sv = viewStore.savedViews[sig.activeViewId];
+    const sv = viewSavedViews[sig.activeViewId];
     return sv?.viewType || 'grid';
-  }, [selectedScope, viewStore]);
+  }, [selectedScope, viewSigs, viewSavedViews]);
 
   return (
     <div style={s.container}>
