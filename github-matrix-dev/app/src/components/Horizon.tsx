@@ -22,7 +22,6 @@ interface HorizonProps {
 }
 
 interface DragState {
-  handle: 'min' | 'max';
   lastX: number;
   startY: number;
   currentValue: number;
@@ -67,8 +66,8 @@ export function Horizon({ records, dateColumns, filter, onFilterChange }: Horizo
   const trackMax = sliderMax + buffer;
   const trackRange = trackMax - trackMin;
 
-  const currentMin = filter.rangeMin ?? trackMin;
-  const currentMax = filter.rangeMax ?? trackMax;
+  // Single node position — defaults to the end of the range
+  const currentPos = filter.rangeMax ?? trackMax;
 
   // Adaptive date formatter based on actual data span
   const formatDate = useMemo(
@@ -76,28 +75,23 @@ export function Horizon({ records, dateColumns, filter, onFilterChange }: Horizo
     [trackRange],
   );
 
-  const isActive =
-    filter.rangeMin != null ||
-    filter.rangeMax != null;
+  const isActive = filter.rangeMax != null;
 
   // ---- Refs ----
   const trackRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<DragState | null>(null);
 
   // ---- Local visual state (smooth during drag) ----
-  const [vizMin, setVizMin] = useState(currentMin);
-  const [vizMax, setVizMax] = useState(currentMax);
+  const [vizPos, setVizPos] = useState(currentPos);
   const [dragging, setDragging] = useState(false);
   const [precisionPct, setPrecisionPct] = useState<string | null>(null);
 
   // Sync visual state when filter changes externally
   useEffect(() => {
     if (!dragRef.current) {
-      setVizMin(currentMin);
-      setVizMax(currentMax);
+      setVizPos(currentPos);
     }
-  }, [currentMin, currentMax]);
-
+  }, [currentPos]);
 
   // ---- Value helpers ----
   const valueToFraction = useCallback(
@@ -106,19 +100,12 @@ export function Horizon({ records, dateColumns, filter, onFilterChange }: Horizo
   );
 
   const commitValue = useCallback(
-    (handle: 'min' | 'max', value: number) => {
+    (value: number) => {
       const clamped = clamp(value, trackMin, trackMax);
-      if (handle === 'min') {
-        setVizMin(clamped);
-        const newMin = clamped <= trackMin + buffer ? null : clamped;
-        const newMax = filter.rangeMax != null ? Math.max(filter.rangeMax, clamped) : null;
-        onFilterChange({ ...filter, rangeMin: newMin, rangeMax: newMax });
-      } else {
-        setVizMax(clamped);
-        const newMax = clamped >= trackMax - buffer ? null : clamped;
-        const newMin = filter.rangeMin != null ? Math.min(filter.rangeMin, clamped) : null;
-        onFilterChange({ ...filter, rangeMax: newMax, rangeMin: newMin });
-      }
+      setVizPos(clamped);
+      // Store position in rangeMax; null out rangeMin (no clipping)
+      const pos = clamped >= trackMax - buffer ? null : clamped;
+      onFilterChange({ ...filter, rangeMin: null, rangeMax: pos });
     },
     [filter, onFilterChange, trackMin, trackMax, buffer],
   );
@@ -131,13 +118,7 @@ export function Horizon({ records, dateColumns, filter, onFilterChange }: Horizo
       const fraction = (e.clientX - rect.left) / rect.width;
       const value = trackMin + fraction * trackRange;
 
-      // Determine closest handle
-      const distMin = Math.abs(value - (dragging ? vizMin : currentMin));
-      const distMax = Math.abs(value - (dragging ? vizMax : currentMax));
-      const handle: 'min' | 'max' = distMin <= distMax ? 'min' : 'max';
-
       dragRef.current = {
-        handle,
         lastX: e.clientX,
         startY: e.clientY,
         currentValue: value,
@@ -149,10 +130,10 @@ export function Horizon({ records, dateColumns, filter, onFilterChange }: Horizo
       setDragging(true);
       setPrecisionPct(null);
 
-      // Snap handle to click position
-      commitValue(handle, value);
+      // Snap node to click position
+      commitValue(value);
     },
-    [range, trackMin, trackRange, currentMin, currentMax, vizMin, vizMax, dragging, commitValue],
+    [range, trackMin, trackRange, commitValue],
   );
 
   const onPointerMove = useCallback(
@@ -174,7 +155,7 @@ export function Horizon({ records, dateColumns, filter, onFilterChange }: Horizo
       drag.lastX = e.clientX;
 
       setPrecisionPct(sensitivityLabel(dy));
-      commitValue(drag.handle, drag.currentValue);
+      commitValue(drag.currentValue);
     },
     [trackMin, trackMax, trackRange, commitValue],
   );
@@ -200,19 +181,8 @@ export function Horizon({ records, dateColumns, filter, onFilterChange }: Horizo
     onFilterChange({ ...DEFAULT_FILTER, dateField: filter.dateField });
   }, [filter.dateField, onFilterChange]);
 
-  // ---- Computed visual positions ----
-  const pctMin = valueToFraction(vizMin) * 100;
-  const pctMax = valueToFraction(vizMax) * 100;
-
-  const trackBg = range
-    ? `linear-gradient(to right,
-        ${theme.bgMuted} 0%,
-        ${theme.bgMuted} ${pctMin}%,
-        ${theme.accent}44 ${pctMin}%,
-        ${theme.accent}44 ${pctMax}%,
-        ${theme.bgMuted} ${pctMax}%,
-        ${theme.bgMuted} 100%)`
-    : theme.bgMuted;
+  // ---- Computed visual position ----
+  const pctPos = valueToFraction(vizPos) * 100;
 
   // ---- Current date field label ----
   const dateFieldLabel =
@@ -248,20 +218,20 @@ export function Horizon({ records, dateColumns, filter, onFilterChange }: Horizo
         onPointerCancel={onPointerUp}
       >
         {/* Background track */}
-        <div style={{ ...s.trackBar, background: trackBg }} />
+        <div style={{ ...s.trackBar, background: theme.bgMuted }} />
 
-        {/* Min handle */}
+        {/* Single node */}
         {range && (
           <div
             style={{
-              ...s.handle,
-              left: `${pctMin}%`,
+              ...s.node,
+              left: `${pctPos}%`,
               background: theme.accent,
             }}
           >
-            {(dragging && dragRef.current?.handle === 'min') && (
+            {dragging && (
               <div style={s.tooltip}>
-                {formatDate(vizMin)}
+                {formatDate(vizPos)}
                 {precisionPct && (
                   <span style={s.precisionBadge}>{precisionPct}</span>
                 )}
@@ -270,42 +240,17 @@ export function Horizon({ records, dateColumns, filter, onFilterChange }: Horizo
           </div>
         )}
 
-        {/* Max handle */}
-        {range && (
-          <div
-            style={{
-              ...s.handle,
-              left: `${pctMax}%`,
-              background: theme.accent,
-            }}
-          >
-            {(dragging && dragRef.current?.handle === 'max') && (
-              <div style={s.tooltip}>
-                {formatDate(vizMax)}
-                {precisionPct && (
-                  <span style={s.precisionBadge}>{precisionPct}</span>
-                )}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Date range labels (shown when not dragging) */}
+        {/* Date label at node position (shown when not dragging) */}
         {range && !dragging && (
-          <>
-            <span style={{ ...s.rangeLabel, left: `${pctMin}%` }}>
-              {formatDate(filter.rangeMin ?? sliderMin)}
-            </span>
-            <span style={{ ...s.rangeLabel, left: `${pctMax}%`, transform: 'translateX(-100%)' }}>
-              {formatDate(filter.rangeMax ?? sliderMax)}
-            </span>
-          </>
+          <span style={{ ...s.dateLabel, left: `${pctPos}%` }}>
+            {formatDate(vizPos)}
+          </span>
         )}
       </div>
 
       {/* Inline reset button */}
       {isActive && (
-        <button onClick={handleReset} style={s.resetBtn} title="Reset range">
+        <button onClick={handleReset} style={s.resetBtn} title="Reset position">
           ×
         </button>
       )}
@@ -373,21 +318,19 @@ function styles(t: Theme): Record<string, React.CSSProperties> {
       height: 3,
       borderRadius: 1.5,
       transform: 'translateY(-50%)',
-      transition: 'height 0.15s ease',
       pointerEvents: 'none',
     } as React.CSSProperties,
 
-    // ---- Handles ----
-    handle: {
+    // ---- Single node ----
+    node: {
       position: 'absolute',
       top: '50%',
-      width: 2,
-      height: 14,
-      borderRadius: 1,
+      width: 8,
+      height: 8,
+      borderRadius: '50%',
       transform: 'translate(-50%, -50%)',
       pointerEvents: 'none',
       zIndex: 3,
-      transition: 'height 0.1s ease',
     } as React.CSSProperties,
 
     // ---- Tooltip (shown during drag) ----
@@ -416,8 +359,8 @@ function styles(t: Theme): Record<string, React.CSSProperties> {
       fontWeight: 600,
     },
 
-    // ---- Range date labels (static, when not dragging) ----
-    rangeLabel: {
+    // ---- Date label at node position (when not dragging) ----
+    dateLabel: {
       position: 'absolute',
       bottom: -1,
       fontSize: 9,
@@ -425,6 +368,7 @@ function styles(t: Theme): Record<string, React.CSSProperties> {
       color: t.textMuted,
       pointerEvents: 'none',
       whiteSpace: 'nowrap',
+      transform: 'translateX(-50%)',
     } as React.CSSProperties,
 
     // ---- Inline reset button ----
