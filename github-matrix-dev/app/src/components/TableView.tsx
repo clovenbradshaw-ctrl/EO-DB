@@ -17,6 +17,8 @@ import { formatName } from './scope-picker-utils';
 import { useIdResolver, isEntityId, isEntityIdArray, type IdResolver } from '../hooks/useIdResolver';
 import { groupSchemaStates, extractColumnTypeOverrides, schemaTypeTarget, schemaConstraintTarget, schemaResolveTarget, type FieldSchema } from '../db/schema-rules';
 import { ColumnTypeSelector } from './ColumnTypeSelector';
+import { FormulaEditor } from './FormulaEditor';
+import { evaluateFormula as evalFormula } from '../db/formula-engine';
 import { useIsMobile, useIsNarrow } from '../hooks/useIsMobile';
 import { ColumnManagerPanel } from './ColumnManagerPanel';
 import {
@@ -379,6 +381,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   const [columnTypeOverrides, setColumnTypeOverrides] = useState<Map<string, any>>(new Map());
   const [columnTypeSelector, setColumnTypeSelector] = useState<{ x: number; y: number; key: string } | null>(null);
   const [editingCell, setEditingCell] = useState<{ target: string; fieldKey: string; value: string } | null>(null);
+  const [formulaEditor, setFormulaEditor] = useState<{ x: number; y: number; key: string; formula?: string } | null>(null);
   const prevRecordsKeyRef = useRef<string>('');
   const prevSchemaKeyRef = useRef<string>('');
   const prevScopeNameRef = useRef<string | null>(null);
@@ -738,6 +741,20 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
             }
           },
         },
+        {
+          label: fs?.typeDef?.value?.formula
+            ? `Formula: ${String(fs.typeDef.value.formula).slice(0, 30)}${String(fs.typeDef.value.formula).length > 30 ? '...' : ''}`
+            : 'Set formula...',
+          onClick: () => {
+            setFormulaEditor({
+              key: colKey,
+              x: columnMenu?.x ?? 0,
+              y: columnMenu?.y ?? 0,
+              formula: fs?.typeDef?.value?.formula,
+            });
+            setColumnMenu(null);
+          },
+        },
       );
     }
 
@@ -875,6 +892,76 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
         return next;
       });
     } catch { /* ignore */ }
+  }
+
+  async function handleSetFormula(fieldKey: string, formula: string) {
+    try {
+      await dispatch({
+        op: 'DEF',
+        target: schemaTypeTarget(scope, fieldKey),
+        operand: { type: 'formula', formula },
+        agent: `user:${session.userId}`,
+        ts: new Date().toISOString(),
+        acquired_ts: new Date().toISOString(),
+      });
+      setColumnTypeOverrides((prev) => {
+        const next = new Map(prev);
+        next.set(fieldKey, { type: 'formula', formula });
+        return next;
+      });
+      setFieldSchemas((prev) => {
+        const next = new Map(prev);
+        const existing = next.get(fieldKey) ?? { fieldKey, constraints: [] };
+        next.set(fieldKey, {
+          ...existing,
+          typeDef: { target: schemaTypeTarget(scope, fieldKey), value: { type: 'formula', formula } },
+        });
+        return next;
+      });
+    } catch { /* ignore */ }
+    setFormulaEditor(null);
+  }
+
+  async function handleClearFormula(fieldKey: string) {
+    try {
+      await dispatch({
+        op: 'DEF',
+        target: schemaTypeTarget(scope, fieldKey),
+        operand: {},
+        agent: `user:${session.userId}`,
+        ts: new Date().toISOString(),
+        acquired_ts: new Date().toISOString(),
+      });
+      setColumnTypeOverrides((prev) => {
+        const next = new Map(prev);
+        next.delete(fieldKey);
+        return next;
+      });
+      setFieldSchemas((prev) => {
+        const next = new Map(prev);
+        const existing = next.get(fieldKey);
+        if (existing) {
+          next.set(fieldKey, { ...existing, typeDef: undefined });
+        }
+        return next;
+      });
+    } catch { /* ignore */ }
+    setFormulaEditor(null);
+  }
+
+  // Get cell value — evaluate formula columns on the fly
+  function getCellValue(rec: EoState, colKey: string): any {
+    const override = columnTypeOverrides.get(colKey);
+    if (override?.type === 'formula' && override.formula) {
+      const fields: Record<string, any> = {};
+      for (const col of entityColumns) {
+        fields[col.key] = getFieldValue(rec, col.key, useFieldsSub);
+      }
+      const result = evalFormula(override.formula, { fields });
+      // Unwrap: the formula engine returns the computed value directly
+      return result;
+    }
+    return getFieldValue(rec, colKey, useFieldsSub);
   }
 
   const canEdit = permissions ? (permissions.can_edit_any_record || permissions.can_edit_own_records) : true;
@@ -1372,8 +1459,8 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                                 color: theme.textSecondary,
                               }}>{rec.last_ts ? formatRelativeTime(rec.last_ts) : <AbsentCell t={theme} />}</span>
                             : isLocked
-                            ? <LockedCell>{renderCell(getFieldValue(rec, col.key, useFieldsSub), col.key, onSelectRecord, theme, idResolver)}</LockedCell>
-                            : renderCell(getFieldValue(rec, col.key, useFieldsSub), col.key, onSelectRecord, theme, idResolver)
+                            ? <LockedCell>{renderCell(getCellValue(rec, col.key), col.key, onSelectRecord, theme, idResolver)}</LockedCell>
+                            : renderCell(getCellValue(rec, col.key), col.key, onSelectRecord, theme, idResolver)
                           }
                         </td>
                       );
@@ -1427,6 +1514,43 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
               currentType={typeSelector.currentType}
               onSelect={(type) => handleTypeChange(typeSelector.target, type)}
               onClose={() => setTypeSelector(null)}
+            />
+          </div>
+        </>
+      )}
+      {/* Formula editor popover */}
+      {formulaEditor && (
+        <>
+          <div
+            style={{ position: 'fixed', inset: 0, zIndex: 9998 }}
+            onClick={() => setFormulaEditor(null)}
+          />
+          <div style={{
+            position: 'fixed',
+            left: Math.min(formulaEditor.x, window.innerWidth - 500),
+            top: Math.min(formulaEditor.y, window.innerHeight - 400),
+            zIndex: 9999,
+            background: theme.bgCard,
+            border: `1px solid ${theme.border}`,
+            borderRadius: 8,
+            boxShadow: `0 8px 30px ${theme.shadow}`,
+          }}>
+            <FormulaEditor
+              fieldKey={formulaEditor.key}
+              currentFormula={formulaEditor.formula}
+              columns={entityColumns}
+              sampleFields={(() => {
+                const first = filtered[0];
+                if (!first) return undefined;
+                const fields: Record<string, any> = {};
+                for (const col of entityColumns) {
+                  fields[col.key] = getFieldValue(first, col.key, useFieldsSub);
+                }
+                return fields;
+              })()}
+              onSave={(formula) => handleSetFormula(formulaEditor.key, formula)}
+              onClear={() => handleClearFormula(formulaEditor.key)}
+              onClose={() => setFormulaEditor(null)}
             />
           </div>
         </>

@@ -8,6 +8,7 @@ import { eventHash } from './hash';
 import { validateEvent, formatValidationErrors } from './validate';
 import { updateFoldCache, refreshGraphMetrics } from './fold-cache';
 import type { EoEvent, EoEventInput, EoState, EvaRegistration, RecResult, ExternalOperator, DerivedEntity } from './types';
+import { evaluateFormula as evalFormulaEngine } from './formula-engine';
 
 /** Fold mutex — ensures only one processEvent executes at a time. */
 const foldMutex = new AsyncMutex();
@@ -922,7 +923,41 @@ async function evaluateFormula(store: EoStore, registration: EvaRegistration): P
 }
 
 function executeFormulaFunction(formula: any, inputs: Record<string, any>): any {
-  return { formula: formula.formula || formula, inputs, evaluated_at: new Date().toISOString() };
+  const formulaStr = typeof formula === 'string' ? formula : formula?.formula;
+  if (typeof formulaStr !== 'string') {
+    return { formula, inputs, evaluated_at: new Date().toISOString() };
+  }
+
+  // Build a flat field map from dependency values.
+  // Dependencies are keyed by target path; each value is the full state value.
+  // We extract field-level values so formulas can reference them by name.
+  const fields: Record<string, any> = {};
+  for (const [depTarget, depValue] of Object.entries(inputs)) {
+    if (depValue == null) continue;
+    // If the dependency value is an object with a `fields` sub-object (Airtable-style),
+    // merge those fields into the context.
+    if (typeof depValue === 'object' && depValue.fields && typeof depValue.fields === 'object' && !Array.isArray(depValue.fields)) {
+      for (const [fk, fv] of Object.entries(depValue.fields)) {
+        fields[fk] = fv;
+      }
+    }
+    // Also expose top-level properties (name, status, etc.)
+    if (typeof depValue === 'object' && !Array.isArray(depValue)) {
+      for (const [k, v] of Object.entries(depValue)) {
+        if (!k.startsWith('_') && k !== 'fields') fields[k] = v;
+      }
+    }
+    // Expose the whole dep value by its target path segment (last part)
+    const shortKey = depTarget.split('.').pop();
+    if (shortKey) fields[shortKey] = depValue;
+  }
+
+  try {
+    const result = evalFormulaEngine(formulaStr, { fields });
+    return { value: result, formula: formulaStr, evaluated_at: new Date().toISOString() };
+  } catch {
+    return { formula: formulaStr, inputs, evaluated_at: new Date().toISOString(), error: true };
+  }
 }
 
 // --- Helpers ---
