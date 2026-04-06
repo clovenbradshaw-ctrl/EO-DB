@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import type { EoState } from '../db/types';
 import { useEoStore } from '../store/eo-store';
-import { buildFieldNameMapFromSchema } from './filter-types';
+import { buildFieldNameMapFromSchema, buildFieldNameMap } from './filter-types';
 import { formatName } from './scope-picker-utils';
 import { useTheme, type Theme } from '../theme';
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
@@ -17,6 +17,7 @@ interface FigureFieldsProps {
 export function FigureFields({ figure, onNavigate, profileFields }: FigureFieldsProps) {
   const dispatch = useEoStore((s) => s.dispatch);
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
+  const getState = useEoStore((s) => s.getState);
   const { theme } = useTheme();
   const s = makeStyles(theme);
   const value = figure.value;
@@ -43,9 +44,17 @@ export function FigureFields({ figure, onNavigate, profileFields }: FigureFields
       );
       if (fieldStates.length > 0) {
         setSchemaFieldNames(buildFieldNameMapFromSchema(fieldStates));
+      } else {
+        // Fallback: read field metadata from table entity's value.fields array
+        getState(tableScope).then((scopeState) => {
+          const fields = scopeState?.value?.fields;
+          if (Array.isArray(fields)) {
+            setSchemaFieldNames(buildFieldNameMap(fields));
+          }
+        });
       }
     });
-  }, [tableScope, getStateByPrefix]);
+  }, [tableScope, getStateByPrefix, getState]);
 
   if (!value || typeof value !== 'object') {
     return <div style={s.mono}>{JSON.stringify(value)}</div>;

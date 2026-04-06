@@ -185,6 +185,8 @@ interface SchemaViewProps {
 
 export function SchemaView({ scope }: SchemaViewProps) {
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
+  const getState = useEoStore((s) => s.getState);
+  const dispatch = useEoStore((s) => s.dispatch);
   const ready = useEoStore((s) => s.ready);
   const lastSeq = useEoStore((s) => s.lastSeq);
   const { theme } = useTheme();
@@ -193,11 +195,23 @@ export function SchemaView({ scope }: SchemaViewProps) {
   const [fieldSchemas, setFieldSchemas] = useState<Map<string, FieldSchema>>(new Map());
   const [loading, setLoading] = useState(true);
   const [expandedField, setExpandedField] = useState<string | null>(null);
+  const [editingLabel, setEditingLabel] = useState<{ fieldKey: string; value: string } | null>(null);
   const [sortKey, setSortKey] = useState<SortKey>('fieldKey');
   const [sortDir, setSortDir] = useState<SortDir>('asc');
   const [recordCount, setRecordCount] = useState(0);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
+  const [collectionDisplayName, setCollectionDisplayName] = useState<string | null>(null);
   const [rollups, setRollups] = useState<Array<{ id: string; name: string; value: any; unit?: string }>>([]);
+
+  // Resolve collection display name from state
+  useEffect(() => {
+    if (!ready) return;
+    getState(scope).then((scopeState) => {
+      if (scopeState?.value?.name) {
+        setCollectionDisplayName(scopeState.value.name);
+      }
+    });
+  }, [ready, lastSeq, scope, getState]);
 
   // Load schema fields
   useEffect(() => {
@@ -272,6 +286,20 @@ export function SchemaView({ scope }: SchemaViewProps) {
     return arr;
   }, [fieldSchemas, sortKey, sortDir]);
 
+  async function handleLabelSave(fieldKey: string, newLabel: string) {
+    try {
+      await dispatch({
+        op: 'DEF',
+        target: `${scope}._schema.${fieldKey}`,
+        operand: { _label: newLabel || undefined },
+        agent: 'user',
+        ts: new Date().toISOString(),
+        acquired_ts: new Date().toISOString(),
+      });
+    } catch { /* ignore */ }
+    setEditingLabel(null);
+  }
+
   function handleSort(key: SortKey) {
     if (sortKey === key) {
       setSortDir(d => d === 'asc' ? 'desc' : 'asc');
@@ -302,7 +330,8 @@ export function SchemaView({ scope }: SchemaViewProps) {
     );
   }
 
-  const collectionName = scope.split('.').pop() || scope;
+  const collectionSegment = scope.split('.').pop() || scope;
+  const collectionName = collectionDisplayName || formatName(collectionSegment);
 
   return (
     <div style={s.container}>
@@ -385,7 +414,53 @@ export function SchemaView({ scope }: SchemaViewProps) {
                     >
                       <div style={s.cell}>
                         <span style={s.expandIcon}>{isExpanded ? '\u25BE' : '\u25B8'}</span>
-                        <span style={s.cellText}>{fs.name || formatName(fs.fieldKey)}</span>
+                        {editingLabel?.fieldKey === fs.fieldKey ? (
+                          <form
+                            style={{ flex: 1 }}
+                            onSubmit={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              const input = (e.target as HTMLFormElement).elements.namedItem('labelVal') as HTMLInputElement;
+                              handleLabelSave(fs.fieldKey, input.value.trim());
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <input
+                              name="labelVal"
+                              autoFocus
+                              defaultValue={editingLabel.value}
+                              placeholder="Display name..."
+                              style={{
+                                width: '100%',
+                                padding: '2px 6px',
+                                fontSize: 12,
+                                border: `1px solid ${theme.accent}`,
+                                borderRadius: 3,
+                                background: theme.bg,
+                                color: theme.text,
+                                outline: 'none',
+                                boxSizing: 'border-box' as const,
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Escape') {
+                                  e.stopPropagation();
+                                  setEditingLabel(null);
+                                }
+                              }}
+                              onBlur={(e) => handleLabelSave(fs.fieldKey, e.target.value.trim())}
+                            />
+                          </form>
+                        ) : (
+                          <span
+                            style={s.cellText}
+                            onDoubleClick={(e) => {
+                              e.stopPropagation();
+                              setEditingLabel({ fieldKey: fs.fieldKey, value: fs.name || '' });
+                            }}
+                          >
+                            {fs.name || formatName(fs.fieldKey)}
+                          </span>
+                        )}
                       </div>
                       <div style={s.cell}>
                         <span style={s.fieldKey}>{fs.fieldKey}</span>
