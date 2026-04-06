@@ -306,6 +306,17 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     message: string;
   } | null>(null);
   const [retryCount, setRetryCount] = useState(0);
+  // Deferred loading flag — only show "Initializing store" after a short delay
+  // so quick re-inits (cached stores) don't cause a visible blink.
+  const [showStoreLoading, setShowStoreLoading] = useState(false);
+  useEffect(() => {
+    if (ready) {
+      setShowStoreLoading(false);
+      return;
+    }
+    const timer = setTimeout(() => setShowStoreLoading(true), 400);
+    return () => clearTimeout(timer);
+  }, [ready]);
   const retrySync = useCallback(() => {
     setConnectionError(null);
     setMatrixReady(false);
@@ -1413,7 +1424,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             </div>
           ) : (
             <>
-              {!ready && (
+              {showStoreLoading && (
                 <SyncProgress message="Initializing store..." detail="Deriving encryption key" />
               )}
               <HolonNav
