@@ -184,8 +184,25 @@ export function ViewsBrowser({ scope, recordCount, userId, onBack, onSelectView 
       setShowCreate(false);
       resetCreateForm();
       onSelectView(savedView);
-    } catch {
-      /* ignore */
+    } catch (err) {
+      console.error('[ViewsBrowser] Failed to create view:', err);
+      // Still register the view optimistically — the fold may have succeeded
+      // even if a downstream step (e.g. Matrix send) threw.
+      const savedView: SavedView = {
+        id: viewId,
+        name,
+        scope,
+        viewType: newViewType,
+        config,
+        visibility: newViewVisibility,
+        createdBy: userId,
+        createdAt: now,
+        updatedAt: now,
+      };
+      registerSavedViews([savedView]);
+      setShowCreate(false);
+      resetCreateForm();
+      onSelectView(savedView);
     } finally {
       setCreating(false);
     }
@@ -352,7 +369,7 @@ export function ViewsBrowser({ scope, recordCount, userId, onBack, onSelectView 
               </button>
             </div>
             <button
-              style={s.modalCreateBtn}
+              style={(!newViewName.trim() || creating) ? s.modalCreateBtnDisabled : s.modalCreateBtn}
               onClick={handleCreateView}
               disabled={!newViewName.trim() || creating}
             >
@@ -590,6 +607,19 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       background: t.accent,
       color: '#fff',
       cursor: 'pointer',
+    },
+    modalCreateBtnDisabled: {
+      width: '100%',
+      marginTop: 12,
+      padding: '8px 0',
+      fontSize: 12,
+      fontWeight: 600,
+      border: `1px solid ${t.border}`,
+      borderRadius: 6,
+      background: t.bgMuted,
+      color: t.textMuted,
+      cursor: 'not-allowed',
+      opacity: 0.6,
     },
   };
 }

@@ -99,7 +99,23 @@ export function ViewTabs({ scope, session }: ViewTabsProps) {
       };
       viewStore.registerSavedViews([savedView]);
       viewStore.markSaved(scope, viewId);
-    } catch { /* ignore */ }
+    } catch (err) {
+      console.error('[ViewTabs] Failed to create view:', err);
+      // Still register optimistically — the fold may have succeeded
+      const savedView: SavedView = {
+        id: viewId,
+        name: newViewName.trim(),
+        scope,
+        viewType: newViewType,
+        config,
+        visibility: newViewVisibility,
+        createdBy: session.userId,
+        createdAt: now,
+        updatedAt: now,
+      };
+      viewStore.registerSavedViews([savedView]);
+      viewStore.markSaved(scope, viewId);
+    }
 
     setShowNameInput(false);
     setNewViewName('');
@@ -127,7 +143,7 @@ export function ViewTabs({ scope, session }: ViewTabsProps) {
         viewStore.registerSavedViews([{ ...existing, config: sig.config, updatedAt: now }]);
       }
       viewStore.markSaved(scope, sig.activeViewId);
-    } catch { /* ignore */ }
+    } catch (err) { console.error('[ViewTabs] Failed to update view:', err); }
   }
 
   async function handleDeleteView(viewId: string) {
@@ -140,7 +156,7 @@ export function ViewTabs({ scope, session }: ViewTabsProps) {
         ts: new Date().toISOString(),
         acquired_ts: new Date().toISOString(),
       });
-    } catch { /* ignore */ }
+    } catch (err) { console.error('[ViewTabs] view op failed:', err); }
     viewStore.removeSavedView(viewId);
     if (sig.activeViewId === viewId) {
       viewStore.resetToDefault(scope);
@@ -163,7 +179,7 @@ export function ViewTabs({ scope, session }: ViewTabsProps) {
       if (existing) {
         viewStore.registerSavedViews([{ ...existing, name: renameValue.trim(), updatedAt: now }]);
       }
-    } catch { /* ignore */ }
+    } catch (err) { console.error('[ViewTabs] view op failed:', err); }
     setRenaming(null);
   }
 
@@ -194,7 +210,7 @@ export function ViewTabs({ scope, session }: ViewTabsProps) {
       viewStore.registerSavedViews([{
         ...source, id: newId, name: newName, createdBy: session.userId, createdAt: now, updatedAt: now,
       }]);
-    } catch { /* ignore */ }
+    } catch (err) { console.error('[ViewTabs] view op failed:', err); }
   }
 
   async function handleToggleVisibility(viewId: string) {
@@ -212,7 +228,7 @@ export function ViewTabs({ scope, session }: ViewTabsProps) {
         acquired_ts: now,
       });
       viewStore.registerSavedViews([{ ...view, visibility: newVis, updatedAt: now }]);
-    } catch { /* ignore */ }
+    } catch (err) { console.error('[ViewTabs] view op failed:', err); }
   }
 
   function getCtxMenuItems(viewId: string): ContextMenuItem[] {
@@ -362,7 +378,7 @@ export function ViewTabs({ scope, session }: ViewTabsProps) {
                 {'\uD83D\uDD13'} Shared
               </button>
             </div>
-            <button style={s.createBtn} onClick={handleSaveNew} disabled={!newViewName.trim()}>
+            <button style={!newViewName.trim() ? s.createBtnDisabled : s.createBtn} onClick={handleSaveNew} disabled={!newViewName.trim()}>
               Create view
             </button>
           </div>
@@ -518,6 +534,19 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       background: t.accent,
       color: '#fff',
       cursor: 'pointer',
+    },
+    createBtnDisabled: {
+      width: '100%',
+      marginTop: 12,
+      padding: '8px 0',
+      fontSize: 12,
+      fontWeight: 600,
+      border: `1px solid ${t.border}`,
+      borderRadius: 6,
+      background: t.bgMuted,
+      color: t.textMuted,
+      cursor: 'not-allowed',
+      opacity: 0.6,
     },
     renameInput: {
       fontSize: 12,
