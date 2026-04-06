@@ -174,6 +174,7 @@ export function getFieldValue(rec: EoState, key: string, useFieldsSub: boolean):
 export function deriveColumns(
   records: EoState[],
   fieldNameMap?: Map<string, string>,
+  columnTypeOverrides?: Map<string, any>,
 ): ColumnDef[] {
   const keyValues = new Map<string, any[]>();
   const useFieldsSub = hasFieldsSubObject(records);
@@ -207,7 +208,8 @@ export function deriveColumns(
 
   const columns: ColumnDef[] = [];
   for (const [key, values] of keyValues) {
-    const type = inferColumnType(values);
+    const typeOverride = columnTypeOverrides?.get(key);
+    const type = (typeOverride?.type as ColumnDef['type']) ?? inferColumnType(values);
     const prettyName = fieldNameMap?.get(key) ?? key;
     const col: ColumnDef = {
       key,

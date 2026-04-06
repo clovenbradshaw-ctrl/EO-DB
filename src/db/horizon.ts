@@ -9,7 +9,9 @@ import type {
   NearbyEntry, GovernanceEntry, AncestryEntry,
   GraphMetrics, GraphRole,
   RecResult, RecCycleInfo,
+  FieldSchemaEntry,
 } from './types.js';
+import { groupSchemaStates } from './schema-rules.js';
 import { isEncryptedOperand } from './crypto-types.js';
 import type { LocalKeyring } from './crypto-types.js';
 import { decryptOperand, getKeyById } from '../crypto/segment-keys.js';
@@ -673,4 +675,27 @@ async function decryptValueOrRedact(value: any, keyring: LocalKeyring): Promise<
       key_version: value.key_version,
     };
   }
+}
+
+// ─── Schema rules ────────────────────────────────────────────────────
+
+/**
+ * Get aggregated schema rules for a scope.
+ *
+ * Projects all ._schema.* states and groups them into per-field summaries
+ * with DEF/EVA counts. REC count is deferred (requires log scan infrastructure).
+ */
+export async function getSchemaRules(db: EoDb, scope: string): Promise<FieldSchemaEntry[]> {
+  const prefix = scope + '._schema.';
+  const states = await getStateByPrefix(db, prefix);
+  const grouped = groupSchemaStates(states, prefix);
+
+  return Array.from(grouped.values()).map(fs => ({
+    fieldKey: fs.fieldKey,
+    defCount: (fs.typeDef ? 1 : 0) + fs.constraints.length,
+    evaCount: fs.resolve ? 1 : 0,
+    typeDef: fs.typeDef?.value,
+    constraints: fs.constraints.map(c => ({ name: c.name, value: c.value })),
+    resolve: fs.resolve?.value,
+  }));
 }
