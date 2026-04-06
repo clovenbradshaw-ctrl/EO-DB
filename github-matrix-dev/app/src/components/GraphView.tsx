@@ -167,72 +167,97 @@ function forceLayout(
 
 /* ── Zoom/pan hook ────────────────────────────────────────────── */
 
-function useZoomPan(svgRef: React.RefObject<SVGSVGElement | null>) {
+function useZoomPan() {
   const [transform, setTransform] = useState({ x: 0, y: 0, k: 1 });
   const isPanning = useRef(false);
   const lastMouse = useRef({ x: 0, y: 0 });
+  const svgElRef = useRef<SVGSVGElement | null>(null);
 
-  useEffect(() => {
-    const svg = svgRef.current;
-    if (!svg) return;
-
-    function onWheel(e: WheelEvent) {
-      e.preventDefault();
-      const rect = svg!.getBoundingClientRect();
-      const mx = e.clientX - rect.left;
-      const my = e.clientY - rect.top;
-
-      setTransform((t) => {
-        const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
-        const newK = Math.min(Math.max(t.k * factor, 0.1), 10);
-        return {
-          k: newK,
-          x: mx - (mx - t.x) * (newK / t.k),
-          y: my - (my - t.y) * (newK / t.k),
-        };
-      });
-    }
-
-    function onMouseDown(e: MouseEvent) {
-      if (e.button !== 0) return;
-      // Only pan if clicking on the SVG background, not on a node
-      const target = e.target as SVGElement;
-      if (target.tagName !== 'svg' && target.tagName !== 'line' && target.tagName !== 'path' && target.tagName !== 'rect') return;
-      isPanning.current = true;
-      lastMouse.current = { x: e.clientX, y: e.clientY };
-      svg!.style.cursor = 'grabbing';
-    }
-
-    function onMouseMove(e: MouseEvent) {
-      if (!isPanning.current) return;
-      const dx = e.clientX - lastMouse.current.x;
-      const dy = e.clientY - lastMouse.current.y;
-      lastMouse.current = { x: e.clientX, y: e.clientY };
-      setTransform((t) => ({ ...t, x: t.x + dx, y: t.y + dy }));
-    }
-
-    function onMouseUp() {
-      isPanning.current = false;
-      svg!.style.cursor = 'grab';
-    }
-
-    svg.addEventListener('wheel', onWheel, { passive: false });
-    svg.addEventListener('mousedown', onMouseDown);
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
-    svg.style.cursor = 'grab';
-
-    return () => {
-      svg.removeEventListener('wheel', onWheel);
-      svg.removeEventListener('mousedown', onMouseDown);
+  const svgCallbackRef = useCallback((node: SVGSVGElement | null) => {
+    // Cleanup previous listeners
+    const prev = svgElRef.current;
+    if (prev) {
+      prev.removeEventListener('wheel', onWheel);
+      prev.removeEventListener('mousedown', onMouseDown);
       window.removeEventListener('mousemove', onMouseMove);
       window.removeEventListener('mouseup', onMouseUp);
-    };
-  }, [svgRef]);
+    }
+    svgElRef.current = node;
+    if (!node) return;
+
+    node.addEventListener('wheel', onWheel, { passive: false });
+    node.addEventListener('mousedown', onMouseDown);
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+    node.style.cursor = 'grab';
+
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function onWheel(e: WheelEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    const svg = svgElRef.current;
+    if (!svg) return;
+    const rect = svg.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+
+    setTransform((t) => {
+      const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+      const newK = Math.min(Math.max(t.k * factor, 0.1), 10);
+      return {
+        k: newK,
+        x: mx - (mx - t.x) * (newK / t.k),
+        y: my - (my - t.y) * (newK / t.k),
+      };
+    });
+  }
+
+  function onMouseDown(e: MouseEvent) {
+    if (e.button !== 0) return;
+    const target = e.target as SVGElement;
+    if (target.tagName !== 'svg' && target.tagName !== 'line' && target.tagName !== 'path' && target.tagName !== 'rect') return;
+    isPanning.current = true;
+    lastMouse.current = { x: e.clientX, y: e.clientY };
+    const svg = svgElRef.current;
+    if (svg) svg.style.cursor = 'grabbing';
+  }
+
+  function onMouseMove(e: MouseEvent) {
+    if (!isPanning.current) return;
+    const dx = e.clientX - lastMouse.current.x;
+    const dy = e.clientY - lastMouse.current.y;
+    lastMouse.current = { x: e.clientX, y: e.clientY };
+    setTransform((t) => ({ ...t, x: t.x + dx, y: t.y + dy }));
+  }
+
+  function onMouseUp() {
+    isPanning.current = false;
+    const svg = svgElRef.current;
+    if (svg) svg.style.cursor = 'grab';
+  }
 
   const resetZoom = useCallback(() => setTransform({ x: 0, y: 0, k: 1 }), []);
 
-  return { transform, resetZoom };
+  const zoomIn = useCallback(() => {
+    setTransform((t) => {
+      const newK = Math.min(t.k * 1.3, 10);
+      // Zoom toward center (VW/2=400, VH/2=280)
+      const cx = 400, cy = 280;
+      return { k: newK, x: cx - (cx - t.x) * (newK / t.k), y: cy - (cy - t.y) * (newK / t.k) };
+    });
+  }, []);
+
+  const zoomOut = useCallback(() => {
+    setTransform((t) => {
+      const newK = Math.max(t.k / 1.3, 0.1);
+      const cx = 400, cy = 280;
+      return { k: newK, x: cx - (cx - t.x) * (newK / t.k), y: cy - (cy - t.y) * (newK / t.k) };
+    });
+  }, []);
+
+  return { transform, resetZoom, zoomIn, zoomOut, svgCallbackRef };
 }
 
 function extractEdgesFromEvents(events: EoEvent[]): Edge[] {
@@ -510,8 +535,7 @@ export function GraphView({ allStates }: { allStates?: EoState[] }) {
   }, []);
 
   // SVG ref for zoom/pan
-  const svgRef = useRef<SVGSVGElement | null>(null);
-  const { transform, resetZoom } = useZoomPan(svgRef);
+  const { transform, resetZoom, zoomIn, zoomOut, svgCallbackRef } = useZoomPan();
 
   // Layout: force-directed
   const VW = 800, VH = 560;
@@ -715,7 +739,7 @@ export function GraphView({ allStates }: { allStates?: EoState[] }) {
           ) : (
             <>
               <svg
-                ref={svgRef}
+                ref={svgCallbackRef}
                 viewBox={`0 0 ${VW} ${VH}`}
                 style={{ width: '100%', height: '100%', userSelect: 'none' }}
               >
@@ -819,12 +843,16 @@ export function GraphView({ allStates }: { allStates?: EoState[] }) {
                 </text>
               </svg>
 
-              {/* Reset zoom button */}
-              {(transform.k !== 1 || transform.x !== 0 || transform.y !== 0) && (
-                <button onClick={resetZoom} style={s.resetBtn}>
-                  Reset view
-                </button>
-              )}
+              {/* Zoom controls */}
+              <div style={s.zoomControls}>
+                <button onClick={zoomOut} style={s.zoomBtn} title="Zoom out">-</button>
+                <button onClick={zoomIn} style={s.zoomBtn} title="Zoom in">+</button>
+                {(transform.k !== 1 || transform.x !== 0 || transform.y !== 0) && (
+                  <button onClick={resetZoom} style={s.zoomBtn} title="Reset view">
+                    Reset
+                  </button>
+                )}
+              </div>
             </>
           )}
         </div>
@@ -1127,12 +1155,16 @@ function styles(t: Theme): Record<string, React.CSSProperties> {
       padding: 16,
       position: 'relative' as const,
     },
-    resetBtn: {
+    zoomControls: {
       position: 'absolute' as const,
       bottom: 12,
       right: 16,
+      display: 'flex',
+      gap: 4,
+    },
+    zoomBtn: {
       padding: '4px 10px',
-      fontSize: 9,
+      fontSize: 10,
       fontWeight: 600,
       fontFamily: "'JetBrains Mono', monospace",
       background: t.bgCard,
@@ -1140,6 +1172,8 @@ function styles(t: Theme): Record<string, React.CSSProperties> {
       border: `1px solid ${t.border}`,
       borderRadius: 4,
       cursor: 'pointer',
+      lineHeight: 1,
+      minWidth: 28,
     },
     empty: {
       display: 'flex',
