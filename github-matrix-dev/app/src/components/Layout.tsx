@@ -1406,18 +1406,22 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           </nav>
 
           {/* Objects tree — integrated under Records */}
-          {ready ? (
-            <HolonNav
-              selectedScope={selectedScope}
-              onSelectScope={(scope) => { navigate({ view: 'records', scope, record: null }); }}
-              onSelectSegment={(_scope, _seg) => { navigate({ view: 'records', scope: _scope }); }}
-            />
-          ) : !selectedSpace ? (
+          {!selectedSpace ? (
             <div style={{ padding: '16px 12px', fontSize: 13, color: theme.textMuted }}>
               No space selected. Open the space browser above to create or select a space.
             </div>
           ) : (
-            <SyncProgress message="Initializing store..." detail="Deriving encryption key" />
+            <>
+              {!ready && (
+                <SyncProgress message="Initializing store..." detail="Deriving encryption key" />
+              )}
+              <HolonNav
+                selectedScope={selectedScope}
+                onSelectScope={(scope) => { navigate({ view: 'records', scope, record: null }); }}
+                onSelectSegment={(_scope, _seg) => { navigate({ view: 'records', scope: _scope }); }}
+                userId={session.userId}
+              />
+            </>
           )}
 
           <nav style={s.sidebarNav}>
