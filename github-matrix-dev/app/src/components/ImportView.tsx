@@ -403,7 +403,7 @@ export function ImportView({ onImportComplete }: ImportViewProps) {
         const result = ext === 'json' ? parseJson(text) : parseCsv(text, ext === 'tsv');
         setRows(result.rows);
         setMode(result.mode);
-        const keyed = result.mode === 'keyed' ? (result as { keyed: KeyedSummary }).keyed : null;
+        const keyed = result.mode === 'keyed' && 'keyed' in result ? (result as { keyed: KeyedSummary }).keyed : null;
         setKeyedSummary(keyed);
         setFileName(file.name);
         const sizeKb = (file.size / 1024).toFixed(1);
