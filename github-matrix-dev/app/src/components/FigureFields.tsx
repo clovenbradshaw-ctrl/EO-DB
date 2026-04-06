@@ -288,11 +288,6 @@ function renderFieldValue(
     );
   }
 
-  // Other objects (non-linked)
-  if (typeof val === 'object' && val !== null) {
-    return <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: t.textSecondary }}>{JSON.stringify(val, null, 1)}</span>;
-  }
-
   // Array of entity IDs
   if (isEntityIdArray(val)) {
     return (
@@ -326,6 +321,39 @@ function renderFieldValue(
         })}
       </div>
     );
+  }
+
+  // Plain string array (e.g. practice_areas: ["corporate_litigation", "bankruptcy"])
+  if (Array.isArray(val)) {
+    if (val.length === 0) {
+      return <span style={{ color: t.textSecondary, fontSize: 13, fontStyle: 'italic' }}>none</span>;
+    }
+    return (
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+        {val.map((item: unknown, i: number) => (
+          <span
+            key={i}
+            style={{
+              display: 'inline-flex',
+              padding: '2px 8px',
+              borderRadius: 4,
+              fontSize: 12,
+              background: t.bgMuted,
+              border: `1px solid ${t.borderLight}`,
+              color: t.textSecondary,
+              fontFamily: "'JetBrains Mono', monospace",
+            }}
+          >
+            {String(item)}
+          </span>
+        ))}
+      </div>
+    );
+  }
+
+  // Other objects (non-array, non-linked)
+  if (typeof val === 'object' && val !== null) {
+    return <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: t.textSecondary }}>{JSON.stringify(val, null, 1)}</span>;
   }
 
   // Single entity ID string
