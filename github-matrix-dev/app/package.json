@@ -22,6 +22,12 @@
     "react": "^18.3.0",
     "react-dom": "^18.3.0",
     "uuid": "^9.0.0",
+    "yjs": "^13.6.0",
+    "@tiptap/core": "^2.6.0",
+    "@tiptap/starter-kit": "^2.6.0",
+    "@tiptap/react": "^2.6.0",
+    "@tiptap/extension-collaboration": "^2.6.0",
+    "@tiptap/extension-collaboration-cursor": "^2.6.0",
     "vite-plugin-pwa": "^1.2.0",
     "workbox-window": "^7.4.0",
     "zustand": "^4.5.0"
