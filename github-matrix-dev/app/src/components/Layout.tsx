@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo } from 'react';
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { logout, createMatrixClient, type MatrixSession } from '../matrix/client';
 import { useEoStore } from '../store/eo-store';
 import { createIdb, deleteAllEoDatabases } from '../db/idb';
@@ -296,6 +296,16 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   const [syncToastStatus, syncToastSeq, onSyncStatus] = useSyncToast();
   const [matrixReady, setMatrixReady] = useState(false);
   const [presence, setPresence] = useState<Presence | null>(null);
+  const [connectionError, setConnectionError] = useState<{
+    phase: 'auth' | 'crypto' | 'sync' | 'room';
+    message: string;
+  } | null>(null);
+  const [retryCount, setRetryCount] = useState(0);
+  const retrySync = useCallback(() => {
+    setConnectionError(null);
+    setMatrixReady(false);
+    setRetryCount(c => c + 1);
+  }, []);
   // Show actual sync status. Filen is the primary data store when connected —
   // Matrix SyncManager is intentionally skipped in that case (see setupSpaceStore),
   // so treat an active Filen sync as "online" too.
@@ -305,9 +315,11 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       ? 'local'
       : (syncManager || filenSync)
         ? 'online'
-        : matrixReady
-          ? 'syncing'
-          : 'offline';
+        : connectionError
+          ? 'error'
+          : matrixReady
+            ? 'syncing'
+            : 'offline';
 
   // Helper to select a space and persist the choice
   function selectSpace(target: string) {
@@ -484,8 +496,12 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     async function startMatrix() {
       if (!navigator.onLine) return;
       try {
-        const client = createMatrixClient(session);
-        matrixClientRef.current = client;
+        // Reuse existing client on retry — only create if absent
+        let client = matrixClientRef.current;
+        if (!client) {
+          client = createMatrixClient(session);
+          matrixClientRef.current = client;
+        }
 
         // Initialize Rust crypto so E2EE rooms can send/receive decrypted messages.
         // Uses IndexedDB to persist device keys & megolm sessions across reloads.
@@ -501,19 +517,26 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           }
         } catch (e) {
           console.warn('[EO-DB] rust crypto init failed — E2EE rooms will not work:', e);
+          // Non-fatal: continue without E2EE — sync still works for unencrypted rooms
         }
 
         await client.startClient({ initialSyncLimit: 20 });
 
-        await new Promise<void>((resolve) => {
-          if (client.isInitialSyncComplete()) {
-            resolve();
-          } else {
-            client.once('sync' as any, (state: string) => {
-              if (state === 'PREPARED') resolve();
-            });
-          }
-        });
+        // Wait for initial sync with a 30s timeout to avoid hanging forever
+        await Promise.race([
+          new Promise<void>((resolve) => {
+            if (client!.isInitialSyncComplete()) {
+              resolve();
+            } else {
+              client!.once('sync' as any, (state: string) => {
+                if (state === 'PREPARED') resolve();
+              });
+            }
+          }),
+          new Promise<void>((_, reject) =>
+            setTimeout(() => reject(new Error('Initial sync timeout after 30s')), 30_000),
+          ),
+        ]);
 
         if (!mounted) { client.stopClient(); return; }
 
@@ -532,9 +555,16 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           // Debug-level only to avoid console noise on every startup.
         }
 
+        setConnectionError(null);
         setMatrixReady(true);
-      } catch {
-        // Offline — local store is still available
+      } catch (e) {
+        console.warn('[EO-DB] startMatrix failed:', e);
+        if (mounted) {
+          setConnectionError({
+            phase: 'sync',
+            message: e instanceof Error ? e.message : 'Matrix connection failed',
+          });
+        }
       }
     }
 
@@ -546,8 +576,9 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       matrixClientRef.current = null;
       roomIdRef.current = null;
       setMatrixReady(false);
+      setConnectionError(null);
     };
-  }, [session]);
+  }, [session, retryCount]);
 
   // --- Space discovery (re-runs when Matrix becomes ready) ---
   useEffect(() => {
@@ -830,19 +861,32 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       let syncManager: SyncManager | null = null;
       const filenConnected = useFilenStore.getState().connected;
       if (MATRIX_ENABLED && spaceRoomId && matrixClientRef.current && !filenOrgMode && !filenConnected) {
-        try {
-          syncManager = new SyncManager(
-            matrixClientRef.current,
-            spaceRoomId,
-            store,
-            onFoldEvent,
-          );
-          await syncManager.initialize();
-          if (!mounted) { syncManager.destroy(); return; }
-          useEoStore.getState().setSyncManager(syncManager);
-        } catch (e) {
-          console.warn('[EO-DB] Matrix sync initialization failed for space', selectedSpace, e);
-          syncManager = null;
+        const maxRetries = 3;
+        for (let attempt = 0; attempt < maxRetries; attempt++) {
+          if (!mounted) return;
+          try {
+            syncManager = new SyncManager(
+              matrixClientRef.current,
+              spaceRoomId,
+              store,
+              onFoldEvent,
+            );
+            await syncManager.initialize();
+            if (!mounted) { syncManager.destroy(); return; }
+            useEoStore.getState().setSyncManager(syncManager);
+            break; // success
+          } catch (e) {
+            console.warn(`[EO-DB] SyncManager init attempt ${attempt + 1}/${maxRetries} for`, selectedSpace, e);
+            syncManager = null;
+            if (attempt < maxRetries - 1) {
+              await new Promise(r => setTimeout(r, (attempt + 1) * 2000));
+            } else {
+              setConnectionError({
+                phase: 'sync',
+                message: `Sync failed after ${maxRetries} attempts: ${e instanceof Error ? e.message : String(e)}`,
+              });
+            }
+          }
         }
       }
 
@@ -1234,7 +1278,11 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               selfDisplayName={displayName}
             />
           )}
-          <ConnectionStatus state={connectionState} />
+          <ConnectionStatus
+            state={connectionState}
+            onRetry={retrySync}
+            errorMessage={connectionError?.message}
+          />
           {!isMobile && <SyncToast status={syncToastStatus} seq={syncToastSeq} />}
           {selectedSpace && !isMobile && (
             <PermissionBadge role={currentRole} displayName={displayName} />
