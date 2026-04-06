@@ -23,6 +23,191 @@ const LANG_PLACEHOLDERS: Record<string, string> = {
 interface Edge { source: string; dest: string }
 interface NodePos { x: number; y: number }
 
+/* ── Minimal force-directed layout ────────────────────────────── */
+
+interface ForceNode { id: string; x: number; y: number; vx: number; vy: number }
+
+function forceLayout(
+  nodeIds: string[],
+  edges: Edge[],
+  width: number,
+  height: number,
+  iterations = 300,
+): Record<string, NodePos> {
+  const n = nodeIds.length;
+  if (n === 0) return {};
+
+  // Initialize nodes in a spread-out pattern (not a tight circle)
+  const nodes: ForceNode[] = nodeIds.map((id, i) => {
+    const angle = (i / n) * Math.PI * 2;
+    const r = Math.min(width, height) * 0.3;
+    return {
+      id,
+      x: width / 2 + Math.cos(angle) * r + (Math.random() - 0.5) * 40,
+      y: height / 2 + Math.sin(angle) * r + (Math.random() - 0.5) * 40,
+      vx: 0,
+      vy: 0,
+    };
+  });
+
+  const idxMap = new Map<string, number>();
+  nodes.forEach((nd, i) => idxMap.set(nd.id, i));
+
+  const edgeIdx = edges
+    .map((e) => [idxMap.get(e.source), idxMap.get(e.dest)] as const)
+    .filter(([a, b]) => a !== undefined && b !== undefined) as [number, number][];
+
+  // Build adjacency for connected-component aware repulsion
+  const idealDist = Math.max(60, Math.sqrt((width * height) / Math.max(n, 1)) * 1.2);
+  const springLen = idealDist * 0.8;
+
+  for (let iter = 0; iter < iterations; iter++) {
+    const temp = 0.1 * (1 - iter / iterations); // cooling
+
+    // Repulsion (all pairs – O(n²) fine for ≤200 nodes)
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        let dx = nodes[j].x - nodes[i].x;
+        let dy = nodes[j].y - nodes[i].y;
+        let dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        const force = (idealDist * idealDist) / dist;
+        const fx = (dx / dist) * force * temp;
+        const fy = (dy / dist) * force * temp;
+        nodes[i].vx -= fx;
+        nodes[i].vy -= fy;
+        nodes[j].vx += fx;
+        nodes[j].vy += fy;
+      }
+    }
+
+    // Attraction along edges
+    for (const [si, di] of edgeIdx) {
+      let dx = nodes[di].x - nodes[si].x;
+      let dy = nodes[di].y - nodes[si].y;
+      let dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      const force = (dist - springLen) * 0.4 * temp;
+      const fx = (dx / dist) * force;
+      const fy = (dy / dist) * force;
+      nodes[si].vx += fx;
+      nodes[si].vy += fy;
+      nodes[di].vx -= fx;
+      nodes[di].vy -= fy;
+    }
+
+    // Center gravity
+    for (const nd of nodes) {
+      nd.vx += (width / 2 - nd.x) * 0.01 * temp;
+      nd.vy += (height / 2 - nd.y) * 0.01 * temp;
+    }
+
+    // Apply velocities with damping
+    for (const nd of nodes) {
+      const speed = Math.sqrt(nd.vx * nd.vx + nd.vy * nd.vy);
+      const maxSpeed = idealDist * temp * 10;
+      if (speed > maxSpeed) {
+        nd.vx = (nd.vx / speed) * maxSpeed;
+        nd.vy = (nd.vy / speed) * maxSpeed;
+      }
+      nd.x += nd.vx;
+      nd.y += nd.vy;
+      nd.vx *= 0.9;
+      nd.vy *= 0.9;
+    }
+  }
+
+  // Normalize positions into [padding, width-padding] x [padding, height-padding]
+  const padding = 40;
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const nd of nodes) {
+    if (nd.x < minX) minX = nd.x;
+    if (nd.x > maxX) maxX = nd.x;
+    if (nd.y < minY) minY = nd.y;
+    if (nd.y > maxY) maxY = nd.y;
+  }
+  const rangeX = maxX - minX || 1;
+  const rangeY = maxY - minY || 1;
+  const scale = Math.min((width - padding * 2) / rangeX, (height - padding * 2) / rangeY);
+
+  const result: Record<string, NodePos> = {};
+  for (const nd of nodes) {
+    result[nd.id] = {
+      x: (nd.x - minX) * scale + padding + ((width - padding * 2) - rangeX * scale) / 2,
+      y: (nd.y - minY) * scale + padding + ((height - padding * 2) - rangeY * scale) / 2,
+    };
+  }
+  return result;
+}
+
+/* ── Zoom/pan hook ────────────────────────────────────────────── */
+
+function useZoomPan(svgRef: React.RefObject<SVGSVGElement | null>) {
+  const [transform, setTransform] = useState({ x: 0, y: 0, k: 1 });
+  const isPanning = useRef(false);
+  const lastMouse = useRef({ x: 0, y: 0 });
+
+  useEffect(() => {
+    const svg = svgRef.current;
+    if (!svg) return;
+
+    function onWheel(e: WheelEvent) {
+      e.preventDefault();
+      const rect = svg!.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+
+      setTransform((t) => {
+        const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+        const newK = Math.min(Math.max(t.k * factor, 0.1), 10);
+        return {
+          k: newK,
+          x: mx - (mx - t.x) * (newK / t.k),
+          y: my - (my - t.y) * (newK / t.k),
+        };
+      });
+    }
+
+    function onMouseDown(e: MouseEvent) {
+      if (e.button !== 0) return;
+      // Only pan if clicking on the SVG background, not on a node
+      const target = e.target as SVGElement;
+      if (target.tagName !== 'svg' && target.tagName !== 'line' && target.tagName !== 'path' && target.tagName !== 'rect') return;
+      isPanning.current = true;
+      lastMouse.current = { x: e.clientX, y: e.clientY };
+      svg!.style.cursor = 'grabbing';
+    }
+
+    function onMouseMove(e: MouseEvent) {
+      if (!isPanning.current) return;
+      const dx = e.clientX - lastMouse.current.x;
+      const dy = e.clientY - lastMouse.current.y;
+      lastMouse.current = { x: e.clientX, y: e.clientY };
+      setTransform((t) => ({ ...t, x: t.x + dx, y: t.y + dy }));
+    }
+
+    function onMouseUp() {
+      isPanning.current = false;
+      svg!.style.cursor = 'grab';
+    }
+
+    svg.addEventListener('wheel', onWheel, { passive: false });
+    svg.addEventListener('mousedown', onMouseDown);
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+    svg.style.cursor = 'grab';
+
+    return () => {
+      svg.removeEventListener('wheel', onWheel);
+      svg.removeEventListener('mousedown', onMouseDown);
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    };
+  }, [svgRef]);
+
+  const resetZoom = useCallback(() => setTransform({ x: 0, y: 0, k: 1 }), []);
+
+  return { transform, resetZoom };
+}
+
 function extractEdgesFromEvents(events: EoEvent[]): Edge[] {
   const edgeList: Edge[] = [];
   events
@@ -251,16 +436,15 @@ export function GraphView({ allStates }: { allStates?: EoState[] }) {
     setHighlighted((h) => (h === name ? null : name));
   }, []);
 
-  // Layout: circular
-  const CX = 400, CY = 280, RADIUS = 180;
+  // SVG ref for zoom/pan
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const { transform, resetZoom } = useZoomPan(svgRef);
+
+  // Layout: force-directed
+  const VW = 800, VH = 560;
   const positions = useMemo(() => {
-    const pos: Record<string, NodePos> = {};
-    nodes.forEach((n, i) => {
-      const angle = (i / nodes.length) * Math.PI * 2 - Math.PI / 2;
-      pos[n] = { x: CX + Math.cos(angle) * RADIUS, y: CY + Math.sin(angle) * RADIUS };
-    });
-    return pos;
-  }, [nodes]);
+    return forceLayout(nodes, edges, VW, VH);
+  }, [nodes, edges]);
 
   // Status line
   const isFiltered = queryTargets !== null;
@@ -421,115 +605,109 @@ export function GraphView({ allStates }: { allStates?: EoState[] }) {
             </div>
           ) : (
             <>
-              <svg viewBox="0 0 800 560" style={{ width: '100%', height: '100%' }}>
+              <svg
+                ref={svgRef}
+                viewBox={`0 0 ${VW} ${VH}`}
+                style={{ width: '100%', height: '100%', userSelect: 'none' }}
+              >
                 <defs>
-                  <marker id="arrow" viewBox="0 0 10 10" refX="35" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                  <marker id="arrow" viewBox="0 0 10 10" refX="18" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
                     <path d="M 0 0 L 10 5 L 0 10 z" fill="#a78bfa" fillOpacity="0.6" />
                   </marker>
                 </defs>
 
-                {/* Edges */}
-                {edges.map((e, i) => {
-                  const sp = positions[e.source];
-                  const dp = positions[e.dest];
-                  if (!sp || !dp) return null;
-                  const midX = (sp.x + dp.x) / 2;
-                  const midY = (sp.y + dp.y) / 2 - 20;
-                  const connected = !highlighted || e.source === highlighted || e.dest === highlighted;
-                  return (
-                    <path
-                      key={i}
-                      d={`M${sp.x},${sp.y} Q${midX},${midY} ${dp.x},${dp.y}`}
-                      fill="none"
-                      stroke="#a78bfa"
-                      strokeWidth={connected && highlighted ? 2 : 1.5}
-                      strokeOpacity={highlighted ? (connected ? 0.8 : 0.08) : 0.5}
-                      markerEnd="url(#arrow)"
-                    />
-                  );
-                })}
-
-                {/* Nodes — sized by degree, colored by role */}
-                {nodes.map((n, i) => {
-                  const p = positions[n];
-                  const c = NODE_COLORS[i % NODE_COLORS.length];
-                  const label = n.split('.').pop() || n;
-                  const isSelected = n === highlighted;
-                  const opacity = highlighted ? (isSelected ? 1 : 0.2) : 1;
-
-                  // Compute degree for sizing
-                  const degree = edges.filter(e => e.source === n || e.dest === n).length;
-                  const baseR = 28;
-                  const r = isSelected ? baseR + 4 + degree : baseR + Math.min(degree * 2, 12);
-
-                  // Detect role for coloring
-                  const connCollections = new Set<string>();
-                  edges.filter(e => e.source === n).forEach(e => {
-                    const ep = e.dest.split('.');
-                    if (ep.length >= 2) connCollections.add(ep.slice(0, 2).join('.'));
-                  });
-                  edges.filter(e => e.dest === n).forEach(e => {
-                    const ep = e.source.split('.');
-                    if (ep.length >= 2) connCollections.add(ep.slice(0, 2).join('.'));
-                  });
-                  const isBridge = connCollections.size >= 2;
-                  const isHub = degree >= 6;
-                  const roleColor = isHub ? '#a855f7' : isBridge ? '#eab308' : c;
-
-                  return (
-                    <g key={n} onClick={() => toggleHighlight(n)} style={{ cursor: 'pointer' }}>
-                      <circle
-                        cx={p.x} cy={p.y} r={r}
-                        fill={`${roleColor}15`}
-                        stroke={roleColor}
-                        strokeWidth={isSelected ? 2.5 : isHub ? 2 : 1.5}
-                        strokeOpacity={opacity}
-                        fillOpacity={opacity}
+                {/* Zoomable/pannable group */}
+                <g transform={`translate(${transform.x},${transform.y}) scale(${transform.k})`}>
+                  {/* Edges */}
+                  {edges.map((e, i) => {
+                    const sp = positions[e.source];
+                    const dp = positions[e.dest];
+                    if (!sp || !dp) return null;
+                    const connected = !highlighted || e.source === highlighted || e.dest === highlighted;
+                    return (
+                      <line
+                        key={i}
+                        x1={sp.x} y1={sp.y}
+                        x2={dp.x} y2={dp.y}
+                        stroke="#a78bfa"
+                        strokeWidth={connected && highlighted ? 1.5 : 0.8}
+                        strokeOpacity={highlighted ? (connected ? 0.7 : 0.06) : 0.35}
+                        markerEnd="url(#arrow)"
                       />
-                      {/* Role label for hubs and bridges */}
-                      {(isHub || isBridge) && (
+                    );
+                  })}
+
+                  {/* Nodes — sized by degree, colored by role */}
+                  {nodes.map((n, i) => {
+                    const p = positions[n];
+                    const c = NODE_COLORS[i % NODE_COLORS.length];
+                    const label = n.split('.').pop() || n;
+                    const isSelected = n === highlighted;
+                    const opacity = highlighted ? (isSelected ? 1 : 0.25) : 1;
+
+                    // Compute degree for sizing
+                    const degree = edges.filter(e => e.source === n || e.dest === n).length;
+                    const baseR = 6;
+                    const r = isSelected ? baseR + 3 : baseR + Math.min(degree, 6);
+
+                    // Detect role for coloring
+                    const connCollections = new Set<string>();
+                    edges.filter(e => e.source === n).forEach(e => {
+                      const ep = e.dest.split('.');
+                      if (ep.length >= 2) connCollections.add(ep.slice(0, 2).join('.'));
+                    });
+                    edges.filter(e => e.dest === n).forEach(e => {
+                      const ep = e.source.split('.');
+                      if (ep.length >= 2) connCollections.add(ep.slice(0, 2).join('.'));
+                    });
+                    const isBridge = connCollections.size >= 2;
+                    const isHub = degree >= 6;
+                    const roleColor = isHub ? '#a855f7' : isBridge ? '#eab308' : c;
+
+                    return (
+                      <g key={n} onClick={() => toggleHighlight(n)} style={{ cursor: 'pointer' }}>
+                        <circle
+                          cx={p.x} cy={p.y} r={r}
+                          fill={roleColor}
+                          fillOpacity={opacity * 0.25}
+                          stroke={roleColor}
+                          strokeWidth={isSelected ? 2 : 1}
+                          strokeOpacity={opacity}
+                        />
+                        {/* Label — offset below node */}
                         <text
-                          x={p.x} y={p.y - r - 4}
+                          x={p.x} y={p.y + r + 10}
                           textAnchor="middle"
                           fill={roleColor}
                           fontFamily="JetBrains Mono, monospace"
-                          fontSize={7}
-                          fontWeight="600"
-                          fillOpacity={opacity * 0.7}
+                          fontSize={isSelected ? 9 : 7}
+                          fontWeight={isSelected ? '700' : '500'}
+                          fillOpacity={opacity * 0.9}
                         >
-                          {isHub ? 'HUB' : 'BRIDGE'}
+                          {label}
                         </text>
-                      )}
-                      <text
-                        x={p.x} y={p.y + 1}
-                        textAnchor="middle"
-                        dominantBaseline="middle"
-                        fill={roleColor}
-                        fontFamily="JetBrains Mono, monospace"
-                        fontSize={isSelected ? 10 : 9}
-                        fontWeight="600"
-                        fillOpacity={opacity}
-                      >
-                        {label}
-                      </text>
-                      {/* Degree count */}
-                      <text
-                        x={p.x} y={p.y + 12}
-                        textAnchor="middle"
-                        fill={roleColor}
-                        fontFamily="JetBrains Mono, monospace"
-                        fontSize={7}
-                        fillOpacity={opacity * 0.5}
-                      >
-                        {degree}
-                      </text>
-                    </g>
-                  );
-                })}
+                        {/* Role badge for hubs */}
+                        {isHub && (
+                          <text
+                            x={p.x} y={p.y - r - 3}
+                            textAnchor="middle"
+                            fill={roleColor}
+                            fontFamily="JetBrains Mono, monospace"
+                            fontSize={5}
+                            fontWeight="700"
+                            fillOpacity={opacity * 0.6}
+                          >
+                            HUB
+                          </text>
+                        )}
+                      </g>
+                    );
+                  })}
+                </g>
 
-                {/* Status text at bottom of SVG */}
+                {/* Status text — fixed position, not affected by zoom */}
                 <text
-                  x={400} y={548}
+                  x={VW / 2} y={VH - 8}
                   textAnchor="middle"
                   fill={theme.textMuted}
                   fontFamily="JetBrains Mono, monospace"
@@ -538,8 +716,16 @@ export function GraphView({ allStates }: { allStates?: EoState[] }) {
                 >
                   {statusText}
                   {showCappedWarning ? ` (capped at ${MAX_DISPLAY_NODES})` : ''}
+                  {' · scroll to zoom · drag to pan'}
                 </text>
               </svg>
+
+              {/* Reset zoom button */}
+              {(transform.k !== 1 || transform.x !== 0 || transform.y !== 0) && (
+                <button onClick={resetZoom} style={s.resetBtn}>
+                  Reset view
+                </button>
+              )}
             </>
           )}
         </div>
@@ -762,6 +948,21 @@ function styles(t: Theme): Record<string, React.CSSProperties> {
       alignItems: 'center',
       justifyContent: 'center',
       padding: 16,
+      position: 'relative' as const,
+    },
+    resetBtn: {
+      position: 'absolute' as const,
+      bottom: 12,
+      right: 16,
+      padding: '4px 10px',
+      fontSize: 9,
+      fontWeight: 600,
+      fontFamily: "'JetBrains Mono', monospace",
+      background: t.bgCard,
+      color: t.textMuted,
+      border: `1px solid ${t.border}`,
+      borderRadius: 4,
+      cursor: 'pointer',
     },
     empty: {
       display: 'flex',
