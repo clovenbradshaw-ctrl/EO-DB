@@ -81,9 +81,10 @@ export function useCollabEditor({
       const { trigger, cleanup } = createDebouncedSave(doc, target, fieldKey, dispatch);
       cleanupRef.current = cleanup;
 
-      // Listen for local changes to trigger save
+      // Listen for local changes to trigger save — remote updates don't need
+      // a DEF from this device (the originating device saves its own state)
       const onUpdate = (_update: Uint8Array, origin: any) => {
-        // Save on any update (local or remote) — the CRDT state is the merged result
+        if (origin === providerRef.current) return; // remote update — skip
         trigger();
       };
       doc.on('update', onUpdate);

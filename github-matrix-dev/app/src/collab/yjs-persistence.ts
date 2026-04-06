@@ -122,7 +122,7 @@ export function createDebouncedSave(
   target: string,
   fieldKey: string,
   dispatch: (event: EoEventInput) => Promise<number>,
-  delayMs = 2000,
+  delayMs = 5000,
 ): { trigger: () => void; flush: () => Promise<void>; cleanup: () => void } {
   let timer: ReturnType<typeof setTimeout> | null = null;
   let pending = false;
