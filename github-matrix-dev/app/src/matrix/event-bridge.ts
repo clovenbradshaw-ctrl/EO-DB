@@ -72,12 +72,30 @@ export function matrixEventToEo(matrixEvent: MatrixEvent): EoEventInput {
 
 /**
  * Resolve the data room alias to a room ID.
+ *
+ * First checks joined rooms for a matching alias (avoids a network
+ * round-trip and the 404 console noise when the alias doesn't exist
+ * in the homeserver directory). Falls back to the directory API only
+ * when no local match is found.
  */
 export async function resolveDataRoom(client: MatrixClient): Promise<string> {
   const alias = getDataRoom();
   if (!alias) {
     throw new Error('Data room alias not configured — call configureMatrixDomain() first');
   }
+
+  // Check joined rooms first — avoids a GET /directory/room 404 when the
+  // alias hasn't been registered on the homeserver.
+  for (const room of client.getRooms()) {
+    const aliases = room.getAltAliases?.() ?? [];
+    const canonical = room.getCanonicalAlias?.();
+    if (canonical) aliases.push(canonical);
+    if (aliases.includes(alias)) {
+      return room.roomId;
+    }
+  }
+
+  // Fall back to directory lookup (may 404 — caller should catch).
   const result = await client.getRoomIdForAlias(alias);
   return result.room_id;
 }
