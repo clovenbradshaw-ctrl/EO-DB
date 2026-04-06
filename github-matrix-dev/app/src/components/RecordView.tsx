@@ -7,8 +7,9 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { HorizonResponse, NearbyEntry, SignalEntry, RecCycleInfo, GovernanceEntry } from '../db/types';
 import { useEoStore } from '../store/eo-store';
 import { FigureFields } from './FigureFields';
-import { ConnectionsPanel, type ConnectionSectionConfig as ConnSectionCfg, type ConnectionColumnDef } from './ConnectionsPanel';
-import { ConnectionColumnPicker } from './ConnectionColumnPicker';
+import { ConnectionsPanel, type ConnectionSectionConfig as ConnSectionCfg } from './ConnectionsPanel';
+import { Modal } from './Modal';
+import { DesignerView } from './DesignerView';
 import { Trajectory } from './Trajectory';
 import { Grounds } from './Grounds';
 import { Nearby } from './Nearby';
@@ -29,9 +30,6 @@ import {
   type ConnectionSectionConfig,
   detailLayoutTarget,
   defaultLayout,
-  addColumn,
-  removeColumn,
-  toggleSectionHidden,
 } from './detail-layout';
 
 interface RecordViewProps {
@@ -66,11 +64,10 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
   const [recCycleLoading, setRecCycleLoading] = useState(false);
   const [recCycleError, setRecCycleError] = useState<string | null>(null);
 
-  // ─── Detail layout config (gear toggle / column picker) ─────────────
-  const [editMode, setEditMode] = useState(false);
+  // ─── Detail layout config (designer modal) ─────────────────────────
+  const [designerOpen, setDesignerOpen] = useState(false);
   const [layout, setLayout] = useState<DetailLayout | null>(null);
   const [layoutLoaded, setLayoutLoaded] = useState(false);
-  const [columnPickerEntity, setColumnPickerEntity] = useState<string | null>(null);
 
   const getState = useEoStore((s) => s.getState);
   const dispatch = useEoStore((s) => s.dispatch);
@@ -249,34 +246,6 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
     }
   }, [scope, dispatch]);
 
-  const handleAddColumn = useCallback((entity: string) => {
-    setColumnPickerEntity(entity);
-  }, []);
-
-  const handleRemoveColumn = useCallback((entity: string, columnKey: string) => {
-    const current = layout || defaultLayout([]);
-    saveLayout(removeColumn(current, entity, columnKey));
-  }, [layout, saveLayout]);
-
-  const handleToggleHidden = useCallback((entity: string) => {
-    const current = layout || defaultLayout([]);
-    saveLayout(toggleSectionHidden(current, entity));
-  }, [layout, saveLayout]);
-
-  const handlePickerToggle = useCallback((col: ConnectionColumnDef) => {
-    if (!columnPickerEntity) return;
-    const current = layout || defaultLayout([]);
-    const section = current.sections.find(
-      (sec): sec is ConnectionSectionConfig =>
-        sec.type === 'connection' && sec.entity === columnPickerEntity,
-    );
-    const hasCol = section?.columns.some(c => c.key === col.key);
-    if (hasCol) {
-      saveLayout(removeColumn(current, columnPickerEntity, col.key));
-    } else {
-      saveLayout(addColumn(current, columnPickerEntity, col));
-    }
-  }, [layout, columnPickerEntity, saveLayout]);
 
   // ─── Memos that must be before early returns (hooks rules) ──────────
 
@@ -310,18 +279,6 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
       }));
   }, [layout]);
 
-  // Column picker entity scope for schema lookup
-  const pickerEntityScope = columnPickerEntity ? `${scope.split('.')[0]}.${columnPickerEntity}` : '';
-  const pickerActiveColumns: ConnectionColumnDef[] = useMemo(() => {
-    if (!columnPickerEntity) return [];
-    const current = layout || defaultLayout(connectionTypes);
-    const section = current.sections.find(
-      (sec): sec is ConnectionSectionConfig =>
-        sec.type === 'connection' && sec.entity === columnPickerEntity,
-    );
-    return section?.columns || [];
-  }, [columnPickerEntity, layout, connectionTypes]);
-
   // ─── Early returns ─────────────────────────────────────────────────
 
   if (loading) {
@@ -354,55 +311,15 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
             <div style={{ ...s.statusBadge, ...statusStyleMap[statusClass] }}>
               {value.status || 'unknown'}
             </div>
-            {/* Gear toggle — in-place edit mode */}
+            {/* Gear — open layout designer */}
             <button
-              style={{
-                ...s.gearBtn,
-                ...(editMode ? { background: theme.accentBg, color: theme.accent } : {}),
-              }}
-              onClick={() => { setEditMode(!editMode); setColumnPickerEntity(null); }}
-              title={editMode ? 'Exit edit mode' : 'Configure layout'}
+              style={s.gearBtn}
+              onClick={() => setDesignerOpen(true)}
+              title="Configure layout"
             >
               {'\u2699'}
             </button>
           </div>
-        </div>
-        <div style={s.meta}>
-          <span style={s.metaItem}>
-            <span style={s.metaLabel}>seq</span> {data.figure.last_seq}
-          </span>
-          {data.graphMetrics && <GraphRoleBadge metrics={data.graphMetrics} />}
-          {data.cadence && <CadenceBadge cadence={data.cadence} />}
-          {hashCohort && hashCohort.length > 0 && (
-            <span style={s.metaItem}>
-              <span style={{
-                fontSize: 10,
-                fontFamily: "'JetBrains Mono', monospace",
-                background: theme.purpleBg,
-                color: theme.purple,
-                border: `1px solid ${theme.purpleBorder}`,
-                borderRadius: 10,
-                padding: '2px 8px',
-              }}>
-                {hashCohort.length} twin{hashCohort.length !== 1 ? 's' : ''}
-              </span>
-            </span>
-          )}
-          {data.trajectoryFingerprint && (
-            <span style={s.metaItem}>
-              <span style={{
-                fontSize: 10,
-                fontFamily: "'JetBrains Mono', monospace",
-                background: theme.accentBg,
-                color: theme.accent,
-                border: `1px solid ${theme.accentBorder}`,
-                borderRadius: 10,
-                padding: '2px 8px',
-              }}>
-                {data.trajectoryFingerprint.fingerprint.slice(0, 8)}
-              </span>
-            </span>
-          )}
         </div>
       </div>
 
@@ -444,21 +361,8 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
               edges={edges}
               onNavigate={onNavigate}
               sectionConfigs={sectionConfigs}
-              editMode={editMode}
-              onAddColumn={handleAddColumn}
-              onRemoveColumn={handleRemoveColumn}
-              onToggleHidden={handleToggleHidden}
             />
           </Section>
-          {/* Column picker popover */}
-          {columnPickerEntity && (
-            <ConnectionColumnPicker
-              entityScope={pickerEntityScope}
-              activeColumns={pickerActiveColumns}
-              onToggle={handlePickerToggle}
-              onClose={() => setColumnPickerEntity(null)}
-            />
-          )}
         </div>
       )}
 
@@ -531,6 +435,61 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
       >
         {recCycle && <RecCycleMap cycle={recCycle} onNavigate={onNavigate} />}
       </LazySection>
+
+      {/* Metadata footer */}
+      <div style={s.metaFooter}>
+        <span style={s.metaItem}>
+          <span style={s.metaLabel}>seq</span> {data.figure.last_seq}
+        </span>
+        {data.graphMetrics && <GraphRoleBadge metrics={data.graphMetrics} />}
+        {data.cadence && <CadenceBadge cadence={data.cadence} />}
+        {hashCohort && hashCohort.length > 0 && (
+          <span style={s.metaItem}>
+            <span style={{
+              fontSize: 10,
+              fontFamily: "'JetBrains Mono', monospace",
+              background: theme.purpleBg,
+              color: theme.purple,
+              border: `1px solid ${theme.purpleBorder}`,
+              borderRadius: 10,
+              padding: '2px 8px',
+            }}>
+              {hashCohort.length} twin{hashCohort.length !== 1 ? 's' : ''}
+            </span>
+          </span>
+        )}
+        {data.trajectoryFingerprint && (
+          <span style={s.metaItem}>
+            <span style={{
+              fontSize: 10,
+              fontFamily: "'JetBrains Mono', monospace",
+              background: theme.accentBg,
+              color: theme.accent,
+              border: `1px solid ${theme.accentBorder}`,
+              borderRadius: 10,
+              padding: '2px 8px',
+            }}>
+              {data.trajectoryFingerprint.fingerprint.slice(0, 8)}
+            </span>
+          </span>
+        )}
+      </div>
+
+      {/* Layout designer modal */}
+      <Modal
+        open={designerOpen}
+        onClose={() => setDesignerOpen(false)}
+        title="Configure Layout"
+        width={520}
+      >
+        <DesignerView
+          layout={layout || defaultLayout(connectionTypes)}
+          scope={scope}
+          connectionTypes={connectionTypes}
+          onSave={saveLayout}
+          onClose={() => setDesignerOpen(false)}
+        />
+      </Modal>
     </div>
   );
 }
@@ -670,6 +629,15 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
     },
     metaItem: { display: 'flex', alignItems: 'center', gap: 4 },
     metaLabel: { color: t.textMuted },
+    metaFooter: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 20,
+      padding: '16px 36px',
+      borderTop: `1px solid ${t.border}`,
+      fontSize: 12,
+      color: t.textSecondary,
+    },
     section: {
       padding: '24px 36px',
       borderBottom: `1px solid ${t.border}`,
