@@ -29,19 +29,30 @@ export interface ConnectedUser {
 const connectedUsers = new Map</*socket id*/ string, ConnectedUser>();
 let socketCounter = 0;
 
+/** Cached connected-users snapshot — invalidated on join/leave. */
+let cachedConnectedUsers: Array<{ user_id: string; connected_at: string; rooms: string[] }> | null = null;
+
 /** Get a snapshot of all currently connected users (serializable). */
 export function getConnectedUsers(): Array<{ user_id: string; connected_at: string; rooms: string[] }> {
-  return Array.from(connectedUsers.values()).map(u => ({
+  if (cachedConnectedUsers) return cachedConnectedUsers;
+  cachedConnectedUsers = Array.from(connectedUsers.values()).map(u => ({
     user_id: u.user_id,
     connected_at: u.connected_at,
     rooms: Array.from(u.rooms),
   }));
+  return cachedConnectedUsers;
+}
+
+/** Invalidate the cached user list (call on join/leave). */
+function invalidateUserCache(): void {
+  cachedConnectedUsers = null;
 }
 
 /** Reset presence tracking (for tests). */
 export function resetPresence(): void {
   connectedUsers.clear();
   socketCounter = 0;
+  invalidateUserCache();
 }
 
 /** Broadcast a message to all connected sockets except the sender. */
@@ -117,6 +128,7 @@ export function registerSyncRoute(
           // Remove presence and broadcast departure
           connectedUsers.delete(socketId);
           activeSockets.delete(socketId);
+          invalidateUserCache();
           broadcastPresence(activeSockets, {
             type: 'presence',
             action: 'left',
@@ -132,8 +144,12 @@ export function registerSyncRoute(
             if (msg.type === 'sync') {
               const since = msg.since ?? 0;
               const events = await readLogSince(db, since);
-              for (const event of events) {
-                socket.send(JSON.stringify({ type: 'event', event }));
+              // Yield to the event loop every 50 events to avoid blocking
+              for (let i = 0; i < events.length; i++) {
+                socket.send(JSON.stringify({ type: 'event', event: events[i] }));
+                if (i > 0 && i % 50 === 0) {
+                  await new Promise(resolve => setImmediate(resolve));
+                }
               }
               const throughSeq = await getCurrentSeq(db);
               socket.send(JSON.stringify({ type: 'sync_complete', through_seq: throughSeq }));
@@ -215,6 +231,9 @@ export function registerSyncRoute(
           }
         });
 
+        // Invalidate cache after adding the new user
+        invalidateUserCache();
+
         // Send connection ack with current online users
         const onlineUsers = getConnectedUsers();
         socket.send(JSON.stringify({
@@ -224,12 +243,12 @@ export function registerSyncRoute(
           online_users: onlineUsers,
         }));
 
-        // Broadcast join to everyone else
+        // Broadcast join to everyone else (reuse cached snapshot)
         broadcastPresence(activeSockets, {
           type: 'presence',
           action: 'joined',
           user_id: userId,
-          online_users: getConnectedUsers(),
+          online_users: onlineUsers,
         }, socketId);
 
       }).catch(() => {
