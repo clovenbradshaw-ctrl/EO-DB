@@ -12,27 +12,40 @@
 const FILEN_GATEWAY = 'https://gateway.filen.io';
 
 /**
- * n8n webhook that returns the shared Filen credentials to authenticated
- * Matrix users. The webhook validates the caller's Matrix access token via
- * /_matrix/client/v3/account/whoami and responds with
- * `{"username": "...", "password": "..."}` on success.
+ * n8n webhook that returns the shared Filen credentials (and optionally an
+ * Airtable PAT) to authenticated Matrix users. The webhook validates the
+ * caller's Matrix access token via /_matrix/client/v3/account/whoami and
+ * responds with
+ * `{"filen username": "...", "filen password": "...", "airtable PAT": "pat..."}`.
  */
 const FILEN_CREDS_WEBHOOK =
   'https://n8n.intelechia.com/webhook/2caa4b94-873d-4a78-9770-d73a4d5b3c79';
 
+export interface WebhookCredentials {
+  username: string;
+  password: string;
+  airtablePat?: string;
+}
+
 export async function fetchFilenCredentialsFromWebhook(
   matrixAccessToken: string,
-): Promise<{ username: string; password: string }> {
+): Promise<WebhookCredentials> {
   const res = await fetch(FILEN_CREDS_WEBHOOK, {
     headers: { Authorization: `Bearer ${matrixAccessToken}` },
   });
   const text = await res.text();
   let data: any;
   try { data = JSON.parse(text); } catch { data = null; }
-  if (!data || !data.username || !data.password) {
+  const username = data?.['filen username'];
+  const password = data?.['filen password'];
+  if (!username || !password) {
     throw new Error('Filen credentials webhook: unauthorized or malformed response');
   }
-  return { username: data.username, password: data.password };
+  return {
+    username,
+    password,
+    airtablePat: data?.['airtable PAT'] || undefined,
+  };
 }
 
 /** Ingest servers — one is chosen at random for each upload. */
