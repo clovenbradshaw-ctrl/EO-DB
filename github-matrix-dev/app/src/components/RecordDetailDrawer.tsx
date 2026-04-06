@@ -1,6 +1,7 @@
 import { RecordView } from './RecordView';
 import { formatName } from './scope-picker-utils';
 import { useTheme, type Theme } from '../theme';
+import type { LayoutDisplayType } from './detail-layout';
 
 interface RecordDetailDrawerProps {
   target: string;
@@ -8,6 +9,7 @@ interface RecordDetailDrawerProps {
   onNavigate: (target: string) => void;
   profileFields?: string[];
   isMobile?: boolean;
+  layoutType?: LayoutDisplayType;
 }
 
 /** Extract initials from a display name (e.g. "Priya Chandrasekaran" -> "PC") */
@@ -51,7 +53,7 @@ const TYPE_COLORS: Record<string, string> = {
   note: '#7c5cbf',
 };
 
-export function RecordDetailDrawer({ target, onClose, onNavigate, profileFields, isMobile }: RecordDetailDrawerProps) {
+export function RecordDetailDrawer({ target, onClose, onNavigate, profileFields, isMobile, layoutType }: RecordDetailDrawerProps) {
   const { theme } = useTheme();
   const s = makeStyles(theme);
   const displayName = formatName(target.split('.').pop() || '');
@@ -59,41 +61,73 @@ export function RecordDetailDrawer({ target, onClose, onNavigate, profileFields,
   const entityId = getEntityId(target);
   const initials = getInitials(displayName);
   const typeColor = TYPE_COLORS[entityType] || '#7a756d';
+  const isFullModal = !isMobile && layoutType === 'modal';
+
+  const panelStyle: React.CSSProperties = isFullModal
+    ? {
+        ...s.panel,
+        position: 'fixed' as const,
+        top: '50%',
+        left: '50%',
+        transform: 'translate(-50%, -50%)',
+        width: '90vw',
+        maxWidth: 1100,
+        height: '85vh',
+        borderRadius: 12,
+        borderLeft: 'none',
+        border: `1px solid ${theme.border}`,
+        boxShadow: `0 8px 30px ${theme.shadow}`,
+        zIndex: 1001,
+      }
+    : {
+        ...s.panel,
+        ...(isMobile ? {
+          width: '100vw', maxWidth: '100vw',
+          position: 'fixed' as const, inset: 0, zIndex: 1000,
+          borderLeft: 'none',
+        } : {}),
+      };
 
   return (
-    <div style={{
-      ...s.panel,
-      ...(isMobile ? {
-        width: '100vw', maxWidth: '100vw',
-        position: 'fixed' as const, inset: 0, zIndex: 1000,
-        borderLeft: 'none',
-      } : {}),
-    }}>
-      <div style={s.header}>
-        {isMobile && (
-          <button onClick={onClose} style={s.backBtn}>{'\u2190'} Back</button>
-        )}
-        <div style={s.headerContent}>
-          <div style={{ ...s.avatar, background: `${typeColor}20`, color: typeColor }}>
-            {initials}
-          </div>
-          <div style={s.headerInfo}>
-            <div style={s.headerName}>{displayName}</div>
-            <div style={s.headerMeta}>
-              <span style={{ ...s.typeBadge, background: `${typeColor}15`, color: typeColor }}>
-                <span style={{ ...s.typeDot, background: typeColor }} />
-                {entityType}
-              </span>
-              <span style={s.entityIdLabel}>{entityId}</span>
+    <>
+      {isFullModal && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0,0,0,0.4)',
+            zIndex: 1000,
+          }}
+          onClick={onClose}
+        />
+      )}
+      <div style={panelStyle}>
+        <div style={s.header}>
+          {isMobile && (
+            <button onClick={onClose} style={s.backBtn}>{'\u2190'} Back</button>
+          )}
+          <div style={s.headerContent}>
+            <div style={{ ...s.avatar, background: `${typeColor}20`, color: typeColor }}>
+              {initials}
+            </div>
+            <div style={s.headerInfo}>
+              <div style={s.headerName}>{displayName}</div>
+              <div style={s.headerMeta}>
+                <span style={{ ...s.typeBadge, background: `${typeColor}15`, color: typeColor }}>
+                  <span style={{ ...s.typeDot, background: typeColor }} />
+                  {entityType}
+                </span>
+                <span style={s.entityIdLabel}>{entityId}</span>
+              </div>
             </div>
           </div>
+          {!isMobile && <button onClick={onClose} style={s.closeBtn}>&times;</button>}
         </div>
-        {!isMobile && <button onClick={onClose} style={s.closeBtn}>&times;</button>}
+        <div style={s.body}>
+          <RecordView target={target} onNavigate={onNavigate} profileFields={profileFields} />
+        </div>
       </div>
-      <div style={s.body}>
-        <RecordView target={target} onNavigate={onNavigate} profileFields={profileFields} />
-      </div>
-    </div>
+    </>
   );
 }
 
