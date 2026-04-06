@@ -15,7 +15,7 @@ import { defaultColumnWidth, MIN_COLUMN_WIDTH } from './view-types';
 import { formatName } from './scope-picker-utils';
 import { groupSchemaStates, extractColumnTypeOverrides, schemaTypeTarget, schemaConstraintTarget, schemaResolveTarget, type FieldSchema } from '../db/schema-rules';
 import { ColumnTypeSelector } from './ColumnTypeSelector';
-import { useIsMobile } from '../hooks/useIsMobile';
+import { useIsMobile, useIsNarrow } from '../hooks/useIsMobile';
 import { ColumnManagerPanel } from './ColumnManagerPanel';
 import {
   DndContext,
@@ -372,6 +372,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   const profileFields = viewConfig.profileFields;
   const displayField = viewConfig.displayField;
   const isMobile = useIsMobile();
+  const isNarrow = useIsNarrow();
 
   const [showProfilePicker, setShowProfilePicker] = useState(false);
   const [showColumnManager, setShowColumnManager] = useState(false);
@@ -911,11 +912,14 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   return (
     <div style={s.container}>
       {/* Toolbar */}
-      <div style={s.toolbar}>
+      <div style={{
+        ...s.toolbar,
+        ...(isMobile ? { flexWrap: 'wrap' as const, gap: 8, padding: '8px 12px' } : {}),
+      }}>
         <div style={s.toolbarLeft}>
           <div style={s.scopeName}>{scopeName || formatScopeName(scope)}</div>
-          <span style={s.recordCount}>{filtered.length} records</span>
-          {(() => {
+          <span style={s.recordCount}>{filtered.length}</span>
+          {!isMobile && (() => {
             const totalDefs = Array.from(fieldSchemas.values()).reduce(
               (sum, fs) => sum + (fs.typeDef ? 1 : 0) + fs.constraints.length, 0);
             const totalEvas = Array.from(fieldSchemas.values()).reduce(
@@ -929,12 +933,18 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
             );
           })()}
           {(permissions?.can_add_records !== false) && (
-            <button onClick={handleAddRecord} style={s.addRecordBtn}>
+            <button onClick={handleAddRecord} style={{
+              ...s.addRecordBtn,
+              ...(isMobile ? { padding: '6px 10px', fontSize: 11 } : {}),
+            }}>
               + New
             </button>
           )}
         </div>
-        <div style={s.toolbarRight}>
+        <div style={{
+          ...s.toolbarRight,
+          ...(isMobile ? { flexWrap: 'wrap' as const, gap: 6 } : {}),
+        }}>
           <FilterBar
             columns={entityColumns}
             filters={advancedFilters}
@@ -953,10 +963,14 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
             value={filterText}
             onChange={(e) => setFilterText(e.target.value)}
             placeholder="Search…"
-            style={s.filterInput}
+            style={{
+              ...s.filterInput,
+              ...(isMobile ? { width: 100, flex: '1 1 100px', minWidth: 80 } : {}),
+            }}
           />
 
-          {/* Row height toggle */}
+          {/* Row height toggle — hidden on mobile */}
+          {!isMobile && (
           <div style={{ display: 'flex', gap: 2 }}>
             {(['compact', 'default', 'tall'] as const).map((h, i) => {
               const labels = ['S', 'M', 'L'];
@@ -982,8 +996,10 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
               );
             })}
           </div>
+          )}
 
-          {/* Cell overflow toggle */}
+          {/* Cell overflow toggle — hidden on mobile */}
+          {!isMobile && (
           <div style={{ display: 'flex', gap: 2 }}>
             {(['clip', 'wrap'] as const).map((mode, i) => {
               const isActive = cellOverflow === mode;
@@ -1015,6 +1031,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
               );
             })}
           </div>
+          )}
 
           {/* Column manager (Fields) */}
           <div style={{ position: 'relative' as const }}>
@@ -1028,7 +1045,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
               }}
               title="Show/hide and reorder table columns"
             >
-              {'\u2630'} Fields{hiddenColumns.size > 0 ? ` (${hiddenColumns.size} hidden)` : ''}
+              {'\u2630'}{!isMobile && <> Fields{hiddenColumns.size > 0 ? ` (${hiddenColumns.size} hidden)` : ''}</>}
             </button>
             {showColumnManager && (
               <ColumnManagerPanel
@@ -1523,8 +1540,7 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
     th: {
       position: 'relative' as const,
       background: t.bgCard,
-      padding: '10px 12px 10px 0',
-      paddingLeft: 20,
+      padding: '8px 8px 8px 12px',
       textAlign: 'left' as const,
       fontSize: 11,
       fontWeight: 400,
@@ -1537,8 +1553,7 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       textOverflow: 'ellipsis' as const,
     },
     td: {
-      padding: '10px 8px 10px 0',
-      paddingLeft: 20,
+      padding: '8px 8px 8px 12px',
       borderBottom: `1px solid ${t.borderLight}`,
       verticalAlign: 'middle' as const,
       maxWidth: 300,

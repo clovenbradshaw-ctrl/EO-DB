@@ -101,7 +101,8 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
   return {
     panel: {
       width: 640,
-      maxWidth: '50vw',
+      maxWidth: '55vw',
+      minWidth: 320,
       height: '100%',
       flexShrink: 0,
       background: t.bg,

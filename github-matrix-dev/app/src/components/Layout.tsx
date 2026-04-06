@@ -16,7 +16,7 @@ import { TableView } from './TableView';
 import { ViewTabs } from './ViewTabs';
 import { RecordDetailDrawer } from './RecordDetailDrawer';
 import { RecordView } from './RecordView';
-import { useIsMobile } from '../hooks/useIsMobile';
+import { useIsMobile, useIsTablet, useIsNarrow } from '../hooks/useIsMobile';
 import { formatName } from './scope-picker-utils';
 import { ConnectionStatus, useConnectionState, type ConnectionState } from './ConnectionStatus';
 import { SyncToast, useSyncToast } from './SyncToast';
@@ -278,6 +278,8 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   const [showMembers, setShowMembers] = useState(false);
   const [showRecycleBin, setShowRecycleBin] = useState(false);
   const isMobile = useIsMobile();
+  const isTablet = useIsTablet();
+  const isNarrow = useIsNarrow(); // mobile OR tablet
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [spaces, setSpaces] = useState<EoState[]>([]);
   const [spaceEntries, setSpaceEntries] = useState<SpaceEntry[]>([]);
@@ -1196,8 +1198,8 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             />
           )}
 
-          {/* Members button */}
-          {selectedSpace && (
+          {/* Members button — hidden on mobile */}
+          {selectedSpace && !isMobile && (
             <button
               onClick={() => setShowMembers(!showMembers)}
               style={{
@@ -1213,22 +1215,28 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         </div>
 
         <div style={s.topBarRight}>
-          {/* Stats — compact, subtle */}
-          <div style={s.stats}>
-            <span title="Sequence number">{lastSeq} seq</span>
-            <span style={s.statSep}>{'\u00B7'}</span>
-            <span title="Event count">{recentEvents.length} events</span>
-            <span style={s.statSep}>{'\u00B7'}</span>
-            <span title="Target count">{targetCount} targets</span>
-          </div>
-          <OnlineUsers
-            presence={presence}
-            selfUserId={session.userId}
-            selfDisplayName={displayName}
-          />
+          {/* Stats — hidden on mobile, compact on tablet */}
+          {!isMobile && (
+            <div style={s.stats}>
+              <span title="Sequence number">{lastSeq} seq</span>
+              {!isTablet && <>
+                <span style={s.statSep}>{'\u00B7'}</span>
+                <span title="Event count">{recentEvents.length} events</span>
+                <span style={s.statSep}>{'\u00B7'}</span>
+                <span title="Target count">{targetCount} targets</span>
+              </>}
+            </div>
+          )}
+          {!isMobile && (
+            <OnlineUsers
+              presence={presence}
+              selfUserId={session.userId}
+              selfDisplayName={displayName}
+            />
+          )}
           <ConnectionStatus state={connectionState} />
-          <SyncToast status={syncToastStatus} seq={syncToastSeq} />
-          {selectedSpace && (
+          {!isMobile && <SyncToast status={syncToastStatus} seq={syncToastSeq} />}
+          {selectedSpace && !isMobile && (
             <PermissionBadge role={currentRole} displayName={displayName} />
           )}
           {/* Theme toggle */}
@@ -1242,9 +1250,14 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           {/* User */}
           <div style={s.userArea}>
             <div style={s.avatar}>{displayName.charAt(0).toUpperCase()}</div>
-            <span style={{ fontSize: 12, color: theme.textSecondary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{displayName}</span>
+            {!isMobile && (
+              <span style={{ fontSize: 12, color: theme.textSecondary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{displayName}</span>
+            )}
           </div>
-          <button onClick={handleLogout} style={s.logoutButton}>Log out</button>
+          <button onClick={handleLogout} style={{
+            ...s.logoutButton,
+            ...(isMobile ? { padding: '4px 8px', fontSize: 10 } : {}),
+          }}>Log out</button>
         </div>
       </header>
 
@@ -1272,6 +1285,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         )}
         <aside style={{
           ...s.sidebar,
+          ...(isTablet ? { width: 180, minWidth: 140 } : {}),
           ...(isMobile ? {
             position: 'fixed' as const, left: 0, top: 0, bottom: 0, zIndex: 999,
             transform: mobileSidebarOpen ? 'translateX(0)' : 'translateX(-100%)',
@@ -1535,7 +1549,7 @@ function RecordPageOrDrawer({ recordTarget, allStates, onClose, onNavigate, prof
   if (recordPageView) {
     return (
       <div style={{
-        width: isMobile ? '100vw' : 720, maxWidth: isMobile ? '100vw' : '50vw', height: '100%',
+        width: isMobile ? '100vw' : 720, maxWidth: isMobile ? '100vw' : '55vw', height: '100%',
         flexShrink: 0, borderLeft: isMobile ? 'none' : '1px solid var(--border, #e0e0e0)',
         background: 'var(--bg, #fff)', display: 'flex', flexDirection: 'column',
         ...(isMobile ? { position: 'fixed' as const, inset: 0, zIndex: 1000 } : {}),
@@ -1578,15 +1592,16 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'space-between',
-      padding: '0 20px',
+      padding: '0 12px',
       height: 48,
       borderBottom: `1px solid ${t.border}`,
       background: t.bgCard,
       flexShrink: 0,
       transition: 'background 0.25s ease',
+      gap: 8,
     },
-    topBarLeft: { display: 'flex', alignItems: 'center', gap: 14, minWidth: 0, overflow: 'hidden' },
-    topBarRight: { display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, flexShrink: 1 },
+    topBarLeft: { display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, overflow: 'hidden', flexShrink: 1 },
+    topBarRight: { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flexShrink: 1 },
     logo: {
       fontFamily: "'JetBrains Mono', monospace",
       fontWeight: 600,
