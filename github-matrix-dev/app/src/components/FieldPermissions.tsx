@@ -6,7 +6,7 @@
 
 import { useState } from 'react';
 import { useTheme, type Theme } from '../theme';
-import type { FieldAssignment, AccessRole } from '../permissions/types';
+import type { FieldAssignment, AccessRole, UserTypeDefinition, FieldTypeVisibility } from '../permissions/types';
 import { ROLE_LABELS } from '../permissions/types';
 
 interface FieldPermissionsProps {
@@ -14,6 +14,12 @@ interface FieldPermissionsProps {
   availableFields: string[];
   onUpdate: (assignments: FieldAssignment[]) => void;
   canManage: boolean;
+  /** User type definitions for the "Visible to types" feature */
+  userTypeDefinitions?: UserTypeDefinition[];
+  /** Current field type visibility rules */
+  fieldTypeVisibility?: FieldTypeVisibility[];
+  /** Callback to update field type visibility */
+  onUpdateFieldTypeVisibility?: (updated: FieldTypeVisibility[]) => void;
 }
 
 const ALL_ROLES: AccessRole[] = ['owner', 'admin', 'editor', 'creator', 'viewer'];
@@ -23,6 +29,9 @@ export function FieldPermissions({
   availableFields,
   onUpdate,
   canManage,
+  userTypeDefinitions,
+  fieldTypeVisibility,
+  onUpdateFieldTypeVisibility,
 }: FieldPermissionsProps) {
   const { theme } = useTheme();
   const s = makeStyles(theme);
@@ -56,6 +65,33 @@ export function FieldPermissions({
 
   function handleRemove(field: string) {
     onUpdate(fieldAssignments.filter(a => a.field !== field));
+  }
+
+  function handleToggleTypeVisibility(field: string, typeId: string) {
+    if (!onUpdateFieldTypeVisibility || !fieldTypeVisibility) return;
+    const existing = fieldTypeVisibility.find(fv => fv.field === field);
+    if (existing) {
+      const current = existing.visible_to_types;
+      const next = current.includes(typeId)
+        ? current.filter(id => id !== typeId)
+        : [...current, typeId];
+      if (next.length === 0) {
+        onUpdateFieldTypeVisibility(fieldTypeVisibility.filter(fv => fv.field !== field));
+      } else {
+        onUpdateFieldTypeVisibility(fieldTypeVisibility.map(fv =>
+          fv.field === field ? { ...fv, visible_to_types: next } : fv
+        ));
+      }
+    } else {
+      onUpdateFieldTypeVisibility([
+        ...fieldTypeVisibility,
+        { field, visible_to_types: [typeId] },
+      ]);
+    }
+  }
+
+  function getFieldTypeVisibility(field: string): string[] {
+    return fieldTypeVisibility?.find(fv => fv.field === field)?.visible_to_types ?? [];
   }
 
   const unassignedFields = availableFields.filter(
@@ -127,6 +163,49 @@ export function FieldPermissions({
                   })}
                 </div>
               </div>
+
+              {/* Visible to types — only shown when type definitions exist */}
+              {userTypeDefinitions && userTypeDefinitions.length > 0 && (
+                <div style={s.fieldRow}>
+                  <span style={s.label}>Visible to:</span>
+                  <div style={s.roleTags}>
+                    {userTypeDefinitions.map(ut => {
+                      const visibleTypes = getFieldTypeVisibility(assignment.field);
+                      const isVisible = visibleTypes.includes(ut.id);
+                      return (
+                        <button
+                          key={ut.id}
+                          style={{
+                            ...s.roleTag,
+                            ...(isVisible ? {
+                              background: `${ut.color || '#6b7280'}18`,
+                              color: ut.color || '#6b7280',
+                              borderColor: ut.color || '#6b7280',
+                            } : {}),
+                            cursor: canManage ? 'pointer' : 'default',
+                          }}
+                          onClick={() => canManage && handleToggleTypeVisibility(assignment.field, ut.id)}
+                          disabled={!canManage}
+                        >
+                          <span style={{
+                            width: 5, height: 5, borderRadius: '50%',
+                            background: ut.color || '#6b7280', display: 'inline-block',
+                          }} />
+                          {' '}{ut.label}
+                          {isVisible && canManage && <span style={s.tagClose}>&times;</span>}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <span style={{
+                    fontSize: 9,
+                    color: theme.textMuted,
+                    marginLeft: 4,
+                  }}>
+                    {getFieldTypeVisibility(assignment.field).length === 0 ? '(all)' : ''}
+                  </span>
+                </div>
+              )}
             </div>
           ))}
 

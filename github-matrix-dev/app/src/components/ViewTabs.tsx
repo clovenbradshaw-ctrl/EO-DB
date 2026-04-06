@@ -4,13 +4,20 @@ import { useEoStore } from '../store/eo-store';
 import { useTheme, type Theme } from '../theme';
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 import { VIEW_TYPE_META, type SavedView, type TableViewConfig, type ViewType } from './view-types';
+import type { UserTypeDefinition } from '../permissions/types';
 
 interface ViewTabsProps {
   scope: string;
   session: { userId: string };
+  /** Currently active user type ID (for filtering type-scoped views) */
+  activeUserType?: string | null;
+  /** All user type definitions for the current space (for the type selector UI) */
+  userTypeDefinitions?: UserTypeDefinition[];
+  /** Whether the current user is admin+ (can set type visibility on views) */
+  canManageViews?: boolean;
 }
 
-export function ViewTabs({ scope, session }: ViewTabsProps) {
+export function ViewTabs({ scope, session, activeUserType, userTypeDefinitions, canManageViews }: ViewTabsProps) {
   const viewStore = useViewStore();
   const dispatch = useEoStore((s) => s.dispatch);
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
@@ -26,6 +33,8 @@ export function ViewTabs({ scope, session }: ViewTabsProps) {
   const [newViewName, setNewViewName] = useState('');
   const [newViewType, setNewViewType] = useState<ViewType>('grid');
   const [newViewVisibility, setNewViewVisibility] = useState<'private' | 'shared'>('shared');
+  const [newVisibleToTypes, setNewVisibleToTypes] = useState<string[]>([]);
+  const [newReadOnlyForTypes, setNewReadOnlyForTypes] = useState<string[]>([]);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; viewId: string } | null>(null);
@@ -62,6 +71,8 @@ export function ViewTabs({ scope, session }: ViewTabsProps) {
           createdAt: st.value.createdAt || st.last_ts,
           updatedAt: st.value.updatedAt || st.last_ts,
           roomId: st.value.roomId,
+          visibleToTypes: st.value.visibleToTypes,
+          readOnlyForTypes: st.value.readOnlyForTypes,
         }));
       viewStore.registerSavedViews(views);
     });
@@ -85,6 +96,8 @@ export function ViewTabs({ scope, session }: ViewTabsProps) {
           createdBy: session.userId,
           createdAt: now,
           updatedAt: now,
+          ...(newVisibleToTypes.length > 0 ? { visibleToTypes: newVisibleToTypes } : {}),
+          ...(newReadOnlyForTypes.length > 0 ? { readOnlyForTypes: newReadOnlyForTypes } : {}),
         },
         agent: `user:${session.userId}`,
         ts: now,
@@ -102,6 +115,8 @@ export function ViewTabs({ scope, session }: ViewTabsProps) {
         createdBy: session.userId,
         createdAt: now,
         updatedAt: now,
+        visibleToTypes: newVisibleToTypes.length > 0 ? newVisibleToTypes : undefined,
+        readOnlyForTypes: newReadOnlyForTypes.length > 0 ? newReadOnlyForTypes : undefined,
       };
       viewStore.registerSavedViews([savedView]);
       viewStore.markSaved(scope, viewId);
@@ -118,6 +133,8 @@ export function ViewTabs({ scope, session }: ViewTabsProps) {
         createdBy: session.userId,
         createdAt: now,
         updatedAt: now,
+        visibleToTypes: newVisibleToTypes.length > 0 ? newVisibleToTypes : undefined,
+        readOnlyForTypes: newReadOnlyForTypes.length > 0 ? newReadOnlyForTypes : undefined,
       };
       viewStore.registerSavedViews([savedView]);
       viewStore.markSaved(scope, viewId);
@@ -126,6 +143,8 @@ export function ViewTabs({ scope, session }: ViewTabsProps) {
     setShowNameInput(false);
     setNewViewName('');
     setNewViewType('grid');
+    setNewVisibleToTypes([]);
+    setNewReadOnlyForTypes([]);
   }
 
   async function handleUpdateView() {
@@ -284,8 +303,14 @@ export function ViewTabs({ scope, session }: ViewTabsProps) {
           <span style={{ fontSize: 11, opacity: 0.7 }}>{VIEW_TYPE_META.schema.icon}</span> Schema
         </button>
 
-        {/* Saved view tabs */}
-        {savedViews.filter((v) => !viewStore.savedViews[v.id]?.scope || viewStore.savedViews[v.id]?.scope === scope).map((view) => {
+        {/* Saved view tabs — filtered by active user type */}
+        {savedViews.filter((v) => {
+          if (viewStore.savedViews[v.id]?.scope && viewStore.savedViews[v.id]?.scope !== scope) return false;
+          // Filter by type visibility
+          const vt = v.visibleToTypes;
+          if (vt && vt.length > 0 && activeUserType && !vt.includes(activeUserType)) return false;
+          return true;
+        }).map((view) => {
           const vtMeta = VIEW_TYPE_META[view.viewType || 'grid'];
           return (
             <button
@@ -401,6 +426,76 @@ export function ViewTabs({ scope, session }: ViewTabsProps) {
                 {'\uD83D\uDD13'} Shared
               </button>
             </div>
+            {/* User type visibility — admin+ only */}
+            {canManageViews && userTypeDefinitions && userTypeDefinitions.length > 0 && (
+              <>
+                <div style={{ fontSize: 10, fontWeight: 600, marginTop: 10, marginBottom: 4, color: theme.textMuted, textTransform: 'uppercase' as const, letterSpacing: '0.5px' }}>
+                  Visible to types
+                </div>
+                <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' as const }}>
+                  {userTypeDefinitions.map((ut) => {
+                    const selected = newVisibleToTypes.includes(ut.id);
+                    return (
+                      <button
+                        key={ut.id}
+                        type="button"
+                        onClick={() => setNewVisibleToTypes(prev =>
+                          selected ? prev.filter(id => id !== ut.id) : [...prev, ut.id]
+                        )}
+                        style={{
+                          display: 'inline-flex', alignItems: 'center', gap: 3,
+                          padding: '3px 8px', fontSize: 10, fontWeight: selected ? 600 : 400,
+                          border: `1px solid ${selected ? (ut.color || theme.accent) : theme.border}`,
+                          borderRadius: 10, cursor: 'pointer',
+                          background: selected ? `${ut.color || theme.accent}18` : 'transparent',
+                          color: selected ? (ut.color || theme.accent) : theme.textSecondary,
+                          fontFamily: "'JetBrains Mono', monospace",
+                        }}
+                      >
+                        <span style={{ width: 5, height: 5, borderRadius: '50%', background: ut.color || '#6b7280' }} />
+                        {ut.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                <div style={{ fontSize: 9, color: theme.textMuted, marginTop: 2 }}>
+                  {newVisibleToTypes.length === 0 ? 'All types can see this view' : `Only selected types see this view`}
+                </div>
+
+                <div style={{ fontSize: 10, fontWeight: 600, marginTop: 8, marginBottom: 4, color: theme.textMuted, textTransform: 'uppercase' as const, letterSpacing: '0.5px' }}>
+                  Read-only for types
+                </div>
+                <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' as const }}>
+                  {userTypeDefinitions.map((ut) => {
+                    const selected = newReadOnlyForTypes.includes(ut.id);
+                    return (
+                      <button
+                        key={ut.id}
+                        type="button"
+                        onClick={() => setNewReadOnlyForTypes(prev =>
+                          selected ? prev.filter(id => id !== ut.id) : [...prev, ut.id]
+                        )}
+                        style={{
+                          display: 'inline-flex', alignItems: 'center', gap: 3,
+                          padding: '3px 8px', fontSize: 10, fontWeight: selected ? 600 : 400,
+                          border: `1px solid ${selected ? theme.warning : theme.border}`,
+                          borderRadius: 10, cursor: 'pointer',
+                          background: selected ? `${theme.warning}18` : 'transparent',
+                          color: selected ? theme.warning : theme.textSecondary,
+                          fontFamily: "'JetBrains Mono', monospace",
+                        }}
+                      >
+                        <span style={{ width: 5, height: 5, borderRadius: '50%', background: ut.color || '#6b7280' }} />
+                        {ut.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                <div style={{ fontSize: 9, color: theme.textMuted, marginTop: 2 }}>
+                  {newReadOnlyForTypes.length === 0 ? 'No type restrictions' : `Selected types can view but not edit`}
+                </div>
+              </>
+            )}
             <button style={!newViewName.trim() ? s.createBtnDisabled : s.createBtn} onClick={handleSaveNew} disabled={!newViewName.trim()}>
               Create view
             </button>

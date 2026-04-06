@@ -122,6 +122,14 @@ export interface ResolvedPermissions {
   restricted_fields: string[];
   locked_fields: string[];
   redacted_fields: string[];
+
+  // User types
+  /** All user type IDs assigned to the current user in this space */
+  user_types: string[];
+  /** Currently selected user type (from header switcher) */
+  active_user_type: string | null;
+  /** Fields hidden from this user due to type-based visibility rules */
+  type_hidden_fields: string[];
 }
 
 // --- Matrix Power Level Config ---
@@ -154,6 +162,51 @@ export interface SchemaManifestField {
 
 export interface SchemaManifest {
   fields: SchemaManifestField[];
+}
+
+// --- User Types (organizational/functional roles) ---
+
+/** A user type definition, created by admins per-space. */
+export interface UserTypeDefinition {
+  /** Unique slug identifier, e.g. "hr_manager", "finance" */
+  id: string;
+  /** Human-readable label, e.g. "HR Manager" */
+  label: string;
+  /** Optional badge color hex */
+  color?: string;
+  /** Optional description */
+  description?: string;
+  /** Headline metrics shown when this type is active */
+  headline_metrics?: HeadlineMetric[];
+}
+
+/** A single headline metric card displayed above the table. */
+export interface HeadlineMetric {
+  /** Display label, e.g. "Total Clients" */
+  label: string;
+  /** Field key to aggregate */
+  field: string;
+  /** Aggregation function */
+  aggregation: 'count' | 'sum' | 'avg' | 'min' | 'max' | 'count_distinct';
+  /** Optional filter — only count records where this field matches */
+  filter_field?: string;
+  filter_value?: string;
+}
+
+/** Assignment of user types to a specific member. */
+export interface UserTypeAssignment {
+  /** Matrix user ID */
+  user_id: string;
+  /** Array of user type IDs assigned to this user */
+  type_ids: string[];
+}
+
+/** Field visibility rule scoped to user types. */
+export interface FieldTypeVisibility {
+  /** Field key (e.g. "fldSalary") */
+  field: string;
+  /** Which user types can see this field. Empty array = visible to all. */
+  visible_to_types: string[];
 }
 
 // --- Backward Compatibility ---

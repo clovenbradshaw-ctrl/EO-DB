@@ -52,6 +52,10 @@ export interface SavedView {
   createdAt: string;
   updatedAt: string;
   roomId?: string;                      // Matrix room for private views
+  /** User type IDs that can see this view. Empty/absent = visible to all. */
+  visibleToTypes?: string[];
+  /** User type IDs for which this view is read-only (can see but not edit). */
+  readOnlyForTypes?: string[];
 }
 
 // ---------------------------------------------------------------------------
