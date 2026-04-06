@@ -146,7 +146,25 @@ async function createSpaceRoom(
       }
     }
 
-    const result = await client.createRoom(createArgs);
+    let result: { room_id: string };
+    try {
+      result = await client.createRoom(createArgs);
+    } catch (err: any) {
+      // Homeserver may forbid public room creation (403). Fall back to
+      // private visibility so the space is still usable.
+      if (err?.httpStatus === 403 && discoverability === 'public') {
+        console.warn('[EO-DB] Public room creation forbidden — falling back to private.');
+        createArgs.visibility = 'private';
+        createArgs.preset = 'private_chat';
+        // Remove knock join rule — not valid for private rooms
+        createArgs.initial_state = (createArgs.initial_state as any[]).filter(
+          (s: any) => s.type !== 'm.room.join_rules' && s.type !== 'm.room.guest_access',
+        );
+        result = await client.createRoom(createArgs);
+      } else {
+        throw err;
+      }
+    }
     const roomId = result.room_id;
 
     // A space spans multiple rooms. Create the governance room eagerly so
