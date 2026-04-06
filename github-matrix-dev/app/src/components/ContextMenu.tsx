@@ -8,6 +8,10 @@ export interface ContextMenuItem {
   danger?: boolean;
   disabled?: boolean;
   separator?: boolean;
+  /** Renders as a non-clickable group header (e.g. "⊢ Definitions") */
+  header?: boolean;
+  /** Glyph prefix displayed before the label (e.g. "⊢", "⊨", "⊛") */
+  icon?: string;
 }
 
 interface ContextMenuProps {
@@ -44,6 +48,14 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
           if (item.separator) {
             return <div key={i} style={s.separator} />;
           }
+          if (item.header) {
+            return (
+              <div key={i} style={s.headerItem}>
+                {item.icon && <span style={s.headerIcon}>{item.icon}</span>}
+                {item.label}
+              </div>
+            );
+          }
           return (
             <button
               key={i}
@@ -56,6 +68,7 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
               onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = theme.bgHover; }}
               onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
             >
+              {item.icon && <span style={{ marginRight: 6, opacity: 0.6 }}>{item.icon}</span>}
               {item.label}
             </button>
           );
@@ -99,6 +112,19 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       height: 1,
       margin: '4px 8px',
       background: t.border,
+    },
+    headerItem: {
+      padding: '6px 12px 2px',
+      fontSize: 10,
+      fontWeight: 600,
+      textTransform: 'uppercase' as const,
+      letterSpacing: '0.05em',
+      color: t.textMuted,
+      userSelect: 'none' as const,
+    },
+    headerIcon: {
+      marginRight: 4,
+      fontSize: 11,
     },
   };
 }

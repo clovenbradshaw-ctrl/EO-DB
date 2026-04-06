@@ -13,6 +13,8 @@ import type { ResolvedPermissions } from '../permissions/types';
 import { useViewStore } from '../store/view-store';
 import { defaultColumnWidth, MIN_COLUMN_WIDTH } from './view-types';
 import { formatName } from './scope-picker-utils';
+import { groupSchemaStates, extractColumnTypeOverrides, schemaTypeTarget, schemaConstraintTarget, schemaResolveTarget, type FieldSchema } from '../db/schema-rules';
+import { ColumnTypeSelector } from './ColumnTypeSelector';
 import { useIsMobile } from '../hooks/useIsMobile';
 import { ColumnManagerPanel } from './ColumnManagerPanel';
 import {
@@ -349,6 +351,9 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   const [columnMenu, setColumnMenu] = useState<{ x: number; y: number; key: string; label: string } | null>(null);
   const [renameCol, setRenameCol] = useState<{ key: string; value: string } | null>(null);
   const [typeSelector, setTypeSelector] = useState<{ x: number; y: number; target: string; currentType?: string } | null>(null);
+  const [fieldSchemas, setFieldSchemas] = useState<Map<string, FieldSchema>>(new Map());
+  const [columnTypeOverrides, setColumnTypeOverrides] = useState<Map<string, any>>(new Map());
+  const [columnTypeSelector, setColumnTypeSelector] = useState<{ x: number; y: number; key: string } | null>(null);
   const { theme } = useTheme();
   const s = makeStyles(theme);
 
@@ -449,10 +454,11 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
       setRecordsLoaded(true);
     });
     // Fetch field metadata: prefer per-field schema entities, fall back to array on table state
-    getStateByPrefix(scope + '._schema.').then((schemaStates) => {
+    getStateByPrefix(scope + '._schema.').then((allSchemaStates) => {
+      const schemaPrefix = scope + '._schema.';
       // Filter to direct children of _schema only
       const schemaDepth = scope.split('.').length + 2; // scope._schema.fieldId
-      const fieldStates = schemaStates.filter(
+      const fieldStates = allSchemaStates.filter(
         (st) => st.target.split('.').length === schemaDepth && !st.value?._alias,
       );
       if (fieldStates.length > 0) {
@@ -468,6 +474,10 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
           }
         });
       }
+      // Group all schema states (including .type, .constraint.*, .resolve children) for schema rules
+      const grouped = groupSchemaStates(allSchemaStates, schemaPrefix);
+      setFieldSchemas(grouped);
+      setColumnTypeOverrides(extractColumnTypeOverrides(grouped));
     });
     // Fetch scope display name
     getState(scope).then((scopeState) => {
@@ -508,7 +518,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   // Detect if records use the Airtable-style fields sub-object
   const useFieldsSub = useMemo(() => hasFieldsSubObject(records), [records]);
 
-  const entityColumns = useMemo(() => deriveColumns(records, fieldNameMap), [records, fieldNameMap]);
+  const entityColumns = useMemo(() => deriveColumns(records, fieldNameMap, columnTypeOverrides), [records, fieldNameMap, columnTypeOverrides]);
   const columns = useMemo<ColumnDef[]>(() => {
     const all = [
       { key: '_record', label: 'record', type: 'text' as const },
@@ -603,6 +613,10 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
 
   function getColumnMenuItems(colKey: string, colLabel: string): ContextMenuItem[] {
     const activeSort = sorts.find((s) => s.field === colKey);
+    const currentCol = entityColumns.find((c) => c.key === colKey);
+    const fs = fieldSchemas.get(colKey);
+    const isSystemCol = colKey === '_record' || colKey === '_last_updated';
+
     const items: ContextMenuItem[] = [
       {
         label: 'Rename column',
@@ -635,14 +649,54 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
           ]);
         },
       },
-      { label: '', onClick: () => {}, separator: true },
-      {
-        label: 'Hide column',
-        onClick: () => viewStore.toggleHiddenColumn(scope, colKey),
-      },
     ];
-    if (colKey !== '_record' && colKey !== '_last_updated') {
-      items.splice(items.length - 1, 0,
+
+    // ─── ⊢ Definitions ───
+    if (!isSystemCol) {
+      const typeLabel = fs?.typeDef
+        ? `${fs.typeDef.value?.type ?? 'unknown'}${fs.typeDef.value?.format ? ` (${fs.typeDef.value.format})` : ''}`
+        : `${currentCol?.type ?? 'text'} (inferred)`;
+
+      items.push(
+        { label: '', onClick: () => {}, separator: true },
+        { header: true, icon: '⊢', label: 'Definitions', onClick: () => {} },
+        {
+          label: `Type: ${typeLabel}`,
+          onClick: () => {
+            setColumnTypeSelector({ key: colKey, x: columnMenu?.x ?? 0, y: columnMenu?.y ?? 0 });
+            setColumnMenu(null);
+          },
+        },
+        // List existing constraints
+        ...fs?.constraints.map(c => ({
+          label: `Constraint: ${c.name}`,
+          disabled: true,
+          onClick: () => {},
+        })) ?? [],
+      );
+
+      // ─── ⊨ Evaluations ───
+      items.push(
+        { label: '', onClick: () => {}, separator: true },
+        { header: true, icon: '⊨', label: 'Evaluations', onClick: () => {} },
+        {
+          label: fs?.resolve
+            ? `Resolution: ${fs.resolve.value?.strategy ?? 'unknown'}`
+            : 'Set resolution...',
+          onClick: () => {
+            // Resolution selector — dispatch EVA with latest-wins for now
+            if (!fs?.resolve) {
+              handleSetResolution(colKey);
+            }
+          },
+        },
+      );
+    }
+
+    // ─── Visibility ───
+    items.push({ label: '', onClick: () => {}, separator: true });
+    if (!isSystemCol) {
+      items.push(
         {
           label: displayField === colKey ? 'Display name (active)' : 'Use as display name',
           onClick: () => viewStore.setDisplayField(scope, displayField === colKey ? undefined : colKey),
@@ -650,6 +704,10 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
         { label: '', onClick: () => {}, separator: true },
       );
     }
+    items.push({
+      label: 'Hide column',
+      onClick: () => viewStore.toggleHiddenColumn(scope, colKey),
+    });
     if (hiddenColumns.size > 0) {
       items.push({
         label: `Show all columns (${hiddenColumns.size} hidden)`,
@@ -678,6 +736,84 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
       });
     } catch { /* ignore */ }
     setRenameCol(null);
+  }
+
+  async function handleSetColumnType(fieldKey: string, type: string) {
+    try {
+      await dispatch({
+        op: 'DEF',
+        target: schemaTypeTarget(scope, fieldKey),
+        operand: { type },
+        agent: `user:${session.userId}`,
+        ts: new Date().toISOString(),
+        acquired_ts: new Date().toISOString(),
+      });
+      // Update local state immediately
+      setColumnTypeOverrides((prev) => {
+        const next = new Map(prev);
+        next.set(fieldKey, { type });
+        return next;
+      });
+      setFieldSchemas((prev) => {
+        const next = new Map(prev);
+        const existing = next.get(fieldKey) ?? { fieldKey, constraints: [] };
+        next.set(fieldKey, {
+          ...existing,
+          typeDef: { target: schemaTypeTarget(scope, fieldKey), value: { type } },
+        });
+        return next;
+      });
+    } catch { /* ignore */ }
+    setColumnTypeSelector(null);
+  }
+
+  async function handleClearColumnType(fieldKey: string) {
+    try {
+      await dispatch({
+        op: 'DEF',
+        target: schemaTypeTarget(scope, fieldKey),
+        operand: {},
+        agent: `user:${session.userId}`,
+        ts: new Date().toISOString(),
+        acquired_ts: new Date().toISOString(),
+      });
+      setColumnTypeOverrides((prev) => {
+        const next = new Map(prev);
+        next.delete(fieldKey);
+        return next;
+      });
+      setFieldSchemas((prev) => {
+        const next = new Map(prev);
+        const existing = next.get(fieldKey);
+        if (existing) {
+          next.set(fieldKey, { ...existing, typeDef: undefined });
+        }
+        return next;
+      });
+    } catch { /* ignore */ }
+    setColumnTypeSelector(null);
+  }
+
+  async function handleSetResolution(fieldKey: string) {
+    try {
+      await dispatch({
+        op: 'EVA',
+        target: schemaResolveTarget(scope, fieldKey),
+        operand: { strategy: 'latest' },
+        agent: `user:${session.userId}`,
+        ts: new Date().toISOString(),
+        acquired_ts: new Date().toISOString(),
+      });
+      setFieldSchemas((prev) => {
+        const next = new Map(prev);
+        const existing = next.get(fieldKey) ?? { fieldKey, constraints: [] };
+        next.set(fieldKey, {
+          ...existing,
+          resolve: { target: schemaResolveTarget(scope, fieldKey), value: { strategy: 'latest' } },
+        });
+        return next;
+      });
+    } catch { /* ignore */ }
   }
 
   function handleContextMenu(e: React.MouseEvent, target: string) {
@@ -779,6 +915,19 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
         <div style={s.toolbarLeft}>
           <div style={s.scopeName}>{scopeName || formatScopeName(scope)}</div>
           <span style={s.recordCount}>{filtered.length} records</span>
+          {(() => {
+            const totalDefs = Array.from(fieldSchemas.values()).reduce(
+              (sum, fs) => sum + (fs.typeDef ? 1 : 0) + fs.constraints.length, 0);
+            const totalEvas = Array.from(fieldSchemas.values()).reduce(
+              (sum, fs) => sum + (fs.resolve ? 1 : 0), 0);
+            if (totalDefs === 0 && totalEvas === 0) return null;
+            return (
+              <span style={s.schemaBadges}>
+                {totalDefs > 0 && <span style={s.schemaBadge}>{totalDefs} DEF</span>}
+                {totalEvas > 0 && <span style={s.schemaBadge}>{totalEvas} EVA</span>}
+              </span>
+            );
+          })()}
           {(permissions?.can_add_records !== false) && (
             <button onClick={handleAddRecord} style={s.addRecordBtn}>
               + New
@@ -1129,6 +1278,36 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
           </div>
         </>
       )}
+      {columnTypeSelector && (
+        <>
+          <div
+            style={{ position: 'fixed', inset: 0, zIndex: 9998 }}
+            onClick={() => setColumnTypeSelector(null)}
+          />
+          <div style={{
+            position: 'fixed',
+            left: columnTypeSelector.x,
+            top: columnTypeSelector.y,
+            zIndex: 9999,
+            background: theme.bgCard,
+            border: `1px solid ${theme.border}`,
+            borderRadius: 8,
+            boxShadow: `0 8px 30px ${theme.shadow}`,
+          }}>
+            <ColumnTypeSelector
+              currentType={
+                fieldSchemas.get(columnTypeSelector.key)?.typeDef?.value?.type
+                ?? entityColumns.find(c => c.key === columnTypeSelector.key)?.type
+                ?? 'text'
+              }
+              isDefined={!!fieldSchemas.get(columnTypeSelector.key)?.typeDef}
+              onSelect={(type) => handleSetColumnType(columnTypeSelector.key, type)}
+              onClear={() => handleClearColumnType(columnTypeSelector.key)}
+              onClose={() => setColumnTypeSelector(null)}
+            />
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -1280,6 +1459,21 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       background: t.bgMuted,
       padding: '1px 6px',
       borderRadius: 4,
+    },
+    schemaBadges: {
+      display: 'inline-flex',
+      gap: 4,
+      marginLeft: 2,
+    },
+    schemaBadge: {
+      fontSize: 10,
+      fontWeight: 600,
+      fontFamily: "'JetBrains Mono', monospace",
+      color: t.textMuted,
+      background: t.bgMuted,
+      padding: '1px 6px',
+      borderRadius: 4,
+      letterSpacing: '0.02em',
     },
     addRecordBtn: {
       display: 'flex',

@@ -171,6 +171,24 @@ export interface RecCycleInfo {
   edges: Array<{ source: string; dest: string }>;
 }
 
+// ─── Schema rules ────────────────────────────────────────────────────────
+
+/** Schema rule summary for a single field — aggregated from ._schema.{field}.* children.
+ *  DEF/EVA counts are projected (Horizon); REC count is deferred (requires log scan). */
+export interface FieldSchemaEntry {
+  fieldKey: string;
+  /** Projected: type + constraints currently active */
+  defCount: number;
+  /** Projected: resolve policies active */
+  evaCount: number;
+  /** Current type definition operand (full object, e.g. {type: "number", format: "currency"}) */
+  typeDef?: any;
+  /** Individually addressable constraints */
+  constraints: Array<{ name: string; value: any }>;
+  /** Current resolution policy operand */
+  resolve?: any;
+}
+
 // ─── Ingestion job tracking ────────────────────────────────────────────────
 
 /** Per-table progress within a hydration/sync job. */
