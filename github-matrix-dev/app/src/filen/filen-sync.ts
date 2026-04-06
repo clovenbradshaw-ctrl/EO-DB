@@ -19,9 +19,12 @@
 
 import type { MatrixClient } from 'matrix-js-sdk';
 import type { EoStore } from '../db/encrypted-store';
+import type { LocalKeyring } from '../db/crypto-types';
 import { processEvent } from '../db/fold';
 import { readLogSince } from '../db/log';
 import { deriveKey, encrypt } from '../lib/crypto';
+import { encryptSnapshot, decryptSnapshot } from '../crypto/snapshot-crypto';
+import { resolveSnapshotKeyId } from '../crypto/segment-keys';
 import {
   filenUploadFile,
   filenListFolder,
@@ -90,6 +93,7 @@ export class FilenSyncService {
   private userId: string;
   private matrixClient: MatrixClient | null;
   private roomId: string | null;
+  private keyring: LocalKeyring;
 
   /** Callback for UI status updates. */
   onStatus?: (status: 'syncing' | 'synced' | 'error', detail?: string) => void;
@@ -102,6 +106,7 @@ export class FilenSyncService {
     userId: string;
     matrixClient?: MatrixClient;
     roomId?: string;
+    keyring?: LocalKeyring;
   }) {
     this.store = opts.store;
     this.spaceId = opts.spaceId;
@@ -110,6 +115,19 @@ export class FilenSyncService {
     this.userId = opts.userId;
     this.matrixClient = opts.matrixClient || null;
     this.roomId = opts.roomId || null;
+    this.keyring = opts.keyring || { keys: new Map() };
+  }
+
+  /** Allow updating keyring after construction (e.g., after key heal). */
+  setKeyring(keyring: LocalKeyring): void {
+    this.keyring = keyring;
+  }
+
+  /** Encrypt binary with keyring if keys are available, otherwise pass through. */
+  private async encryptBinary(binary: Uint8Array): Promise<Uint8Array> {
+    const keyId = resolveSnapshotKeyId(this.keyring);
+    if (!keyId) return binary;
+    return encryptSnapshot(binary, this.keyring, keyId);
   }
 
   /** Start the 30-second sync timer. */
@@ -177,10 +195,11 @@ export class FilenSyncService {
     };
 
     const binary = packEodb(snapshotFile);
+    const encrypted = await this.encryptBinary(binary);
     const filename = snapshotFilename(currentSeq);
 
     const uploaded = await filenUploadFile(
-      auth.apiKey, this.spaceFolderUuid, filename, binary, masterKeys[0],
+      auth.apiKey, this.spaceFolderUuid, filename, encrypted, masterKeys[0],
     );
 
     // Update chain tracking
@@ -191,7 +210,7 @@ export class FilenSyncService {
     this.lastSnapshotSeq = currentSeq;
     await this.store.put('meta:filen_snapshot_seq', currentSeq);
 
-    console.log(`[EO-DB] Manual snapshot created: ${filename} (${allEvents.length} events, ${binary.byteLength} bytes)`);
+    console.log(`[EO-DB] Manual snapshot created: ${filename} (${allEvents.length} events, ${encrypted.byteLength} bytes)`);
 
     // Enforce snapshot cap — delete oldest beyond MAX_MANUAL_SNAPSHOTS
     try {
@@ -220,7 +239,7 @@ export class FilenSyncService {
           file_uuid: uploaded.uuid,
           seq: currentSeq,
           event_count: allEvents.length,
-          size_bytes: binary.byteLength,
+          size_bytes: encrypted.byteLength,
           compacted_at: new Date().toISOString(),
           compacted_by: this.userId,
         });
@@ -231,7 +250,7 @@ export class FilenSyncService {
           folder_uuid: this.spaceFolderUuid,
           seq: currentSeq,
           event_count: allEvents.length,
-          compressed_bytes: binary.byteLength,
+          compressed_bytes: encrypted.byteLength,
           compacted_at: new Date().toISOString(),
           compacted_by: this.userId,
         }, this.spaceId);
@@ -354,9 +373,10 @@ export class FilenSyncService {
       };
 
       const binary = packEodb(backupFile);
+      const encrypted = await this.encryptBinary(binary);
 
       const uploaded = await filenUploadFile(
-        auth.apiKey, this.spaceFolderUuid, filename, binary, masterKeys[0],
+        auth.apiKey, this.spaceFolderUuid, filename, encrypted, masterKeys[0],
       );
 
       // Update bookkeeping
@@ -380,7 +400,7 @@ export class FilenSyncService {
             event_count: allEventsSinceSnapshot.length,
             uploader: this.userId,
             uploaded_at: new Date().toISOString(),
-            size_bytes: binary.byteLength,
+            size_bytes: encrypted.byteLength,
           });
 
           // State event: update head pointer
@@ -474,10 +494,11 @@ export class FilenSyncService {
     };
 
     const binary = packEodb(snapshotFile);
+    const encrypted = await this.encryptBinary(binary);
     const filename = snapshotFilename(currentSeq);
 
     const uploaded = await filenUploadFile(
-      apiKey, this.spaceFolderUuid, filename, binary, masterKey,
+      apiKey, this.spaceFolderUuid, filename, encrypted, masterKey,
     );
 
     this.prevSnapshotUuids.unshift(uploaded.uuid);
@@ -488,7 +509,7 @@ export class FilenSyncService {
     this.lastSnapshotSeq = currentSeq;
     await this.store.put('meta:filen_snapshot_seq', currentSeq);
 
-    console.log(`[EO-DB] Filen snapshot created: ${filename} (${allEvents.length} events, ${binary.byteLength} bytes)`);
+    console.log(`[EO-DB] Filen snapshot created: ${filename} (${allEvents.length} events, ${encrypted.byteLength} bytes)`);
 
     // Signal compaction via Matrix
     if (this.matrixClient && this.roomId) {
@@ -500,7 +521,7 @@ export class FilenSyncService {
           file_uuid: uploaded.uuid,
           seq: currentSeq,
           event_count: allEvents.length,
-          size_bytes: binary.byteLength,
+          size_bytes: encrypted.byteLength,
           compacted_at: new Date().toISOString(),
           compacted_by: this.userId,
         });
@@ -511,7 +532,7 @@ export class FilenSyncService {
           folder_uuid: this.spaceFolderUuid,
           seq: currentSeq,
           event_count: allEvents.length,
-          compressed_bytes: binary.byteLength,
+          compressed_bytes: encrypted.byteLength,
           compacted_at: new Date().toISOString(),
           compacted_by: this.userId,
         }, this.spaceId);
@@ -610,6 +631,7 @@ export class FilenSyncService {
     store: EoStore,
     spaceFolderUuid: string,
     onEvent?: (event: any) => void,
+    keyring?: LocalKeyring,
   ): Promise<number> {
     const { auth, masterKeys } = useFilenStore.getState();
     if (!auth) throw new Error('Not connected to Filen');
@@ -651,9 +673,10 @@ export class FilenSyncService {
     if (snapshots.length > 0) {
       const latest = snapshots[0];
       if (latest.key) {
-        const data = await filenDownloadFile(
+        const raw = await filenDownloadFile(
           auth.apiKey, latest.uuid, latest.key, latest.region, latest.bucket,
         );
+        const data = keyring ? await decryptSnapshot(raw, keyring) : raw;
         const eodb = unpackEodb(data);
         for (const event of eodb.events) {
           if (event.seq <= localSeq) continue;
@@ -668,9 +691,10 @@ export class FilenSyncService {
       if (!backup.key) continue;
       if (backup.seq <= lastAppliedSeq) continue;
       try {
-        const data = await filenDownloadFile(
+        const raw = await filenDownloadFile(
           auth.apiKey, backup.uuid, backup.key, backup.region, backup.bucket,
         );
+        const data = keyring ? await decryptSnapshot(raw, keyring) : raw;
         const eodb = unpackEodb(data);
         for (const event of eodb.events) {
           if (event.seq <= lastAppliedSeq) continue;
