@@ -296,19 +296,28 @@ async function emitEvent(
 
 // ─── Target naming ──────────────────────────────────────────────────────────
 
+/** Slugify a base name for use as a target prefix (e.g. "My Base" → "my_base"). */
+function slugifyBaseName(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_|_$/g, '')
+    .slice(0, 60) || 'unnamed_base';
+}
+
 /** Map an Airtable record to an EO target path. */
-function recordTarget(baseId: string, tableId: string, recordId: string): string {
-  return `at.${baseId}.${tableId}.${recordId}`;
+function recordTarget(baseName: string, tableId: string, recordId: string): string {
+  return `${slugifyBaseName(baseName)}.${tableId}.${recordId}`;
 }
 
 /** Map an Airtable table to an EO target (the collection/parent). */
-function tableTarget(baseId: string, tableId: string): string {
-  return `at.${baseId}.${tableId}`;
+function tableTarget(baseName: string, tableId: string): string {
+  return `${slugifyBaseName(baseName)}.${tableId}`;
 }
 
-/** Map an Airtable base to an EO target. */
-function baseTarget(baseId: string): string {
-  return `at.${baseId}`;
+/** Map an Airtable base to an EO target — uses the human-readable base name. */
+function baseTarget(baseName: string): string {
+  return slugifyBaseName(baseName);
 }
 
 // ─── Field metadata helpers ────────────────────────────────────────────────
@@ -347,10 +356,10 @@ function buildFieldMetaMap(
  */
 async function getTableFieldMeta(
   db: EoDb,
-  baseId: string,
+  baseName: string,
   tableId: string,
 ): Promise<Map<string, FieldMeta>> {
-  const state = await getState(db, tableTarget(baseId, tableId));
+  const state = await getState(db, tableTarget(baseName, tableId));
   return buildFieldMetaMap(state?.value?.fields);
 }
 
@@ -460,6 +469,7 @@ async function ingestRecord(
   db: EoDb,
   feed: Feed,
   baseId: string,
+  baseName: string,
   tableId: string,
   record: AirtableRecord,
   agent: string,
@@ -469,7 +479,7 @@ async function ingestRecord(
   displayField?: string,
   sink?: EventSink,
 ): Promise<'ingested' | 'skipped_no_change' | 'skipped_duplicate'> {
-  const target = recordTarget(baseId, tableId, record.id);
+  const target = recordTarget(baseName, tableId, record.id);
 
   // 1. Extract only storable fields (skip computed/metadata, normalize values)
   let storableFields = extractStorableFields(record.fields, fieldMeta, exclusions);
@@ -677,7 +687,7 @@ export async function hydrationSync(
       if (selectedTables && !baseTables?.length) continue;
 
       // INS the base as a container, then DEF its metadata
-      const baseT = baseTarget(base.id);
+      const baseT = baseTarget(base.name);
       const baseExists = await getState(db, baseT);
       if (!baseExists) {
         try {
@@ -715,7 +725,7 @@ export async function hydrationSync(
         if (tableProgress?.status === 'completed') continue;
 
         // INS the table as a container, then DEF its metadata
-        const tblT = tableTarget(base.id, table.id);
+        const tblT = tableTarget(base.name, table.id);
         const tblExists = await getState(db, tblT);
         if (!tblExists) {
           try {
@@ -803,7 +813,7 @@ export async function hydrationSync(
 
         // Sync all records in this table
         try {
-          const result = await syncTable(db, feed, client, base.id, table.id, table.name, agent, null, exclusions, preserveExisting, opts?.sink);
+          const result = await syncTable(db, feed, client, base.id, base.name, table.id, table.name, agent, null, exclusions, preserveExisting, opts?.sink);
           syncResults.push(result);
 
           // Update job progress
@@ -914,7 +924,7 @@ export async function updateSync(
 
       try {
         const exclusions = fieldExclusions?.[table.id] ?? EMPTY_EXCLUSIONS;
-        const result = await syncTable(db, feed, client, base.id, table.id, table.name, agent, cursor, exclusions, preserveExisting, opts?.sink);
+        const result = await syncTable(db, feed, client, base.id, base.name, table.id, table.name, agent, cursor, exclusions, preserveExisting, opts?.sink);
         syncResults.push(result);
         opts?.onTableComplete?.(result);
       } finally {
@@ -943,6 +953,7 @@ async function syncTable(
   feed: Feed,
   client: AirtableClient,
   baseId: string,
+  baseName: string,
   tableId: string,
   tableName: string,
   agent: string,
@@ -957,10 +968,10 @@ async function syncTable(
   let skippedDuplicate = 0;
 
   // Retrieve field metadata from the table's stored schema (set during hydration).
-  const fieldMeta = await getTableFieldMeta(db, baseId, tableId);
+  const fieldMeta = await getTableFieldMeta(db, baseName, tableId);
 
   // Retrieve the display field (primaryFieldId) so records get a `name` property.
-  const tableState = await getState(db, tableTarget(baseId, tableId));
+  const tableState = await getState(db, tableTarget(baseName, tableId));
   const displayField: string | undefined = tableState?.value?._displayField;
 
   // Build filter: if we have a cursor, subtract a 60-second overlap window
@@ -991,7 +1002,7 @@ async function syncTable(
 
     for (const record of page) {
       fetched++;
-      const result = await ingestRecord(db, feed, baseId, tableId, record, agent, fieldMeta, exclusions, preserveExisting, displayField, sink);
+      const result = await ingestRecord(db, feed, baseId, baseName, tableId, record, agent, fieldMeta, exclusions, preserveExisting, displayField, sink);
       switch (result) {
         case 'ingested': ingested++; break;
         case 'skipped_no_change': skippedNoChange++; break;

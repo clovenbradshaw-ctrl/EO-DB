@@ -224,16 +224,21 @@ describe('hasActualChanges', () => {
 // ─── Target naming tests ────────────────────────────────────────────────────
 
 describe('target naming', () => {
-  it('generates correct record target', () => {
-    expect(recordTarget('appABC', 'tblDEF', 'recGHI')).toBe('at.appABC.tblDEF.recGHI');
+  it('generates correct record target using base name', () => {
+    expect(recordTarget('My Base', 'tblDEF', 'recGHI')).toBe('my_base.tblDEF.recGHI');
   });
 
-  it('generates correct table target', () => {
-    expect(tableTarget('appABC', 'tblDEF')).toBe('at.appABC.tblDEF');
+  it('generates correct table target using base name', () => {
+    expect(tableTarget('My Base', 'tblDEF')).toBe('my_base.tblDEF');
   });
 
-  it('generates correct base target', () => {
-    expect(baseTarget('appABC')).toBe('at.appABC');
+  it('generates correct base target using base name', () => {
+    expect(baseTarget('My Base')).toBe('my_base');
+  });
+
+  it('slugifies special characters in base names', () => {
+    expect(baseTarget('Client Management (2024)')).toBe('client_management_2024');
+    expect(baseTarget('HR & Finance')).toBe('hr_finance');
   });
 });
 

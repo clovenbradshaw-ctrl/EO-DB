@@ -133,16 +133,25 @@ async function setCursor(store: EoStore, baseId: string, tableId: string, cursor
 
 // ─── Target naming ──────────────────────────────────────────────────────────
 
-function recordTarget(baseId: string, tableId: string, recordId: string): string {
-  return `at.${baseId}.${tableId}.${recordId}`;
+/** Slugify a base name for use as a target prefix (e.g. "My Base" → "my_base"). */
+function slugifyBaseName(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_|_$/g, '')
+    .slice(0, 60) || 'unnamed_base';
 }
 
-function tableTarget(baseId: string, tableId: string): string {
-  return `at.${baseId}.${tableId}`;
+function recordTarget(baseName: string, tableId: string, recordId: string): string {
+  return `${slugifyBaseName(baseName)}.${tableId}.${recordId}`;
 }
 
-function baseTarget(baseId: string): string {
-  return `at.${baseId}`;
+function tableTarget(baseName: string, tableId: string): string {
+  return `${slugifyBaseName(baseName)}.${tableId}`;
+}
+
+function baseTarget(baseName: string): string {
+  return slugifyBaseName(baseName);
 }
 
 // ─── Field metadata ─────────────────────────────────────────────────────────
@@ -174,10 +183,10 @@ function buildFieldMetaMap(
 
 async function getTableFieldMeta(
   store: EoStore,
-  baseId: string,
+  baseName: string,
   tableId: string,
 ): Promise<Map<string, FieldMeta>> {
-  const state = await getState(store, tableTarget(baseId, tableId));
+  const state = await getState(store, tableTarget(baseName, tableId));
   return buildFieldMetaMap(state?.value?.fields);
 }
 
@@ -187,7 +196,7 @@ function extractStorableFields(
   rawFields: Record<string, any>,
   fieldMeta: Map<string, FieldMeta>,
   exclusions: SyncExclusions,
-  baseId: string,
+  baseName: string,
 ): Record<string, any> {
   if (fieldMeta.size === 0) return rawFields;
 
@@ -205,7 +214,7 @@ function extractStorableFields(
       const linkedTableId = meta.options?.linkedTableId;
       if (linkedTableId) {
         result[fieldId] = {
-          linked: extracted.map((recId: string) => recordTarget(baseId, linkedTableId, recId)),
+          linked: extracted.map((recId: string) => recordTarget(baseName, linkedTableId, recId)),
         };
         continue;
       }
@@ -247,6 +256,7 @@ function recordEventId(baseId: string, tableId: string, recordId: string, conten
 async function ingestRecord(
   store: EoStore,
   baseId: string,
+  baseName: string,
   tableId: string,
   record: AirtableRecord,
   agent: string,
@@ -256,8 +266,8 @@ async function ingestRecord(
   onEvent?: (event: any) => void,
   displayField?: string,
 ): Promise<'ingested' | 'skipped_no_change' | 'skipped_duplicate'> {
-  const target = recordTarget(baseId, tableId, record.id);
-  let storableFields = extractStorableFields(record.fields, fieldMeta, exclusions, baseId);
+  const target = recordTarget(baseName, tableId, record.id);
+  let storableFields = extractStorableFields(record.fields, fieldMeta, exclusions, baseName);
 
   if (preserveExisting) {
     // Only write fields that don't already exist in EO-DB.
@@ -364,6 +374,7 @@ async function syncTable(
   store: EoStore,
   client: AirtableClient,
   baseId: string,
+  baseName: string,
   tableId: string,
   tableName: string,
   agent: string,
@@ -381,10 +392,10 @@ async function syncTable(
   const now = new Date().toISOString();
   const limit = recordLimit && recordLimit > 0 ? recordLimit : Infinity;
 
-  const fieldMeta = await getTableFieldMeta(store, baseId, tableId);
+  const fieldMeta = await getTableFieldMeta(store, baseName, tableId);
 
   // Retrieve display field so records get a `name` property
-  const tableState = await getState(store, tableTarget(baseId, tableId));
+  const tableState = await getState(store, tableTarget(baseName, tableId));
   const displayField: string | undefined = tableState?.value?._displayField;
 
   const filterByFormula = cursorSince
@@ -401,7 +412,7 @@ async function syncTable(
     for (const record of page) {
       if (fetched >= limit) { limitReached = true; break; }
       fetched++;
-      const result = await ingestRecord(store, baseId, tableId, record, agent, fieldMeta, exclusions, preserveExisting, onEvent, displayField);
+      const result = await ingestRecord(store, baseId, baseName, tableId, record, agent, fieldMeta, exclusions, preserveExisting, onEvent, displayField);
       switch (result) {
         case 'ingested': ingested++; break;
         case 'skipped_no_change': skippedNoChange++; break;
@@ -456,11 +467,11 @@ export async function hydrationSync(
     const baseTables = selectedTables?.[base.id];
     if (selectedTables && !baseTables?.length) continue;
 
-    // Register base container
+    // Register base container — target is the slugified base name
     try {
       await processEvent(store, {
         op: 'DEF',
-        target: baseTarget(base.id),
+        target: baseTarget(base.name),
         operand: { name: base.name, _airtable: { type: 'base', base_id: base.id } },
         agent,
         ts: new Date().toISOString(),
@@ -477,7 +488,7 @@ export async function hydrationSync(
       try {
         await processEvent(store, {
           op: 'DEF',
-          target: tableTarget(base.id, table.id),
+          target: tableTarget(base.name, table.id),
           operand: {
             name: table.name,
             field_count: table.fieldCount,
@@ -493,7 +504,7 @@ export async function hydrationSync(
       } catch { /* idempotent */ }
 
       // Create per-field schema entities under _schema container
-      const tblT = tableTarget(base.id, table.id);
+      const tblT = tableTarget(base.name, table.id);
       const schemaTarget = `${tblT}._schema`;
       try {
         await processEvent(store, {
@@ -542,7 +553,7 @@ export async function hydrationSync(
       const exclusions = fieldExclusions?.[table.id] ?? EMPTY_EXCLUSIONS;
 
       const result = await syncTable(
-        store, client, base.id, table.id, table.name, agent, null,
+        store, client, base.id, base.name, table.id, table.name, agent, null,
         exclusions, preserveExisting,
         opts?.onEvent, opts?.onProgress, recordLimit,
       );
@@ -603,7 +614,7 @@ export async function updateSync(
       if (!cursor) continue; // Not hydrated yet — skip
 
       // Refresh per-field schema entities (handles field adds/renames)
-      const tblT = tableTarget(base.id, table.id);
+      const tblT = tableTarget(base.name, table.id);
       const schemaTarget = `${tblT}._schema`;
       try {
         await processEvent(store, {
@@ -652,7 +663,7 @@ export async function updateSync(
       const exclusions = fieldExclusions?.[table.id] ?? EMPTY_EXCLUSIONS;
 
       const result = await syncTable(
-        store, client, base.id, table.id, table.name, agent, cursor,
+        store, client, base.id, base.name, table.id, table.name, agent, cursor,
         exclusions, preserveExisting,
         opts?.onEvent, opts?.onProgress, recordLimit,
       );
