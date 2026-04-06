@@ -770,19 +770,121 @@ export async function loadAllChunks(store: EoStore): Promise<DiffChunk[]> {
 
 /** Build card buffer from persisted chunks. Deduplicates by targetHash (latest wins). */
 export async function buildCardBuffer(store: EoStore): Promise<CardBuffer> {
-  const chunks = await loadAllChunks(store);
   const buffer = new CardBuffer();
   const latestSeq = new Map<number, number>();
-
-  for (const chunk of chunks) {
-    const cards = decodeChunk(chunk);
-    for (const card of cards) {
+  for await (const batch of loadChunks(store)) {
+    for (const card of batch.cards) {
       const prev = latestSeq.get(card.targetHash);
       if (prev === undefined || card.temporalSeq > prev) {
         buffer.upsert(card);
         latestSeq.set(card.targetHash, card.temporalSeq);
       }
     }
+  }
+  return buffer;
+}
+
+// ─── Phase 2: Progressive Loading ───────────────────────────────────────
+//
+// loadChunks() is an async generator that yields in two phases:
+//   Phase A: prototypes only (from proto:current) — enough for overview.
+//   Phase B: card batches from each chunk — caller deduplicates incrementally.
+//
+// buildCardBufferProgressive() consumes this generator with an onProgress
+// callback so the table view can render incrementally as chunks arrive.
+
+/** A batch yielded by the loadChunks generator. */
+export interface LoadBatch {
+  /** 'prototypes' for the initial overview, 'cards' for chunk data. */
+  phase: 'prototypes' | 'cards';
+  /** Decoded cards from this batch (empty for prototype-only phase). */
+  cards: Card[];
+  /** Prototype registry snapshot (present only in the 'prototypes' phase). */
+  registry?: PrototypeRegistry;
+  /** 1-based chunk index within the cards phase. */
+  chunkIndex?: number;
+  /** Total chunk count (known after first IDB scan). */
+  chunkCount?: number;
+}
+
+/**
+ * Async generator that yields prototype overview first, then card batches
+ * one chunk at a time. Each chunk is self-contained (decodes against its
+ * own prototypeSnapshot). Caller deduplicates by targetHash (latest wins).
+ */
+export async function* loadChunks(store: EoStore): AsyncGenerator<LoadBatch> {
+  // Phase A: yield prototypes for overview (<50ms target)
+  const regData = await store.get('proto:current');
+  const registry = regData ? deserializeRegistry(regData) : createEmptyRegistry();
+  yield { phase: 'prototypes', cards: [], registry };
+
+  // Phase B: iterate chunk:* keys, decode each, yield card batch
+  const entries = await store.iterator('chunk:');
+  const chunkCount = entries.length;
+  for (let i = 0; i < entries.length; i++) {
+    const chunk = entries[i][1] as DiffChunk;
+    const cards = decodeChunk(chunk);
+    yield { phase: 'cards', cards, chunkIndex: i + 1, chunkCount };
+  }
+}
+
+/** Progress info emitted by buildCardBufferProgressive. */
+export interface CardBufferProgress {
+  /** 'overview' after prototypes loaded, 'chunk' after each chunk batch. */
+  stage: 'overview' | 'chunk';
+  /** Current buffer (accumulating — same reference throughout). */
+  buffer: CardBuffer;
+  /** Prototype registry (available from the overview stage onward). */
+  registry?: PrototypeRegistry;
+  /** Number of unique entities loaded so far. */
+  entityCount: number;
+  /** 1-based chunk index (only for 'chunk' stage). */
+  chunkIndex?: number;
+  /** Total chunk count (only for 'chunk' stage). */
+  chunkCount?: number;
+}
+
+/**
+ * Progressive card buffer builder. Consumes loadChunks() and invokes
+ * onProgress after each phase, allowing the table view to render
+ * incrementally as data streams in.
+ *
+ * First callback fires at 'overview' stage (prototypes only, <50ms).
+ * Subsequent callbacks fire per chunk with deduped card buffer.
+ */
+export async function buildCardBufferProgressive(
+  store: EoStore,
+  onProgress?: (progress: CardBufferProgress) => void,
+): Promise<CardBuffer> {
+  const buffer = new CardBuffer();
+  const latestSeq = new Map<number, number>();
+
+  for await (const batch of loadChunks(store)) {
+    if (batch.phase === 'prototypes') {
+      onProgress?.({
+        stage: 'overview',
+        buffer,
+        registry: batch.registry,
+        entityCount: 0,
+      });
+      continue;
+    }
+
+    for (const card of batch.cards) {
+      const prev = latestSeq.get(card.targetHash);
+      if (prev === undefined || card.temporalSeq > prev) {
+        buffer.upsert(card);
+        latestSeq.set(card.targetHash, card.temporalSeq);
+      }
+    }
+
+    onProgress?.({
+      stage: 'chunk',
+      buffer,
+      entityCount: buffer.size,
+      chunkIndex: batch.chunkIndex,
+      chunkCount: batch.chunkCount,
+    });
   }
 
   return buffer;
@@ -828,15 +930,33 @@ let _buffer: CardBuffer | null = null;
 /**
  * Initialize the card encoder for a store. Loads existing prototypes and
  * chunks from IDB, builds the in-memory card buffer, returns it.
+ *
+ * Accepts an optional onProgress callback for progressive loading (Phase 2).
+ * The first callback fires after prototypes are loaded (<50ms), before any
+ * chunks are decoded — enough for a table overview. Subsequent callbacks
+ * fire per chunk as cards stream in.
  */
-export async function initCardEncoder(store: EoStore): Promise<CardBuffer> {
-  const regData = await store.get('proto:current');
-  const registry = regData ? deserializeRegistry(regData) : createEmptyRegistry();
+export async function initCardEncoder(
+  store: EoStore,
+  onProgress?: (progress: CardBufferProgress) => void,
+): Promise<CardBuffer> {
+  // Registry and ChunkWriter are set up from the prototype phase callback
+  let registry: PrototypeRegistry | undefined;
+
+  _buffer = await buildCardBufferProgressive(store, (progress) => {
+    if (progress.stage === 'overview' && progress.registry) {
+      registry = progress.registry;
+    }
+    onProgress?.(progress);
+  });
+
+  // If no registry was loaded (empty store), create a fresh one
+  if (!registry) registry = createEmptyRegistry();
+
   const meta = await store.get('card:meta');
   const nextChunkId = meta?.nextChunkId ?? 0;
-
   _writer = new ChunkWriter(store, registry, nextChunkId);
-  _buffer = await buildCardBuffer(store);
+
   return _buffer;
 }
 

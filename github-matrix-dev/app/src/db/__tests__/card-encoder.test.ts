@@ -15,6 +15,8 @@ import {
   ChunkWriter,
   CardBuffer,
   buildCardBuffer,
+  buildCardBufferProgressive,
+  loadChunks,
   compact,
   initCardEncoder,
   shutdownCardEncoder,
@@ -25,6 +27,8 @@ import {
   type Prototype,
   type PrototypeRegistry,
   type DiffChunk,
+  type LoadBatch,
+  type CardBufferProgress,
 } from '../card-encoder';
 import type { EoStore } from '../encrypted-store';
 import type { EoEvent, EoStateFold, LoggableOperator } from '../types';
@@ -533,5 +537,160 @@ describe('verification: decodeDiff(encodeDiff(card, proto.id, proto.card), proto
       expect(decoded.eventCount).toBe(card.eventCount);
       expect(decoded.graphDegree).toBe(card.graphDegree);
     }
+  });
+});
+
+// ─── Phase 2: Progressive Loading ──────────────────────────────────────
+
+describe('loadChunks async generator', () => {
+  it('yields prototypes phase first on empty store', async () => {
+    const store = createTestStore();
+    const batches: LoadBatch[] = [];
+    for await (const batch of loadChunks(store)) batches.push(batch);
+
+    expect(batches).toHaveLength(1);
+    expect(batches[0].phase).toBe('prototypes');
+    expect(batches[0].cards).toHaveLength(0);
+    expect(batches[0].registry).toBeDefined();
+  });
+
+  it('yields prototypes then card batches per chunk', async () => {
+    const store = createTestStore();
+    const reg: PrototypeRegistry = { prototypes: new Map(), nextId: 1 };
+    const writer = new ChunkWriter(store, reg, 0);
+
+    await writer.addRecord(makeCard({ targetHash: fnv1a('a'), temporalSeq: 1 }));
+    await writer.flushChunk();
+    await writer.addRecord(makeCard({ targetHash: fnv1a('b'), temporalSeq: 2 }));
+    await writer.shutdown();
+
+    const batches: LoadBatch[] = [];
+    for await (const batch of loadChunks(store)) batches.push(batch);
+
+    // 1 prototype batch + 2 chunk batches
+    expect(batches).toHaveLength(3);
+    expect(batches[0].phase).toBe('prototypes');
+    expect(batches[1].phase).toBe('cards');
+    expect(batches[1].chunkIndex).toBe(1);
+    expect(batches[1].chunkCount).toBe(2);
+    expect(batches[1].cards.length).toBeGreaterThanOrEqual(1);
+    expect(batches[2].phase).toBe('cards');
+    expect(batches[2].chunkIndex).toBe(2);
+    expect(batches[2].chunkCount).toBe(2);
+  });
+});
+
+describe('buildCardBufferProgressive', () => {
+  it('emits overview callback before any cards', async () => {
+    const store = createTestStore();
+    const reg: PrototypeRegistry = { prototypes: new Map(), nextId: 1 };
+    const writer = new ChunkWriter(store, reg, 0);
+
+    await writer.addRecord(makeCard({ targetHash: fnv1a('a'), temporalSeq: 1 }));
+    await writer.addRecord(makeCard({ targetHash: fnv1a('b'), temporalSeq: 2 }));
+    await writer.shutdown();
+
+    const stages: string[] = [];
+    const entityCounts: number[] = [];
+
+    const buffer = await buildCardBufferProgressive(store, (progress) => {
+      stages.push(progress.stage);
+      entityCounts.push(progress.entityCount);
+    });
+
+    expect(stages[0]).toBe('overview');
+    expect(entityCounts[0]).toBe(0); // no cards loaded yet at overview
+    expect(stages.slice(1).every(s => s === 'chunk')).toBe(true);
+    expect(buffer.size).toBe(2);
+  });
+
+  it('deduplicates across chunks (latest seq wins)', async () => {
+    const store = createTestStore();
+    const reg: PrototypeRegistry = { prototypes: new Map(), nextId: 1 };
+    const writer = new ChunkWriter(store, reg, 0);
+
+    await writer.addRecord(makeCard({ targetHash: fnv1a('x'), temporalSeq: 1, eventCount: 5 }));
+    await writer.flushChunk();
+    await writer.addRecord(makeCard({ targetHash: fnv1a('x'), temporalSeq: 2, eventCount: 10 }));
+    await writer.shutdown();
+
+    const buffer = await buildCardBufferProgressive(store);
+    expect(buffer.size).toBe(1);
+    expect(buffer.get(fnv1a('x'))!.eventCount).toBe(10);
+  });
+
+  it('entity count increases monotonically across progress callbacks', async () => {
+    const store = createTestStore();
+    const reg: PrototypeRegistry = { prototypes: new Map(), nextId: 1 };
+    const writer = new ChunkWriter(store, reg, 0);
+
+    // Spread entities across 3 chunks
+    for (let i = 0; i < 3; i++) {
+      await writer.addRecord(makeCard({ targetHash: fnv1a(`entity-${i}`), temporalSeq: i + 1 }));
+      await writer.flushChunk();
+    }
+    await writer.shutdown();
+
+    const counts: number[] = [];
+    await buildCardBufferProgressive(store, (progress) => {
+      if (progress.stage === 'chunk') counts.push(progress.entityCount);
+    });
+
+    // Each chunk adds one unique entity
+    expect(counts).toEqual([1, 2, 3]);
+  });
+});
+
+describe('initCardEncoder with progressive loading', () => {
+  it('fires onProgress callbacks during initialization', async () => {
+    const store = createTestStore();
+
+    // Pre-populate with data
+    const reg: PrototypeRegistry = { prototypes: new Map(), nextId: 1 };
+    const writer = new ChunkWriter(store, reg, 0);
+    await writer.addRecord(makeCard({ targetHash: fnv1a('a'), temporalSeq: 1 }));
+    await writer.addRecord(makeCard({ targetHash: fnv1a('b'), temporalSeq: 2 }));
+    await writer.shutdown();
+
+    const progressEvents: CardBufferProgress[] = [];
+    const buffer = await initCardEncoder(store, (p) => progressEvents.push(p));
+
+    expect(progressEvents.length).toBeGreaterThanOrEqual(2); // overview + at least 1 chunk
+    expect(progressEvents[0].stage).toBe('overview');
+    expect(buffer.size).toBe(2);
+    expect(getChunkWriter()).not.toBeNull();
+
+    await shutdownCardEncoder();
+  });
+
+  it('works without onProgress (backward compatible)', async () => {
+    const store = createTestStore();
+    const buffer = await initCardEncoder(store);
+    expect(buffer).toBeInstanceOf(CardBuffer);
+    expect(getChunkWriter()).not.toBeNull();
+    await shutdownCardEncoder();
+  });
+
+  it('restores from persisted state with progressive loading', async () => {
+    const store = createTestStore();
+
+    // Session 1: write cards
+    await initCardEncoder(store);
+    const writer1 = getChunkWriter()!;
+    await writer1.addRecord(makeCard({ targetHash: fnv1a('a'), temporalSeq: 1 }));
+    await writer1.addRecord(makeCard({ targetHash: fnv1a('b'), temporalSeq: 2 }));
+    await shutdownCardEncoder();
+
+    // Session 2: progressive init should restore
+    let overviewFired = false;
+    const buf2 = await initCardEncoder(store, (p) => {
+      if (p.stage === 'overview') overviewFired = true;
+    });
+
+    expect(overviewFired).toBe(true);
+    expect(buf2.size).toBe(2);
+    expect(buf2.has(fnv1a('a'))).toBe(true);
+    expect(buf2.has(fnv1a('b'))).toBe(true);
+    await shutdownCardEncoder();
   });
 });
