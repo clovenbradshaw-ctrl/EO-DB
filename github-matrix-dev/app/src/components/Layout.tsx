@@ -1579,9 +1579,9 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                 ) : (
                   <div style={s.empty}>
                     <div style={s.emptyIcon}>{'\u25A6'}</div>
-                    <div style={s.emptyText}>Select an object to get started</div>
+                    <div style={s.emptyText}>Select a collection to get started</div>
                     <div style={s.emptySub}>
-                      Pick a table or collection from the sidebar to browse its records
+                      Pick a collection from the sidebar to view its schema
                     </div>
                   </div>
                 )}
