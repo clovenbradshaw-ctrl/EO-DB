@@ -256,74 +256,76 @@ export function ViewTabs({ scope, session }: ViewTabsProps) {
   }
 
   return (
-    <div style={s.container}>
-      {/* Default view tab */}
-      <button
-        style={sig.activeViewId === null ? s.tabActive : s.tab}
-        onClick={() => viewStore.resetToDefault(scope)}
-      >
-        <span style={{ fontSize: 11, opacity: 0.7 }}>{VIEW_TYPE_META.grid.icon}</span> Grid view
-      </button>
+    <div style={s.wrapper}>
+      <div style={s.container}>
+        {/* Default view tab */}
+        <button
+          style={sig.activeViewId === null ? s.tabActive : s.tab}
+          onClick={() => viewStore.resetToDefault(scope)}
+        >
+          <span style={{ fontSize: 11, opacity: 0.7 }}>{VIEW_TYPE_META.grid.icon}</span> Grid view
+        </button>
 
-      {/* Saved view tabs */}
-      {savedViews.filter((v) => !viewStore.savedViews[v.id]?.scope || viewStore.savedViews[v.id]?.scope === scope).map((view) => {
-        const vtMeta = VIEW_TYPE_META[view.viewType || 'grid'];
-        return (
-          <button
-            key={view.id}
-            style={sig.activeViewId === view.id ? s.tabActive : s.tab}
-            onClick={() => viewStore.activateView(scope, view)}
-            onContextMenu={(e) => {
-              e.preventDefault();
-              setCtxMenu({ x: e.clientX, y: e.clientY, viewId: view.id });
-            }}
-          >
-            {renaming === view.id ? (
-              <input
-                autoFocus
-                value={renameValue}
-                onChange={(e) => setRenameValue(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') handleRename(view.id);
-                  if (e.key === 'Escape') setRenaming(null);
-                }}
-                onBlur={() => handleRename(view.id)}
-                onClick={(e) => e.stopPropagation()}
-                style={s.renameInput}
-              />
-            ) : (
-              <>
-                <span style={{ fontSize: 11, opacity: 0.7 }}>{vtMeta.icon}</span>
-                {view.visibility === 'private' && <span style={{ marginRight: 2, fontSize: 10 }}>{'\uD83D\uDD12'}</span>}
-                {view.name}
-                {sig.activeViewId === view.id && sig.dirty && (
-                  <span style={s.dirtyDot} title="Unsaved changes" />
-                )}
-              </>
-            )}
-          </button>
-        );
-      })}
+        {/* Saved view tabs */}
+        {savedViews.filter((v) => !viewStore.savedViews[v.id]?.scope || viewStore.savedViews[v.id]?.scope === scope).map((view) => {
+          const vtMeta = VIEW_TYPE_META[view.viewType || 'grid'];
+          return (
+            <button
+              key={view.id}
+              style={sig.activeViewId === view.id ? s.tabActive : s.tab}
+              onClick={() => viewStore.activateView(scope, view)}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setCtxMenu({ x: e.clientX, y: e.clientY, viewId: view.id });
+              }}
+            >
+              {renaming === view.id ? (
+                <input
+                  autoFocus
+                  value={renameValue}
+                  onChange={(e) => setRenameValue(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') handleRename(view.id);
+                    if (e.key === 'Escape') setRenaming(null);
+                  }}
+                  onBlur={() => handleRename(view.id)}
+                  onClick={(e) => e.stopPropagation()}
+                  style={s.renameInput}
+                />
+              ) : (
+                <>
+                  <span style={{ fontSize: 11, opacity: 0.7 }}>{vtMeta.icon}</span>
+                  {view.visibility === 'private' && <span style={{ marginRight: 2, fontSize: 10 }}>{'\uD83D\uDD12'}</span>}
+                  {view.name}
+                  {sig.activeViewId === view.id && sig.dirty && (
+                    <span style={s.dirtyDot} title="Unsaved changes" />
+                  )}
+                </>
+              )}
+            </button>
+          );
+        })}
 
-      {/* Save / Update button */}
-      {sig.dirty && (
-        sig.activeViewId ? (
-          <button style={s.saveBtn} onClick={handleUpdateView}>
-            Save
-          </button>
-        ) : (
-          <button style={s.saveBtn} onClick={() => setShowNameInput(true)}>
-            Save as view
-          </button>
-        )
-      )}
+        {/* Save / Update button */}
+        {sig.dirty && (
+          sig.activeViewId ? (
+            <button style={s.saveBtn} onClick={handleUpdateView}>
+              Save
+            </button>
+          ) : (
+            <button style={s.saveBtn} onClick={() => setShowNameInput(true)}>
+              Save as view
+            </button>
+          )
+        )}
 
-      {/* New view button */}
-      <button style={s.addBtn} onClick={() => setShowNameInput(true)} title="Create new view">
-        +
-      </button>
+        {/* New view button */}
+        <button style={s.addBtn} onClick={() => setShowNameInput(true)} title="Create new view">
+          +
+        </button>
+      </div>
 
-      {/* New view name input popover */}
+      {/* New view name input popover — rendered outside the scrolling container so it isn't clipped */}
       {showNameInput && (
         <>
           <div style={s.overlay} onClick={() => setShowNameInput(false)} />
@@ -347,6 +349,7 @@ export function ViewTabs({ scope, session }: ViewTabsProps) {
                 return (
                   <button
                     key={vt}
+                    type="button"
                     onClick={() => setNewViewType(vt)}
                     style={{
                       display: 'inline-flex', alignItems: 'center', gap: 4,
@@ -366,12 +369,14 @@ export function ViewTabs({ scope, session }: ViewTabsProps) {
             {/* Visibility */}
             <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
               <button
+                type="button"
                 style={newViewVisibility === 'private' ? s.visBtnActive : s.visBtn}
                 onClick={() => setNewViewVisibility('private')}
               >
                 {'\uD83D\uDD12'} Private
               </button>
               <button
+                type="button"
                 style={newViewVisibility === 'shared' ? s.visBtnActive : s.visBtn}
                 onClick={() => setNewViewVisibility('shared')}
               >
@@ -418,6 +423,10 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
   };
 
   return {
+    wrapper: {
+      position: 'relative' as const,
+      flexShrink: 0,
+    },
     container: {
       display: 'flex',
       alignItems: 'center',
@@ -427,7 +436,6 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       background: t.bgCard,
       overflowX: 'auto',
       flexShrink: 0,
-      position: 'relative' as const,
     },
     tab: tabBase,
     tabActive: {
