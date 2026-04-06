@@ -32,6 +32,8 @@ export interface TableViewConfig {
   profileFields?: string[];
   /** Field key used as the record's display name (falls back to rec.value.name / target segment) */
   displayField?: string;
+  /** Field key used to group records into kanban columns */
+  kanbanField?: string;
 }
 
 // ---------------------------------------------------------------------------
