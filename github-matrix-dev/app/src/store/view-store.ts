@@ -29,6 +29,25 @@ function persistSig(sig: ViewSig): void {
 }
 
 // ---------------------------------------------------------------------------
+// localStorage helpers — savedViews persistence
+// ---------------------------------------------------------------------------
+
+const SAVED_VIEWS_KEY = 'eo-saved-views';
+
+function loadSavedViews(): Record<string, SavedView> {
+  try {
+    const raw = localStorage.getItem(SAVED_VIEWS_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch { return {}; }
+}
+
+function persistSavedViews(views: Record<string, SavedView>): void {
+  try {
+    localStorage.setItem(SAVED_VIEWS_KEY, JSON.stringify(views));
+  } catch { /* quota exceeded — silently drop */ }
+}
+
+// ---------------------------------------------------------------------------
 // Store
 // ---------------------------------------------------------------------------
 
@@ -87,7 +106,7 @@ interface ViewStoreState {
 
 export const useViewStore = create<ViewStoreState>((set, get) => ({
   sigs: {},
-  savedViews: {},
+  savedViews: loadSavedViews(),
 
   getSig(scope: string): ViewSig {
     const existing = get().sigs[scope];
@@ -217,12 +236,14 @@ export const useViewStore = create<ViewStoreState>((set, get) => ({
     const map: Record<string, SavedView> = { ...get().savedViews };
     for (const v of views) map[v.id] = v;
     set({ savedViews: map });
+    persistSavedViews(map);
   },
 
   removeSavedView(viewId) {
     const map = { ...get().savedViews };
     delete map[viewId];
     set({ savedViews: map });
+    persistSavedViews(map);
   },
 
   getViewsForScope(scope) {

@@ -9,6 +9,11 @@ import { buildTree, formatName, type TreeNode } from './scope-picker-utils';
 import { useViewStore } from '../store/view-store';
 import { Modal } from './Modal';
 import { usePanelPosition } from '../hooks/usePanelPosition';
+import { VIEW_TYPE_META, createDefaultConfig, type ViewType, type SavedView } from './view-types';
+
+function navCacheKey(prefix: string): string {
+  return `eo-nav-cache:${prefix}`;
+}
 
 interface HolonNavProps {
   selectedScope: string | null;
@@ -16,15 +21,22 @@ interface HolonNavProps {
   onSelectSegment?: (scope: string, segment: FilterDefinition) => void;
   /** Prefix to scope which records are loaded. Empty string = all records. */
   statePrefix?: string;
+  /** Matrix user ID — needed for creating views. */
+  userId?: string;
 }
 
-export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, statePrefix = '' }: HolonNavProps) {
+export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, statePrefix = '', userId }: HolonNavProps) {
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
   const getState = useEoStore((s) => s.getState);
   const dispatch = useEoStore((s) => s.dispatch);
   const ready = useEoStore((s) => s.ready);
   const lastSeq = useEoStore((s) => s.lastSeq);
-  const [allStates, setAllStates] = useState<EoState[]>([]);
+  const [allStates, setAllStates] = useState<EoState[]>(() => {
+    try {
+      const raw = localStorage.getItem(navCacheKey(statePrefix));
+      return raw ? JSON.parse(raw) : [];
+    } catch { return []; }
+  });
   const prevStatesKeyRef = useRef<string>('');
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; target: string } | null>(null);
@@ -33,6 +45,13 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
   /** When set, only this top-level entity type is shown (drill-down mode) */
   const [focusedEntity, setFocusedEntity] = useState<string | null>(null);
   const viewStore = useViewStore();
+
+  // --- Create-view inline form state ---
+  const [showCreateView, setShowCreateView] = useState(false);
+  const [newViewName, setNewViewName] = useState('');
+  const [newViewType, setNewViewType] = useState<ViewType>('grid');
+  const [newViewVisibility, setNewViewVisibility] = useState<'private' | 'shared'>('shared');
+  const [creating, setCreating] = useState(false);
   const { theme } = useTheme();
   const s = makeStyles(theme);
   const typeSelectorPos = usePanelPosition({
@@ -44,20 +63,27 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
   });
 
   useEffect(() => {
-    if (!ready) return;
+    if (!ready) return; // keep cached allStates when not ready
     getStateByPrefix(statePrefix).then((states) => {
       const key = states.map(s => s.target + ':' + s.last_seq).join('|');
       if (key !== prevStatesKeyRef.current) {
         prevStatesKeyRef.current = key;
         setAllStates(states);
+        try { localStorage.setItem(navCacheKey(statePrefix), JSON.stringify(states)); } catch { /* quota */ }
       }
     });
   }, [ready, lastSeq, getStateByPrefix, statePrefix]);
 
-  // Reset expansion and drill-down when space changes
+  // Reset expansion and drill-down when space changes; hydrate from cache
   useEffect(() => {
     setExpanded(new Set());
     setFocusedEntity(null);
+    setShowCreateView(false);
+    try {
+      const raw = localStorage.getItem(navCacheKey(statePrefix));
+      if (raw) setAllStates(JSON.parse(raw));
+      else setAllStates([]);
+    } catch { setAllStates([]); }
   }, [statePrefix]);
 
   const tree = useMemo(() => buildTree(allStates, statePrefix), [allStates, statePrefix]);
@@ -127,6 +153,59 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
       });
     } catch { /* ignore */ }
     setTypeSelector(null);
+  }
+
+  function resetCreateForm() {
+    setNewViewName('');
+    setNewViewType('grid');
+    setNewViewVisibility('shared');
+    setShowCreateView(false);
+  }
+
+  async function handleCreateView() {
+    if (!focusedEntity || !newViewName.trim() || creating || !userId) return;
+    setCreating(true);
+    const viewId = crypto.randomUUID().replace(/-/g, '').slice(0, 12);
+    const now = new Date().toISOString();
+    const config = createDefaultConfig();
+    const name = newViewName.trim();
+    try {
+      await dispatch({
+        op: 'INS',
+        target: `${focusedEntity}._views.${viewId}`,
+        operand: {
+          name,
+          viewType: newViewType,
+          config,
+          visibility: newViewVisibility,
+          createdBy: userId,
+          createdAt: now,
+          updatedAt: now,
+        },
+        agent: `user:${userId}`,
+        ts: now,
+        acquired_ts: now,
+        client_event_id: crypto.randomUUID(),
+      });
+    } catch (err) {
+      console.error('[HolonNav] Failed to create view:', err);
+    }
+    const savedView: SavedView = {
+      id: viewId,
+      name,
+      scope: focusedEntity,
+      viewType: newViewType,
+      config,
+      visibility: newViewVisibility,
+      createdBy: userId,
+      createdAt: now,
+      updatedAt: now,
+    };
+    viewStore.registerSavedViews([savedView]);
+    viewStore.activateView(focusedEntity, savedView);
+    onSelectScope(focusedEntity);
+    resetCreateForm();
+    setCreating(false);
   }
 
   function getContextMenuItems(target: string): ContextMenuItem[] {
@@ -307,6 +386,84 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
               <span>All records</span>
             </div>
             {renderNode(focusedNode, 0, undefined, false)}
+
+            {/* + New view button / inline form */}
+            {!showCreateView ? (
+              <div
+                style={{
+                  ...s.segItem,
+                  paddingLeft: 28,
+                  color: theme.accent,
+                  fontWeight: 500,
+                  marginTop: 4,
+                }}
+                onClick={() => setShowCreateView(true)}
+              >
+                <span style={{ fontSize: 12, opacity: 0.8 }}>+</span>
+                <span style={s.segName}>New view</span>
+              </div>
+            ) : (
+              <div style={s.createViewForm}>
+                <input
+                  autoFocus
+                  value={newViewName}
+                  onChange={(e) => setNewViewName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') handleCreateView();
+                    if (e.key === 'Escape') resetCreateForm();
+                  }}
+                  placeholder="View name..."
+                  style={s.createViewInput}
+                />
+                <div style={{ display: 'flex', gap: 4, marginTop: 6, flexWrap: 'wrap' as const }}>
+                  {(Object.keys(VIEW_TYPE_META) as ViewType[]).map((vt) => {
+                    const meta = VIEW_TYPE_META[vt];
+                    const active = newViewType === vt;
+                    return (
+                      <button
+                        key={vt}
+                        onClick={() => setNewViewType(vt)}
+                        style={{
+                          display: 'inline-flex', alignItems: 'center', gap: 3,
+                          padding: '3px 7px', fontSize: 10, fontWeight: active ? 600 : 400,
+                          border: `1px solid ${active ? theme.accent : theme.border}`,
+                          borderRadius: 4, cursor: 'pointer',
+                          background: active ? theme.accentBg : 'transparent',
+                          color: active ? theme.accent : theme.textSecondary,
+                        }}
+                      >
+                        <span style={{ fontSize: 11 }}>{meta.icon}</span>
+                        {meta.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+                  <button
+                    style={newViewVisibility === 'private' ? s.createViewVisBtnActive : s.createViewVisBtn}
+                    onClick={() => setNewViewVisibility('private')}
+                  >
+                    {'\uD83D\uDD12'} Private
+                  </button>
+                  <button
+                    style={newViewVisibility === 'shared' ? s.createViewVisBtnActive : s.createViewVisBtn}
+                    onClick={() => setNewViewVisibility('shared')}
+                  >
+                    {'\uD83D\uDD13'} Shared
+                  </button>
+                </div>
+                <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+                  <button style={s.createViewCancelBtn} onClick={resetCreateForm}>Cancel</button>
+                  <button
+                    style={(!newViewName.trim() || creating) ? s.createViewSubmitBtnDisabled : s.createViewSubmitBtn}
+                    onClick={handleCreateView}
+                    disabled={!newViewName.trim() || creating}
+                  >
+                    {creating ? 'Creating...' : 'Create'}
+                  </button>
+                </div>
+              </div>
+            )}
           </>
         ) : (
           tree.map(node => renderNode(node, 0, undefined, true))
@@ -552,6 +709,81 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       overflow: 'hidden',
       textOverflow: 'ellipsis',
       whiteSpace: 'nowrap' as const,
+    },
+    createViewForm: {
+      margin: '6px 12px 4px',
+      padding: 10,
+      background: t.bgCard,
+      border: `1px solid ${t.border}`,
+      borderRadius: 6,
+    },
+    createViewInput: {
+      width: '100%',
+      height: 28,
+      fontSize: 11,
+      padding: '0 8px',
+      border: `1px solid ${t.border}`,
+      borderRadius: 4,
+      background: t.bgCard,
+      color: t.text,
+      outline: 'none',
+      boxSizing: 'border-box' as const,
+    },
+    createViewVisBtn: {
+      flex: 1,
+      padding: '4px 0',
+      fontSize: 10,
+      fontWeight: 500,
+      border: `1px solid ${t.border}`,
+      borderRadius: 4,
+      background: 'transparent',
+      color: t.textMuted,
+      cursor: 'pointer',
+    },
+    createViewVisBtnActive: {
+      flex: 1,
+      padding: '4px 0',
+      fontSize: 10,
+      fontWeight: 600,
+      border: `1px solid ${t.accent}`,
+      borderRadius: 4,
+      background: t.accentBg,
+      color: t.accent,
+      cursor: 'pointer',
+    },
+    createViewCancelBtn: {
+      flex: 1,
+      padding: '5px 0',
+      fontSize: 11,
+      fontWeight: 500,
+      border: `1px solid ${t.border}`,
+      borderRadius: 4,
+      background: 'transparent',
+      color: t.textSecondary,
+      cursor: 'pointer',
+    },
+    createViewSubmitBtn: {
+      flex: 1,
+      padding: '5px 0',
+      fontSize: 11,
+      fontWeight: 600,
+      border: 'none',
+      borderRadius: 4,
+      background: t.accent,
+      color: '#fff',
+      cursor: 'pointer',
+    },
+    createViewSubmitBtnDisabled: {
+      flex: 1,
+      padding: '5px 0',
+      fontSize: 11,
+      fontWeight: 600,
+      border: `1px solid ${t.border}`,
+      borderRadius: 4,
+      background: t.bgMuted,
+      color: t.textMuted,
+      cursor: 'not-allowed',
+      opacity: 0.6,
     },
   };
 }
