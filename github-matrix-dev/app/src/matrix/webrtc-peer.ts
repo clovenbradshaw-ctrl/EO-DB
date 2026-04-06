@@ -42,7 +42,7 @@ const RTC_ICE = _rtcTypes.ice;
 const RTC_HANGUP = _rtcTypes.hangup;
 
 /** Build the Map<userId, Map<deviceId, content>> structure for sendToDevice. */
-function toDeviceContent(userId: string, deviceId: string, content: Record<string, any>) {
+export function toDeviceContent(userId: string, deviceId: string, content: Record<string, any>) {
   const inner = new Map<string, Record<string, any>>();
   inner.set(deviceId, content);
   const outer = new Map<string, Map<string, Record<string, any>>>();
@@ -121,7 +121,7 @@ const DEFAULT_ICE: RTCConfiguration = {
   ],
 };
 
-function buildIceConfig(custom?: IceConfig): RTCConfiguration {
+export function buildIceConfig(custom?: IceConfig): RTCConfiguration {
   if (!custom) return DEFAULT_ICE;
   const servers: RTCIceServer[] = [];
   if (custom.stunServers) {

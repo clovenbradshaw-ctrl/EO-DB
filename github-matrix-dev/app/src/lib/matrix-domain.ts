@@ -75,6 +75,21 @@ export function peerRtcEventTypes(prefix?: string) {
   } as const;
 }
 
+/** Whisper (ephemeral P2P messaging) signaling event types (to-device only). */
+export function whisperEventTypes(prefix?: string) {
+  const p = prefix ?? _eventPrefix;
+  return {
+    /** SDP offer to start a whisper session. */
+    invite: `${p}.whisper.invite`,
+    /** SDP answer accepting a whisper session. */
+    accept: `${p}.whisper.accept`,
+    /** Peer declined the whisper invitation. */
+    decline: `${p}.whisper.decline`,
+    /** ICE candidate exchange during whisper signaling. */
+    ice: `${p}.whisper.ice`,
+  } as const;
+}
+
 /** Filen P2P sharing event types. */
 export function filenShareEventTypes(prefix?: string) {
   const p = prefix ?? _eventPrefix;

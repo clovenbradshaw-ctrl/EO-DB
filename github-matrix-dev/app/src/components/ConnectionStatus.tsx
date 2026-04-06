@@ -5,13 +5,15 @@
 import { useState, useEffect } from 'react';
 import { useTheme, type Theme } from '../theme';
 
-export type ConnectionState = 'online' | 'offline' | 'syncing' | 'local';
+export type ConnectionState = 'online' | 'offline' | 'syncing' | 'local' | 'error';
 
 interface ConnectionStatusProps {
   state: ConnectionState;
+  onRetry?: () => void;
+  errorMessage?: string;
 }
 
-export function ConnectionStatus({ state }: ConnectionStatusProps) {
+export function ConnectionStatus({ state, onRetry, errorMessage }: ConnectionStatusProps) {
   const { theme } = useTheme();
 
   const stateConfig: Record<ConnectionState, { color: string; bg: string; borderColor: string; label: string }> = {
@@ -19,6 +21,7 @@ export function ConnectionStatus({ state }: ConnectionStatusProps) {
     offline: { color: theme.danger, bg: theme.dangerBg, borderColor: theme.dangerBorder, label: 'Offline' },
     syncing: { color: theme.warning, bg: theme.warningBg, borderColor: theme.warningBorder, label: 'Syncing...' },
     local: { color: theme.accent, bg: theme.accentBg, borderColor: theme.accentBorder, label: 'Local' },
+    error: { color: theme.danger, bg: theme.dangerBg, borderColor: theme.dangerBorder, label: 'Error' },
   };
 
   const config = stateConfig[state];
@@ -36,7 +39,7 @@ export function ConnectionStatus({ state }: ConnectionStatusProps) {
       fontWeight: 500,
       flexShrink: 0,
       whiteSpace: 'nowrap' as const,
-    }}>
+    }} title={state === 'error' && errorMessage ? errorMessage : undefined}>
       <div style={{
         width: 6,
         height: 6,
@@ -49,6 +52,25 @@ export function ConnectionStatus({ state }: ConnectionStatusProps) {
       }}>
         {config.label}
       </span>
+      {state === 'error' && onRetry && (
+        <button
+          onClick={onRetry}
+          style={{
+            background: 'none',
+            border: `1px solid ${config.borderColor}`,
+            borderRadius: 8,
+            color: config.color,
+            cursor: 'pointer',
+            fontSize: 9,
+            fontFamily: "'JetBrains Mono', monospace",
+            fontWeight: 600,
+            padding: '1px 6px',
+            marginLeft: 2,
+          }}
+        >
+          Retry
+        </button>
+      )}
     </div>
   );
 }

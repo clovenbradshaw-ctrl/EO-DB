@@ -75,6 +75,9 @@ export class SyncManager {
   private syncStateHandler: ((state: string, prevState: string | null) => void) | null = null;
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
 
+  /** Late room arrival listener — cleaned up in destroy(). */
+  private lateRoomHandler: ((room: any) => void) | null = null;
+
   /** Whether this manager has been destroyed. */
   private destroyed = false;
 
@@ -144,6 +147,10 @@ export class SyncManager {
       clearTimeout(this.flushTimer);
       this.flushTimer = null;
     }
+    if (this.lateRoomHandler) {
+      this.client.off('Room' as any, this.lateRoomHandler);
+      this.lateRoomHandler = null;
+    }
   }
 
   /**
@@ -160,8 +167,42 @@ export class SyncManager {
       await new Promise(resolve => setTimeout(resolve, delay));
       delay *= 2;
     }
-    console.warn('[EO-DB] Room', this.roomId, 'not available after polling — continuing with live listener only');
+    console.warn('[EO-DB] Room', this.roomId, 'not available after polling — registering late arrival listener');
+    // Register a one-shot listener so we can hydrate/replay when the room
+    // eventually appears from the sync stream.
+    const handler = (arrivedRoom: any) => {
+      if (this.destroyed) return;
+      if (arrivedRoom.roomId !== this.roomId) return;
+      this.client.off('Room' as any, handler);
+      this.lateRoomHandler = null;
+      this.lateInitialize();
+    };
+    this.lateRoomHandler = handler;
+    this.client.on('Room' as any, handler);
     return null;
+  }
+
+  /**
+   * Called when a room arrives late (after initial polling timed out).
+   * Performs hydration + replay that was skipped during initialize().
+   */
+  private async lateInitialize(): Promise<void> {
+    if (this.destroyed) return;
+    try {
+      const currentSeq = await this.store.getCurrentSeq();
+      if (currentSeq === 0) {
+        try {
+          await this.hydrateFromSnapshot();
+        } catch (e) {
+          console.warn('[EO-DB] Late snapshot hydration failed:', e);
+        }
+      }
+      await this.replayTimelineEvents();
+      await this.flushUnsyncedEvents();
+      console.log('[EO-DB] Late room initialization completed for', this.roomId);
+    } catch (e) {
+      console.warn('[EO-DB] Late room initialization failed:', e);
+    }
   }
 
   /**
@@ -177,9 +218,15 @@ export class SyncManager {
 
     const currentSeq = await this.store.getCurrentSeq();
 
-    // On a fresh device, restore from the latest Matrix media snapshot
+    // On a fresh device, restore from the latest Matrix media snapshot.
+    // Non-fatal: a missing or corrupt snapshot shouldn't block sync —
+    // timeline replay will still pick up events from the room.
     if (currentSeq === 0) {
-      await this.hydrateFromSnapshot();
+      try {
+        await this.hydrateFromSnapshot();
+      } catch (e) {
+        console.warn('[EO-DB] Snapshot hydration failed, continuing with timeline replay:', e);
+      }
     }
 
     // Replay EO events already in the room timeline (from initial sync).
