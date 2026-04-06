@@ -14,6 +14,7 @@ import { seedHash, chainHash } from './hash';
 export interface HorizonOpts {
   prefix?: boolean;
   ancestry?: boolean;     // default true (fast)
+  ancestryLight?: boolean; // default true; when true, skip expensive children/sibling counts
   signals?: boolean;      // default false (opt-in; expensive)
   grounds?: boolean;      // default true (fast — from fold cache / ground prefix)
   nearby?: boolean;       // default false (opt-in; O(N) edge lookups)
@@ -48,7 +49,7 @@ export async function horizonGet(
   // Run independent lookups in parallel. Expensive ones are opt-in so the
   // caller (e.g. RecordView on drawer open) can skip them for instant render.
   const [ancestry, grounds, nearby, governance, signals, hashCohort, recCycle] = await Promise.all([
-    opts?.ancestry !== false ? getAncestry(store, resolved) : Promise.resolve(undefined),
+    opts?.ancestry !== false ? getAncestry(store, resolved, opts?.ancestryLight !== false) : Promise.resolve(undefined),
     opts?.grounds !== false ? getGrounds(store, resolved) : Promise.resolve([] as GroundEntry[]),
     opts?.nearby === true ? getNearby(store, resolved) : Promise.resolve(undefined),
     opts?.governance === true ? getGovernance(store, resolved) : Promise.resolve(undefined),
@@ -165,7 +166,7 @@ async function getGrounds(store: EoStore, target: string): Promise<GroundEntry[]
 
 // --- Ancestry ---
 
-async function getAncestry(store: EoStore, target: string): Promise<AncestryEntry[]> {
+async function getAncestry(store: EoStore, target: string, light = false): Promise<AncestryEntry[]> {
   const parts = target.split('.');
   if (parts.length <= 1) return [];
 
@@ -196,22 +197,28 @@ async function getAncestry(store: EoStore, target: string): Promise<AncestryEntr
       }
     }
 
-    const childPrefix = ancestorTarget + '.';
-    const allChildren = await getStateByPrefix(store, childPrefix);
-    const directChildren = allChildren.filter(s => {
-      const childParts = s.target.split('.');
-      return childParts.length === depth + 1 && !s.value?._alias;
-    });
-
+    // In light mode, skip expensive prefix scans for children/sibling counts.
+    // These are informational metadata and not critical for initial render.
+    let childrenCount = 0;
     let nearbyCount = 0;
-    if (depth >= 2) {
-      const parentTarget = parts.slice(0, depth - 1).join('.');
-      const sibPrefix = parentTarget + '.';
-      const siblings = await getStateByPrefix(store, sibPrefix);
-      nearbyCount = siblings.filter(s => {
-        const sp = s.target.split('.');
-        return sp.length === depth && s.target !== ancestorTarget && !s.value?._alias;
+
+    if (!light) {
+      const childPrefix = ancestorTarget + '.';
+      const allChildren = await getStateByPrefix(store, childPrefix);
+      childrenCount = allChildren.filter(s => {
+        const childParts = s.target.split('.');
+        return childParts.length === depth + 1 && !s.value?._alias;
       }).length;
+
+      if (depth >= 2) {
+        const parentTarget = parts.slice(0, depth - 1).join('.');
+        const sibPrefix = parentTarget + '.';
+        const siblings = await getStateByPrefix(store, sibPrefix);
+        nearbyCount = siblings.filter(s => {
+          const sp = s.target.split('.');
+          return sp.length === depth && s.target !== ancestorTarget && !s.value?._alias;
+        }).length;
+      }
     }
 
     ancestry.push({
@@ -219,7 +226,7 @@ async function getAncestry(store: EoStore, target: string): Promise<AncestryEntr
       figure: figure && !figure.value?._alias ? figure : null,
       grounds: ancestorGrounds,
       nearby_count: nearbyCount,
-      children_count: directChildren.length,
+      children_count: childrenCount,
       depth: distance,
     });
   }
