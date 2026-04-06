@@ -30,6 +30,17 @@ export function FigureFields({ figure, onNavigate, profileFields }: FigureFields
   }
 
   let entries = Object.entries(value).filter(([k]) => !k.startsWith('_') && k !== 'linked' && k !== 'edge_type');
+
+  // Flatten the "fields" sub-object: promote each sub-key to a top-level entry
+  const fieldsObj = entries.find(([k]) => k === 'fields');
+  if (fieldsObj && typeof fieldsObj[1] === 'object' && fieldsObj[1] !== null && !Array.isArray(fieldsObj[1])) {
+    const subEntries = Object.entries(fieldsObj[1] as Record<string, unknown>);
+    entries = [
+      ...entries.filter(([k]) => k !== 'fields'),
+      ...subEntries,
+    ];
+  }
+
   // Display name overrides stored in _fieldLabels on the figure
   const fieldLabels: Record<string, string> = (value as any)._fieldLabels || {};
 
@@ -388,7 +399,7 @@ function renderFieldValue(
     );
   }
 
-  // Other objects (non-array, non-linked) — render as key-value pairs
+  // Other objects (non-array, non-linked) — render as key-value pairs recursively
   if (typeof val === 'object' && val !== null) {
     const objEntries = Object.entries(val);
     if (objEntries.length === 0) {
@@ -399,7 +410,9 @@ function renderFieldValue(
         {objEntries.map(([k, v]) => (
           <div key={k} style={{ display: 'flex', alignItems: 'baseline', gap: 8, padding: '3px 0', borderBottom: `1px solid ${t.borderLight}` }}>
             <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: t.textMuted, minWidth: 80, flexShrink: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{k}</span>
-            <span style={{ fontSize: 12, color: t.text, fontFamily: typeof v === 'number' ? "'JetBrains Mono', monospace" : 'inherit', wordBreak: 'break-word' }}>{typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v)}</span>
+            <span style={{ fontSize: 12, color: t.text, wordBreak: 'break-word' }}>
+              {renderFieldValue(v, onNavigate, t, resolver)}
+            </span>
           </div>
         ))}
       </div>
