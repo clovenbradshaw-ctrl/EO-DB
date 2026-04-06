@@ -12,6 +12,8 @@ import {
   type FieldAssignment,
   type ResolvedPermissions,
   type SpaceConfig,
+  type UserTypeAssignment,
+  type FieldTypeVisibility,
   powerLevelToRole,
 } from './types';
 
@@ -37,6 +39,9 @@ export function resolvePermissions(
   restrictedRoom?: Room | null,
   governanceRoom?: Room | null,
   spaceConfig?: SpaceConfig | null,
+  userTypeAssignments?: UserTypeAssignment[] | null,
+  fieldTypeVisibility?: FieldTypeVisibility[] | null,
+  activeUserType?: string | null,
 ): ResolvedPermissions {
   // 1. Read power level from Matrix room state
   const pl = getUserPowerLevel(mainRoom, userId);
@@ -60,7 +65,21 @@ export function resolvePermissions(
     .filter(f => f.locked_to && !f.locked_to.includes(role))
     .map(f => f.field);
 
-  // 5. Return capabilities derived from power level
+  // 5. Resolve user types
+  const userTypes = userTypeAssignments
+    ?.find(a => a.user_id === userId)?.type_ids ?? [];
+  const effectiveActiveType = activeUserType ?? null;
+
+  // Admin+ (pl >= 50) bypasses type-based field hiding
+  const typeHiddenFields = pl >= 50 ? [] : (fieldTypeVisibility ?? [])
+    .filter(ftv =>
+      ftv.visible_to_types.length > 0 &&
+      (effectiveActiveType === null ||
+        !ftv.visible_to_types.includes(effectiveActiveType))
+    )
+    .map(ftv => ftv.field);
+
+  // 6. Return capabilities derived from power level
   return {
     role,
     powerLevel: pl,
@@ -84,6 +103,10 @@ export function resolvePermissions(
     restricted_fields: restrictedFields,
     locked_fields: lockedFields,
     redacted_fields: redactedFields,
+
+    user_types: userTypes,
+    active_user_type: effectiveActiveType,
+    type_hidden_fields: typeHiddenFields,
   };
 }
 
@@ -96,6 +119,9 @@ export function resolvePermissionsFromSharing(
   owner: string,
   sharing: Array<{ user_id: string; access: 'read' | 'write' | 'admin' }>,
   fieldAssignments?: FieldAssignment[],
+  userTypeAssignments?: UserTypeAssignment[] | null,
+  fieldTypeVisibility?: FieldTypeVisibility[] | null,
+  activeUserType?: string | null,
 ): ResolvedPermissions {
   let pl: number;
 
@@ -125,6 +151,20 @@ export function resolvePermissionsFromSharing(
     .filter(f => f.locked_to && !f.locked_to.includes(role))
     .map(f => f.field);
 
+  // Resolve user types
+  const userTypes = userTypeAssignments
+    ?.find(a => a.user_id === userId)?.type_ids ?? [];
+  const effectiveActiveType = activeUserType ?? null;
+
+  // Admin+ (pl >= 50) bypasses type-based field hiding
+  const typeHiddenFields = pl >= 50 ? [] : (fieldTypeVisibility ?? [])
+    .filter(ftv =>
+      ftv.visible_to_types.length > 0 &&
+      (effectiveActiveType === null ||
+        !ftv.visible_to_types.includes(effectiveActiveType))
+    )
+    .map(ftv => ftv.field);
+
   return {
     role,
     powerLevel: pl,
@@ -148,6 +188,10 @@ export function resolvePermissionsFromSharing(
     restricted_fields: restrictedFields,
     locked_fields: lockedFields,
     redacted_fields: restrictedFields.filter(() => pl < 50),
+
+    user_types: userTypes,
+    active_user_type: effectiveActiveType,
+    type_hidden_fields: typeHiddenFields,
   };
 }
 

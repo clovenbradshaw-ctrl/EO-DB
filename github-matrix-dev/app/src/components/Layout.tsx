@@ -37,6 +37,7 @@ import { PeopleView } from './PeopleView';
 import { RecordPageView } from './builder/RecordPageView';
 import { PermissionBadge } from './PermissionBadge';
 import { ViewOnlyBanner } from './ViewOnlyBanner';
+import { HeadlineMetrics } from './HeadlineMetrics';
 import { useViewStore } from '../store/view-store';
 import { useBuilderStore } from '../store/builder-store';
 import { useSyncStore } from '../store/sync-store';
@@ -50,7 +51,8 @@ import { Horizon } from './Horizon';
 import { type TimeScrubberFilter, type DateColumnOption, DEFAULT_FILTER, detectDateColumns } from './time-scrubber-utils';
 import { hasFieldsSubObject, buildFieldNameMap } from './filter-types';
 import { useHashRoute, type View } from '../lib/router';
-import { type AccessRole, powerLevelToRole, legacyAccessToRole } from '../permissions/types';
+import { type AccessRole, type UserTypeDefinition, powerLevelToRole, legacyAccessToRole } from '../permissions/types';
+import { UserTypeSwitcher } from './UserTypeSwitcher';
 import { resolvePermissionsFromSharing } from '../permissions/resolve';
 import { RecycleBin, addDeletedSpace, isSpaceDeleted, removeDeletedSpace, getDeletedSpaces } from './RecycleBin';
 import { addArchivedSpace, isSpaceArchived, removeArchivedSpace, getArchivedSpaces } from './ArchivedSpaces';
@@ -1152,6 +1154,36 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   const currentSpaceState = useMemo(() => {
     return spaces.find(s => normalizeSpaceTarget(s.target) === selectedSpace);
   }, [spaces, selectedSpace]);
+  const activeUserType = useEoStore((st) => st.activeUserType);
+  const setActiveUserType = useEoStore((st) => st.setActiveUserType);
+
+  // User type definitions & assignments from space state
+  const spaceUserTypeDefinitions: UserTypeDefinition[] = currentSpaceState?.value?._user_type_definitions || [];
+  const spaceUserTypeAssignments = currentSpaceState?.value?._user_type_assignments || [];
+  const spaceFieldTypeVisibility = currentSpaceState?.value?._field_type_visibility || [];
+  const currentUserAssignedTypes: string[] = useMemo(() => {
+    const assignment = spaceUserTypeAssignments.find(
+      (a: { user_id: string }) => a.user_id === session.userId,
+    );
+    return assignment?.type_ids ?? [];
+  }, [spaceUserTypeAssignments, session.userId]);
+
+  // Restore active user type from localStorage on space change
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem('eo-active-user-type');
+      if (saved && currentUserAssignedTypes.includes(saved)) {
+        setActiveUserType(saved);
+      } else if (currentUserAssignedTypes.length > 0) {
+        setActiveUserType(currentUserAssignedTypes[0]);
+      } else {
+        setActiveUserType(null);
+      }
+    } catch {
+      setActiveUserType(null);
+    }
+  }, [selectedSpace, currentUserAssignedTypes]);
+
   const currentPermissions = useMemo(() => {
     if (!currentSpaceState) {
       // No space state found — if a space is selected, treat current user as owner
@@ -1164,8 +1196,11 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     const owner = currentSpaceState.last_agent;
     const sharing = currentSpaceState.value?._sharing || [];
     const fieldAssignments = currentSpaceState.value?._field_assignments || [];
-    return resolvePermissionsFromSharing(session.userId, owner, sharing, fieldAssignments);
-  }, [currentSpaceState, session.userId, selectedSpace]);
+    return resolvePermissionsFromSharing(
+      session.userId, owner, sharing, fieldAssignments,
+      spaceUserTypeAssignments, spaceFieldTypeVisibility, activeUserType,
+    );
+  }, [currentSpaceState, session.userId, selectedSpace, spaceUserTypeAssignments, spaceFieldTypeVisibility, activeUserType]);
   const currentRole: AccessRole = currentPermissions?.role ?? 'viewer';
   const isViewer = currentRole === 'viewer';
 
@@ -1363,6 +1398,15 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           {selectedSpace && !isMobile && (
             <PermissionBadge role={currentRole} displayName={displayName} />
           )}
+          {/* User type switcher */}
+          {selectedSpace && !isMobile && currentUserAssignedTypes.length > 0 && (
+            <UserTypeSwitcher
+              typeDefinitions={spaceUserTypeDefinitions}
+              assignedTypeIds={currentUserAssignedTypes}
+              activeTypeId={activeUserType}
+              onSelect={setActiveUserType}
+            />
+          )}
           {/* Theme toggle */}
           <button
             onClick={toggleTheme}
@@ -1397,6 +1441,20 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           onFilterChange={setTimeScrubberFilter}
         />
       )}
+
+      {/* Headline metrics — type-scoped, under Horizon */}
+      {activeView === 'records' && activeUserType && (() => {
+        const activeDef = spaceUserTypeDefinitions.find(d => d.id === activeUserType);
+        const metrics = activeDef?.headline_metrics;
+        if (!metrics || metrics.length === 0) return null;
+        return (
+          <HeadlineMetrics
+            metrics={metrics}
+            records={scopedRecords}
+            typeColor={activeDef?.color}
+          />
+        );
+      })()}
 
       {/* Body */}
       <div style={s.body}>
@@ -1546,7 +1604,13 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                   />
                 ) : selectedScope ? (
                   <>
-                    <ViewTabs scope={selectedScope} session={{ userId: session.userId }} />
+                    <ViewTabs
+                      scope={selectedScope}
+                      session={{ userId: session.userId }}
+                      activeUserType={activeUserType}
+                      userTypeDefinitions={spaceUserTypeDefinitions}
+                      canManageViews={currentPermissions?.can_build_views}
+                    />
                     {activeViewType === 'schema' ? (
                       <SchemaView scope={selectedScope} />
                     ) : activeViewType === 'graph' ? (
@@ -1560,6 +1624,13 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                         session={{ userId: session.userId }}
                         timeScrubberFilter={timeScrubberFilter}
                         permissions={currentPermissions}
+                        viewReadOnly={(() => {
+                          if (!activeUserType) return false;
+                          const sig = viewSigs[selectedScope];
+                          if (!sig?.activeViewId) return false;
+                          const sv = viewSavedViews[sig.activeViewId];
+                          return sv?.readOnlyForTypes?.includes(activeUserType) ?? false;
+                        })()}
                       />
                     ) : (
                       <div style={{

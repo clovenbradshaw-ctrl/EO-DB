@@ -44,6 +44,8 @@ interface TableViewProps {
   session: { userId: string };
   timeScrubberFilter?: TimeScrubberFilter;
   permissions?: ResolvedPermissions | null;
+  /** When true, the current view is read-only for this user's type */
+  viewReadOnly?: boolean;
 }
 
 function formatRelativeTime(ts: string): string {
@@ -376,7 +378,7 @@ function renderCell(value: any, key: string, onNavigate: (t: string) => void, t:
   return <span>{String(value)}</span>;
 }
 
-export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, activeRecord, session, timeScrubberFilter, permissions }: TableViewProps) {
+export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, activeRecord, session, timeScrubberFilter, permissions, viewReadOnly }: TableViewProps) {
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
   const getState = useEoStore((s) => s.getState);
   const dispatch = useEoStore((s) => s.dispatch);
@@ -416,7 +418,12 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   const advancedFilters = viewConfig.filters;
   const filterConjunction = viewConfig.filterConjunction;
   const hiddenColumnsArr = viewConfig.hiddenColumns;
-  const hiddenColumns = useMemo(() => new Set(hiddenColumnsArr), [hiddenColumnsArr]);
+  const typeHiddenFields = permissions?.type_hidden_fields ?? [];
+  const hiddenColumns = useMemo(() => {
+    const s = new Set(hiddenColumnsArr);
+    for (const f of typeHiddenFields) s.add(f);
+    return s;
+  }, [hiddenColumnsArr, typeHiddenFields]);
   const columnOrder = viewConfig.columnOrder;
   const columnWidths = viewConfig.columnWidths;
   const rowHeight = viewConfig.rowHeight || 'default';
@@ -901,13 +908,14 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     } catch { /* ignore */ }
   }
 
-  const canEdit = permissions ? (permissions.can_edit_any_record || permissions.can_edit_own_records) : true;
+  const canEdit = viewReadOnly ? false : (permissions ? (permissions.can_edit_any_record || permissions.can_edit_own_records) : true);
 
   function handleCellDoubleClick(rec: EoState, colKey: string) {
     if (!canEdit) return;
     if (colKey === '_record' || colKey === '_last_updated') return;
     if (permissions?.locked_fields?.includes(colKey)) return;
     if (permissions?.redacted_fields?.includes(colKey)) return;
+    if (permissions?.type_hidden_fields?.includes(colKey)) return;
 
     const raw = getFieldValue(rec, colKey, useFieldsSub);
     const strVal = raw != null && typeof raw === 'object'

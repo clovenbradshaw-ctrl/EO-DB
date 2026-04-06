@@ -6,6 +6,9 @@ import type { EoState } from '../db/types';
 import {
   type AccessRole,
   type FieldAssignment,
+  type UserTypeDefinition,
+  type UserTypeAssignment,
+  type FieldTypeVisibility,
   ROLE_LABELS,
   ROLE_DESCRIPTIONS,
   ROLE_POWER_LEVELS,
@@ -17,6 +20,8 @@ import { resolvePermissionsFromSharing } from '../permissions/resolve';
 import { FieldPermissions } from './FieldPermissions';
 import { SpaceInvite } from './SpaceInvite';
 import { inviteToRoom } from '../permissions/room-topology';
+import { UserTypeManager } from './UserTypeManager';
+import { UserTypeBadge } from './UserTypeBadge';
 
 type AccessLevel = 'read' | 'write' | 'admin';
 
@@ -110,6 +115,11 @@ export function SpaceMembers({ spaceTarget, currentUserId, onClose, matrixClient
   const [fieldAssignments, setFieldAssignments] = useState<FieldAssignment[]>([]);
   const [availableFields, setAvailableFields] = useState<string[]>([]);
 
+  // User type state
+  const [userTypeDefinitions, setUserTypeDefinitions] = useState<UserTypeDefinition[]>([]);
+  const [userTypeAssignments, setUserTypeAssignments] = useState<UserTypeAssignment[]>([]);
+  const [fieldTypeVisibility, setFieldTypeVisibility] = useState<FieldTypeVisibility[]>([]);
+
   const currentUserAccess = getAccessLevel(currentUserId);
   const currentUserRole = getCurrentUserRole();
   const currentPermissions = resolvePermissionsFromSharing(
@@ -119,13 +129,22 @@ export function SpaceMembers({ spaceTarget, currentUserId, onClose, matrixClient
     fieldAssignments,
   );
 
-  // Load field assignments from space state
+  // Load field assignments and user types from space state
   useEffect(() => {
     if (spaceState?.value?._field_assignments) {
       setFieldAssignments(spaceState.value._field_assignments);
     }
     if (spaceState?.value?._available_fields) {
       setAvailableFields(spaceState.value._available_fields);
+    }
+    if (spaceState?.value?._user_type_definitions) {
+      setUserTypeDefinitions(spaceState.value._user_type_definitions);
+    }
+    if (spaceState?.value?._user_type_assignments) {
+      setUserTypeAssignments(spaceState.value._user_type_assignments);
+    }
+    if (spaceState?.value?._field_type_visibility) {
+      setFieldTypeVisibility(spaceState.value._field_type_visibility);
     }
   }, [spaceState]);
 
@@ -167,6 +186,83 @@ export function SpaceMembers({ spaceTarget, currentUserId, onClose, matrixClient
     } catch (e: any) {
       setAddError('Failed to update field permissions: ' + e.message);
     }
+  }
+
+  async function handleUpdateUserTypeDefinitions(updated: UserTypeDefinition[]) {
+    try {
+      // When deleting types, also clean up assignments and field visibility
+      const removedIds = userTypeDefinitions
+        .filter(t => !updated.some(u => u.id === t.id))
+        .map(t => t.id);
+
+      let cleanedAssignments = userTypeAssignments;
+      let cleanedVisibility = fieldTypeVisibility;
+
+      if (removedIds.length > 0) {
+        cleanedAssignments = userTypeAssignments.map(a => ({
+          ...a,
+          type_ids: a.type_ids.filter(id => !removedIds.includes(id)),
+        })).filter(a => a.type_ids.length > 0);
+
+        cleanedVisibility = fieldTypeVisibility.map(fv => ({
+          ...fv,
+          visible_to_types: fv.visible_to_types.filter(id => !removedIds.includes(id)),
+        })).filter(fv => fv.visible_to_types.length > 0);
+      }
+
+      await dispatch({
+        op: 'DEF',
+        target: spaceTarget,
+        operand: {
+          _user_type_definitions: updated,
+          ...(removedIds.length > 0 ? {
+            _user_type_assignments: cleanedAssignments,
+            _field_type_visibility: cleanedVisibility,
+          } : {}),
+        },
+        agent: currentUserId,
+        ts: new Date().toISOString(),
+        acquired_ts: new Date().toISOString(),
+      });
+      setUserTypeDefinitions(updated);
+      if (removedIds.length > 0) {
+        setUserTypeAssignments(cleanedAssignments);
+        setFieldTypeVisibility(cleanedVisibility);
+      }
+    } catch (e: any) {
+      setAddError('Failed to update user types: ' + e.message);
+    }
+  }
+
+  async function handleUpdateUserTypeAssignment(userId: string, typeIds: string[]) {
+    const existing = userTypeAssignments.find(a => a.user_id === userId);
+    let updated: UserTypeAssignment[];
+    if (typeIds.length === 0) {
+      updated = userTypeAssignments.filter(a => a.user_id !== userId);
+    } else if (existing) {
+      updated = userTypeAssignments.map(a =>
+        a.user_id === userId ? { ...a, type_ids: typeIds } : a
+      );
+    } else {
+      updated = [...userTypeAssignments, { user_id: userId, type_ids: typeIds }];
+    }
+    try {
+      await dispatch({
+        op: 'DEF',
+        target: spaceTarget,
+        operand: { _user_type_assignments: updated },
+        agent: currentUserId,
+        ts: new Date().toISOString(),
+        acquired_ts: new Date().toISOString(),
+      });
+      setUserTypeAssignments(updated);
+    } catch (e: any) {
+      setAddError('Failed to update type assignment: ' + e.message);
+    }
+  }
+
+  function getUserTypeIds(userId: string): string[] {
+    return userTypeAssignments.find(a => a.user_id === userId)?.type_ids ?? [];
   }
 
   function formatUserId(userId: string): string {
@@ -386,6 +482,8 @@ export function SpaceMembers({ spaceTarget, currentUserId, onClose, matrixClient
           color={avatarColor(owner)}
           role="Owner"
           isYou={owner === currentUserId}
+          userTypeIds={getUserTypeIds(owner)}
+          userTypeDefinitions={userTypeDefinitions}
         />
 
         {/* Member rows */}
@@ -407,6 +505,9 @@ export function SpaceMembers({ spaceTarget, currentUserId, onClose, matrixClient
               onChangeAccess={(level) => handleChangeAccess(m.user_id, level)}
               onRemove={() => handleRemoveMember(m.user_id)}
               currentAccess={m.access}
+              userTypeIds={getUserTypeIds(m.user_id)}
+              userTypeDefinitions={userTypeDefinitions}
+              onChangeTypes={(typeIds) => handleUpdateUserTypeAssignment(m.user_id, typeIds)}
             />
           );
         })}
@@ -418,6 +519,33 @@ export function SpaceMembers({ spaceTarget, currentUserId, onClose, matrixClient
           fieldAssignments={fieldAssignments}
           availableFields={availableFields}
           onUpdate={handleUpdateFieldAssignments}
+          canManage={currentPermissions.can_set_governance}
+          userTypeDefinitions={userTypeDefinitions}
+          fieldTypeVisibility={fieldTypeVisibility}
+          onUpdateFieldTypeVisibility={async (updated) => {
+            try {
+              await dispatch({
+                op: 'DEF',
+                target: spaceTarget,
+                operand: { _field_type_visibility: updated },
+                agent: currentUserId,
+                ts: new Date().toISOString(),
+                acquired_ts: new Date().toISOString(),
+              });
+              setFieldTypeVisibility(updated);
+            } catch (e: any) {
+              setAddError('Failed to update field type visibility: ' + e.message);
+            }
+          }}
+        />
+      </div>
+
+      {/* User type management section */}
+      <div style={{ padding: '0 20px 16px' }}>
+        <UserTypeManager
+          typeDefinitions={userTypeDefinitions}
+          availableFields={availableFields}
+          onUpdate={handleUpdateUserTypeDefinitions}
           canManage={currentPermissions.can_set_governance}
         />
       </div>
@@ -546,6 +674,9 @@ function PersonRow({
   onChangeAccess,
   onRemove,
   currentAccess,
+  userTypeIds,
+  userTypeDefinitions,
+  onChangeTypes,
 }: {
   theme: Theme;
   name: string;
@@ -559,6 +690,9 @@ function PersonRow({
   onChangeAccess?: (level: AccessLevel) => void;
   onRemove?: () => void;
   currentAccess?: AccessLevel;
+  userTypeIds?: string[];
+  userTypeDefinitions?: UserTypeDefinition[];
+  onChangeTypes?: (typeIds: string[]) => void;
 }) {
   const mono = "'JetBrains Mono', monospace";
 
@@ -607,6 +741,16 @@ function PersonRow({
               color: theme.textMuted,
             }}>
               {server}
+            </div>
+          )}
+          {/* User type badges */}
+          {userTypeIds && userTypeIds.length > 0 && userTypeDefinitions && (
+            <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap' as const, marginTop: 2 }}>
+              {userTypeIds.map(typeId => {
+                const def = userTypeDefinitions.find(d => d.id === typeId);
+                if (!def) return null;
+                return <UserTypeBadge key={typeId} label={def.label} color={def.color} compact />;
+              })}
             </div>
           )}
         </div>
@@ -711,6 +855,83 @@ function PersonRow({
                 </button>
               );
             })}
+
+            {/* User type assignment */}
+            {onChangeTypes && userTypeDefinitions && userTypeDefinitions.length > 0 && (
+              <>
+                <div style={{
+                  height: 1,
+                  background: theme.border,
+                  margin: '4px 0',
+                }} />
+                <div style={{
+                  padding: '6px 12px',
+                  fontFamily: mono,
+                  fontSize: 10,
+                  fontWeight: 600,
+                  color: theme.textMuted,
+                  textTransform: 'uppercase' as const,
+                  letterSpacing: '0.5px',
+                }}>
+                  User types
+                </div>
+                {userTypeDefinitions.map((ut) => {
+                  const assigned = userTypeIds?.includes(ut.id) ?? false;
+                  return (
+                    <button
+                      key={ut.id}
+                      onClick={() => {
+                        const current = userTypeIds ?? [];
+                        const next = assigned
+                          ? current.filter(id => id !== ut.id)
+                          : [...current, ut.id];
+                        onChangeTypes(next);
+                      }}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 6,
+                        width: '100%',
+                        textAlign: 'left' as const,
+                        padding: '6px 12px',
+                        background: assigned ? `${ut.color || theme.accent}10` : 'transparent',
+                        border: 'none',
+                        cursor: 'pointer',
+                        fontFamily: mono,
+                        fontSize: 11,
+                      }}
+                      onMouseEnter={(e) => {
+                        if (!assigned) e.currentTarget.style.background = theme.bgHover;
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.background = assigned ? `${ut.color || theme.accent}10` : 'transparent';
+                      }}
+                    >
+                      <span style={{
+                        width: 14, height: 14, borderRadius: 3,
+                        border: `1.5px solid ${assigned ? (ut.color || theme.accent) : theme.border}`,
+                        background: assigned ? (ut.color || theme.accent) : 'transparent',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        flexShrink: 0,
+                      }}>
+                        {assigned && (
+                          <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+                            <path d="M2 5.5L4 7.5L8 3" stroke="#fff" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                          </svg>
+                        )}
+                      </span>
+                      <span style={{
+                        width: 6, height: 6, borderRadius: '50%',
+                        background: ut.color || '#6b7280', flexShrink: 0,
+                      }} />
+                      <span style={{ color: assigned ? theme.text : theme.textSecondary }}>
+                        {ut.label}
+                      </span>
+                    </button>
+                  );
+                })}
+              </>
+            )}
 
             <div style={{
               height: 1,

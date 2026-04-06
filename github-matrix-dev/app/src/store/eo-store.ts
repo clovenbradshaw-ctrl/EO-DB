@@ -27,6 +27,8 @@ interface EoDbState {
   ready: boolean;
   /** Resolved permissions for the current user in the current space */
   resolvedPermissions: ResolvedPermissions | null;
+  /** Currently active user type (selected via header switcher) */
+  activeUserType: string | null;
 
   /** Initialize the store with an encrypted store instance */
   init: (store: EoStore) => Promise<void>;
@@ -42,6 +44,9 @@ interface EoDbState {
 
   /** Set resolved permissions for the current space */
   setPermissions: (permissions: ResolvedPermissions | null) => void;
+
+  /** Set the active user type (persisted to localStorage) */
+  setActiveUserType: (typeId: string | null) => void;
 
   /** Process an event through the fold */
   dispatch: (event: EoEventInput) => Promise<number>;
@@ -80,6 +85,7 @@ export const useEoStore = create<EoDbState>((set, get) => ({
   lastSeq: 0,
   ready: false,
   resolvedPermissions: null,
+  activeUserType: null,
 
   async init(store: EoStore) {
     // Set the store immediately so the UI can start reading from it.
@@ -148,6 +154,17 @@ export const useEoStore = create<EoDbState>((set, get) => ({
 
   setPermissions(permissions: ResolvedPermissions | null) {
     set({ resolvedPermissions: permissions });
+  },
+
+  setActiveUserType(typeId: string | null) {
+    set({ activeUserType: typeId });
+    try {
+      if (typeId) {
+        localStorage.setItem('eo-active-user-type', typeId);
+      } else {
+        localStorage.removeItem('eo-active-user-type');
+      }
+    } catch { /* quota exceeded — silently drop */ }
   },
 
   async dispatch(event: EoEventInput) {
@@ -232,6 +249,6 @@ export const useEoStore = create<EoDbState>((set, get) => ({
   teardown() {
     const { store } = get();
     if (store) store.close();
-    set({ store: null, syncManager: null, filenSync: null, ready: false, recentEvents: [], lastSeq: 0, resolvedPermissions: null });
+    set({ store: null, syncManager: null, filenSync: null, ready: false, recentEvents: [], lastSeq: 0, resolvedPermissions: null, activeUserType: null });
   },
 }));
