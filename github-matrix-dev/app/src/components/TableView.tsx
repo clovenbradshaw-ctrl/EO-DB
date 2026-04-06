@@ -21,11 +21,13 @@ import { useIsMobile, useIsNarrow } from '../hooks/useIsMobile';
 import { ColumnManagerPanel } from './ColumnManagerPanel';
 import {
   DndContext,
+  DragOverlay,
   closestCenter,
   PointerSensor,
   useSensor,
   useSensors,
   type DragEndEvent,
+  type DragStartEvent,
 } from '@dnd-kit/core';
 import {
   SortableContext,
@@ -448,10 +450,11 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   // --- Column resize state ---
   const [resizing, setResizing] = useState<{ key: string; startX: number; startWidth: number } | null>(null);
   const tableRef = useRef<HTMLTableElement>(null);
+  const [activeDragId, setActiveDragId] = useState<string | null>(null);
 
-  // --- DnD sensors ---
+  // --- DnD sensors (delay-based to prevent accidental drags while resizing) ---
   const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
+    useSensor(PointerSensor, { activationConstraint: { delay: 200, tolerance: 5 } }),
   );
 
   const scopeDepth = scope.split('.').length;
@@ -473,8 +476,12 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     };
   }, [resizing, scope, viewStore]);
 
-  // --- Column drag-end handler ---
+  // --- Column drag handlers ---
+  function handleColumnDragStart(event: DragStartEvent) {
+    setActiveDragId(event.active.id as string);
+  }
   function handleColumnDragEnd(event: DragEndEvent) {
+    setActiveDragId(null);
     const { active, over } = event;
     if (!over || active.id === over.id) return;
     const currentOrder = orderedColumns.map((c) => c.key);
@@ -1299,7 +1306,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
 
       {/* Table */}
       <div style={s.tableWrap}>
-        <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleColumnDragEnd}>
+        <DndContext sensors={sensors} collisionDetection={closestCenter} onDragStart={handleColumnDragStart} onDragEnd={handleColumnDragEnd} onDragCancel={() => setActiveDragId(null)}>
           <table ref={tableRef} style={{ ...s.table, tableLayout: 'fixed' }}>
             <colgroup>
               {orderedColumns.map((col) => (
@@ -1319,6 +1326,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                       renameCol={renameCol}
                       permissions={permissions}
                       isResizing={resizing?.key === col.key}
+                      isAnyResizing={resizing !== null}
                       disabled={col.key === '_record'}
                       onContextMenu={(e) => handleColumnContextMenu(e, col)}
                       onRename={(val) => handleColumnRename(col.key, val)}
@@ -1440,6 +1448,28 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
               })}
             </tbody>
           </table>
+          <DragOverlay dropAnimation={null}>
+            {activeDragId && (() => {
+              const col = orderedColumns.find(c => c.key === activeDragId);
+              if (!col) return null;
+              return (
+                <div style={{
+                  padding: '6px 10px',
+                  background: theme.bgCard,
+                  border: `2px solid ${theme.accent}`,
+                  borderRadius: 4,
+                  fontSize: 11,
+                  fontWeight: 600,
+                  color: theme.text,
+                  boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+                  whiteSpace: 'nowrap',
+                  opacity: 0.9,
+                }}>
+                  {col.label}
+                </div>
+              );
+            })()}
+          </DragOverlay>
         </DndContext>
       </div>
 
@@ -1532,6 +1562,7 @@ interface SortableColumnHeaderProps {
   renameCol: { key: string; value: string } | null;
   permissions?: ResolvedPermissions | null;
   isResizing: boolean;
+  isAnyResizing: boolean;
   disabled: boolean;
   onContextMenu: (e: React.MouseEvent) => void;
   onRename: (val: string) => void;
@@ -1539,10 +1570,13 @@ interface SortableColumnHeaderProps {
   onResizeStart: (startX: number) => void;
 }
 
+const DRAG_DEAD_ZONE_PX = 16; // suppress column drag near right edge (resize area)
+
 function SortableColumnHeader({
   col, theme, thStyle, sorts, renameCol, permissions,
-  isResizing, disabled, onContextMenu, onRename, onCancelRename, onResizeStart,
+  isResizing, isAnyResizing, disabled, onContextMenu, onRename, onCancelRename, onResizeStart,
 }: SortableColumnHeaderProps) {
+  const effectivelyDisabled = disabled || isAnyResizing;
   const {
     attributes,
     listeners,
@@ -1550,18 +1584,36 @@ function SortableColumnHeader({
     transform,
     transition,
     isDragging,
-  } = useSortable({ id: col.key, disabled });
+  } = useSortable({ id: col.key, disabled: effectivelyDisabled });
+
+  // Wrap dnd-kit listeners to add a dead zone near the resize handle edge
+  const filteredListeners = useMemo(() => {
+    if (effectivelyDisabled || !listeners) return {};
+    return Object.fromEntries(
+      Object.entries(listeners).map(([key, handler]) => {
+        if (key === 'onPointerDown') {
+          return [key, (e: React.PointerEvent) => {
+            const rect = e.currentTarget.getBoundingClientRect();
+            if (rect.right - e.clientX < DRAG_DEAD_ZONE_PX) return;
+            (handler as (e: React.PointerEvent) => void)(e);
+          }];
+        }
+        return [key, handler];
+      })
+    );
+  }, [listeners, effectivelyDisabled]);
 
   const style: React.CSSProperties = {
     ...thStyle,
-    cursor: disabled ? 'default' : 'grab',
+    cursor: effectivelyDisabled ? 'default' : 'grab',
     userSelect: 'none',
     position: 'sticky' as const,
     top: 0,
     transform: CSS.Transform.toString(transform ? { ...transform, y: 0 } : null),
     transition,
-    opacity: isDragging ? 0.5 : 1,
+    opacity: isDragging ? 0.3 : 1,
     zIndex: isDragging ? 10 : 2,
+    background: isDragging ? theme.bgHover : thStyle.background,
   };
 
   const isLocked = permissions?.locked_fields?.includes(col.key);
@@ -1571,7 +1623,7 @@ function SortableColumnHeader({
       ref={setNodeRef}
       style={style}
       {...attributes}
-      {...(disabled ? {} : listeners)}
+      {...filteredListeners}
       onContextMenu={onContextMenu}
     >
       {renameCol?.key === col.key ? (
@@ -1601,17 +1653,17 @@ function SortableColumnHeader({
           )}
         </span>
       )}
-      {/* Resize handle */}
+      {/* Resize handle — wide invisible hit area with narrow visible indicator */}
       <div
         style={{
           position: 'absolute',
           top: 0,
-          right: 0,
-          width: 5,
+          right: -4,
+          width: 12,
           height: '100%',
           cursor: 'col-resize',
-          background: isResizing ? theme.accent : theme.border,
           zIndex: 3,
+          background: 'transparent',
         }}
         onMouseDown={(e) => {
           e.stopPropagation();
@@ -1619,12 +1671,26 @@ function SortableColumnHeader({
           onResizeStart(e.clientX);
         }}
         onMouseEnter={(e) => {
-          if (!isResizing) (e.currentTarget as HTMLElement).style.background = theme.borderDivider;
+          const indicator = e.currentTarget.firstElementChild as HTMLElement;
+          if (!isResizing && indicator) indicator.style.background = theme.borderDivider;
         }}
         onMouseLeave={(e) => {
-          if (!isResizing) (e.currentTarget as HTMLElement).style.background = theme.border;
+          const indicator = e.currentTarget.firstElementChild as HTMLElement;
+          if (!isResizing && indicator) indicator.style.background = theme.border;
         }}
-      />
+      >
+        <div
+          style={{
+            position: 'absolute',
+            top: 0,
+            right: 4,
+            width: 5,
+            height: '100%',
+            background: isResizing ? theme.accent : theme.border,
+            pointerEvents: 'none',
+          }}
+        />
+      </div>
     </th>
   );
 }
