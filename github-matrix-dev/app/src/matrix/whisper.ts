@@ -283,10 +283,10 @@ export class WhisperChannel {
     const keyEntry = keyId ? getKeyById(this.keyring, keyId) : null;
 
     if (keyEntry) {
-      const encrypted = await encryptPeerPayload(keyEntry.key, keyId!, raw);
-      this.dc.send(pack(encrypted));
+      const encrypted = await encryptPeerPayload(keyEntry.key, keyId!, new Uint8Array(raw));
+      this.dc.send(new Uint8Array(pack(encrypted)));
     } else {
-      this.dc.send(raw);
+      this.dc.send(new Uint8Array(raw));
     }
   }
 
