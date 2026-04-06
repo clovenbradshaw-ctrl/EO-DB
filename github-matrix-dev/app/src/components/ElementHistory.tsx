@@ -41,6 +41,11 @@ function getAgentName(agent: string): string {
   return agent;
 }
 
+/** Short ID from a target path: "import.cases.CASE-001" -> "CASE-001" */
+function shortTarget(target: string): string {
+  return target.split('.').pop() || target;
+}
+
 function summarizeOperand(op: string, operand: any): string {
   if (!operand) return '';
   if (op === 'INS') {
@@ -51,11 +56,31 @@ function summarizeOperand(op: string, operand: any): string {
   if (op === 'DEF') {
     const keys = Object.keys(operand).filter(k => !k.startsWith('_'));
     if (keys.length === 0) return 'updated';
-    return `set ${keys.join(', ')}`;
+    // Show which fields changed and the new values
+    const parts = keys.map(k => {
+      const v = operand[k];
+      const display = typeof v === 'string' ? v : JSON.stringify(v);
+      return `${k} updated`;
+    });
+    return parts.join(', ');
   }
   if (op === 'CON') {
     const added = operand.added || [];
-    return `linked ${added.length} target${added.length !== 1 ? 's' : ''}`;
+    const removed = operand.removed || [];
+    const parts: string[] = [];
+    if (added.length > 0) {
+      const names = added.map((t: string) => shortTarget(t));
+      parts.push(`linked to ${names.join(', ')}`);
+    }
+    if (removed.length > 0) {
+      const names = removed.map((t: string) => shortTarget(t));
+      parts.push(`unlinked ${names.join(', ')}`);
+    }
+    if (operand.edge_type) parts.push(`(${operand.edge_type})`);
+    if (parts.length === 0 && added.length > 0) {
+      return `linked ${added.length} target${added.length !== 1 ? 's' : ''}`;
+    }
+    return parts.join(' ') || 'connection changed';
   }
   if (op === 'SEG') {
     return `${operand.boundary || 'boundary'}${operand.reason ? `: ${operand.reason}` : ''}`;
@@ -63,6 +88,49 @@ function summarizeOperand(op: string, operand: any): string {
   if (op === 'SYN') return 'merged';
   if (op === 'EVA') return operand.strategy || 'evaluated';
   return '';
+}
+
+/** Render before/after diff for DEF operand changes */
+function renderDefDiff(operand: any, theme: any): React.ReactNode {
+  if (!operand || typeof operand !== 'object') return null;
+  const keys = Object.keys(operand).filter(k => !k.startsWith('_'));
+  if (keys.length === 0) return null;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 6 }}>
+      {keys.map(k => {
+        const newVal = operand[k];
+        const display = typeof newVal === 'string' ? newVal : JSON.stringify(newVal);
+        const meta = operand._prev?.[k];
+        const oldDisplay = meta !== undefined
+          ? (typeof meta === 'string' ? meta : JSON.stringify(meta))
+          : null;
+        return (
+          <div key={k} style={{
+            fontSize: 11,
+            fontFamily: "'JetBrains Mono', monospace",
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
+            flexWrap: 'wrap' as const,
+          }}>
+            <span style={{ color: theme.textMuted, minWidth: 60 }}>{k}</span>
+            {oldDisplay !== null && (
+              <>
+                <span style={{
+                  color: theme.danger,
+                  textDecoration: 'line-through',
+                  opacity: 0.7,
+                }}>{oldDisplay}</span>
+                <span style={{ color: theme.textMuted }}>{'\u2192'}</span>
+              </>
+            )}
+            <span style={{ color: theme.success }}>{display}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 export function ElementHistory({ target, onRevert }: ElementHistoryProps) {
@@ -156,34 +224,41 @@ export function ElementHistory({ target, onRevert }: ElementHistoryProps) {
                       {event.op}
                     </span>
                     <span style={s.summary}>{summarizeOperand(event.op, event.operand)}</span>
-                    {isFirst && (
-                      <span style={s.currentBadge}>current</span>
-                    )}
+                    <span style={s.timeLabel}>{formatTime(event.ts)}</span>
                   </div>
+                  {/* Before/after for DEF changes — shown inline */}
+                  {event.op === 'DEF' && renderDefDiff(event.operand, theme)}
+                  {/* CON detail — show linked targets */}
+                  {event.op === 'CON' && event.operand?.added && (
+                    <div style={{ fontSize: 11, color: theme.textMuted, marginTop: 4 }}>
+                      {(event.operand.added as string[]).map((t: string) => shortTarget(t)).join(', ')}
+                    </div>
+                  )}
                   <div style={s.entryMeta}>
                     <span>{getAgentName(event.agent)}</span>
-                    <span style={s.metaSep}>·</span>
-                    <span>{formatTime(event.ts)}</span>
-                    <span style={s.metaSep}>·</span>
-                    <span style={s.seqLabel}>#{event.seq}</span>
+                    {canRevert && (
+                      <>
+                        <span style={s.metaSep}>·</span>
+                        <span
+                          role="button"
+                          tabIndex={0}
+                          style={s.revertLink}
+                          onClick={(e) => { e.stopPropagation(); handleRevert(event); }}
+                          onKeyDown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); handleRevert(event); } }}
+                        >
+                          {reverting === event.seq ? 'reverting...' : 'revert'}
+                        </span>
+                      </>
+                    )}
                   </div>
                 </div>
 
-                {/* Expanded detail */}
+                {/* Expanded detail — raw operand JSON */}
                 {isExpanded && (
                   <div style={s.detail}>
                     <pre style={s.operandPre}>
                       {JSON.stringify(event.operand, null, 2)}
                     </pre>
-                    {canRevert && (
-                      <button
-                        style={s.revertBtn}
-                        onClick={() => handleRevert(event)}
-                        disabled={reverting === event.seq}
-                      >
-                        {reverting === event.seq ? 'Reverting...' : 'Revert to this version'}
-                      </button>
-                    )}
                   </div>
                 )}
               </div>
@@ -261,20 +336,17 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       fontSize: 12,
       color: t.text,
     },
-    currentBadge: {
-      fontSize: 9,
-      fontWeight: 600,
-      color: t.success,
-      background: t.successBg,
-      border: `1px solid ${t.successBorder}`,
-      borderRadius: 8,
-      padding: '1px 6px',
+    timeLabel: {
+      fontSize: 10,
+      color: t.textMuted,
+      marginLeft: 'auto',
       fontFamily: "'JetBrains Mono', monospace",
+      flexShrink: 0,
     },
     entryMeta: {
       fontSize: 10,
       color: t.textMuted,
-      marginTop: 2,
+      marginTop: 4,
       fontFamily: "'JetBrains Mono', monospace",
     },
     metaSep: {
@@ -301,6 +373,11 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       lineHeight: 1.5,
       maxHeight: 200,
       overflowY: 'auto' as const,
+    },
+    revertLink: {
+      color: t.warning,
+      cursor: 'pointer',
+      fontWeight: 500,
     },
     revertBtn: {
       marginTop: 8,

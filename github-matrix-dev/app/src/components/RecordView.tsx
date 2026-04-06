@@ -3,10 +3,12 @@
  * Renders: Figure, Trajectory, Grounds, Nearby, Governance, Signals
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { HorizonResponse, NearbyEntry, SignalEntry, RecCycleInfo, GovernanceEntry } from '../db/types';
 import { useEoStore } from '../store/eo-store';
 import { FigureFields } from './FigureFields';
+import { ConnectionsPanel, type ConnectionSectionConfig as ConnSectionCfg, type ConnectionColumnDef } from './ConnectionsPanel';
+import { ConnectionColumnPicker } from './ConnectionColumnPicker';
 import { Trajectory } from './Trajectory';
 import { Grounds } from './Grounds';
 import { Nearby } from './Nearby';
@@ -22,6 +24,15 @@ import { RedactedCell } from './RedactedCell';
 import { useTheme, type Theme } from '../theme';
 import { formatName } from './scope-picker-utils';
 import type { ResolvedPermissions } from '../permissions/types';
+import {
+  type DetailLayout,
+  type ConnectionSectionConfig,
+  detailLayoutTarget,
+  defaultLayout,
+  addColumn,
+  removeColumn,
+  toggleSectionHidden,
+} from './detail-layout';
 
 interface RecordViewProps {
   target: string;
@@ -54,7 +65,15 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
   const [recCycleLoaded, setRecCycleLoaded] = useState(false);
   const [recCycleLoading, setRecCycleLoading] = useState(false);
   const [recCycleError, setRecCycleError] = useState<string | null>(null);
-  const [historyOpened, setHistoryOpened] = useState(false);
+
+  // ─── Detail layout config (gear toggle / column picker) ─────────────
+  const [editMode, setEditMode] = useState(false);
+  const [layout, setLayout] = useState<DetailLayout | null>(null);
+  const [layoutLoaded, setLayoutLoaded] = useState(false);
+  const [columnPickerEntity, setColumnPickerEntity] = useState<string | null>(null);
+
+  const getState = useEoStore((s) => s.getState);
+  const dispatch = useEoStore((s) => s.dispatch);
 
   const { theme } = useTheme();
   const s = makeStyles(theme);
@@ -70,7 +89,6 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
     setGovernance(undefined); setGovernanceLoading(false); setGovernanceError(null);
     setHashCohort(undefined); setHashLoading(false); setHashError(null);
     setRecCycle(undefined); setRecCycleLoaded(false); setRecCycleLoading(false); setRecCycleError(null);
-    setHistoryOpened(false);
 
     // Fast path: figure + ancestry + grounds + trajectory only. All expensive
     // sections are opt-in via LazySection.
@@ -183,6 +201,129 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
     }
   }, [target, horizon, recCycleLoaded, recCycleLoading]);
 
+  // Eagerly load governance for compact chip display under Fields
+  useEffect(() => {
+    if (governance === undefined && !governanceLoading) loadGovernance();
+  }, [governance, governanceLoading, loadGovernance]);
+
+  // ─── Load detail layout from schema DEF (non-blocking) ─────────────
+  // Derives the scope from the target: "import.clients.CLI-001" -> "import.clients"
+  const scope = useMemo(() => {
+    const parts = target.split('.');
+    return parts.length >= 2 ? parts.slice(0, -1).join('.') : target;
+  }, [target]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLayoutLoaded(false);
+    getState(detailLayoutTarget(scope))
+      .then((state) => {
+        if (cancelled) return;
+        if (state?.value?.sections) {
+          setLayout(state.value as DetailLayout);
+        } else {
+          setLayout(null);
+        }
+        setLayoutLoaded(true);
+      })
+      .catch(() => {
+        if (!cancelled) setLayoutLoaded(true);
+      });
+    return () => { cancelled = true; };
+  }, [scope, getState]);
+
+  // Save layout as a DEF on the schema
+  const saveLayout = useCallback(async (newLayout: DetailLayout) => {
+    setLayout(newLayout);
+    try {
+      await dispatch({
+        op: 'DEF',
+        target: detailLayoutTarget(scope),
+        operand: newLayout,
+        agent: 'user',
+        ts: new Date().toISOString(),
+        acquired_ts: new Date().toISOString(),
+      });
+    } catch (err) {
+      console.error('[RecordView] failed to save detail layout', err);
+    }
+  }, [scope, dispatch]);
+
+  const handleAddColumn = useCallback((entity: string) => {
+    setColumnPickerEntity(entity);
+  }, []);
+
+  const handleRemoveColumn = useCallback((entity: string, columnKey: string) => {
+    const current = layout || defaultLayout([]);
+    saveLayout(removeColumn(current, entity, columnKey));
+  }, [layout, saveLayout]);
+
+  const handleToggleHidden = useCallback((entity: string) => {
+    const current = layout || defaultLayout([]);
+    saveLayout(toggleSectionHidden(current, entity));
+  }, [layout, saveLayout]);
+
+  const handlePickerToggle = useCallback((col: ConnectionColumnDef) => {
+    if (!columnPickerEntity) return;
+    const current = layout || defaultLayout([]);
+    const section = current.sections.find(
+      (sec): sec is ConnectionSectionConfig =>
+        sec.type === 'connection' && sec.entity === columnPickerEntity,
+    );
+    const hasCol = section?.columns.some(c => c.key === col.key);
+    if (hasCol) {
+      saveLayout(removeColumn(current, columnPickerEntity, col.key));
+    } else {
+      saveLayout(addColumn(current, columnPickerEntity, col));
+    }
+  }, [layout, columnPickerEntity, saveLayout]);
+
+  // ─── Memos that must be before early returns (hooks rules) ──────────
+
+  const value = data?.figure?.value || {};
+
+  // Extract edges for the Connections section
+  const edges: Array<{ dest: string; edge_type?: string }> = useMemo(
+    () => value._edges || [],
+    [value._edges],
+  );
+
+  // Derive connection types from edges
+  const connectionTypes = useMemo(() => {
+    const types = new Set<string>();
+    for (const edge of edges) {
+      const parts = edge.dest.split('.');
+      if (parts.length >= 2) types.add(parts[parts.length - 2]);
+    }
+    return Array.from(types);
+  }, [edges]);
+
+  // Build section configs for ConnectionsPanel from layout
+  const sectionConfigs: ConnSectionCfg[] | undefined = useMemo(() => {
+    if (!layout) return undefined;
+    return layout.sections
+      .filter((sec): sec is ConnectionSectionConfig => sec.type === 'connection')
+      .map(sec => ({
+        entity: sec.entity,
+        columns: sec.columns,
+        hidden: sec.hidden,
+      }));
+  }, [layout]);
+
+  // Column picker entity scope for schema lookup
+  const pickerEntityScope = columnPickerEntity ? `${scope.split('.')[0]}.${columnPickerEntity}` : '';
+  const pickerActiveColumns: ConnectionColumnDef[] = useMemo(() => {
+    if (!columnPickerEntity) return [];
+    const current = layout || defaultLayout(connectionTypes);
+    const section = current.sections.find(
+      (sec): sec is ConnectionSectionConfig =>
+        sec.type === 'connection' && sec.entity === columnPickerEntity,
+    );
+    return section?.columns || [];
+  }, [columnPickerEntity, layout, connectionTypes]);
+
+  // ─── Early returns ─────────────────────────────────────────────────
+
   if (loading) {
     return <div style={s.loading}>Loading record...</div>;
   }
@@ -195,7 +336,6 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
     return <div style={s.loading}>Record not found</div>;
   }
 
-  const value = data.figure.value || {};
   const statusClass = value.status === 'active' ? 'active' : value.status === 'archived' ? 'archived' : 'pending';
   const statusStyleMap: Record<string, React.CSSProperties> = {
     active: { background: theme.statusActive.bg, color: theme.statusActive.color, border: `1px solid ${theme.statusActive.border}` },
@@ -205,7 +345,7 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
 
   return (
     <div style={s.container}>
-      {/* Record Header */}
+      {/* Record Header — compact badge row */}
       <div style={s.header}>
         <div style={s.headerTop}>
           <div style={s.clientName}>{value.name || formatName(target.split('.').pop() || target)}</div>
@@ -214,14 +354,22 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
             <div style={{ ...s.statusBadge, ...statusStyleMap[statusClass] }}>
               {value.status || 'unknown'}
             </div>
+            {/* Gear toggle — in-place edit mode */}
+            <button
+              style={{
+                ...s.gearBtn,
+                ...(editMode ? { background: theme.accentBg, color: theme.accent } : {}),
+              }}
+              onClick={() => { setEditMode(!editMode); setColumnPickerEntity(null); }}
+              title={editMode ? 'Exit edit mode' : 'Configure layout'}
+            >
+              {'\u2699'}
+            </button>
           </div>
         </div>
         <div style={s.meta}>
           <span style={s.metaItem}>
-            <span style={s.metaLabel}>Target:</span> {target}
-          </span>
-          <span style={s.metaItem}>
-            <span style={s.metaLabel}>Last modified seq</span> {data.figure.last_seq}
+            <span style={s.metaLabel}>seq</span> {data.figure.last_seq}
           </span>
           {data.graphMetrics && <GraphRoleBadge metrics={data.graphMetrics} />}
           {data.cadence && <CadenceBadge cadence={data.cadence} />}
@@ -258,8 +406,8 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
         </div>
       </div>
 
-      {/* Layer 1: Figure — with redacted field support */}
-      <Section title="Current State" subtitle="what this target is" color={theme.accent}>
+      {/* Fields — entity's own DEF values */}
+      <Section title="Fields" subtitle="" color={theme.accent}>
         {permissions?.redacted_fields && permissions.redacted_fields.length > 0 ? (
           <div>
             <FigureFields figure={data.figure} onNavigate={onNavigate} profileFields={profileFields} />
@@ -270,7 +418,7 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
                     fontFamily: "'JetBrains Mono', monospace",
                     fontSize: 11,
                     color: theme.textMuted,
-                    minWidth: 100,
+                    minWidth: 120,
                   }}>{field}</span>
                   <RedactedCell />
                 </div>
@@ -280,36 +428,53 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
         ) : (
           <FigureFields figure={data.figure} onNavigate={onNavigate} profileFields={profileFields} />
         )}
+        {/* Governance chips — inline under fields when available */}
+        {governance && governance.length > 0 && (
+          <div style={{ marginTop: 12 }}>
+            <Governance entries={governance} />
+          </div>
+        )}
       </Section>
 
-      {/* Layer 5: Trajectory */}
-      {data.trajectory && data.trajectory.length > 0 && (
-        <Section title="Trajectory" subtitle="where this record has been" color={theme.textSecondary}>
-          <Trajectory entries={data.trajectory} fingerprint={data.trajectoryFingerprint} cadence={data.cadence} />
-        </Section>
+      {/* Connections — CON edges as inline mini-tables with configurable columns */}
+      {edges.length > 0 && (
+        <div style={{ position: 'relative' as const }}>
+          <Section title="Connections" subtitle={String(edges.length)} color={theme.purple}>
+            <ConnectionsPanel
+              edges={edges}
+              onNavigate={onNavigate}
+              sectionConfigs={sectionConfigs}
+              editMode={editMode}
+              onAddColumn={handleAddColumn}
+              onRemoveColumn={handleRemoveColumn}
+              onToggleHidden={handleToggleHidden}
+            />
+          </Section>
+          {/* Column picker popover */}
+          {columnPickerEntity && (
+            <ConnectionColumnPicker
+              entityScope={pickerEntityScope}
+              activeColumns={pickerActiveColumns}
+              onToggle={handlePickerToggle}
+              onClose={() => setColumnPickerEntity(null)}
+            />
+          )}
+        </div>
       )}
 
-      {/* Edit History — lazy: full log scan, mount ElementHistory on first expand */}
-      <LazySection
-        title="Event History"
-        subtitle="changes to this record with revert"
-        color={theme.warning}
-        loaded={historyOpened}
-        loading={false}
-        error={null}
-        onLoad={() => setHistoryOpened(true)}
-      >
-        {historyOpened && <ElementHistory target={target} />}
-      </LazySection>
+      {/* History — visible by default as a vertical timeline */}
+      <Section title="History" subtitle={`${data.trajectory?.length ?? 0} events`} color={theme.warning}>
+        <ElementHistory target={target} />
+      </Section>
 
-      {/* Layer 2: Grounds */}
+      {/* Context — inherited ground conditions */}
       {data.grounds && data.grounds.length > 0 && (
         <Section title="Context" subtitle="conditions that apply here" color={theme.purple}>
           <Grounds entries={data.grounds} />
         </Section>
       )}
 
-      {/* Layer 3: Nearby — lazy: O(N) edge lookups across the collection */}
+      {/* Similar Records — lazy: O(N) edge lookups */}
       <LazySection
         title="Similar Records"
         subtitle="nearby in the key-space"
@@ -323,21 +488,7 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
         {nearby && nearby.length > 0 && <Nearby entries={nearby} onNavigate={onNavigate} />}
       </LazySection>
 
-      {/* Layer 4: Governance — lazy: EVA registration scan */}
-      <LazySection
-        title="Governance"
-        subtitle="rules that apply to this record"
-        color={theme.gold}
-        loaded={governance !== undefined}
-        loading={governanceLoading}
-        error={governanceError}
-        onLoad={loadGovernance}
-        emptyMessage="No governance rules"
-      >
-        {governance && governance.length > 0 && <Governance entries={governance} />}
-      </LazySection>
-
-      {/* Layer 6: Signals — lazy: full collection scan + population stats */}
+      {/* Patterns — lazy: full collection scan + population stats */}
       <LazySection
         title="Patterns"
         subtitle="what the database sees across similar records"
@@ -351,7 +502,7 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
         {signals && signals.length > 0 && <Signals entries={signals} />}
       </LazySection>
 
-      {/* Hash Cohort: Structural Twins — lazy: collection prefix scan (hydrated by background effect when possible) */}
+      {/* Structural Twins — lazy: collection prefix scan */}
       <LazySection
         title="Structural Twins"
         subtitle="identical transformation journeys"
@@ -367,7 +518,7 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
         )}
       </LazySection>
 
-      {/* REC Cycle: Dependency Cycle Visualization — lazy: graph walk */}
+      {/* Dependency Cycle — lazy: graph walk */}
       <LazySection
         title="Dependency Cycle"
         subtitle="recursive formula resolution"
@@ -493,6 +644,21 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       borderRadius: 20,
       fontSize: 11,
       fontWeight: 500,
+    },
+    gearBtn: {
+      width: 28,
+      height: 28,
+      borderRadius: '50%',
+      border: `1px solid ${t.border}`,
+      background: 'transparent',
+      color: t.textMuted,
+      fontSize: 16,
+      cursor: 'pointer',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: 0,
+      flexShrink: 0,
     },
     meta: {
       display: 'flex',

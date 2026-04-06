@@ -24,7 +24,7 @@ export function FigureFields({ figure, onNavigate, profileFields }: FigureFields
     return <div style={s.mono}>{JSON.stringify(value)}</div>;
   }
 
-  let entries = Object.entries(value).filter(([k]) => !k.startsWith('_'));
+  let entries = Object.entries(value).filter(([k]) => !k.startsWith('_') && k !== 'linked' && k !== 'edge_type');
   // Display name overrides stored in _fieldLabels on the figure
   const fieldLabels: Record<string, string> = (value as any)._fieldLabels || {};
 
@@ -280,31 +280,33 @@ function renderObjectValue(val: any, onNavigate: (t: string) => void, t: Theme):
 function makeStyles(t: Theme): Record<string, React.CSSProperties> {
   return {
     grid: {
-      display: 'grid',
-      gridTemplateColumns: '1fr 1fr 1fr',
+      display: 'flex',
+      flexDirection: 'column' as const,
       gap: 0,
     },
     cell: {
-      padding: '14px 16px',
-      border: `1px solid ${t.border}`,
-      margin: '-1px 0 0 -1px',
-      background: t.bgCard,
+      display: 'flex',
+      alignItems: 'baseline',
+      gap: 16,
+      padding: '10px 0',
+      borderBottom: `1px solid ${t.border}`,
     },
     label: {
-      fontSize: 10,
+      fontSize: 11,
       fontWeight: 500,
       color: t.textMuted,
-      textTransform: 'uppercase' as const,
-      letterSpacing: 0.3,
-      marginBottom: 4,
+      minWidth: 120,
+      flexShrink: 0,
       display: 'flex',
       alignItems: 'center',
       gap: 4,
     },
     value: {
-      fontSize: 14,
+      fontSize: 13,
       color: t.textHeading,
       fontWeight: 400,
+      flex: 1,
+      minWidth: 0,
     },
     mono: {
       fontFamily: "'JetBrains Mono', monospace",
