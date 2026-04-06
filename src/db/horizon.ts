@@ -23,6 +23,7 @@ export interface HorizonOpts {
   grounds?: boolean;    // default true
   nearby?: boolean;     // default true
   governance?: boolean; // default true
+  include_deleted?: boolean; // default false — if true, include soft-deleted entities
 }
 
 /**
@@ -51,6 +52,9 @@ export async function horizonGet(
   // Layer 1: Figure
   const figure = await getFigureState(db, resolved);
   if (!figure) return null;
+
+  // Soft-delete check: unless include_deleted is set, treat deleted entities as not found
+  if (figure.value?._deleted && !opts?.include_deleted) return null;
 
   // Ancestry: the ontology chain — each parent as a mini-Horizon
   const ancestry = opts?.ancestry !== false ? await getAncestry(db, resolved) : undefined;
@@ -94,6 +98,7 @@ async function horizonGetByPrefix(db: EoDb, prefix: string, opts?: HorizonOpts):
 
   for (const state of states) {
     if (state.value?._alias) continue;
+    if (state.value?._deleted && !opts?.include_deleted) continue;
 
     const figure = await getFigureState(db, state.target);
     const grounds = opts?.grounds !== false ? await getGrounds(db, state.target) : [];
