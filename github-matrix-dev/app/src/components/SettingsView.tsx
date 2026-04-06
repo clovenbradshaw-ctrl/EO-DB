@@ -164,8 +164,8 @@ export function SettingsView({ session, matrixClient, roomId, onUnarchive }: Set
         )}
 
         {/* Cloud Storage (shared Filen credentials fetched from n8n webhook) */}
-        {matrixClient && roomId && (
-          <Section title="Cloud Storage" theme={theme}>
+        {(filenSync || (matrixClient && roomId)) && (
+          <Section title="Filen Cloud Storage" theme={theme}>
             <FilenStorageWidget />
           </Section>
         )}
