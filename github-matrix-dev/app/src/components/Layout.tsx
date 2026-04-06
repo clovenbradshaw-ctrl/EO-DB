@@ -51,7 +51,7 @@ import { type AccessRole, powerLevelToRole, legacyAccessToRole } from '../permis
 import { resolvePermissionsFromSharing } from '../permissions/resolve';
 import { RecycleBin, addDeletedSpace, isSpaceDeleted, removeDeletedSpace, getDeletedSpaces } from './RecycleBin';
 import { addArchivedSpace, isSpaceArchived, removeArchivedSpace, getArchivedSpaces } from './ArchivedSpaces';
-import { setSpaceConfig, applyEoPowerLevels, createGovernanceRoom } from '../permissions/room-topology';
+import { setSpaceConfig, getSpaceConfig, applyEoPowerLevels, createGovernanceRoom } from '../permissions/room-topology';
 import { EO_POWER_LEVEL_CONTENT } from '../permissions/types';
 import { listAllHomeserverUsers } from '../matrix/user-discovery';
 
@@ -332,6 +332,46 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     navigate({ scope: null, record: null, view: 'records', builderViewId: null, customPageId: null });
   }
   // Soft-delete a space: hide from list, track in recycle bin
+  /**
+   * Persist space lifecycle status to Matrix room state (source of truth).
+   * Falls back to localStorage-only if the Matrix write fails (e.g. insufficient power level).
+   */
+  async function persistSpaceStatus(
+    spaceTarget: string,
+    status: 'active' | 'archived' | 'deleted',
+  ): Promise<void> {
+    const client = matrixClientRef.current;
+    const entry = mergedEntries.find((e) => e.spaceTarget === spaceTarget);
+    const mainRoomId = spaceCacheRef.current.get(spaceTarget)?.mainRoomId || entry?.mainRoomId;
+    if (!client || !mainRoomId) return;
+
+    try {
+      const currentConfig = getSpaceConfig(client as any, mainRoomId);
+      if (!currentConfig) return;
+
+      const updatedConfig = {
+        ...currentConfig,
+        status,
+        status_changed_at: Date.now(),
+        status_changed_by: session.userId,
+      };
+
+      await setSpaceConfig(client, mainRoomId, updatedConfig);
+
+      // Mirror to governance room if it exists
+      const govRoomId = currentConfig.rooms?.governance;
+      if (govRoomId) {
+        try {
+          await setSpaceConfig(client, govRoomId, updatedConfig);
+        } catch {
+          // Best-effort mirror
+        }
+      }
+    } catch (e) {
+      console.warn('[EO-DB] Failed to persist space status to Matrix — using localStorage fallback:', e);
+    }
+  }
+
   function handleDeleteSpace(spaceTarget: string) {
     const entry = mergedEntries.find((e) => e.spaceTarget === spaceTarget);
     addDeletedSpace({
@@ -341,6 +381,8 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       deletedBy: session.userId,
       memberCount: entry?.memberCount || 0,
     });
+    // Persist to Matrix room state (async, best-effort)
+    persistSpaceStatus(spaceTarget, 'deleted');
     if (selectedSpace === spaceTarget) {
       const remaining = mergedEntries.filter((e) => e.spaceTarget !== spaceTarget && !isSpaceDeleted(e.spaceTarget));
       if (remaining.length > 0) {
@@ -358,6 +400,8 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   // Restore a space from the recycle bin
   function handleRestoreSpace(target: string) {
     removeDeletedSpace(target);
+    // Persist to Matrix room state (async, best-effort)
+    persistSpaceStatus(target, 'active');
     setSpaces([...spaces]);
     setSpaceEntries([...spaceEntries]);
     selectSpace(target);
@@ -374,6 +418,8 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       archivedBy: session.userId,
       memberCount: entry?.memberCount || 0,
     });
+    // Persist to Matrix room state (async, best-effort)
+    persistSpaceStatus(spaceTarget, 'archived');
     if (selectedSpace === spaceTarget) {
       const remaining = mergedEntries.filter((e) => e.spaceTarget !== spaceTarget && !isSpaceDeleted(e.spaceTarget) && !isSpaceArchived(e.spaceTarget));
       if (remaining.length > 0) {
@@ -390,6 +436,8 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   // Unarchive a space from settings
   function handleUnarchiveSpace(target: string) {
     removeArchivedSpace(target);
+    // Persist to Matrix room state (async, best-effort)
+    persistSpaceStatus(target, 'active');
     setSpaces([...spaces]);
     setSpaceEntries([...spaceEntries]);
     selectSpace(target);

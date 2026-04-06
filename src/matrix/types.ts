@@ -113,6 +113,12 @@ export interface SpaceConfig {
   };
   field_assignments: FieldAssignment[];
   space_settings: SpaceSettings;
+  /** Soft-lifecycle status. Absent or 'active' means normal. */
+  status?: 'active' | 'archived' | 'deleted';
+  /** Epoch ms when the status was last changed. */
+  status_changed_at?: number;
+  /** Matrix user ID who changed the status. */
+  status_changed_by?: string;
 }
 
 /** Default power level configuration for EO-DB rooms. */
@@ -155,6 +161,12 @@ export interface SpaceEntry {
   ownerUserId: string;
   ownerDisplayName: string;
   memberCount: number;
+  /** Lifecycle status from SpaceConfig. Defaults to 'active'. */
+  status?: 'active' | 'archived' | 'deleted';
+  /** Epoch ms when status was last changed. */
+  statusChangedAt?: number;
+  /** Matrix user ID who changed the status. */
+  statusChangedBy?: string;
 }
 
 // ─── Room Topology ─────────────────────────────────────────────────────────
