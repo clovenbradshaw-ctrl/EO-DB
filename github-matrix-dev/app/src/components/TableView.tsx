@@ -428,6 +428,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   const columnWidths = viewConfig.columnWidths;
   const rowHeight = viewConfig.rowHeight || 'default';
   const cellOverflow = viewConfig.cellOverflow || 'wrap';
+  const showFieldIds = viewConfig.showFieldIds || false;
   const profileFields = viewConfig.profileFields;
   const displayField = auditableDisplayField ?? viewConfig.displayField ?? null;
   const isMobile = useIsMobile();
@@ -597,7 +598,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   // Detect if records use the Airtable-style fields sub-object
   const useFieldsSub = useMemo(() => hasFieldsSubObject(records), [records]);
 
-  const entityColumns = useMemo(() => deriveColumns(records, fieldNameMap, columnTypeOverrides), [records, fieldNameMap, columnTypeOverrides]);
+  const entityColumns = useMemo(() => deriveColumns(records, fieldNameMap, columnTypeOverrides, showFieldIds), [records, fieldNameMap, columnTypeOverrides, showFieldIds]);
   const columns = useMemo<ColumnDef[]>(() => {
     const all = [
       { key: '_record', label: 'record', type: 'text' as const },
@@ -1160,6 +1161,30 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
               );
             })}
           </div>
+          )}
+
+          {/* Field ID toggle — hidden on mobile */}
+          {!isMobile && (
+          <button
+            onClick={() => viewStore.setShowFieldIds(scope, !showFieldIds)}
+            title={showFieldIds ? 'Showing raw field IDs — click for display names' : 'Showing display names — click for raw field IDs'}
+            aria-label="Toggle field ID display"
+            aria-pressed={showFieldIds}
+            style={{
+              ...s.toggleBtn,
+              padding: '0 8px',
+              minWidth: 28,
+              fontWeight: showFieldIds ? 600 : 400,
+              background: showFieldIds ? theme.accentBg : 'transparent',
+              color: showFieldIds ? theme.accent : theme.textMuted,
+              border: `1px solid ${showFieldIds ? theme.accentBorder : theme.border}`,
+              borderRadius: 4,
+              fontFamily: "'JetBrains Mono', monospace",
+              fontSize: 10,
+            }}
+          >
+            ID
+          </button>
           )}
 
           {/* Column manager (Fields) */}

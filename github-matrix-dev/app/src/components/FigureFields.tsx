@@ -1,6 +1,8 @@
-import { useState } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import type { EoState } from '../db/types';
 import { useEoStore } from '../store/eo-store';
+import { buildFieldNameMapFromSchema } from './filter-types';
+import { formatName } from './scope-picker-utils';
 import { useTheme, type Theme } from '../theme';
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 import { useIdResolver, isEntityId, isEntityIdArray, type IdResolver } from '../hooks/useIdResolver';
@@ -24,6 +26,26 @@ export function FigureFields({ figure, onNavigate, profileFields }: FigureFields
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; fieldKey: string } | null>(null);
   const [editing, setEditing] = useState<{ fieldKey: string; value: string } | null>(null);
   const [displayNameEdit, setDisplayNameEdit] = useState<{ fieldKey: string; currentLabel: string } | null>(null);
+
+  // Fetch schema-level field name map for the parent table scope
+  const [schemaFieldNames, setSchemaFieldNames] = useState<Map<string, string>>(new Map());
+  const tableScope = useMemo(() => {
+    const parts = figure.target.split('.');
+    // Table scope is everything except the last segment (the record ID)
+    return parts.length > 1 ? parts.slice(0, -1).join('.') : figure.target;
+  }, [figure.target]);
+
+  useEffect(() => {
+    getStateByPrefix(tableScope + '._schema.').then((allSchemaStates) => {
+      const schemaDepth = tableScope.split('.').length + 2;
+      const fieldStates = allSchemaStates.filter(
+        (st) => st.target.split('.').length === schemaDepth && !st.value?._alias,
+      );
+      if (fieldStates.length > 0) {
+        setSchemaFieldNames(buildFieldNameMapFromSchema(fieldStates));
+      }
+    });
+  }, [tableScope, getStateByPrefix]);
 
   if (!value || typeof value !== 'object') {
     return <div style={s.mono}>{JSON.stringify(value)}</div>;
@@ -133,8 +155,8 @@ export function FigureFields({ figure, onNavigate, profileFields }: FigureFields
           onContextMenu={(e) => handleContextMenu(e, key)}
         >
           <div style={s.label}>
-            {fieldLabels[key] || key}
-            {fieldLabels[key] && (
+            {fieldLabels[key] || schemaFieldNames.get(key) || (key.startsWith('fld') ? formatName(key) : key)}
+            {(fieldLabels[key] || schemaFieldNames.has(key) || key.startsWith('fld')) && (
               <span style={s.fieldKeyHint}>{key}</span>
             )}
             {value._computed && key === '_computed' && (
