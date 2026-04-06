@@ -546,6 +546,15 @@ export function toEoEvents(
 ): ImportEventRow[] {
   const rows: ImportEventRow[] = [];
 
+  // Build set of reference fields per collection
+  const refFields = new Map<string, Set<string>>();
+  for (const edge of result.explicitEdges) {
+    if (!refFields.has(edge.sourceCollection)) {
+      refFields.set(edge.sourceCollection, new Set());
+    }
+    refFields.get(edge.sourceCollection)!.add(edge.field);
+  }
+
   // INS events for all entities
   for (const [id, entry] of result.entityRegistry) {
     rows.push({
@@ -565,6 +574,29 @@ export function toEoEvents(
         edge_type: edge.field,
       },
     });
+  }
+
+  // DEF events for scalar (non-reference) fields — emitted after CON so that
+  // last_op is DEF and the UI displays actual field values, not just edges
+  for (const [id, entry] of result.entityRegistry) {
+    const collMeta = result.typeRegistry.get(entry.collection);
+    const idField = collMeta?.idField;
+    const collRefFields = refFields.get(entry.collection);
+
+    const scalarFields: Record<string, any> = {};
+    for (const [field, value] of Object.entries(entry.data)) {
+      if (field === idField) continue;
+      if (collRefFields && collRefFields.has(field)) continue;
+      scalarFields[field] = value;
+    }
+
+    if (Object.keys(scalarFields).length > 0) {
+      rows.push({
+        op: 'DEF',
+        target: `${targetPrefix}.${entry.collection}.${id}`,
+        operand: scalarFields,
+      });
+    }
   }
 
   return rows;

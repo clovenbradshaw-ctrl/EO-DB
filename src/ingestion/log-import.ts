@@ -129,6 +129,19 @@ function parseKeyedCollections(obj: Record<string, any>, targetPrefix?: string):
   const typeRegistry = discoverStructure(collections);
   const entityRegistry = populateEntities(collections, typeRegistry);
 
+  // Auto-detect foreign key relationships
+  const defs = autoDetectDefs(collections, typeRegistry, entityRegistry);
+
+  // Build set of reference fields per collection so we can separate
+  // scalar fields (for DEF) from reference fields (for CON)
+  const refFields = new Map<string, Set<string>>();
+  for (const decl of defs) {
+    if (!refFields.has(decl.sourceCollection)) {
+      refFields.set(decl.sourceCollection, new Set());
+    }
+    refFields.get(decl.sourceCollection)!.add(decl.sourceField);
+  }
+
   // INS events for all entities — use real entity IDs
   for (const [collectionName, records] of Object.entries(collections)) {
     const meta = typeRegistry.get(collectionName);
@@ -147,8 +160,7 @@ function parseKeyedCollections(obj: Record<string, any>, targetPrefix?: string):
     }
   }
 
-  // Auto-detect foreign key relationships and create CON events
-  const defs = autoDetectDefs(collections, typeRegistry, entityRegistry);
+  // CON events for detected foreign key edges
   if (defs.length > 0) {
     const { explicitEdges } = resolveEdges(defs, collections, typeRegistry, entityRegistry);
     for (const edge of explicitEdges) {
@@ -160,6 +172,37 @@ function parseKeyedCollections(obj: Record<string, any>, targetPrefix?: string):
           edge_type: edge.field,
         },
       });
+    }
+  }
+
+  // DEF events for scalar (non-reference) fields — emitted after CON so that
+  // last_op is DEF and the UI displays actual field values, not just edges
+  for (const [collectionName, records] of Object.entries(collections)) {
+    const meta = typeRegistry.get(collectionName);
+    if (!meta) continue;
+    const collRefFields = refFields.get(collectionName);
+
+    for (let i = 0; i < records.length; i++) {
+      const record = records[i];
+      const id = record[meta.idField] != null
+        ? String(record[meta.idField])
+        : `rec${String(i + 1).padStart(String(records.length).length, '0')}`;
+
+      // Collect scalar fields — skip ID field and reference fields
+      const scalarFields: Record<string, any> = {};
+      for (const [field, value] of Object.entries(record)) {
+        if (field === meta.idField) continue;
+        if (collRefFields && collRefFields.has(field)) continue;
+        scalarFields[field] = value;
+      }
+
+      if (Object.keys(scalarFields).length > 0) {
+        rows.push({
+          op: 'DEF',
+          target: `${prefix}.${collectionName}.${id}`,
+          operand: scalarFields,
+        });
+      }
     }
   }
 
