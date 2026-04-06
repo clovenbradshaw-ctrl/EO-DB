@@ -83,6 +83,18 @@ export { PeerSync } from './peer-sync.js';
 // Space Discovery
 export { discoverSpacesFromMatrix } from './space-discovery.js';
 
+// Connection Resilience
+export {
+  fetchWithRetry,
+  MatrixConnectionMonitor,
+} from './connection-resilience.js';
+export type {
+  ConnectionStatus,
+  ConnectionState,
+  RetryOptions,
+  ConnectionListener,
+} from './connection-resilience.js';
+
 // Room Topology
 export {
   createRestrictedRoom,

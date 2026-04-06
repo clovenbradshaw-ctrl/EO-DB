@@ -2,7 +2,7 @@ import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import { createDb, type EoDb } from './db/level.js';
 import { Feed } from './db/feed.js';
-import { authMiddleware, setAuthConfig, setAuthDb } from './auth/matrix.js';
+import { authMiddleware, setAuthConfig, setAuthDb, setConnectionStatus } from './auth/matrix.js';
 import { registerHealthRoute, registerQueryRoutes } from './api/query.js';
 import { registerWebhookRoutes } from './api/webhook.js';
 import { registerOpsRoutes } from './api/ops.js';
@@ -15,6 +15,7 @@ import { registerRoomSyncRoutes } from './api/room-sync.js';
 import { registerDedupRoutes } from './api/dedup.js';
 import { configureMatrixDomain } from './config/matrix-domain.js';
 import { RoomSyncCoordinator } from './ingestion/room-sync-coordinator.js';
+import { MatrixConnectionMonitor } from './matrix/connection-resilience.js';
 
 const PORT = parseInt(process.env.EO_PORT || '3000', 10);
 const DATA_DIR = process.env.EO_DATA_DIR || './data';
@@ -45,11 +46,22 @@ async function start(): Promise<void> {
   // CORS
   await app.register(cors, { origin: true });
 
+  // Start connection health monitor
+  let connectionMonitor: MatrixConnectionMonitor | undefined;
+  if (HOMESERVER) {
+    connectionMonitor = new MatrixConnectionMonitor(HOMESERVER);
+    connectionMonitor.onStateChange((state) => {
+      setConnectionStatus(state.status);
+      app.log.info(`Matrix connection: ${state.status} (${state.reason})`);
+    });
+    connectionMonitor.start();
+  }
+
   // Health endpoint (no auth)
   registerHealthRoute(app, db);
 
   // Auth proxy routes (login/whoami/profile — no EO auth required)
-  registerAuthRoutes(app, HOMESERVER);
+  registerAuthRoutes(app, HOMESERVER, DATA_DIR);
 
   // Room sync coordinator — manages continuous Airtable sync per room
   const coordinator = new RoomSyncCoordinator(db, feed);
@@ -82,6 +94,7 @@ async function start(): Promise<void> {
   // Graceful shutdown
   const shutdown = async () => {
     app.log.info('Shutting down...');
+    connectionMonitor?.stop();
     coordinator.stop();
     await app.close();
     await db.close();

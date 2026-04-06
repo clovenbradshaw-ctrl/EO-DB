@@ -525,11 +525,11 @@ describe('SyncManager', () => {
     expect(state).not.toBeNull();
     expect(state!.value).toEqual({ name: 'Test' });
 
-    // Event was sent to Matrix
+    // Event is buffered in the SendBuffer; flush to trigger the Matrix upload
+    await sm.flushSendBufferNow();
+
+    // Event was sent to Matrix (via batched snapshot upload)
     expect(client._sent.length).toBeGreaterThanOrEqual(1);
-    const sent = client._sent.find((s: any) => s.content.target === 'sync.rec1');
-    expect(sent).toBeDefined();
-    expect(sent.content.agent).toBeUndefined(); // agent not in content
   });
 
   it('processLocalEvent queues event when send fails', async () => {
@@ -554,10 +554,12 @@ describe('SyncManager', () => {
     const state = await getState(db, 'sync.offline');
     expect(state).not.toBeNull();
 
-    // Event was queued
-    const queue = decode(await db.get('meta:offline_queue')) as EoEventInput[];
-    expect(queue).toHaveLength(1);
-    expect(queue[0].target).toBe('sync.offline');
+    // Event is buffered; flush triggers the upload which should fail
+    await sm.flushSendBufferNow();
+
+    // Send failed, so events remain buffered in the SendBuffer for retry
+    const status = sm.getSendBufferStatus();
+    expect(status.buffered).toBeGreaterThanOrEqual(1);
   });
 
   it('processLocalEvent generates deterministic client_event_id', async () => {

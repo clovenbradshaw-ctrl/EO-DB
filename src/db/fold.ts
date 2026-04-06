@@ -243,6 +243,7 @@ async function handleCON(db: EoDb, event: EoEvent): Promise<void> {
     value: {
       ...(sourceState?.value ?? {}),
       _edges: currentEdges.map(e => ({ dest: e.dest, edge_type: e.edge_type })),
+      linked: currentEdges.map(e => e.dest),
     },
     hash: chainHash(sourceState!.hash, event),
     level: sourceState!.level,
