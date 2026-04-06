@@ -31,6 +31,7 @@ export function ViewsBrowser({ scope, recordCount, userId, onBack, onSelectView 
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(true);
   const hasLoadedOnce = useRef(false);
+  const prevViewsKeyRef = useRef<string>('');
 
   // --- Create-view popover state ---
   const [showCreate, setShowCreate] = useState(false);
@@ -85,6 +86,14 @@ export function ViewsBrowser({ scope, recordCount, userId, onBack, onSelectView 
     if (!hasLoadedOnce.current) setLoading(true);
 
     getStateByPrefix(`${scope}._views.`).then((states) => {
+      const key = states.map(s => s.target + ':' + s.last_seq).join('|');
+      if (key === prevViewsKeyRef.current) {
+        hasLoadedOnce.current = true;
+        setLoading(false);
+        return;
+      }
+      prevViewsKeyRef.current = key;
+
       const viewDepth = scope.split('.').length + 2; // scope._views.viewId
       const views: SavedView[] = states
         .filter(

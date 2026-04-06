@@ -7,7 +7,7 @@
  * or when previewing a record page in the builder.
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { useEoStore } from '../../store/eo-store';
 import { useBuilderStore } from '../../store/builder-store';
 import { BlockRenderer } from '../../blocks/BlockRenderer';
@@ -39,17 +39,20 @@ export function RecordPageView({ recordTarget, onNavigate, onBack }: RecordPageV
   const [record, setRecord] = useState<EoState | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const prevRecordKeyRef = useRef<string>('');
 
   // Load the record state
   useEffect(() => {
     if (!ready) return;
     let cancelled = false;
-    setLoading(true);
-    setError(null);
     getState(recordTarget)
       .then(state => {
         if (cancelled) return;
-        setRecord(state);
+        const key = state ? state.target + ':' + state.last_seq : '';
+        if (key !== prevRecordKeyRef.current) {
+          prevRecordKeyRef.current = key;
+          setRecord(state);
+        }
         setLoading(false);
       })
       .catch(err => {

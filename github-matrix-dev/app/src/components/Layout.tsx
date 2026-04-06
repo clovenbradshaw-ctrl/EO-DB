@@ -285,8 +285,10 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   const [spaceEntries, setSpaceEntries] = useState<SpaceEntry[]>([]);
   const [publicSpaceEntries, setPublicSpaceEntries] = useState<SpaceEntry[]>([]);
   const [allStates, setAllStates] = useState<EoState[]>([]);
+  const prevAllStatesKeyRef = useRef<string>('');
   const [timeScrubberFilter, setTimeScrubberFilter] = useState<TimeScrubberFilter>(DEFAULT_FILTER);
   const [scopedRecords, setScopedRecords] = useState<EoState[]>([]);
+  const prevScopedRecordsKeyRef = useRef<string>('');
   const [scopeFieldNameMap, setScopeFieldNameMap] = useState<Map<string, string>>(new Map());
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
   const getState = useEoStore((s) => s.getState);
@@ -405,7 +407,13 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   // Load all states — each space has its own isolated IDB, no prefix needed
   useEffect(() => {
     if (!ready) return;
-    getStateByPrefix('').then(setAllStates);
+    getStateByPrefix('').then((states) => {
+      const key = states.map(s => s.target + ':' + s.last_seq).join('|');
+      if (key !== prevAllStatesKeyRef.current) {
+        prevAllStatesKeyRef.current = key;
+        setAllStates(states);
+      }
+    });
   }, [ready, lastSeq, getStateByPrefix]);
 
   // Load records scoped to selected scope for the time scrubber
@@ -421,7 +429,11 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         const parts = st.target.split('.');
         return parts.length === scopeDepth + 1 && !st.value?._alias;
       });
-      setScopedRecords(direct);
+      const key = direct.map(r => r.target + ':' + r.last_seq).join('|');
+      if (key !== prevScopedRecordsKeyRef.current) {
+        prevScopedRecordsKeyRef.current = key;
+        setScopedRecords(direct);
+      }
     });
     getState(selectedScope).then((scopeState) => {
       const fields = scopeState?.value?.fields;

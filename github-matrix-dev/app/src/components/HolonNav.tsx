@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useState, useMemo, useRef } from 'react';
 import type { EoState } from '../db/types';
 import { useEoStore } from '../store/eo-store';
 import type { FilterDefinition } from './filter-types';
@@ -25,6 +25,7 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
   const ready = useEoStore((s) => s.ready);
   const lastSeq = useEoStore((s) => s.lastSeq);
   const [allStates, setAllStates] = useState<EoState[]>([]);
+  const prevStatesKeyRef = useRef<string>('');
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; target: string } | null>(null);
   const [typeSelector, setTypeSelector] = useState<{ x: number; y: number; target: string; currentType?: string } | null>(null);
@@ -44,7 +45,13 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
 
   useEffect(() => {
     if (!ready) return;
-    getStateByPrefix(statePrefix).then(setAllStates);
+    getStateByPrefix(statePrefix).then((states) => {
+      const key = states.map(s => s.target + ':' + s.last_seq).join('|');
+      if (key !== prevStatesKeyRef.current) {
+        prevStatesKeyRef.current = key;
+        setAllStates(states);
+      }
+    });
   }, [ready, lastSeq, getStateByPrefix, statePrefix]);
 
   // Reset expansion and drill-down when space changes
