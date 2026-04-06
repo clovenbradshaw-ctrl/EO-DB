@@ -3,9 +3,14 @@
  *
  * Creates and manages a Y.Doc, YjsMatrixProvider, TipTap editor,
  * and debounced persistence. Cleans up on unmount.
+ *
+ * Persistence flow:
+ * - Debounced auto-save writes to IndexedDB only (silent, fast)
+ * - Explicit saveNow() (on blur/click-out) writes to IndexedDB + Filen
+ *   and returns whether the Filen upload succeeded (for toast)
  */
 
-import { useEffect, useRef, useState, useMemo } from 'react';
+import { useEffect, useRef, useState, useMemo, useCallback } from 'react';
 import * as Y from 'yjs';
 import { useEditor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
@@ -27,6 +32,10 @@ export interface UseCollabEditorOpts {
   matrixClient: MatrixClient | null;
   /** Matrix room ID for sync */
   roomId: string | null;
+  /** Space ID for Filen folder resolution */
+  spaceId: string;
+  /** Current user ID */
+  userId: string;
   /** Whether the editor should be editable */
   editable?: boolean;
 }
@@ -45,10 +54,11 @@ export function useCollabEditor({
   fieldKey,
   matrixClient,
   roomId,
+  spaceId,
+  userId,
   editable = true,
 }: UseCollabEditorOpts) {
   const store = useEoStore((s) => s.store);
-  const dispatch = useEoStore((s) => s.dispatch);
   const [state, setState] = useState<CollabEditorState>({
     transport: 'offline',
     peerCount: 0,
@@ -58,6 +68,7 @@ export function useCollabEditor({
   const docRef = useRef<Y.Doc | null>(null);
   const providerRef = useRef<YjsMatrixProvider | null>(null);
   const cleanupRef = useRef<(() => void) | null>(null);
+  const flushRef = useRef<(() => Promise<boolean>) | null>(null);
 
   // Stable document ID for the provider
   const documentId = useMemo(() => `${target}.${fieldKey}`, [target, fieldKey]);
@@ -77,12 +88,15 @@ export function useCollabEditor({
 
       docRef.current = doc;
 
-      // Set up debounced persistence
-      const { trigger, cleanup } = createDebouncedSave(doc, target, fieldKey, dispatch);
+      // Set up debounced persistence (IndexedDB auto-save + Filen on flush)
+      const { trigger, flush, cleanup } = createDebouncedSave(
+        doc, store, target, fieldKey, spaceId, userId,
+      );
       cleanupRef.current = cleanup;
+      flushRef.current = flush;
 
-      // Listen for local changes to trigger save — remote updates don't need
-      // a DEF from this device (the originating device saves its own state)
+      // Listen for local changes to trigger auto-save — remote updates don't
+      // need a save from this device (the originating device saves its own)
       const onUpdate = (_update: Uint8Array, origin: any) => {
         if (origin === providerRef.current) return; // remote update — skip
         trigger();
@@ -122,11 +136,22 @@ export function useCollabEditor({
       providerRef.current = null;
       cleanupRef.current?.();
       cleanupRef.current = null;
+      flushRef.current = null;
       docRef.current?.destroy();
       docRef.current = null;
       setState({ transport: 'offline', peerCount: 0, loaded: false });
     };
-  }, [store, target, fieldKey, documentId, matrixClient, roomId, dispatch]);
+  }, [store, target, fieldKey, documentId, matrixClient, roomId, spaceId, userId]);
+
+  /**
+   * Immediately save to IndexedDB + upload to Filen.
+   * Returns 'filen' if Filen upload succeeded, 'local' if only local, false if nothing dirty.
+   */
+  const saveNow = useCallback(async (): Promise<'filen' | 'local' | false> => {
+    if (!flushRef.current) return false;
+    const filenOk = await flushRef.current();
+    return filenOk ? 'filen' : 'local';
+  }, []);
 
   // Create TipTap editor — depends on doc being loaded
   const editor = useEditor(
@@ -144,8 +169,8 @@ export function useCollabEditor({
               CollaborationCursor.configure({
                 provider: providerRef.current ?? undefined,
                 user: {
-                  name: matrixClient?.getUserId() || 'Anonymous',
-                  color: colorForUser(matrixClient?.getUserId() || 'anon'),
+                  name: matrixClient?.getUserId() || userId || 'Anonymous',
+                  color: colorForUser(matrixClient?.getUserId() || userId || 'anon'),
                 },
               }),
             ]
@@ -155,5 +180,5 @@ export function useCollabEditor({
     [state.loaded], // recreate editor when doc loads
   );
 
-  return { editor, ...state };
+  return { editor, saveNow, ...state };
 }

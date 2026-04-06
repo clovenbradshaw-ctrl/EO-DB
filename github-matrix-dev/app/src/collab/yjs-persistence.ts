@@ -1,39 +1,31 @@
 /**
- * Yjs persistence bridge — load/save Yjs document state from/to EO DEF operands.
+ * Yjs persistence — local IndexedDB cache + Filen remote backup.
  *
- * The Yjs binary state is base64-encoded and stored as a DEF operand with
- * `_yjs: true`. The fold treats it as a normal shallow merge. On load, the
- * base64 is decoded and applied to the Yjs document.
+ * The Yjs binary state is stored directly in IndexedDB (via EoStore) as a
+ * key-value blob under `yjs:{target}:{fieldKey}`. No DEF, no fold, no
+ * Matrix timeline event. The CRDT state is its own world — the fold is
+ * for structured record-level transformations.
  *
- * Debounced save ensures the document is persisted after editing pauses,
- * not on every keystroke.
+ * On click-out (blur), the state is flushed to local storage and uploaded
+ * to Filen. The Filen upload is the durable persistence event — the toast
+ * confirms that.
+ *
+ * Debounced auto-save writes to IndexedDB only (fast, silent).
+ * Explicit save (blur) writes to IndexedDB + Filen (shows toast).
  */
 
 import * as Y from 'yjs';
 import type { EoStore } from '../db/encrypted-store';
-import type { EoEventInput } from '../db/types';
-import { getState } from '../db/state';
-import type { YjsDefOperand } from './types';
+import { useFilenStore } from '../filen/filen-store';
+import { filenUploadFile } from '../filen/filen-api';
+import { packEodb, type EodbFile } from '../filen/eodb-format';
 
 // --------------------------------------------------------------------------
-// Encode / decode helpers
+// IndexedDB key format
 // --------------------------------------------------------------------------
 
-function uint8ToBase64(bytes: Uint8Array): string {
-  let binary = '';
-  for (let i = 0; i < bytes.length; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return btoa(binary);
-}
-
-function base64ToUint8(base64: string): Uint8Array {
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes;
+function yjsKey(target: string, fieldKey: string): string {
+  return `yjs:${target}:${fieldKey}`;
 }
 
 // --------------------------------------------------------------------------
@@ -41,10 +33,9 @@ function base64ToUint8(base64: string): Uint8Array {
 // --------------------------------------------------------------------------
 
 /**
- * Load a Yjs document from the EO store's DEF state.
+ * Load a Yjs document from IndexedDB.
  *
- * If the target has a `_yjs` operand, the base64 state is decoded and applied.
- * If no state exists, returns an empty doc (fresh document).
+ * If state exists, it's applied as a Yjs update. Otherwise returns an empty doc.
  */
 export async function loadYjsDoc(
   store: EoStore,
@@ -52,98 +43,147 @@ export async function loadYjsDoc(
   fieldKey: string,
 ): Promise<Y.Doc> {
   const doc = new Y.Doc();
-  const state = await getState(store, target);
+  const saved = await store.get(yjsKey(target, fieldKey));
 
-  if (state?.value) {
-    const fieldValue = state.value[fieldKey];
-    if (fieldValue && fieldValue._yjs && fieldValue.state) {
-      const update = base64ToUint8(fieldValue.state);
-      Y.applyUpdate(doc, update);
+  if (saved && saved instanceof Uint8Array) {
+    Y.applyUpdate(doc, saved);
+  } else if (saved && saved.state) {
+    // Legacy format: { _yjs: true, state: base64 }
+    const binary = atob(saved.state);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
     }
+    Y.applyUpdate(doc, bytes);
   }
 
   return doc;
 }
 
 // --------------------------------------------------------------------------
-// Save
+// Save to IndexedDB (local only, fast, silent)
 // --------------------------------------------------------------------------
 
 /**
- * Build a DEF operand containing the full Yjs document state.
+ * Save the current Yjs document state to IndexedDB.
+ * This is the fast local-only path — no network, no toast.
  */
-export function buildYjsDefOperand(doc: Y.Doc): YjsDefOperand {
+export async function saveYjsDocLocal(
+  doc: Y.Doc,
+  store: EoStore,
+  target: string,
+  fieldKey: string,
+): Promise<void> {
   const state = Y.encodeStateAsUpdate(doc);
-  return {
-    _yjs: true,
-    state: uint8ToBase64(state),
-    version: 1,
-  };
+  await store.put(yjsKey(target, fieldKey), state);
 }
 
+// --------------------------------------------------------------------------
+// Save to Filen (remote, durable)
+// --------------------------------------------------------------------------
+
 /**
- * Save the current Yjs document state as a DEF event.
- *
- * @param doc - The Yjs document to snapshot
- * @param target - EO target path (e.g. `at.appXYZ.tblABC.rec001`)
- * @param fieldKey - Field key (e.g. `fldBody`)
- * @param dispatch - The eo-store dispatch function
+ * Upload the Yjs document state to Filen as an .eodb file.
+ * Returns true if the upload succeeded, false if Filen is not connected.
  */
-export async function saveYjsDoc(
+export async function saveYjsDocToFilen(
   doc: Y.Doc,
   target: string,
   fieldKey: string,
-  dispatch: (event: EoEventInput) => Promise<number>,
-): Promise<void> {
-  const operand: Record<string, any> = {};
-  operand[fieldKey] = buildYjsDefOperand(doc);
-  const now = new Date().toISOString();
+  spaceId: string,
+  userId: string,
+): Promise<boolean> {
+  const { auth, masterKeys, spaceFolders } = useFilenStore.getState();
+  if (!auth) return false;
 
-  await dispatch({
-    op: 'DEF',
-    target,
-    operand,
-    agent: 'system',
-    ts: now,
-    acquired_ts: now,
-  });
+  const spaceFolderUuid = spaceFolders[spaceId];
+  if (!spaceFolderUuid) return false;
+
+  const state = Y.encodeStateAsUpdate(doc);
+  const filename = `yjs-${target}-${fieldKey}-${Date.now()}.bin`;
+
+  await filenUploadFile(
+    auth.apiKey,
+    spaceFolderUuid,
+    filename,
+    state,
+    masterKeys[0],
+  );
+
+  return true;
 }
 
 // --------------------------------------------------------------------------
-// Debounced save
+// Combined save (local + Filen)
 // --------------------------------------------------------------------------
 
 /**
- * Create a debounced save function that persists the Yjs doc after a pause.
- * Returns a cleanup function that flushes any pending save and clears the timer.
+ * Save to IndexedDB and upload to Filen.
+ * Returns true if the Filen upload succeeded.
+ */
+export async function saveYjsDocFull(
+  doc: Y.Doc,
+  store: EoStore,
+  target: string,
+  fieldKey: string,
+  spaceId: string,
+  userId: string,
+): Promise<boolean> {
+  // Always save locally first
+  await saveYjsDocLocal(doc, store, target, fieldKey);
+
+  // Then try Filen
+  try {
+    return await saveYjsDocToFilen(doc, target, fieldKey, spaceId, userId);
+  } catch (err) {
+    console.warn('[EO-DB] Filen upload failed for Yjs doc:', err);
+    return false;
+  }
+}
+
+// --------------------------------------------------------------------------
+// Debounced local save
+// --------------------------------------------------------------------------
+
+/**
+ * Create a debounced save that writes to IndexedDB only (fast, silent).
+ * The explicit `flush()` does IndexedDB + Filen and returns whether Filen succeeded.
  */
 export function createDebouncedSave(
   doc: Y.Doc,
+  store: EoStore,
   target: string,
   fieldKey: string,
-  dispatch: (event: EoEventInput) => Promise<number>,
+  spaceId: string,
+  userId: string,
   delayMs = 5000,
-): { trigger: () => void; flush: () => Promise<void>; cleanup: () => void } {
+): { trigger: () => void; flush: () => Promise<boolean>; cleanup: () => void } {
   let timer: ReturnType<typeof setTimeout> | null = null;
-  let pending = false;
+  let dirty = false;
 
-  const flush = async () => {
+  const autoSave = async () => {
+    if (dirty) {
+      dirty = false;
+      await saveYjsDocLocal(doc, store, target, fieldKey);
+    }
+  };
+
+  const flush = async (): Promise<boolean> => {
     if (timer) {
       clearTimeout(timer);
       timer = null;
     }
-    if (pending) {
-      pending = false;
-      await saveYjsDoc(doc, target, fieldKey, dispatch);
-    }
+    if (!dirty) return false; // nothing changed since last save
+    dirty = false;
+    return saveYjsDocFull(doc, store, target, fieldKey, spaceId, userId);
   };
 
   const trigger = () => {
-    pending = true;
+    dirty = true;
     if (timer) clearTimeout(timer);
     timer = setTimeout(() => {
       timer = null;
-      flush();
+      autoSave();
     }, delayMs);
   };
 
@@ -152,10 +192,9 @@ export function createDebouncedSave(
       clearTimeout(timer);
       timer = null;
     }
-    // Fire-and-forget final save
-    if (pending) {
-      pending = false;
-      saveYjsDoc(doc, target, fieldKey, dispatch).catch(() => {});
+    if (dirty) {
+      dirty = false;
+      saveYjsDocLocal(doc, store, target, fieldKey).catch(() => {});
     }
   };
 

@@ -14,9 +14,13 @@ interface Props {
   roomId?: string | null;
   /** Optional EO target path for persistence */
   target?: string;
+  /** Space ID for Filen folder resolution */
+  spaceId?: string;
+  /** Current user ID */
+  userId?: string;
 }
 
-export function ParagraphBlock({ block, mode, matrixClient, roomId, target }: Props) {
+export function ParagraphBlock({ block, mode, matrixClient, roomId, target, spaceId, userId }: Props) {
   const { text = '', alignment = 'left', collabField } = block.props;
   const updateBlockProps = useBuilderStore((s) => s.updateBlockProps);
   const { theme } = useTheme();
@@ -33,6 +37,8 @@ export function ParagraphBlock({ block, mode, matrixClient, roomId, target }: Pr
           fieldKey={collabField}
           matrixClient={matrixClient ?? null}
           roomId={roomId ?? null}
+          spaceId={spaceId ?? ''}
+          userId={userId ?? ''}
           editable
           placeholder="Type something..."
         />

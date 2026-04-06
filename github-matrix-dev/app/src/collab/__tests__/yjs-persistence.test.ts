@@ -1,12 +1,11 @@
 /**
- * Yjs persistence tests — verify load/save roundtrip through the EO fold.
+ * Yjs persistence tests — verify load/save roundtrip through IndexedDB (via EoStore).
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import * as Y from 'yjs';
 import type { EoStore } from '../../db/encrypted-store';
-import { processEvent } from '../../db/fold';
-import { loadYjsDoc, saveYjsDoc, buildYjsDefOperand } from '../yjs-persistence';
+import { loadYjsDoc, saveYjsDocLocal } from '../yjs-persistence';
 
 /**
  * In-memory store for testing — same pattern as fold.test.ts.
@@ -51,7 +50,6 @@ describe('yjs-persistence', () => {
   let store: EoStore;
   const TARGET = 'app.tblNotes.rec001';
   const FIELD = 'fldBody';
-  const AGENT = '@test:matrix.example.com';
 
   beforeEach(() => {
     store = createTestStore();
@@ -65,22 +63,14 @@ describe('yjs-persistence', () => {
     doc.destroy();
   });
 
-  it('roundtrips Yjs document state through DEF', async () => {
+  it('roundtrips Yjs document state through IndexedDB', async () => {
     // Create a doc with some content
     const doc1 = new Y.Doc();
     const text1 = doc1.getText('default');
     text1.insert(0, 'Hello, collaborative world!');
 
-    // Save via DEF
-    const dispatch = async (event: any) => {
-      return processEvent(store, {
-        ...event,
-        agent: AGENT,
-        acquired_ts: new Date().toISOString(),
-      });
-    };
-
-    await saveYjsDoc(doc1, TARGET, FIELD, dispatch);
+    // Save to store
+    await saveYjsDocLocal(doc1, store, TARGET, FIELD);
 
     // Load into a new doc
     const doc2 = await loadYjsDoc(store, TARGET, FIELD);
@@ -98,15 +88,7 @@ describe('yjs-persistence', () => {
     text.insert(11, 'Second line\n');
     text.insert(23, 'Third line');
 
-    const dispatch = async (event: any) => {
-      return processEvent(store, {
-        ...event,
-        agent: AGENT,
-        acquired_ts: new Date().toISOString(),
-      });
-    };
-
-    await saveYjsDoc(doc1, TARGET, FIELD, dispatch);
+    await saveYjsDocLocal(doc1, store, TARGET, FIELD);
 
     const doc2 = await loadYjsDoc(store, TARGET, FIELD);
     const text2 = doc2.getText('default');
@@ -116,15 +98,15 @@ describe('yjs-persistence', () => {
     doc2.destroy();
   });
 
-  it('buildYjsDefOperand produces correct shape', () => {
+  it('stores raw binary in IndexedDB (not DEF operand)', async () => {
     const doc = new Y.Doc();
     doc.getText('default').insert(0, 'test');
 
-    const operand = buildYjsDefOperand(doc);
-    expect(operand._yjs).toBe(true);
-    expect(operand.version).toBe(1);
-    expect(typeof operand.state).toBe('string');
-    expect(operand.state.length).toBeGreaterThan(0);
+    await saveYjsDocLocal(doc, store, TARGET, FIELD);
+
+    // Verify raw value is a Uint8Array, not a DEF operand object
+    const raw = await store.get(`yjs:${TARGET}:${FIELD}`);
+    expect(raw).toBeInstanceOf(Uint8Array);
 
     doc.destroy();
   });
@@ -152,15 +134,7 @@ describe('yjs-persistence', () => {
     expect(doc1.getText('default').toString()).toBe(doc2.getText('default').toString());
 
     // Save and reload — result should still match
-    const dispatch = async (event: any) => {
-      return processEvent(store, {
-        ...event,
-        agent: AGENT,
-        acquired_ts: new Date().toISOString(),
-      });
-    };
-
-    await saveYjsDoc(doc1, TARGET, FIELD, dispatch);
+    await saveYjsDocLocal(doc1, store, TARGET, FIELD);
     const doc3 = await loadYjsDoc(store, TARGET, FIELD);
     expect(doc3.getText('default').toString()).toBe(doc1.getText('default').toString());
 

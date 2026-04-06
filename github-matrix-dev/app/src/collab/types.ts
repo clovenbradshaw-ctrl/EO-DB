@@ -24,9 +24,3 @@ export const MSG_AWARENESS = 0x02;
 export const MSG_SYNC_STEP1 = 0x03;
 export const MSG_SYNC_STEP2 = 0x04;
 
-/** DEF operand shape for Yjs-backed fields. */
-export interface YjsDefOperand {
-  _yjs: true;
-  state: string;   // base64-encoded Yjs state
-  version: 1;
-}
