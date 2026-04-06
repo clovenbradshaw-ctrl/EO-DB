@@ -336,6 +336,30 @@ function renderFieldValue(
     );
   }
 
+  // Array of target-path strings (e.g. ["import.cases.CASE-001", ...]) — render as clickable links
+  if (Array.isArray(val) && val.length > 0 && val.every((v: unknown) => typeof v === 'string' && (v as string).includes('.'))) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+        {val.map((target: string) => {
+          const resolved = resolver.resolveTarget(target);
+          const shortId = target.split('.').pop() || target;
+          return (
+            <div
+              key={target}
+              onClick={() => onNavigate(target)}
+              style={{ color: t.purple, cursor: 'pointer', fontSize: 13 }}
+            >
+              <span style={{ fontFamily: "'JetBrains Mono', monospace" }}>{shortId}</span>
+              {resolved?.name && (
+                <span style={{ color: t.text, fontWeight: 400 }}>{' · '}{resolved.name}</span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+
   // Plain string array (e.g. practice_areas: ["corporate_litigation", "bankruptcy"])
   if (Array.isArray(val)) {
     if (val.length === 0) {

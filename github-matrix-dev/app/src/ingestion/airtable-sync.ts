@@ -36,7 +36,7 @@ export interface HydrationManifest {
       name: string;
       primaryFieldId?: string;
       fieldCount: number;
-      fields: Array<{ id: string; name: string; type: string }>;
+      fields: Array<{ id: string; name: string; type: string; options?: Record<string, any> }>;
     }>;
   }>;
   discovered_at: string;
@@ -152,10 +152,11 @@ interface FieldMeta {
   name: string;
   type: string;
   classification: FieldClassification;
+  options?: Record<string, any>;
 }
 
 function buildFieldMetaMap(
-  fields: Array<{ id: string; name: string; type: string }> | undefined,
+  fields: Array<{ id: string; name: string; type: string; options?: Record<string, any> }> | undefined,
 ): Map<string, FieldMeta> {
   const map = new Map<string, FieldMeta>();
   if (!fields) return map;
@@ -165,6 +166,7 @@ function buildFieldMetaMap(
       name: f.name,
       type: f.type,
       classification: classifyFieldType(f.type),
+      options: f.options,
     });
   }
   return map;
@@ -185,6 +187,7 @@ function extractStorableFields(
   rawFields: Record<string, any>,
   fieldMeta: Map<string, FieldMeta>,
   exclusions: SyncExclusions,
+  baseId: string,
 ): Record<string, any> {
   if (fieldMeta.size === 0) return rawFields;
 
@@ -194,7 +197,21 @@ function extractStorableFields(
     if (!meta) { result[fieldId] = rawValue; continue; }
     if (meta.classification === 'skip') continue;
     if (isExcluded(fieldId, meta.name, exclusions)) continue;
-    result[fieldId] = extractValue(rawValue, meta.type);
+
+    const extracted = extractValue(rawValue, meta.type);
+
+    // Link fields → {linked: [target, ...]} so the UI renders clickable links
+    if (meta.classification === 'con' && Array.isArray(extracted)) {
+      const linkedTableId = meta.options?.linkedTableId;
+      if (linkedTableId) {
+        result[fieldId] = {
+          linked: extracted.map((recId: string) => recordTarget(baseId, linkedTableId, recId)),
+        };
+        continue;
+      }
+    }
+
+    result[fieldId] = extracted;
   }
   return result;
 }
@@ -240,7 +257,7 @@ async function ingestRecord(
   displayField?: string,
 ): Promise<'ingested' | 'skipped_no_change' | 'skipped_duplicate'> {
   const target = recordTarget(baseId, tableId, record.id);
-  let storableFields = extractStorableFields(record.fields, fieldMeta, exclusions);
+  let storableFields = extractStorableFields(record.fields, fieldMeta, exclusions, baseId);
 
   if (preserveExisting) {
     // Only write fields that don't already exist in EO-DB.
@@ -330,7 +347,10 @@ export async function discoverSchema(client: AirtableClient): Promise<HydrationM
         name: t.name,
         primaryFieldId: t.primaryFieldId,
         fieldCount: t.fields.length,
-        fields: t.fields.map(f => ({ id: f.id, name: f.name, type: f.type })),
+        fields: t.fields.map(f => ({
+          id: f.id, name: f.name, type: f.type,
+          ...(f.options ? { options: f.options } : {}),
+        })),
       })),
     });
   }

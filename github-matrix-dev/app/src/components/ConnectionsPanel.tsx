@@ -118,6 +118,17 @@ function getEdgeMetaValue(row: ResolvedRow, key: string): any {
 
 function formatCellValue(val: any): string {
   if (val === undefined || val === null) return '';
+  // Arrays of strings: show short IDs or comma-joined values
+  if (Array.isArray(val)) {
+    return val.map(v => {
+      if (typeof v === 'string' && v.includes('.')) return v.split('.').pop() || v;
+      return v != null ? String(v) : '';
+    }).filter(Boolean).join(', ');
+  }
+  // Objects with linked array: show short IDs of linked targets
+  if (typeof val === 'object' && val.linked && Array.isArray(val.linked)) {
+    return val.linked.map((t: string) => t.split('.').pop() || t).join(', ');
+  }
   if (typeof val === 'object') return JSON.stringify(val);
   return String(val);
 }
