@@ -101,6 +101,27 @@ export function filenShareEventTypes(prefix?: string) {
   } as const;
 }
 
+/** Collaborative editing (Yjs) signaling event types (to-device). */
+export function collabEventTypes(prefix?: string) {
+  const p = prefix ?? _eventPrefix;
+  return {
+    /** Announce that this device is editing a document. */
+    announce: `${p}.collab.announce`,
+    /** Yjs document update (fallback when WebRTC unavailable). */
+    update: `${p}.collab.update`,
+    /** Yjs awareness update (cursors, selections). */
+    awareness: `${p}.collab.awareness`,
+    /** WebRTC SDP offer for collab DataChannel. */
+    rtcOffer: `${p}.collab.rtc.offer`,
+    /** WebRTC SDP answer for collab DataChannel. */
+    rtcAnswer: `${p}.collab.rtc.answer`,
+    /** WebRTC ICE candidate exchange. */
+    rtcIce: `${p}.collab.rtc.ice`,
+    /** Announce that this device stopped editing. */
+    leave: `${p}.collab.leave`,
+  } as const;
+}
+
 export interface MatrixDomainConfig {
   eventPrefix?: string;
   dataRoomAlias?: string;
