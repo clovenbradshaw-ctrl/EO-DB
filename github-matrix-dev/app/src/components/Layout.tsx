@@ -25,6 +25,7 @@ import { SyncProgress } from './SyncProgress';
 import { LogView } from './LogView';
 import { ComposeView } from './ComposeView';
 import { GraphView } from './GraphView';
+import { SchemaView } from './SchemaView';
 import { SettingsView } from './SettingsView';
 import { SpaceMembers } from './SpaceMembers';
 import { ImportView } from './ImportView';
@@ -1151,6 +1152,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   const activeViewType: ViewType = useMemo(() => {
     if (!selectedScope) return 'grid';
     const sig = viewStore.getSig(selectedScope);
+    if (sig.activeViewId === '__schema') return 'schema';
     if (!sig.activeViewId) return 'grid';
     const sv = viewStore.savedViews[sig.activeViewId];
     return sv?.viewType || 'grid';
@@ -1531,7 +1533,9 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                 ) : selectedScope ? (
                   <>
                     <ViewTabs scope={selectedScope} session={{ userId: session.userId }} />
-                    {activeViewType === 'graph' ? (
+                    {activeViewType === 'schema' ? (
+                      <SchemaView scope={selectedScope} />
+                    ) : activeViewType === 'graph' ? (
                       <GraphView allStates={allStates} />
                     ) : activeViewType === 'grid' ? (
                       <TableView

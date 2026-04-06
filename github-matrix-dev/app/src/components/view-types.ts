@@ -5,7 +5,7 @@ import type { FilterRule } from './filter-types';
 // ViewType — the kind of visualization for a saved view
 // ---------------------------------------------------------------------------
 
-export type ViewType = 'grid' | 'graph' | 'kanban' | 'calendar' | 'gallery';
+export type ViewType = 'grid' | 'graph' | 'kanban' | 'calendar' | 'gallery' | 'schema';
 
 export const VIEW_TYPE_META: Record<ViewType, { label: string; icon: string }> = {
   grid: { label: 'Grid', icon: '\u229E' },
@@ -13,6 +13,7 @@ export const VIEW_TYPE_META: Record<ViewType, { label: string; icon: string }> =
   kanban: { label: 'Kanban', icon: '\u25A5' },
   calendar: { label: 'Calendar', icon: '\u25F7' },
   gallery: { label: 'Gallery', icon: '\u25A6' },
+  schema: { label: 'Schema', icon: '\u2261' },
 };
 
 // ---------------------------------------------------------------------------
