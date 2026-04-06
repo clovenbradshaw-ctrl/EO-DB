@@ -37,7 +37,7 @@ export function ViewsBrowser({ scope, recordCount, userId, onBack, onSelectView 
   const [showCreate, setShowCreate] = useState(false);
   const [newViewName, setNewViewName] = useState('');
   const [newViewType, setNewViewType] = useState<ViewType>('grid');
-  const [newViewVisibility, setNewViewVisibility] = useState<'private' | 'shared'>('private');
+  const [newViewVisibility, setNewViewVisibility] = useState<'private' | 'shared'>('shared');
   const [newKanbanField, setNewKanbanField] = useState('');
   const [creating, setCreating] = useState(false);
 
@@ -180,7 +180,7 @@ export function ViewsBrowser({ scope, recordCount, userId, onBack, onSelectView 
   function resetCreateForm() {
     setNewViewName('');
     setNewViewType('grid');
-    setNewViewVisibility('private');
+    setNewViewVisibility('shared');
     setNewKanbanField('');
   }
 

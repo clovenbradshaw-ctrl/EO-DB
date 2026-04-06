@@ -25,7 +25,7 @@ export function ViewTabs({ scope, session }: ViewTabsProps) {
   const [showNameInput, setShowNameInput] = useState(false);
   const [newViewName, setNewViewName] = useState('');
   const [newViewType, setNewViewType] = useState<ViewType>('grid');
-  const [newViewVisibility, setNewViewVisibility] = useState<'private' | 'shared'>('private');
+  const [newViewVisibility, setNewViewVisibility] = useState<'private' | 'shared'>('shared');
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; viewId: string } | null>(null);
