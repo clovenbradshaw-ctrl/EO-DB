@@ -502,11 +502,15 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       fontWeight: 400,
       flex: 1,
       minWidth: 0,
+      overflow: 'hidden',
+      wordBreak: 'break-word' as const,
     },
     mono: {
       fontFamily: "'JetBrains Mono', monospace",
       fontSize: 11,
       color: t.textSecondary,
+      wordBreak: 'break-all' as const,
+      overflow: 'hidden',
     },
     fieldKeyHint: {
       fontSize: 9,

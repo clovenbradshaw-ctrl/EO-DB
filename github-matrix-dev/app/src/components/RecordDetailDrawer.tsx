@@ -143,6 +143,7 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       borderLeft: `1px solid ${t.border}`,
       display: 'flex',
       flexDirection: 'column',
+      overflow: 'hidden',
     },
     header: {
       display: 'flex',
@@ -228,6 +229,7 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
     body: {
       flex: 1,
       overflowY: 'auto',
+      overflowX: 'hidden',
     },
   };
 }

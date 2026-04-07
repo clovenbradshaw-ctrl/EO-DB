@@ -370,9 +370,10 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       margin: 0,
       whiteSpace: 'pre-wrap' as const,
       wordBreak: 'break-all' as const,
+      overflowWrap: 'break-word' as const,
       lineHeight: 1.5,
       maxHeight: 200,
-      overflowY: 'auto' as const,
+      overflow: 'auto',
     },
     revertLink: {
       color: t.warning,
