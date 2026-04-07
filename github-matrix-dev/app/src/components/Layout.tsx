@@ -327,7 +327,13 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   const selectedScope = route.scope;
   const selectedRecord = route.record;
   const [selectedSpace, setSelectedSpace] = useState<string | null>(() => {
-    // Restore last selected space from localStorage
+    // Prefer space from URL hash (enables direct links)
+    if (route.space) {
+      const fromUrl = normalizeSpaceTarget(route.space);
+      localStorage.setItem('eo-selected-space', fromUrl);
+      return fromUrl;
+    }
+    // Fall back to last selected space from localStorage
     const saved = localStorage.getItem('eo-selected-space');
     if (!saved) return null;
     // Normalize legacy "space.foo" format to canonical "space_foo"
@@ -405,8 +411,8 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     const canonical = normalizeSpaceTarget(target);
     setSelectedSpace(canonical);
     localStorage.setItem('eo-selected-space', canonical);
-    // Clear route state when switching spaces
-    navigate({ scope: null, record: null, view: 'records', builderViewId: null, customPageId: null });
+    // Clear route state when switching spaces — space is now part of the URL
+    navigate({ space: canonical, scope: null, record: null, view: 'records', builderViewId: null, customPageId: null });
   }
   // Soft-delete a space: hide from list, track in recycle bin
   /**
@@ -467,6 +473,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       } else {
         setSelectedSpace(null);
         localStorage.removeItem('eo-selected-space');
+        navigate({ space: null });
       }
     }
     // Force re-render
@@ -504,6 +511,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       } else {
         setSelectedSpace(null);
         localStorage.removeItem('eo-selected-space');
+        navigate({ space: null });
       }
     }
     setSpaces([...spaces]);
@@ -519,6 +527,25 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     setSpaceEntries([...spaceEntries]);
     selectSpace(target);
   }
+
+  // Sync selectedSpace → URL: when selectedSpace changes outside of navigate
+  // (e.g. auto-select on discovery), push it into the URL
+  useEffect(() => {
+    if (selectedSpace && route.space !== selectedSpace) {
+      navigate({ space: selectedSpace });
+    } else if (!selectedSpace && route.space) {
+      navigate({ space: null });
+    }
+  }, [selectedSpace]);
+
+  // Sync URL → selectedSpace: when browser back/forward changes the hash space
+  useEffect(() => {
+    const urlSpace = route.space ? normalizeSpaceTarget(route.space) : null;
+    if (urlSpace && urlSpace !== selectedSpace) {
+      setSelectedSpace(urlSpace);
+      localStorage.setItem('eo-selected-space', urlSpace);
+    }
+  }, [route.space]);
 
   // Permanently delete a space's local IndexedDB data
   async function handlePermanentDelete(target: string) {

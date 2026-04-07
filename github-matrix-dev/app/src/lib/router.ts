@@ -10,6 +10,7 @@ const VIEWS = new Set<string>(['records', 'log', 'graph', 'import', 'compose', '
 
 export interface AppRoute {
   view: View;
+  space: string | null;           // space target e.g. 'space_amino'
   scope: string | null;          // full dot-path e.g. 'tblClients'
   record: string | null;         // full dot-path e.g. 'tblClients.rec123'
   builderViewId: string | null;  // UUID when editing a builder view
@@ -19,6 +20,7 @@ export interface AppRoute {
 
 const DEFAULT_ROUTE: AppRoute = {
   view: 'records',
+  space: null,
   scope: null,
   record: null,
   builderViewId: null,
@@ -68,6 +70,13 @@ export function parseHash(hash: string): AppRoute {
   let i = 0;
   while (i < segments.length) {
     const seg = segments[i];
+
+    if (seg === 's' && i + 1 < segments.length) {
+      // Space: /s/{spaceTarget}
+      route.space = segments[i + 1];
+      i += 2;
+      continue;
+    }
 
     if (seg === 't' && i + 1 < segments.length) {
       // Scope: /t/{scope}
@@ -124,6 +133,11 @@ export function parseHash(hash: string): AppRoute {
 
 export function serializeRoute(route: AppRoute): string {
   const ordered: string[] = [];
+
+  // Space prefix: /s/{spaceTarget}
+  if (route.space) {
+    ordered.push('s', route.space);
+  }
 
   if (route.customPageId) {
     ordered.push('p', route.customPageId);
@@ -187,6 +201,13 @@ export function useHashRoute() {
     const next: AppRoute = { ...current, ...partial };
 
     // Clear downstream state when changing upstream context
+    if ('space' in partial && partial.space !== current.space) {
+      if (!('scope' in partial)) next.scope = null;
+      if (!('record' in partial)) next.record = null;
+      if (!('view' in partial)) next.view = 'records';
+      if (!('builderViewId' in partial)) next.builderViewId = null;
+      if (!('customPageId' in partial)) next.customPageId = null;
+    }
     if ('scope' in partial && partial.scope !== current.scope) {
       if (!('record' in partial)) next.record = null;
     }
