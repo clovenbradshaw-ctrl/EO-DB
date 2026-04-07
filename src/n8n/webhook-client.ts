@@ -1,16 +1,16 @@
 /**
- * n8n webhook client — POST (store) and GET (retrieve) with E2E encryption.
+ * n8n webhook client — single endpoint, action-routed.
  *
- * Every payload is encrypted locally before it touches the network.
- * n8n only ever sees opaque ciphertext + a content hash for addressing.
+ * Every request is a POST to /webhook/eo-store with an `action` field:
+ *   { action: "store",    envelope, data_id, data_type }
+ *   { action: "retrieve", content_hash, data_id }
+ *   { action: "list",     data_type? }
  *
- * Flow:
- *   STORE:  encrypt → POST /webhook/eo-store  → n8n persists blob by hash
- *   FETCH:  GET /webhook/eo-store?hash=<hash>&id=<id> → decrypt locally
+ * All payloads encrypted locally (AES-256-GCM) before they touch the wire.
+ * n8n routes via a Switch node, stores/retrieves from Google Drive.
  */
 
 import { v4 as uuid } from 'uuid';
-import { pack } from 'msgpackr';
 import type { LocalKeyring } from '../db/crypto-types.js';
 import { resolveKeyForTarget } from '../crypto/segment-keys.js';
 import { getWebhookUrl, getN8nConfig } from './config.js';
@@ -25,11 +25,34 @@ import type {
   ManifestEntry,
   WebhookStoreRequest,
   WebhookStoreResponse,
+  WebhookRetrieveRequest,
   WebhookRetrieveResponse,
-  EncryptedWebhookEnvelope,
+  WebhookListRequest,
+  WebhookListResponse,
 } from './types.js';
 
-// ─── Store (POST) ──────────────────────────────────────────────────────────
+// ─── Shared fetch helper ───────────────────────────────────────────────────
+
+async function postToWebhook(
+  body: WebhookStoreRequest | WebhookRetrieveRequest | WebhookListRequest,
+  matrixToken: string,
+): Promise<Response> {
+  const config = getN8nConfig();
+  return fetch(getWebhookUrl(), {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(config?.webhookAuthToken
+        ? { Authorization: `Bearer ${config.webhookAuthToken}` }
+        : {}),
+      'X-Matrix-Token': matrixToken,
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(config?.timeoutMs ?? 30_000),
+  });
+}
+
+// ─── Store ─────────────────────────────────────────────────────────────────
 
 export interface StoreOptions {
   /** EO target path for key resolution. */
@@ -49,12 +72,12 @@ export interface StoreOptions {
 export interface StoreResult {
   /** The manifest entry to publish to the Matrix room. */
   manifest: ManifestEntry;
-  /** The n8n storage reference (if returned). */
-  ref?: string;
+  /** Google Drive file ID (if returned by n8n). */
+  driveFileId?: string;
 }
 
 /**
- * Encrypt and POST arbitrary data to n8n.
+ * Encrypt and store arbitrary data via n8n.
  * Returns a ManifestEntry ready to be published as Matrix room state.
  */
 export async function storeViaN8n(
@@ -72,36 +95,22 @@ export async function storeViaN8n(
 
   const dataId = uuid();
   const body: WebhookStoreRequest = {
+    action: 'store',
     envelope,
     data_id: dataId,
     data_type: opts.dataType,
   };
 
-  const config = getN8nConfig();
-  const resp = await fetch(getWebhookUrl(), {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(config?.webhookAuthToken
-        ? { Authorization: `Bearer ${config.webhookAuthToken}` }
-        : {}),
-      'X-Matrix-Token': opts.matrixToken,
-    },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(config?.timeoutMs ?? 30_000),
-  });
-
+  const resp = await postToWebhook(body, opts.matrixToken);
   if (!resp.ok) {
     const text = await resp.text().catch(() => '');
-    throw new Error(`n8n webhook POST failed (${resp.status}): ${text}`);
+    throw new Error(`n8n store failed (${resp.status}): ${text}`);
   }
 
   const result: WebhookStoreResponse = await resp.json();
   if (!result.ok) {
     throw new Error(`n8n rejected the payload: ${JSON.stringify(result)}`);
   }
-
-  // Verify n8n echoed the correct hash
   if (result.content_hash !== envelope.content_hash) {
     throw new Error(
       `Hash mismatch from n8n: sent ${envelope.content_hash}, got ${result.content_hash}`,
@@ -120,13 +129,11 @@ export async function storeViaN8n(
     seq_range: opts.seqRange,
   };
 
-  return { manifest, ref: result.ref };
+  return { manifest, driveFileId: result.drive_file_id };
 }
 
-// ─── Store binary (snapshots, archives) ────────────────────────────────────
-
 /**
- * Encrypt and POST raw binary (already-packed snapshot, archive, etc.).
+ * Encrypt and store raw binary (already-packed snapshot, archive, etc.).
  */
 export async function storeBinaryViaN8n(
   binary: Uint8Array,
@@ -144,28 +151,16 @@ export async function storeBinaryViaN8n(
   const envelope = await encryptBinaryForWebhook(binary, entry.key, entry.keyId);
   const dataId = uuid();
   const body: WebhookStoreRequest = {
+    action: 'store',
     envelope,
     data_id: dataId,
     data_type: opts.dataType,
   };
 
-  const config = getN8nConfig();
-  const resp = await fetch(getWebhookUrl(), {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(config?.webhookAuthToken
-        ? { Authorization: `Bearer ${config.webhookAuthToken}` }
-        : {}),
-      'X-Matrix-Token': opts.matrixToken,
-    },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(config?.timeoutMs ?? 30_000),
-  });
-
+  const resp = await postToWebhook(body, opts.matrixToken);
   if (!resp.ok) {
     const text = await resp.text().catch(() => '');
-    throw new Error(`n8n webhook POST (binary) failed (${resp.status}): ${text}`);
+    throw new Error(`n8n store (binary) failed (${resp.status}): ${text}`);
   }
 
   const result: WebhookStoreResponse = await resp.json();
@@ -185,47 +180,37 @@ export async function storeBinaryViaN8n(
     seq_range: opts.seqRange,
   };
 
-  return { manifest, ref: result.ref };
+  return { manifest, driveFileId: result.drive_file_id };
 }
 
-// ─── Retrieve (GET) ────────────────────────────────────────────────────────
+// ─── Retrieve ──────────────────────────────────────────────────────────────
 
 /**
  * Fetch and decrypt a data blob from n8n using a manifest entry.
- * The Matrix room provides the manifest; this function does the rest.
  */
 export async function retrieveViaN8n(
   manifest: ManifestEntry,
   keyring: LocalKeyring,
   matrixToken: string,
 ): Promise<unknown> {
-  const config = getN8nConfig();
-  const url = new URL(getWebhookUrl());
-  url.searchParams.set('hash', manifest.content_hash);
-  url.searchParams.set('id', manifest.data_id);
+  const body: WebhookRetrieveRequest = {
+    action: 'retrieve',
+    content_hash: manifest.content_hash,
+    data_id: manifest.data_id,
+  };
 
-  const resp = await fetch(url.toString(), {
-    method: 'GET',
-    headers: {
-      ...(config?.webhookAuthToken
-        ? { Authorization: `Bearer ${config.webhookAuthToken}` }
-        : {}),
-      'X-Matrix-Token': matrixToken,
-    },
-    signal: AbortSignal.timeout(config?.timeoutMs ?? 30_000),
-  });
-
+  const resp = await postToWebhook(body, matrixToken);
   if (!resp.ok) {
     const text = await resp.text().catch(() => '');
-    throw new Error(`n8n webhook GET failed (${resp.status}): ${text}`);
+    throw new Error(`n8n retrieve failed (${resp.status}): ${text}`);
   }
 
-  const body: WebhookRetrieveResponse = await resp.json();
-  if (!body.ok || !body.envelope) {
+  const result: WebhookRetrieveResponse = await resp.json();
+  if (!result.ok || !result.envelope) {
     throw new Error(`Blob not found in n8n for hash=${manifest.content_hash}`);
   }
 
-  return decryptFromWebhook(body.envelope, keyring);
+  return decryptFromWebhook(result.envelope, keyring);
 }
 
 /**
@@ -236,31 +221,45 @@ export async function retrieveBinaryViaN8n(
   keyring: LocalKeyring,
   matrixToken: string,
 ): Promise<Uint8Array> {
-  const config = getN8nConfig();
-  const url = new URL(getWebhookUrl());
-  url.searchParams.set('hash', manifest.content_hash);
-  url.searchParams.set('id', manifest.data_id);
+  const body: WebhookRetrieveRequest = {
+    action: 'retrieve',
+    content_hash: manifest.content_hash,
+    data_id: manifest.data_id,
+  };
 
-  const resp = await fetch(url.toString(), {
-    method: 'GET',
-    headers: {
-      ...(config?.webhookAuthToken
-        ? { Authorization: `Bearer ${config.webhookAuthToken}` }
-        : {}),
-      'X-Matrix-Token': matrixToken,
-    },
-    signal: AbortSignal.timeout(config?.timeoutMs ?? 30_000),
-  });
-
+  const resp = await postToWebhook(body, matrixToken);
   if (!resp.ok) {
     const text = await resp.text().catch(() => '');
-    throw new Error(`n8n webhook GET (binary) failed (${resp.status}): ${text}`);
+    throw new Error(`n8n retrieve (binary) failed (${resp.status}): ${text}`);
   }
 
-  const body: WebhookRetrieveResponse = await resp.json();
-  if (!body.ok || !body.envelope) {
-    throw new Error(`Binary blob not found in n8n for hash=${manifest.content_hash}`);
+  const result: WebhookRetrieveResponse = await resp.json();
+  if (!result.ok || !result.envelope) {
+    throw new Error(`Binary blob not found for hash=${manifest.content_hash}`);
   }
 
-  return decryptBinaryFromWebhook(body.envelope, keyring);
+  return decryptBinaryFromWebhook(result.envelope, keyring);
+}
+
+// ─── List ──────────────────────────────────────────────────────────────────
+
+/**
+ * List blobs stored in n8n (from Google Drive), optionally filtered by type.
+ */
+export async function listViaN8n(
+  matrixToken: string,
+  dataType?: ManifestDataType,
+): Promise<WebhookListResponse> {
+  const body: WebhookListRequest = {
+    action: 'list',
+    data_type: dataType,
+  };
+
+  const resp = await postToWebhook(body, matrixToken);
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => '');
+    throw new Error(`n8n list failed (${resp.status}): ${text}`);
+  }
+
+  return resp.json();
 }

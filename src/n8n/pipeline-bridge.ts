@@ -1,10 +1,9 @@
 /**
  * Pipeline bridge — wires n8n webhook storage into the EO-DB lifecycle.
  *
- * Replaces FilenPipelineBridge: instead of watching a Filen folder for
- * file changes, this module provides store/retrieve operations that
- * encrypt everything through n8n webhooks and record manifests in the
- * Matrix room.
+ * Works alongside Filen: Filen handles real-time file watching,
+ * n8n handles encrypted blob storage via a single POST endpoint
+ * with action-based routing (store / retrieve / list).
  *
  * Usage:
  *   const bridge = new N8nPipelineBridge(matrixClient, roomId, keyring);
@@ -25,12 +24,13 @@
 import type { IMatrixClient, IRoom } from '../matrix/types.js';
 import type { LocalKeyring } from '../db/crypto-types.js';
 import type { EoEvent } from '../db/types.js';
-import type { ManifestEntry, ManifestDataType } from './types.js';
+import type { ManifestEntry, ManifestDataType, DriveChangeNotification } from './types.js';
 import {
   storeViaN8n,
   storeBinaryViaN8n,
   retrieveViaN8n,
   retrieveBinaryViaN8n,
+  listViaN8n,
 } from './webhook-client.js';
 import {
   publishManifest,
@@ -206,5 +206,29 @@ export class N8nPipelineBridge {
    */
   async tombstone(dataId: string, reason?: string): Promise<void> {
     await tombstoneManifest(this.client, this.roomId, dataId, reason);
+  }
+
+  // ─── Remote listing (queries n8n / Google Drive directly) ──────────────
+
+  /**
+   * List blobs stored in n8n's Google Drive backend.
+   * Useful for reconciliation against the Matrix manifest.
+   */
+  async listRemote(matrixToken: string, filterType?: ManifestDataType) {
+    return listViaN8n(matrixToken, filterType);
+  }
+
+  // ─── Drive Change Handling ─────────────────────────────────────────────
+
+  /** Matrix event type emitted by the n8n Drive Watcher workflow. */
+  static readonly DRIVE_CHANGE_EVENT = 'eo.n8n.drive.change';
+
+  /**
+   * Parse a Drive change notification from a Matrix event.
+   * Call this from your Matrix sync handler when you see an
+   * event of type `eo.n8n.drive.change`.
+   */
+  static parseDriveChange(eventContent: Record<string, any>): DriveChangeNotification {
+    return eventContent as unknown as DriveChangeNotification;
   }
 }

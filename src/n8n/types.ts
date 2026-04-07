@@ -1,10 +1,11 @@
 /**
  * n8n webhook storage types.
  *
- * Replaces Filen — all data flows through n8n webhooks (POST to store,
- * GET to retrieve) with AES-256-GCM encryption on every payload.
- * The Matrix room holds a manifest of what data exists so any client
- * knows exactly what to request and which key decrypts it.
+ * Single-endpoint design: every request is a POST to /webhook/eo-store
+ * with an `action` field that routes inside n8n via a Switch node.
+ *
+ * All data encrypted with AES-256-GCM before it leaves the device.
+ * The Matrix room holds a manifest so any client knows what to request.
  */
 
 // ─── Configuration ─────────────────────────────────────────────────────────
@@ -12,7 +13,7 @@
 export interface N8nWebhookConfig {
   /** Base URL of the n8n instance (e.g. "https://n8n.example.com"). */
   baseUrl: string;
-  /** Webhook path for storing/retrieving data (e.g. "/webhook/eo-store"). */
+  /** Webhook path (e.g. "/webhook/eo-store"). */
   webhookPath: string;
   /** Optional static auth token n8n expects in the Authorization header. */
   webhookAuthToken?: string;
@@ -76,36 +77,88 @@ export type ManifestDataType =
   | 'attachment'
   | 'backup';
 
-// ─── Webhook Request / Response ────────────────────────────────────────────
+// ─── Single-Endpoint Action Requests ───────────────────────────────────────
+
+/** Every request to /webhook/eo-store is a POST with an `action` field. */
+export type WebhookAction = 'store' | 'retrieve' | 'list';
 
 export interface WebhookStoreRequest {
+  action: 'store';
   /** The encrypted envelope. */
   envelope: EncryptedWebhookEnvelope;
   /** Data ID (so n8n can key the storage). */
   data_id: string;
-  /** Data type hint for n8n routing/storage decisions. */
+  /** Data type hint for n8n routing / Drive folder selection. */
   data_type: ManifestDataType;
 }
 
-export interface WebhookStoreResponse {
-  /** Whether n8n accepted the blob. */
-  ok: boolean;
-  /** The content_hash echoed back for verification. */
-  content_hash: string;
-  /** Optional storage URL / reference from n8n. */
-  ref?: string;
-}
-
 export interface WebhookRetrieveRequest {
+  action: 'retrieve';
   /** Content hash to look up. */
   content_hash: string;
   /** Data ID as a secondary key. */
   data_id: string;
 }
 
+export interface WebhookListRequest {
+  action: 'list';
+  /** Optional: filter to a specific data type subfolder. */
+  data_type?: ManifestDataType;
+}
+
+/** Union of all possible request bodies. */
+export type WebhookRequest =
+  | WebhookStoreRequest
+  | WebhookRetrieveRequest
+  | WebhookListRequest;
+
+// ─── Responses ─────────────────────────────────────────────────────────────
+
+export interface WebhookStoreResponse {
+  ok: boolean;
+  /** The content_hash echoed back for verification. */
+  content_hash: string;
+  /** Optional Google Drive file ID. */
+  drive_file_id?: string;
+}
+
 export interface WebhookRetrieveResponse {
-  /** Whether the blob was found. */
   ok: boolean;
   /** The encrypted envelope (if found). */
   envelope?: EncryptedWebhookEnvelope;
+}
+
+export interface WebhookListResponse {
+  ok: boolean;
+  /** List of { data_id, content_hash, data_type, stored_at } entries. */
+  entries: Array<{
+    data_id: string;
+    content_hash: string;
+    data_type: string;
+    stored_at: string;
+  }>;
+}
+
+// ─── Drive Change Notification (arrives via Matrix) ────────────────────────
+
+/**
+ * Event content for `eo.n8n.drive.change` Matrix events.
+ * Sent by the n8n Drive Watcher workflow when a file appears/changes
+ * in the watched Google Drive folder.
+ */
+export interface DriveChangeNotification {
+  /** Google Drive file ID. */
+  file_id: string;
+  /** File name. */
+  file_name: string;
+  /** MIME type. */
+  mime_type: string;
+  /** File size in bytes. */
+  size: number;
+  /** What happened. */
+  change_type: 'created' | 'modified' | 'deleted';
+  /** Which Drive folder was being watched. */
+  drive_folder: string;
+  /** ISO-8601 timestamp when n8n detected the change. */
+  detected_at: string;
 }
