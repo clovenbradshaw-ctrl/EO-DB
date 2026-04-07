@@ -48,6 +48,7 @@ async function callWebhook(
   matrixAccessToken: string,
   body: Record<string, unknown>,
 ): Promise<any> {
+  console.log('[EO-DB] GDrive webhook call:', EO_STORE_WEBHOOK, 'action:', body.action);
   const res = await fetch(EO_STORE_WEBHOOK, {
     method: 'POST',
     headers: {
@@ -56,6 +57,7 @@ async function callWebhook(
     },
     body: JSON.stringify(body),
   });
+  console.log('[EO-DB] GDrive webhook response:', res.status, res.statusText);
   if (res.status === 401) {
     throw new Error('Unauthorized — Matrix token invalid or expired');
   }
