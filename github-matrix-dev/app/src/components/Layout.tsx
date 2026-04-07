@@ -1208,6 +1208,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   const sliceStore = useSliceStore();
   const sliceSigs = sliceStore.sigs;
   const savedSlices = sliceStore.savedSlices;
+  const openScopes = sliceStore.openScopes;
   const activeSliceType: SliceType = useMemo(() => {
     if (!selectedScope) return 'grid';
     const sig = sliceSigs[selectedScope];
@@ -1605,7 +1606,16 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                 ) : selectedScope ? (
                   <>
                     <SliceTabs
-                      scope={selectedScope}
+                      openScopes={openScopes.length > 0 ? openScopes : [selectedScope]}
+                      activeScope={selectedScope}
+                      onSelectScope={(sc) => navigate({ view: 'records', scope: sc, record: null })}
+                      onCloseScope={(sc) => {
+                        sliceStore.closeScope(sc);
+                        if (sc === selectedScope) {
+                          const remaining = sliceStore.getOpenScopes();
+                          navigate({ scope: remaining[0] || null, record: null });
+                        }
+                      }}
                       session={{ userId: session.userId }}
                       activeUserType={activeUserType}
                       userTypeDefinitions={spaceUserTypeDefinitions}

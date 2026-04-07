@@ -258,12 +258,9 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
           }}
           onClick={() => {
             onSelectScope(node.fullPath);
-            // Default to schema slice when clicking a collection
-            sliceStore.activateSlice(node.fullPath, {
-              id: '__schema', name: 'Schema', scope: node.fullPath, sliceType: 'schema',
-              config: { columnOrder: [], columnWidths: {}, hiddenColumns: [], sorts: [], filters: [], filterConjunction: 'AND', showLastUpdated: false },
-              visibility: 'shared', createdBy: '', createdAt: '', updatedAt: '',
-            });
+            // Default to grid view when clicking a collection
+            sliceStore.resetToDefault(node.fullPath);
+            sliceStore.openScope(node.fullPath);
             // Drill-down: clicking a top-level entity focuses it
             if (isTopLevel && !focusedEntity) {
               setFocusedEntity(node.fullPath);

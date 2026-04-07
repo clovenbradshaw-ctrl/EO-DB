@@ -48,6 +48,25 @@ function persistSavedSlices(slices: Record<string, SavedSlice>): void {
 }
 
 // ---------------------------------------------------------------------------
+// localStorage helpers — openScopes persistence
+// ---------------------------------------------------------------------------
+
+const OPEN_SCOPES_KEY = 'eo-open-scopes';
+
+function loadOpenScopes(): string[] {
+  try {
+    const raw = localStorage.getItem(OPEN_SCOPES_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch { return []; }
+}
+
+function persistOpenScopes(scopes: string[]): void {
+  try {
+    localStorage.setItem(OPEN_SCOPES_KEY, JSON.stringify(scopes));
+  } catch { /* quota exceeded — silently drop */ }
+}
+
+// ---------------------------------------------------------------------------
 // Store
 // ---------------------------------------------------------------------------
 
@@ -103,11 +122,26 @@ interface SliceStoreState {
 
   /** Get saved slices for a scope */
   getSlicesForScope: (scope: string) => SavedSlice[];
+
+  // --- Open scopes (multi-collection tabs) ---
+
+  /** Ordered list of scopes with open tabs */
+  openScopes: string[];
+
+  /** Add a scope to the open tabs list */
+  openScope: (scope: string) => void;
+
+  /** Remove a scope from the open tabs list and clean up its sig */
+  closeScope: (scope: string) => void;
+
+  /** Get the ordered list of open scopes */
+  getOpenScopes: () => string[];
 }
 
 export const useSliceStore = create<SliceStoreState>((set, get) => ({
   sigs: {},
   savedSlices: loadSavedSlices(),
+  openScopes: loadOpenScopes(),
 
   getSig(scope: string): SliceSig {
     const existing = get().sigs[scope];
@@ -257,6 +291,28 @@ export const useSliceStore = create<SliceStoreState>((set, get) => ({
 
   getSlicesForScope(scope) {
     return Object.values(get().savedSlices).filter((v) => v.scope === scope);
+  },
+
+  openScope(scope) {
+    const current = get().openScopes;
+    if (current.includes(scope)) return;
+    const updated = [...current, scope];
+    set({ openScopes: updated });
+    persistOpenScopes(updated);
+  },
+
+  closeScope(scope) {
+    const updated = get().openScopes.filter((s) => s !== scope);
+    set({ openScopes: updated });
+    persistOpenScopes(updated);
+    // Clean up sig from memory (localStorage sig stays for potential re-open)
+    const sigs = { ...get().sigs };
+    delete sigs[scope];
+    set({ sigs });
+  },
+
+  getOpenScopes() {
+    return get().openScopes;
   },
 }));
 

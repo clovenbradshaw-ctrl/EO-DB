@@ -1,14 +1,22 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import { useSliceStore } from '../store/slice-store';
 import { useEoStore } from '../store/eo-store';
 import { useTheme, type Theme } from '../theme';
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 import { SLICE_TYPE_META, type SavedSlice, type TableSliceConfig, type SliceType } from './slice-types';
 import { deriveColumns, type ColumnDef } from './filter-types';
+import { formatName } from './scope-picker-utils';
 import type { UserTypeDefinition } from '../permissions/types';
 
 interface SliceTabsProps {
-  scope: string;
+  /** All scopes that have open tabs */
+  openScopes: string[];
+  /** Currently active/selected scope */
+  activeScope: string;
+  /** Callback when user clicks a tab from a different collection */
+  onSelectScope: (scope: string) => void;
+  /** Callback when user closes all tabs for a collection */
+  onCloseScope: (scope: string) => void;
   session: { userId: string };
   /** Currently active user type ID (for filtering type-scoped slices) */
   activeUserType?: string | null;
@@ -18,7 +26,7 @@ interface SliceTabsProps {
   canManageSlices?: boolean;
 }
 
-export function SliceTabs({ scope, session, activeUserType, userTypeDefinitions, canManageSlices }: SliceTabsProps) {
+export function SliceTabs({ openScopes, activeScope, onSelectScope, onCloseScope, session, activeUserType, userTypeDefinitions, canManageSlices }: SliceTabsProps) {
   const sliceStore = useSliceStore();
   const dispatch = useEoStore((s) => s.dispatch);
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
@@ -27,6 +35,8 @@ export function SliceTabs({ scope, session, activeUserType, userTypeDefinitions,
   const { theme } = useTheme();
   const s = makeStyles(theme);
 
+  // Use activeScope for operations that need a single scope context
+  const scope = activeScope;
   const sig = sliceStore.getSig(scope);
   const savedSlices = sliceStore.getSlicesForScope(scope);
 
@@ -43,44 +53,40 @@ export function SliceTabs({ scope, session, activeUserType, userTypeDefinitions,
   const [renameValue, setRenameValue] = useState('');
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; sliceId: string } | null>(null);
 
-  const prevSlicesKeyRef = useRef<string>('');
-
-  // Load saved slices from DB
+  // Load saved slices from DB for all open scopes
   useEffect(() => {
     if (!ready) return;
-    getStateByPrefix(`${scope}._slices.`).then((states) => {
-      const key = states.map(s => s.target + ':' + s.last_seq).join('|');
-      if (key === prevSlicesKeyRef.current) return;
-      prevSlicesKeyRef.current = key;
-
-      const sliceDepth = scope.split('.').length + 2; // scope._slices.sliceId
-      const slices: SavedSlice[] = states
-        .filter((st) => st.target.split('.').length === sliceDepth && st.value?.name)
-        .map((st) => ({
-          id: st.target.split('.').pop()!,
-          name: st.value.name,
-          scope,
-          sliceType: st.value.sliceType || 'grid',
-          config: st.value.config || {
-            columnOrder: [],
-            columnWidths: {},
-            hiddenColumns: [],
-            sorts: [],
-            filters: [],
-            filterConjunction: 'AND',
-            showLastUpdated: true,
-          },
-          visibility: st.value.visibility || 'shared',
-          createdBy: st.value.createdBy || st.last_agent,
-          createdAt: st.value.createdAt || st.last_ts,
-          updatedAt: st.value.updatedAt || st.last_ts,
-          roomId: st.value.roomId,
-          visibleToTypes: st.value.visibleToTypes,
-          readOnlyForTypes: st.value.readOnlyForTypes,
-        }));
-      sliceStore.registerSavedSlices(slices);
-    });
-  }, [ready, lastSeq, getStateByPrefix, scope, sliceStore]);
+    for (const sc of openScopes) {
+      getStateByPrefix(`${sc}._slices.`).then((states) => {
+        const sliceDepth = sc.split('.').length + 2; // scope._slices.sliceId
+        const slices: SavedSlice[] = states
+          .filter((st) => st.target.split('.').length === sliceDepth && st.value?.name)
+          .map((st) => ({
+            id: st.target.split('.').pop()!,
+            name: st.value.name,
+            scope: sc,
+            sliceType: st.value.sliceType || 'grid',
+            config: st.value.config || {
+              columnOrder: [],
+              columnWidths: {},
+              hiddenColumns: [],
+              sorts: [],
+              filters: [],
+              filterConjunction: 'AND',
+              showLastUpdated: true,
+            },
+            visibility: st.value.visibility || 'shared',
+            createdBy: st.value.createdBy || st.last_agent,
+            createdAt: st.value.createdAt || st.last_ts,
+            updatedAt: st.value.updatedAt || st.last_ts,
+            roomId: st.value.roomId,
+            visibleToTypes: st.value.visibleToTypes,
+            readOnlyForTypes: st.value.readOnlyForTypes,
+          }));
+        if (slices.length > 0) sliceStore.registerSavedSlices(slices);
+      });
+    }
+  }, [ready, lastSeq, getStateByPrefix, openScopes, sliceStore]);
 
   // Derive available columns for kanban field selection
   useEffect(() => {
@@ -325,73 +331,101 @@ export function SliceTabs({ scope, session, activeUserType, userTypeDefinitions,
   return (
     <div style={s.wrapper}>
       <div style={s.container}>
-        {/* Default slice tab */}
-        <button
-          style={sig.activeSliceId === null ? s.tabActive : s.tab}
-          onClick={() => sliceStore.resetToDefault(scope)}
-        >
-          <span style={{ fontSize: 11, opacity: 0.7 }}>{SLICE_TYPE_META.grid.icon}</span> Grid view
-        </button>
+        {openScopes.map((sc, idx) => {
+          const scSig = sliceStore.getSig(sc);
+          const scSavedSlices = sliceStore.getSlicesForScope(sc);
+          const collectionName = formatName(sc.split('.').pop() || sc);
+          const isActive = sc === activeScope;
 
-        {/* Schema tab — always visible, not removable */}
-        <button
-          style={sig.activeSliceId === '__schema' ? s.tabActive : s.tab}
-          onClick={() => sliceStore.activateSlice(scope, {
-            id: '__schema', name: 'Schema', scope, sliceType: 'schema',
-            config: { columnOrder: [], columnWidths: {}, hiddenColumns: [], sorts: [], filters: [], filterConjunction: 'AND', showLastUpdated: false },
-            visibility: 'shared', createdBy: '', createdAt: '', updatedAt: '',
-          })}
-        >
-          <span style={{ fontSize: 11, opacity: 0.7 }}>{SLICE_TYPE_META.schema.icon}</span> Schema
-        </button>
+          const handleTabClick = (activateFn: () => void) => {
+            if (!isActive) onSelectScope(sc);
+            activateFn();
+          };
 
-        {/* Saved slice tabs — filtered by active user type */}
-        {savedSlices.filter((v) => {
-          if (sliceStore.savedSlices[v.id]?.scope && sliceStore.savedSlices[v.id]?.scope !== scope) return false;
-          // Filter by type visibility
-          const vt = v.visibleToTypes;
-          if (vt && vt.length > 0 && activeUserType && !vt.includes(activeUserType)) return false;
-          return true;
-        }).map((slice) => {
-          const vtMeta = SLICE_TYPE_META[slice.sliceType || 'grid'];
           return (
-            <button
-              key={slice.id}
-              style={sig.activeSliceId === slice.id ? s.tabActive : s.tab}
-              onClick={() => sliceStore.activateSlice(scope, slice)}
-              onContextMenu={(e) => {
-                e.preventDefault();
-                setCtxMenu({ x: e.clientX, y: e.clientY, sliceId: slice.id });
-              }}
-            >
-              {renaming === slice.id ? (
-                <input
-                  autoFocus
-                  value={renameValue}
-                  onChange={(e) => setRenameValue(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') handleRename(slice.id);
-                    if (e.key === 'Escape') setRenaming(null);
-                  }}
-                  onBlur={() => handleRename(slice.id)}
-                  onClick={(e) => e.stopPropagation()}
-                  style={s.renameInput}
-                />
-              ) : (
-                <>
-                  <span style={{ fontSize: 11, opacity: 0.7 }}>{vtMeta.icon}</span>
-                  {slice.visibility === 'private' && <span style={{ marginRight: 2, fontSize: 10 }}>{'\uD83D\uDD12'}</span>}
-                  {slice.name}
-                  {sig.activeSliceId === slice.id && sig.dirty && (
-                    <span style={s.dirtyDot} title="Unsaved changes" />
-                  )}
-                </>
+            <div key={sc} style={{ display: 'inline-flex', alignItems: 'center', gap: 0, ...(idx > 0 ? { borderLeft: `1px solid ${theme.border}`, marginLeft: 4, paddingLeft: 4 } : {}) }}>
+              {/* Schema tab — first */}
+              <button
+                style={isActive && scSig.activeSliceId === '__schema' ? s.tabActive : s.tab}
+                onClick={() => handleTabClick(() => sliceStore.activateSlice(sc, {
+                  id: '__schema', name: 'Schema', scope: sc, sliceType: 'schema',
+                  config: { columnOrder: [], columnWidths: {}, hiddenColumns: [], sorts: [], filters: [], filterConjunction: 'AND', showLastUpdated: false },
+                  visibility: 'shared', createdBy: '', createdAt: '', updatedAt: '',
+                }))}
+              >
+                <span style={{ fontSize: 11, opacity: 0.7 }}>{SLICE_TYPE_META.schema.icon}</span>
+                <span style={{ opacity: 0.5, fontSize: 10 }}>{collectionName}</span> / Schema
+              </button>
+
+              {/* Grid tab — second */}
+              <button
+                style={isActive && scSig.activeSliceId === null ? s.tabActive : s.tab}
+                onClick={() => handleTabClick(() => sliceStore.resetToDefault(sc))}
+              >
+                <span style={{ fontSize: 11, opacity: 0.7 }}>{SLICE_TYPE_META.grid.icon}</span>
+                <span style={{ opacity: 0.5, fontSize: 10 }}>{collectionName}</span> / Grid
+              </button>
+
+              {/* Saved slice tabs — filtered by active user type */}
+              {scSavedSlices.filter((v) => {
+                if (sliceStore.savedSlices[v.id]?.scope && sliceStore.savedSlices[v.id]?.scope !== sc) return false;
+                const vt = v.visibleToTypes;
+                if (vt && vt.length > 0 && activeUserType && !vt.includes(activeUserType)) return false;
+                return true;
+              }).map((slice) => {
+                const vtMeta = SLICE_TYPE_META[slice.sliceType || 'grid'];
+                return (
+                  <button
+                    key={slice.id}
+                    style={isActive && scSig.activeSliceId === slice.id ? s.tabActive : s.tab}
+                    onClick={() => handleTabClick(() => sliceStore.activateSlice(sc, slice))}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      setCtxMenu({ x: e.clientX, y: e.clientY, sliceId: slice.id });
+                    }}
+                  >
+                    {renaming === slice.id ? (
+                      <input
+                        autoFocus
+                        value={renameValue}
+                        onChange={(e) => setRenameValue(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') handleRename(slice.id);
+                          if (e.key === 'Escape') setRenaming(null);
+                        }}
+                        onBlur={() => handleRename(slice.id)}
+                        onClick={(e) => e.stopPropagation()}
+                        style={s.renameInput}
+                      />
+                    ) : (
+                      <>
+                        <span style={{ fontSize: 11, opacity: 0.7 }}>{vtMeta.icon}</span>
+                        {slice.visibility === 'private' && <span style={{ marginRight: 2, fontSize: 10 }}>{'\uD83D\uDD12'}</span>}
+                        <span style={{ opacity: 0.5, fontSize: 10 }}>{collectionName}</span> / {slice.name}
+                        {isActive && scSig.activeSliceId === slice.id && scSig.dirty && (
+                          <span style={s.dirtyDot} title="Unsaved changes" />
+                        )}
+                      </>
+                    )}
+                  </button>
+                );
+              })}
+
+              {/* Close button for this collection's tab group */}
+              {openScopes.length > 1 && (
+                <button
+                  style={s.closeBtn}
+                  onClick={(e) => { e.stopPropagation(); onCloseScope(sc); }}
+                  title={`Close ${collectionName} tabs`}
+                >
+                  {'\u00D7'}
+                </button>
               )}
-            </button>
+            </div>
           );
         })}
 
-        {/* Save / Update button */}
+        {/* Save / Update button — only for active scope */}
         {sig.dirty && (
           sig.activeSliceId ? (
             <button style={s.saveBtn} onClick={handleUpdateSlice}>
@@ -643,6 +677,22 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       color: t.accent,
       borderBottomColor: t.accent,
       fontWeight: 600,
+    },
+    closeBtn: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      width: 18,
+      height: 18,
+      fontSize: 12,
+      fontWeight: 600,
+      border: 'none',
+      borderRadius: 3,
+      background: 'transparent',
+      color: t.textMuted,
+      cursor: 'pointer',
+      marginLeft: 2,
+      opacity: 0.6,
     },
     dirtyDot: {
       display: 'inline-block',
