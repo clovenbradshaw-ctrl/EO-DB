@@ -2,7 +2,7 @@
  * Google Drive API — n8n webhook proxy for EO-DB storage on Google Drive.
  *
  * All operations go through the n8n webhook at /webhook/eo-store.
- * The webhook authenticates via the Matrix access token (x-matrix-token header),
+ * The webhook authenticates via the Matrix access token (matrix_token body field),
  * then uses its own Google Drive OAuth credentials to perform operations.
  *
  * Actions:
@@ -48,6 +48,7 @@ async function callWebhook(
   matrixAccessToken: string,
   body: Record<string, unknown>,
 ): Promise<any> {
+  console.log('[EO-DB] GDrive webhook call:', EO_STORE_WEBHOOK, 'action:', body.action);
   const res = await fetch(EO_STORE_WEBHOOK, {
     method: 'POST',
     headers: {
@@ -55,14 +56,19 @@ async function callWebhook(
     },
     body: JSON.stringify({ ...body, matrix_token: matrixAccessToken }),
   });
+  console.log('[EO-DB] GDrive webhook response:', res.status, res.statusText);
   if (res.status === 401) {
     throw new Error('Unauthorized — Matrix token invalid or expired');
   }
+  const text = await res.text();
+  console.log('[EO-DB] GDrive webhook body:', text.slice(0, 500));
   if (!res.ok) {
-    const msg = await res.text().catch(() => `HTTP ${res.status}`);
-    throw new Error(`EO Store webhook error: ${msg}`);
+    throw new Error(`EO Store webhook error: ${text || `HTTP ${res.status}`}`);
   }
-  return res.json();
+  if (!text) {
+    return { ok: true, entries: [] };
+  }
+  return JSON.parse(text);
 }
 
 // ──────────────────────────────────────────────────────────────
