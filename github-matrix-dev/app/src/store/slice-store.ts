@@ -16,7 +16,12 @@ function loadSig(scope: string): SliceSig | null {
   try {
     const raw = localStorage.getItem(sigKey(scope));
     if (!raw) return null;
-    return JSON.parse(raw) as SliceSig;
+    const parsed = JSON.parse(raw) as SliceSig;
+    return {
+      ...parsed,
+      scope,
+      config: normalizeTableSliceConfig(parsed.config),
+    };
   } catch {
     return null;
   }
@@ -250,7 +255,7 @@ export const useSliceStore = create<SliceStoreState>((set, get) => ({
     const sig: SliceSig = {
       scope,
       activeSliceId: slice.id,
-      config: { ...slice.config },
+      config: normalizeTableSliceConfig(slice.config),
       dirty: false,
     };
     set((s) => ({ sigs: { ...s.sigs, [scope]: sig } }));
@@ -334,4 +339,19 @@ function _updateConfig(
   };
   set((s) => ({ sigs: { ...s.sigs, [scope]: updated } }));
   persistSig(updated);
+}
+
+function normalizeTableSliceConfig(config?: Partial<TableSliceConfig> | null): TableSliceConfig {
+  const defaults = createDefaultConfig();
+  return {
+    ...defaults,
+    ...(config ?? {}),
+    columnOrder: Array.isArray(config?.columnOrder) ? config.columnOrder : defaults.columnOrder,
+    columnWidths: config?.columnWidths && typeof config.columnWidths === 'object' ? config.columnWidths : defaults.columnWidths,
+    hiddenColumns: Array.isArray(config?.hiddenColumns) ? config.hiddenColumns : defaults.hiddenColumns,
+    sorts: Array.isArray(config?.sorts) ? config.sorts : defaults.sorts,
+    filters: Array.isArray(config?.filters) ? config.filters : defaults.filters,
+    filterConjunction: config?.filterConjunction === 'OR' ? 'OR' : 'AND',
+    showLastUpdated: typeof config?.showLastUpdated === 'boolean' ? config.showLastUpdated : defaults.showLastUpdated,
+  };
 }
