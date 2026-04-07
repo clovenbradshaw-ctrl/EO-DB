@@ -59,22 +59,40 @@ export function RecordDetailDrawer({ target, onClose, onNavigate, profileFields,
   const { theme } = useTheme();
   const s = makeStyles(theme);
   const horizon = useEoStore((s) => s.horizon);
+  const getState = useEoStore((s) => s.getState);
   const ready = useEoStore((s) => s.ready);
   const [recordName, setRecordName] = useState<string | null>(null);
 
   useEffect(() => {
     if (!ready) return;
     let cancelled = false;
-    horizon(target)
-      .then((result) => {
+
+    // Resolve display name using the parent scope's _displayField DEF,
+    // falling back to value.name, then formatted ID.
+    const parentScope = target.split('.').slice(0, -1).join('.');
+
+    Promise.all([
+      horizon(target),
+      parentScope ? getState(parentScope) : Promise.resolve(null),
+    ])
+      .then(([result, parentState]) => {
         if (cancelled) return;
-        if (result && !Array.isArray(result) && result.figure?.value?.name) {
-          setRecordName(result.figure.value.name);
+        if (!result || Array.isArray(result) || !result.figure) return;
+        const value = result.figure.value;
+        if (!value) return;
+
+        // 1. Parent's _displayField → pull that field from record's fields
+        const df = parentState?.value?._displayField;
+        if (df && value.fields) {
+          const fieldVal = value.fields[df];
+          if (fieldVal != null) { setRecordName(String(fieldVal)); return; }
         }
+        // 2. Explicit name on the record
+        if (value.name) { setRecordName(value.name); }
       })
       .catch(() => { /* header falls back to formatted ID */ });
     return () => { cancelled = true; };
-  }, [ready, target, horizon]);
+  }, [ready, target, horizon, getState]);
 
   const displayName = recordName || formatName(target.split('.').pop() || '');
   const entityType = getEntityType(target);
