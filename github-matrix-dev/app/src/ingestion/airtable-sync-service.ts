@@ -1,24 +1,27 @@
 /**
  * Airtable continuous sync service — browser-side.
  *
- * Coordinates via Matrix room state events:
- *   - `eo.airtable.head` (state event, state_key = ""):
+ * Coordinates via:
+ *   - `eo.airtable.head` (Matrix state event, state_key = ""):
  *       Tracks the current primary syncer, last sync time, and hydration status.
- *   - `eo.airtable.signal` (timeline event):
- *       Notifies other clients of sync completions.
+ *       State events are deduplicated — no timeline spam.
+ *   - To-device messages (ephemeral, never persisted to timeline):
+ *       `com.eo-db.airtable.signal` — sync completion broadcasts
+ *       `com.eo-db.airtable.lock`   — sync lock claim/release signals
  *
  * Only the elected primary syncer calls the Airtable API. Other clients receive
  * data through the normal EO changefeed / Filen snapshot chain.
  *
  * Primary syncer election:
  *   1. Read `eo.airtable.head` from room state
- *   2. If unclaimed or stale (>2 min), claim by writing our userId
- *   3. If another client is active (<2 min), defer
+ *   2. If unclaimed or stale (>2 min) AND not actively syncing, claim
+ *   3. If another client is active (<2 min) or syncing, defer
  *   4. On stop(), clear our claim
  *   5. On each sync, refresh `last_sync_at` to keep claim alive
+ *   6. Device ID prevents same-user multi-tab races
  */
 
-import type { MatrixClient } from 'matrix-js-sdk';
+import type { MatrixClient, MatrixEvent } from 'matrix-js-sdk';
 import type { EoStore } from '../db/encrypted-store';
 import { AirtableClient } from './airtable-client';
 import {
@@ -29,6 +32,7 @@ import {
   type UpdateSyncResult,
 } from './airtable-sync';
 import { useAirtableStore } from './airtable-store';
+import { airtableSyncEventTypes } from '../lib/matrix-domain';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -37,12 +41,15 @@ const STALE_THRESHOLD_MS = 2 * 60_000;   // 2 minutes — claim is stale after t
 const FIRST_SYNC_DELAY_MS = 3_000;       // 3 seconds — let connections settle
 
 const EO_AIRTABLE_HEAD = 'eo.airtable.head';
-const EO_AIRTABLE_SIGNAL = 'eo.airtable.signal';
+
+const SIGNAL_TYPE = airtableSyncEventTypes().signal;
+const LOCK_TYPE = airtableSyncEventTypes().lock;
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 interface AirtableHeadContent {
   syncer: string;          // Matrix user ID of the primary syncer
+  device: string;          // Device ID (tab-specific, prevents same-user races)
   syncing: boolean;        // Whether a sync is currently in progress
   last_sync_at: string;    // ISO timestamp of last successful sync
   records_ingested: number;
@@ -56,6 +63,10 @@ export class AirtableSyncService {
   private timer: ReturnType<typeof setInterval> | null = null;
   private running = false;
   private syncing = false;
+  private deviceId: string;
+
+  /** Tracks whether a remote device holds the sync lock (via to-device signal). */
+  private remoteLockHeld = false;
 
   constructor(
     private matrixClient: MatrixClient,
@@ -64,12 +75,17 @@ export class AirtableSyncService {
     private agent: string,
     private getApiKey: () => string | null,
     private customization?: SyncCustomization,
-  ) {}
+  ) {
+    this.deviceId = this.matrixClient.getDeviceId() ?? `browser-${Date.now()}`;
+  }
 
   /** Begin the 30-second continuous sync loop. */
   async start(): Promise<void> {
     if (this.running) return;
     this.running = true;
+
+    // Listen for to-device sync signals from other clients
+    this.matrixClient.on('toDeviceEvent' as any, this.handleToDeviceEvent);
 
     // Initial claim attempt after a short delay
     setTimeout(async () => {
@@ -88,6 +104,10 @@ export class AirtableSyncService {
       clearInterval(this.timer);
       this.timer = null;
     }
+
+    // Stop listening for to-device events
+    this.matrixClient.removeListener('toDeviceEvent' as any, this.handleToDeviceEvent);
+
     await this.releasePrimarySyncer();
     useAirtableStore.getState().setPrimarySyncer(false);
     useAirtableStore.getState().setContinuousSync(false);
@@ -96,6 +116,50 @@ export class AirtableSyncService {
   /** Update the customization options for future syncs. */
   setCustomization(c: SyncCustomization | undefined) {
     this.customization = c;
+  }
+
+  // ─── To-device event handling ─────────────────────────────────────────────
+
+  private handleToDeviceEvent = (event: MatrixEvent): void => {
+    const type = event.getType();
+    const content = event.getContent() as Record<string, any>;
+
+    // Scope to this room only
+    if (content.room_id !== this.roomId) return;
+
+    if (type === SIGNAL_TYPE) {
+      // Another device completed a sync — update local UI
+      useAirtableStore.getState().setLastSyncAt(content.synced_at);
+    } else if (type === LOCK_TYPE) {
+      // Another device acquired/released sync lock
+      if (content.action === 'acquired') {
+        this.remoteLockHeld = true;
+        useAirtableStore.getState().setRemoteLockHeld(true);
+      } else if (content.action === 'released') {
+        this.remoteLockHeld = false;
+        useAirtableStore.getState().setRemoteLockHeld(false);
+      }
+    }
+  };
+
+  // ─── To-device broadcast ──────────────────────────────────────────────────
+
+  /** Send a to-device message to all room members (ephemeral, not persisted). */
+  private async broadcastToMembers(type: string, content: Record<string, any>): Promise<void> {
+    const room = this.matrixClient.getRoom(this.roomId);
+    if (!room) return;
+    const myUserId = this.matrixClient.getUserId();
+
+    for (const member of room.getJoinedMembers()) {
+      if (member.userId === myUserId) continue;
+      try {
+        const inner = new Map<string, Record<string, any>>([['*', content]]);
+        const outer = new Map<string, Map<string, Record<string, any>>>([[member.userId, inner]]);
+        await this.matrixClient.sendToDevice(type, outer);
+      } catch {
+        // Non-fatal — peer may be offline; next broadcast will retry.
+      }
+    }
   }
 
   // ─── Primary syncer election ──────────────────────────────────────────────
@@ -119,28 +183,49 @@ export class AirtableSyncService {
    * Returns true if we are (or became) the primary syncer.
    */
   private async claimPrimarySyncer(): Promise<boolean> {
+    // Don't attempt to claim while a remote device holds the lock
+    if (this.remoteLockHeld) return false;
+
     const head = this.readHead();
 
     if (head) {
-      // Already us
-      if (head.syncer === this.agent) return true;
+      // Already us (same user + same device)
+      if (head.syncer === this.agent && head.device === this.deviceId) return true;
 
-      // Another client is actively syncing — check staleness
-      const lastSync = new Date(head.last_sync_at).getTime();
-      const age = Date.now() - lastSync;
-      if (age < STALE_THRESHOLD_MS) {
-        // Active syncer exists — defer
+      // Another client is actively syncing — never steal mid-sync
+      if (head.syncing) {
         useAirtableStore.getState().setPrimarySyncer(false);
         useAirtableStore.getState().setLastSyncAt(head.last_sync_at);
         return false;
       }
-      // Stale — take over
+
+      // Same user but different device (tab) — only steal if stale
+      if (head.syncer === this.agent && head.device !== this.deviceId) {
+        const age = Date.now() - new Date(head.last_sync_at).getTime();
+        if (age < STALE_THRESHOLD_MS) {
+          useAirtableStore.getState().setPrimarySyncer(false);
+          useAirtableStore.getState().setLastSyncAt(head.last_sync_at);
+          return false;
+        }
+        // Stale same-user tab — take over
+      } else if (head.syncer !== this.agent) {
+        // Different user — check staleness
+        const age = Date.now() - new Date(head.last_sync_at).getTime();
+        if (age < STALE_THRESHOLD_MS) {
+          // Active syncer exists — defer
+          useAirtableStore.getState().setPrimarySyncer(false);
+          useAirtableStore.getState().setLastSyncAt(head.last_sync_at);
+          return false;
+        }
+        // Stale — take over
+      }
     }
 
     // Claim it
     try {
       await this.matrixClient.sendStateEvent(this.roomId, EO_AIRTABLE_HEAD as any, {
         syncer: this.agent,
+        device: this.deviceId,
         syncing: false,
         last_sync_at: new Date().toISOString(),
         records_ingested: head?.records_ingested ?? 0,
@@ -163,11 +248,21 @@ export class AirtableSyncService {
       await this.matrixClient.sendStateEvent(this.roomId, EO_AIRTABLE_HEAD as any, {
         ...head,
         syncer: '',
+        device: '',
         syncing: false,
       }, '');
     } catch (e) {
       console.warn('[EO-DB] Failed to release Airtable primary syncer:', e);
     }
+
+    // Broadcast lock release so other devices know immediately
+    await this.broadcastToMembers(LOCK_TYPE, {
+      room_id: this.roomId,
+      action: 'released',
+      syncer: this.agent,
+      device: this.deviceId,
+      ts: Date.now(),
+    });
   }
 
   // ─── Sync cycle ───────────────────────────────────────────────────────────
@@ -187,6 +282,15 @@ export class AirtableSyncService {
 
     this.syncing = true;
     useAirtableStore.getState().setSyncing(true);
+
+    // Broadcast lock acquired so other devices don't attempt to claim
+    await this.broadcastToMembers(LOCK_TYPE, {
+      room_id: this.roomId,
+      action: 'acquired',
+      syncer: this.agent,
+      device: this.deviceId,
+      ts: Date.now(),
+    });
 
     // Mark syncing in room state
     const headBefore = this.readHead();
@@ -235,6 +339,15 @@ export class AirtableSyncService {
     } finally {
       this.syncing = false;
       useAirtableStore.getState().setSyncing(false);
+
+      // Broadcast lock released
+      await this.broadcastToMembers(LOCK_TYPE, {
+        room_id: this.roomId,
+        action: 'released',
+        syncer: this.agent,
+        device: this.deviceId,
+        ts: Date.now(),
+      });
     }
   }
 
@@ -246,10 +359,11 @@ export class AirtableSyncService {
 
     useAirtableStore.getState().setLastSyncAt(now);
 
-    // Update head state event
+    // Update head state event (deduplicated, not spam)
     try {
       await this.matrixClient.sendStateEvent(this.roomId, EO_AIRTABLE_HEAD as any, {
         syncer: this.agent,
+        device: this.deviceId,
         syncing: false,
         last_sync_at: now,
         records_ingested: result.total_records_ingested,
@@ -260,19 +374,16 @@ export class AirtableSyncService {
       console.warn('[EO-DB] Failed to update Airtable head state:', e);
     }
 
-    // Send timeline signal
-    try {
-      await this.matrixClient.sendEvent(this.roomId, EO_AIRTABLE_SIGNAL as any, {
-        stream: 'airtable-sync',
-        type: wasHydration ? 'hydration_complete' : 'sync_complete',
-        syncer: this.agent,
-        records_ingested: result.total_records_ingested,
-        records_skipped: result.total_records_skipped,
-        duration_ms: result.duration_ms,
-        synced_at: now,
-      });
-    } catch (e) {
-      console.warn('[EO-DB] Failed to send Airtable signal:', e);
-    }
+    // Broadcast sync completion via to-device (ephemeral, never hits timeline)
+    await this.broadcastToMembers(SIGNAL_TYPE, {
+      room_id: this.roomId,
+      stream: 'airtable-sync',
+      type: wasHydration ? 'hydration_complete' : 'sync_complete',
+      syncer: this.agent,
+      records_ingested: result.total_records_ingested,
+      records_skipped: result.total_records_skipped,
+      duration_ms: result.duration_ms,
+      synced_at: now,
+    });
   }
 }

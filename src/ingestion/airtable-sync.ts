@@ -425,6 +425,30 @@ async function hasActualChanges(
   return false;
 }
 
+/**
+ * Compute field-level diff between incoming fields and existing state.
+ * Returns only the fields that actually changed.
+ * For new records (no existing), returns only fields with non-null values.
+ */
+function computeFieldDiff(
+  incomingFields: Record<string, any>,
+  existingFields: Record<string, any> | undefined,
+): Record<string, any> {
+  const diff: Record<string, any> = {};
+  if (!existingFields) {
+    // New record — only DEF fields that have actual values
+    for (const [key, val] of Object.entries(incomingFields)) {
+      if (val !== null && val !== undefined) diff[key] = val;
+    }
+    return diff;
+  }
+  // Existing record — only include fields that actually changed
+  for (const [key, val] of Object.entries(incomingFields)) {
+    if (!valuesEqual(val, existingFields[key])) diff[key] = val;
+  }
+  return diff;
+}
+
 /** @deprecated Use valuesEqual from value-extract.ts instead. Kept for test backward compat. */
 function deepEqual(a: any, b: any): boolean {
   if (a === b) return true;
@@ -472,40 +496,37 @@ async function ingestRecord(
   const target = recordTarget(baseId, tableId, record.id);
 
   // 1. Extract only storable fields (skip computed/metadata, normalize values)
-  let storableFields = extractStorableFields(record.fields, fieldMeta, exclusions);
+  const storableFields = extractStorableFields(record.fields, fieldMeta, exclusions);
 
-  if (preserveExisting) {
-    // Only write fields that don't already exist in EO-DB.
-    // Existing field values are never overwritten — EO-DB is source of truth.
-    const existing = await getState(db, target);
-    const existingFields = existing?.value?.fields;
-    if (existingFields) {
-      const newFields: Record<string, any> = {};
-      for (const [key, val] of Object.entries(storableFields)) {
-        if (!(key in existingFields) || existingFields[key] === undefined || existingFields[key] === null) {
-          newFields[key] = val;
-        }
+  // 2. Get existing state once — used for INS check, diff, and preserveExisting
+  const existing = await getState(db, target);
+  const existingFields = existing?.value?.fields;
+
+  // 3. Compute field-level diff — only fields that actually changed
+  let diffFields = computeFieldDiff(storableFields, existingFields);
+
+  // 4. If preserveExisting, further filter to only fields where existing is null/undefined
+  if (preserveExisting && existingFields) {
+    const filtered: Record<string, any> = {};
+    for (const [key, val] of Object.entries(diffFields)) {
+      if (!(key in existingFields) || existingFields[key] === undefined || existingFields[key] === null) {
+        filtered[key] = val;
       }
-      if (Object.keys(newFields).length === 0) {
-        return 'skipped_no_change';
-      }
-      storableFields = newFields;
     }
-  } else {
-    // 2. Check for non-transformation against normalized fields
-    if (!await hasActualChanges(db, target, storableFields)) {
-      return 'skipped_no_change';
-    }
+    diffFields = filtered;
   }
 
-  // 3. Build idempotent event ID using normalized content hash for dedup
-  const contentKey = stableStringify(storableFields);
+  // 5. If no actual diffs, skip
+  if (Object.keys(diffFields).length === 0) {
+    return 'skipped_no_change';
+  }
+
+  // 6. Build idempotent event ID using diff content hash for dedup
+  const contentKey = stableStringify(diffFields);
   const clientEventId = recordEventId(baseId, tableId, record.id, contentKey);
 
-  // 4. Explicit INS for new records — the log should truthfully show entity birth
+  // 7. Explicit INS for new records — the log should truthfully show entity birth
   //    INS idempotency key uses record ID only (stable across re-syncs).
-  //    Idempotency check in processEvent prevents duplicate INS on re-sync.
-  const existing = await getState(db, target);
   if (!existing) {
     try {
       await emitEvent(db, feed, {
@@ -530,13 +551,13 @@ async function ingestRecord(
     }
   }
 
-  // 5. Ingest via DEF with only storable fields (no computed/Horizon noise)
+  // 8. DEF with only the changed fields (not all storable fields)
   try {
     await emitEvent(db, feed, {
       op: 'DEF',
       target,
       operand: {
-        fields: storableFields,
+        fields: diffFields,
         _airtable: {
           record_id: record.id,
           base_id: baseId,
@@ -550,11 +571,9 @@ async function ingestRecord(
       client_event_id: clientEventId,
     }, sink);
 
-    // 6. Set display name as a separate DEF — ontologically distinct from the data import.
-    //    The name assignment is a user/system choice about how to present this record,
-    //    not part of the source data itself.
+    // 9. Set display name as a separate DEF — ontologically distinct from the data import.
     if (displayField) {
-      const nameVal = storableFields[displayField] ?? record.fields[displayField];
+      const nameVal = diffFields[displayField] ?? record.fields[displayField];
       if (nameVal != null) {
         await emitEvent(db, feed, {
           op: 'DEF',
@@ -1023,6 +1042,7 @@ async function syncTable(
 export {
   hasActualChanges,
   deepEqual,
+  computeFieldDiff,
   recordEventId,
   recordTarget,
   tableTarget,

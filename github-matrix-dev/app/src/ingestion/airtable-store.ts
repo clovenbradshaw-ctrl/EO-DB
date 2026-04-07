@@ -34,6 +34,8 @@ export interface AirtableSyncState {
   lastSyncResult: HydrationResult | UpdateSyncResult | null;
   /** Whether the 30s continuous sync loop is enabled. */
   continuousSyncEnabled: boolean;
+  /** Whether a remote device currently holds the sync lock (via to-device signal). */
+  remoteLockHeld: boolean;
 
   // ── Schema cache (in-memory) ──
   /** Discovered Airtable schema (bases/tables/fields). */
@@ -52,6 +54,7 @@ export interface AirtableSyncState {
   setLastSyncAt: (ts: string) => void;
   setLastSyncResult: (r: HydrationResult | UpdateSyncResult | null) => void;
   setContinuousSync: (v: boolean) => void;
+  setRemoteLockHeld: (v: boolean) => void;
   setError: (e: string | null) => void;
 }
 
@@ -65,6 +68,7 @@ export const useAirtableStore = create<AirtableSyncState>((set, get) => ({
   lastSyncAt: null,
   lastSyncResult: null,
   continuousSyncEnabled: false,
+  remoteLockHeld: false,
   manifest: null,
 
   async connectFromWebhook(matrixAccessToken: string): Promise<void> {
@@ -107,6 +111,7 @@ export const useAirtableStore = create<AirtableSyncState>((set, get) => ({
       isPrimarySyncer: false,
       lastSyncResult: null,
       continuousSyncEnabled: false,
+      remoteLockHeld: false,
       manifest: null,
     });
   },
@@ -117,5 +122,6 @@ export const useAirtableStore = create<AirtableSyncState>((set, get) => ({
   setLastSyncAt(ts) { set({ lastSyncAt: ts }); },
   setLastSyncResult(r) { set({ lastSyncResult: r }); },
   setContinuousSync(v) { set({ continuousSyncEnabled: v }); },
+  setRemoteLockHeld(v) { set({ remoteLockHeld: v }); },
   setError(e) { set({ error: e }); },
 }));
