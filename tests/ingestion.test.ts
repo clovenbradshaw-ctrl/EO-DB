@@ -14,7 +14,7 @@ import {
   extractStorableFields,
   buildFieldMetaMap,
 } from '../src/ingestion/airtable-sync.js';
-import { classifyFieldType, COMPUTED_TYPES, METADATA_TYPES } from '../src/ingestion/field-rules.js';
+import { classifyFieldType, COMPUTED_TYPES, INGESTABLE_METADATA, FOLD_METADATA } from '../src/ingestion/field-rules.js';
 import { extractValue, valuesEqual, stableStringify } from '../src/ingestion/value-extract.js';
 import { isExcluded, mergeExclusions, EMPTY_EXCLUSIONS } from '../src/ingestion/exclusions.js';
 import { getState, setState } from '../src/db/state.js';

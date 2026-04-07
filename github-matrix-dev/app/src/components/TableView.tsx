@@ -249,14 +249,86 @@ function formatCurrency(n: number): string {
   });
 }
 
-function renderCell(value: any, key: string, onNavigate: (t: string) => void, t: Theme, resolver?: IdResolver): React.ReactNode {
+function renderCell(value: any, key: string, onNavigate: (t: string) => void, t: Theme, resolver?: IdResolver, colType?: string): React.ReactNode {
   // Intentional clear: an explicit null assertion gets the NUL glyph.
   if (value === null) {
     return <ClearedCell t={t} />;
   }
+
+  // Computed/EVA fields with no ingested value
+  if ((value === undefined || value === '') && (
+    colType === 'formula' || colType === 'rollup' || colType === 'lookup' || colType === 'count' ||
+    colType === 'lastModifiedTime' || colType === 'lastModifiedBy'
+  )) {
+    return <span style={{ color: t.textMuted, fontStyle: 'italic', fontSize: 11 }}>(computed)</span>;
+  }
+
   // Absence: undefined or empty string — never asserted. Show a faint em-dash.
   if (value === undefined || value === '') {
     return <AbsentCell t={t} />;
+  }
+
+  // ─── Type-aware rendering ──────────────────────────────────
+  if (colType === 'rating' && typeof value === 'number') {
+    const max = 5;
+    return (
+      <span style={{ letterSpacing: 2, fontSize: 13 }}>
+        {'★'.repeat(Math.min(value, max))}{'☆'.repeat(Math.max(0, max - value))}
+      </span>
+    );
+  }
+  if (colType === 'percent' && typeof value === 'number') {
+    return (
+      <span style={{ display: 'block', textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+        {(value * 100).toFixed(1)}%
+      </span>
+    );
+  }
+  if (colType === 'currency' && typeof value === 'number') {
+    return (
+      <span style={{ display: 'block', textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+        {formatCurrency(value)}
+      </span>
+    );
+  }
+  if (colType === 'duration' && typeof value === 'number') {
+    const h = Math.floor(value / 3600);
+    const m = Math.floor((value % 3600) / 60);
+    const s = Math.round(value % 60);
+    const parts: string[] = [];
+    if (h) parts.push(`${h}h`);
+    if (m || h) parts.push(`${m}m`);
+    parts.push(`${s}s`);
+    return <span style={{ fontVariantNumeric: 'tabular-nums' }}>{parts.join(' ')}</span>;
+  }
+  if (colType === 'url' && typeof value === 'string') {
+    let display: string;
+    try { display = new URL(value).hostname; } catch { display = value.slice(0, 40); }
+    return <a href={value} target="_blank" rel="noopener noreferrer" style={{ color: t.accent }} onClick={(e) => e.stopPropagation()}>{display}</a>;
+  }
+  if (colType === 'email' && typeof value === 'string') {
+    return <a href={`mailto:${value}`} style={{ color: t.accent }} onClick={(e) => e.stopPropagation()}>{value}</a>;
+  }
+  if (colType === 'phone' && typeof value === 'string') {
+    return <a href={`tel:${value}`} style={{ color: t.accent }} onClick={(e) => e.stopPropagation()}>{value}</a>;
+  }
+  if (colType === 'autoNumber' && (typeof value === 'number' || typeof value === 'string')) {
+    return <span style={{ fontVariantNumeric: 'tabular-nums', color: t.textMuted }}>#{value}</span>;
+  }
+  if ((colType === 'createdTime' || colType === 'lastModifiedTime') && typeof value === 'string') {
+    try {
+      return <span>{new Date(value).toLocaleString()}</span>;
+    } catch { /* fall through */ }
+  }
+  if (colType === 'attachment' && Array.isArray(value)) {
+    return <span style={{ color: t.textMuted }}>{value.length} file{value.length !== 1 ? 's' : ''}</span>;
+  }
+  if (colType === 'multiSelect' && Array.isArray(value)) {
+    const names = value.map((v: any) => typeof v === 'object' && v?.name ? v.name : String(v));
+    return <span>{names.join(', ')}</span>;
+  }
+  if (colType === 'select' && typeof value === 'object' && value?.name) {
+    return <span>{value.name}</span>;
   }
 
   // Status pill — universal for any string value on the status column
@@ -1464,8 +1536,8 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                                 color: theme.textSecondary,
                               }}>{rec.last_ts ? formatRelativeTime(rec.last_ts) : <AbsentCell t={theme} />}</span>
                             : isLocked
-                            ? <LockedCell>{renderCell(getFieldValue(rec, col.key, useFieldsSub), col.key, onSelectRecord, theme, idResolver)}</LockedCell>
-                            : renderCell(getFieldValue(rec, col.key, useFieldsSub), col.key, onSelectRecord, theme, idResolver)
+                            ? <LockedCell>{renderCell(getFieldValue(rec, col.key, useFieldsSub), col.key, onSelectRecord, theme, idResolver, col.type)}</LockedCell>
+                            : renderCell(getFieldValue(rec, col.key, useFieldsSub), col.key, onSelectRecord, theme, idResolver, col.type)
                           }
                         </td>
                       );

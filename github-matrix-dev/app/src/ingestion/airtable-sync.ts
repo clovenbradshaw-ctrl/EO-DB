@@ -22,6 +22,7 @@ import {
   type AirtableRecord,
 } from './airtable-client';
 import { classifyFieldType, type FieldClassification } from './field-rules';
+import { mapAirtableType } from './airtable-type-map';
 import { extractValue, valuesEqual, stableStringify } from './value-extract';
 import { isExcluded, EMPTY_EXCLUSIONS, type SyncExclusions } from './exclusions';
 
@@ -181,6 +182,51 @@ async function getTableFieldMeta(
   return buildFieldMetaMap(state?.value?.fields);
 }
 
+// ─── Constraint emission from Airtable field options ──────────────────────
+
+/** Constraint mapping: Airtable field type → option keys to emit as constraints. */
+const CONSTRAINT_MAP: Record<string, Array<{ optionKey: string; constraintName: string }>> = {
+  singleSelect:        [{ optionKey: 'choices', constraintName: 'enum' }],
+  multipleSelects:     [{ optionKey: 'choices', constraintName: 'enum' }],
+  number:              [{ optionKey: 'precision', constraintName: 'precision' }],
+  currency:            [{ optionKey: 'precision', constraintName: 'precision' }, { optionKey: 'symbol', constraintName: 'symbol' }],
+  percent:             [{ optionKey: 'precision', constraintName: 'precision' }],
+  rating:              [{ optionKey: 'max', constraintName: 'max' }, { optionKey: 'icon', constraintName: 'icon' }, { optionKey: 'color', constraintName: 'color' }],
+  duration:            [{ optionKey: 'durationFormat', constraintName: 'format' }],
+  date:                [{ optionKey: 'dateFormat', constraintName: 'dateFormat' }, { optionKey: 'timeFormat', constraintName: 'timeFormat' }],
+  dateTime:            [{ optionKey: 'dateFormat', constraintName: 'dateFormat' }, { optionKey: 'timeFormat', constraintName: 'timeFormat' }],
+};
+
+async function emitFieldConstraints(
+  store: EoStore,
+  fieldTarget: string,
+  field: { id: string; type: string; options?: Record<string, any> },
+  agent: string,
+  baseId: string,
+  tableId: string,
+  onEvent?: (e: any) => void,
+): Promise<void> {
+  const mappings = CONSTRAINT_MAP[field.type];
+  if (!mappings || !field.options) return;
+
+  for (const { optionKey, constraintName } of mappings) {
+    const value = field.options[optionKey];
+    if (value == null) continue;
+
+    try {
+      await processEvent(store, {
+        op: 'DEF',
+        target: `${fieldTarget}.constraint.${constraintName}`,
+        operand: constraintName === 'enum' ? { choices: value } : { value },
+        agent,
+        ts: new Date().toISOString(),
+        acquired_ts: new Date().toISOString(),
+        client_event_id: `at-constraint:${baseId}:${tableId}:${field.id}:${constraintName}`,
+      }, onEvent);
+    } catch { /* idempotent */ }
+  }
+}
+
 // ─── Non-transformation detection ──────────────────────────────────────────
 
 function extractStorableFields(
@@ -195,7 +241,7 @@ function extractStorableFields(
   for (const [fieldId, rawValue] of Object.entries(rawFields)) {
     const meta = fieldMeta.get(fieldId);
     if (!meta) { result[fieldId] = rawValue; continue; }
-    if (meta.classification === 'skip') continue;
+    if (meta.classification === 'skip' || meta.classification === 'eva') continue;
     if (isExcluded(fieldId, meta.name, exclusions)) continue;
 
     const extracted = extractValue(rawValue, meta.type);
@@ -585,6 +631,23 @@ export async function hydrationSync(
             client_event_id: `at-field:${base.id}:${table.id}:${field.id}`,
           }, opts?.onEvent);
         } catch { /* idempotent */ }
+
+        // Emit .type DEF with mapped EO-DB column type
+        const eoType = mapAirtableType(field.type);
+        try {
+          await processEvent(store, {
+            op: 'DEF',
+            target: `${fieldTarget}.type`,
+            operand: { type: eoType },
+            agent,
+            ts: new Date().toISOString(),
+            acquired_ts: new Date().toISOString(),
+            client_event_id: `at-field-type:${base.id}:${table.id}:${field.id}`,
+          }, opts?.onEvent);
+        } catch { /* idempotent */ }
+
+        // Emit constraint DEFs from Airtable field options
+        await emitFieldConstraints(store, fieldTarget, field, agent, base.id, table.id, opts?.onEvent);
       }
 
       opts?.onProgress?.({ phase: 'syncing', base: base.name, table: table.name });
@@ -695,6 +758,23 @@ export async function updateSync(
             client_event_id: `at-field-upd:${base.id}:${table.id}:${field.id}`,
           }, opts?.onEvent);
         } catch { /* idempotent */ }
+
+        // Emit .type DEF with mapped EO-DB column type
+        const eoType = mapAirtableType(field.type);
+        try {
+          await processEvent(store, {
+            op: 'DEF',
+            target: `${fieldTarget}.type`,
+            operand: { type: eoType },
+            agent,
+            ts: new Date().toISOString(),
+            acquired_ts: new Date().toISOString(),
+            client_event_id: `at-field-type-upd:${base.id}:${table.id}:${field.id}`,
+          }, opts?.onEvent);
+        } catch { /* idempotent */ }
+
+        // Emit constraint DEFs from Airtable field options
+        await emitFieldConstraints(store, fieldTarget, field, agent, base.id, table.id, opts?.onEvent);
       }
 
       opts?.onProgress?.({ phase: 'syncing', base: base.name, table: table.name });

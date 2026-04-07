@@ -34,6 +34,7 @@ import {
   type AirtableRecord,
 } from './airtable-client.js';
 import { classifyFieldType, type FieldClassification } from './field-rules.js';
+import { mapAirtableType } from './airtable-type-map.js';
 import { extractValue, valuesEqual, stableStringify } from './value-extract.js';
 import { isExcluded, EMPTY_EXCLUSIONS, type SyncExclusions } from './exclusions.js';
 
@@ -48,7 +49,7 @@ export interface HydrationManifest {
       name: string;
       primaryFieldId?: string;
       fieldCount: number;
-      fields: Array<{ id: string; name: string; type: string }>;
+      fields: Array<{ id: string; name: string; type: string; options?: Record<string, any> }>;
     }>;
   }>;
   discovered_at: string;
@@ -313,12 +314,13 @@ function baseTarget(baseId: string): string {
 
 // ─── Field metadata helpers ────────────────────────────────────────────────
 
-/** Map of field ID → { name, type, classification } built from table schema. */
+/** Map of field ID → { name, type, classification, options } built from table schema. */
 export interface FieldMeta {
   id: string;
   name: string;
   type: string;
   classification: FieldClassification;
+  options?: Record<string, any>;
 }
 
 /**
@@ -326,7 +328,7 @@ export interface FieldMeta {
  * Falls back to empty map if schema isn't available (all fields pass through).
  */
 function buildFieldMetaMap(
-  fields: Array<{ id: string; name: string; type: string }> | undefined,
+  fields: Array<{ id: string; name: string; type: string; options?: Record<string, any> }> | undefined,
 ): Map<string, FieldMeta> {
   const map = new Map<string, FieldMeta>();
   if (!fields) return map;
@@ -336,6 +338,7 @@ function buildFieldMetaMap(
       name: f.name,
       type: f.type,
       classification: classifyFieldType(f.type),
+      options: f.options,
     });
   }
   return map;
@@ -355,6 +358,52 @@ async function getTableFieldMeta(
 }
 
 // ─── Non-transformation detection ───────────────────────────────────────────
+
+// ─── Constraint emission from Airtable field options ──────────────────────
+
+/** Constraint mapping: Airtable field type → option keys to emit as constraints. */
+const CONSTRAINT_MAP: Record<string, Array<{ optionKey: string; constraintName: string }>> = {
+  singleSelect:        [{ optionKey: 'choices', constraintName: 'enum' }],
+  multipleSelects:     [{ optionKey: 'choices', constraintName: 'enum' }],
+  number:              [{ optionKey: 'precision', constraintName: 'precision' }],
+  currency:            [{ optionKey: 'precision', constraintName: 'precision' }, { optionKey: 'symbol', constraintName: 'symbol' }],
+  percent:             [{ optionKey: 'precision', constraintName: 'precision' }],
+  rating:              [{ optionKey: 'max', constraintName: 'max' }, { optionKey: 'icon', constraintName: 'icon' }, { optionKey: 'color', constraintName: 'color' }],
+  duration:            [{ optionKey: 'durationFormat', constraintName: 'format' }],
+  date:                [{ optionKey: 'dateFormat', constraintName: 'dateFormat' }, { optionKey: 'timeFormat', constraintName: 'timeFormat' }],
+  dateTime:            [{ optionKey: 'dateFormat', constraintName: 'dateFormat' }, { optionKey: 'timeFormat', constraintName: 'timeFormat' }],
+};
+
+async function emitFieldConstraints(
+  db: EoDb,
+  feed: Feed,
+  fieldTarget: string,
+  field: { id: string; type: string; options?: Record<string, any> },
+  agent: string,
+  baseId: string,
+  tableId: string,
+  sink?: EventSink,
+): Promise<void> {
+  const mappings = CONSTRAINT_MAP[field.type];
+  if (!mappings || !field.options) return;
+
+  for (const { optionKey, constraintName } of mappings) {
+    const value = field.options[optionKey];
+    if (value == null) continue;
+
+    try {
+      await emitEvent(db, feed, {
+        op: 'DEF',
+        target: `${fieldTarget}.constraint.${constraintName}`,
+        operand: constraintName === 'enum' ? { choices: value } : { value },
+        agent,
+        ts: new Date().toISOString(),
+        acquired_ts: new Date().toISOString(),
+        client_event_id: `at-constraint:${baseId}:${tableId}:${field.id}:${constraintName}`,
+      }, sink);
+    } catch { /* idempotent */ }
+  }
+}
 
 /**
  * Extract only the storable fields from an Airtable record, skipping
@@ -380,8 +429,8 @@ function extractStorableFields(
       continue;
     }
 
-    // Skip computed/metadata fields — they're Horizon outputs
-    if (meta.classification === 'skip') continue;
+    // Skip computed fields and fold-computed metadata — values come from fold
+    if (meta.classification === 'skip' || meta.classification === 'eva') continue;
 
     // Skip excluded fields
     if (isExcluded(fieldId, meta.name, exclusions)) continue;
@@ -618,7 +667,7 @@ export async function discoverSchema(client: AirtableClient): Promise<HydrationM
         name: t.name,
         primaryFieldId: t.primaryFieldId,
         fieldCount: t.fields.length,
-        fields: t.fields.map(f => ({ id: f.id, name: f.name, type: f.type })),
+        fields: t.fields.map(f => ({ id: f.id, name: f.name, type: f.type, ...(f.options ? { options: f.options } : {}) })),
       })),
     });
   }
@@ -809,6 +858,23 @@ export async function hydrationSync(
               client_event_id: `at-field:${base.id}:${table.id}:${field.id}`,
             }, opts?.sink);
           } catch { /* idempotency */ }
+
+          // Emit .type DEF with mapped EO-DB column type
+          const eoType = mapAirtableType(field.type);
+          try {
+            await emitEvent(db, feed, {
+              op: 'DEF',
+              target: `${fieldTarget}.type`,
+              operand: { type: eoType },
+              agent,
+              ts: new Date().toISOString(),
+              acquired_ts: new Date().toISOString(),
+              client_event_id: `at-field-type:${base.id}:${table.id}:${field.id}`,
+            }, opts?.sink);
+          } catch { /* idempotency */ }
+
+          // Emit constraint DEFs from Airtable field options
+          await emitFieldConstraints(db, feed, fieldTarget, field, agent, base.id, table.id, opts?.sink);
         }
 
         // Mark table in-progress in job

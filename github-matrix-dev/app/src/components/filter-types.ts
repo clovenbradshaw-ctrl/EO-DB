@@ -17,10 +17,20 @@ export interface FilterRule {
   value: string;
 }
 
+export type ColumnType =
+  | 'text' | 'richText' | 'email' | 'url' | 'phone'
+  | 'number' | 'currency' | 'percent' | 'rating' | 'duration'
+  | 'select' | 'multiSelect'
+  | 'date'
+  | 'boolean'
+  | 'attachment' | 'linkedRecord' | 'object'
+  | 'formula' | 'rollup' | 'lookup' | 'count'
+  | 'autoNumber' | 'createdTime' | 'lastModifiedTime' | 'createdBy' | 'lastModifiedBy';
+
 export interface ColumnDef {
   key: string;
   label: string;
-  type: 'text' | 'number' | 'date' | 'select' | 'boolean' | 'object';
+  type: ColumnType;
   selectOptions?: string[];
 }
 
@@ -43,12 +53,29 @@ const OBJECT_OPS: FilterOperator[] = ['is_empty', 'is_not_empty', 'contains'];
 
 export function operatorsForType(type: ColumnDef['type']): FilterOperator[] {
   switch (type) {
-    case 'number': return NUMBER_OPS;
-    case 'date': return DATE_OPS;
-    case 'select': return SELECT_OPS;
-    case 'boolean': return BOOLEAN_OPS;
-    case 'object': return OBJECT_OPS;
-    default: return TEXT_OPS;
+    case 'number':
+    case 'currency':
+    case 'percent':
+    case 'rating':
+    case 'duration':
+    case 'autoNumber':
+    case 'count':
+      return NUMBER_OPS;
+    case 'date':
+    case 'createdTime':
+    case 'lastModifiedTime':
+      return DATE_OPS;
+    case 'select':
+    case 'multiSelect':
+      return SELECT_OPS;
+    case 'boolean':
+      return BOOLEAN_OPS;
+    case 'object':
+    case 'attachment':
+    case 'linkedRecord':
+      return OBJECT_OPS;
+    default:
+      return TEXT_OPS;
   }
 }
 
@@ -78,6 +105,8 @@ export const HORIZON_HIDDEN_FIELDS = new Set([
 // --- Column Inference ---
 
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}/;
+const EMAIL_RE = /@.*\./;
+const URL_RE = /^https?:\/\//;
 
 export function inferColumnType(values: any[]): ColumnDef['type'] {
   const nonNull = values.filter(v => v != null);
@@ -88,12 +117,20 @@ export function inferColumnType(values: any[]): ColumnDef['type'] {
   if (types.size === 1 && types.has('number')) return 'number';
   if (types.size === 1 && types.has('boolean')) return 'boolean';
 
-  // Date detection: if >50% of non-null string values look like ISO dates
   if (types.has('string')) {
     const strings = nonNull.filter(v => typeof v === 'string') as string[];
     if (strings.length > 0) {
+      // Date detection: if >50% of non-null string values look like ISO dates
       const dateCount = strings.filter(s => ISO_DATE_RE.test(s) && !isNaN(new Date(s).getTime())).length;
       if (dateCount / strings.length > 0.5) return 'date';
+
+      // Email detection: if >50% look like emails
+      const emailCount = strings.filter(s => EMAIL_RE.test(s)).length;
+      if (emailCount / strings.length > 0.5) return 'email';
+
+      // URL detection: if >50% look like URLs
+      const urlCount = strings.filter(s => URL_RE.test(s)).length;
+      if (urlCount / strings.length > 0.5) return 'url';
     }
   }
 
@@ -224,6 +261,17 @@ export function deriveColumns(
       col.selectOptions = [...new Set(values.filter(v => typeof v === 'string') as string[])].sort();
     }
     columns.push(col);
+  }
+
+  // Add columns for schema-defined fields with no record data (computed/EVA)
+  if (fieldNameMap) {
+    for (const [fieldId, name] of fieldNameMap) {
+      if (!keyValues.has(fieldId)) {
+        const typeOverride = columnTypeOverrides?.get(fieldId);
+        const type = (typeOverride?.type as ColumnDef['type']) ?? 'text';
+        columns.push({ key: fieldId, label: showFieldIds ? fieldId : name, type });
+      }
+    }
   }
 
   // Sort: name first, status second, then alphabetical
