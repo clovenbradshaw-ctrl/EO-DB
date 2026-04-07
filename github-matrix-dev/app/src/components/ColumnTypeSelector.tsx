@@ -1,17 +1,104 @@
 import { useTheme, type Theme } from '../theme';
+import type { ColumnType } from './filter-types';
+import {
+  TextT,
+  TextAlignLeft,
+  Envelope,
+  Globe,
+  Phone,
+  Hash,
+  CurrencyDollar,
+  Percent,
+  Star,
+  Timer,
+  CaretCircleDown,
+  ListChecks,
+  Calendar,
+  CheckSquare,
+  Paperclip,
+  ArrowSquareOut,
+  CubeTransparent,
+  MathOperations,
+  ArrowsClockwise,
+  MagnifyingGlass,
+  ListNumbers,
+  NumberCircleOne,
+  Clock,
+  ClockCounterClockwise,
+  UserCircle,
+  UserCircleMinus,
+  type Icon,
+} from '@phosphor-icons/react';
 
-const COLUMN_TYPES = [
-  { value: 'text', label: 'Text', color: '#7a756d' },
-  { value: 'number', label: 'Number', color: '#3b82f6' },
-  { value: 'date', label: 'Date', color: '#e67e22' },
-  { value: 'select', label: 'Select', color: '#9b59b6' },
-  { value: 'boolean', label: 'Boolean', color: '#27ae60' },
-  { value: 'object', label: 'Object', color: '#6b7280' },
-] as const;
+// ─── Icon + color mapping (exported for column headers) ─────────────────────
+
+export interface ColumnTypeInfo {
+  value: ColumnType;
+  label: string;
+  icon: Icon;
+  color: string;
+  group: string;
+}
+
+export const COLUMN_TYPE_DEFS: ColumnTypeInfo[] = [
+  // Basic
+  { value: 'text',               label: 'Text',               icon: TextT,                  color: '#7a756d', group: 'Basic' },
+  { value: 'richText',           label: 'Rich Text',           icon: TextAlignLeft,           color: '#7a756d', group: 'Basic' },
+  { value: 'email',              label: 'Email',               icon: Envelope,                color: '#3b82f6', group: 'Basic' },
+  { value: 'url',                label: 'URL',                 icon: Globe,                   color: '#3b82f6', group: 'Basic' },
+  { value: 'phone',              label: 'Phone',               icon: Phone,                   color: '#3b82f6', group: 'Basic' },
+  // Numeric
+  { value: 'number',             label: 'Number',              icon: Hash,                    color: '#3b82f6', group: 'Numeric' },
+  { value: 'currency',           label: 'Currency',            icon: CurrencyDollar,          color: '#16a34a', group: 'Numeric' },
+  { value: 'percent',            label: 'Percent',             icon: Percent,                 color: '#3b82f6', group: 'Numeric' },
+  { value: 'rating',             label: 'Rating',              icon: Star,                    color: '#f59e0b', group: 'Numeric' },
+  { value: 'duration',           label: 'Duration',            icon: Timer,                   color: '#e67e22', group: 'Numeric' },
+  // Select
+  { value: 'select',             label: 'Select',              icon: CaretCircleDown,         color: '#9b59b6', group: 'Select' },
+  { value: 'multiSelect',        label: 'Multi Select',        icon: ListChecks,              color: '#9b59b6', group: 'Select' },
+  // Date & Time
+  { value: 'date',               label: 'Date',                icon: Calendar,                color: '#e67e22', group: 'Date & Time' },
+  // Other
+  { value: 'boolean',            label: 'Boolean',             icon: CheckSquare,             color: '#27ae60', group: 'Other' },
+  { value: 'attachment',         label: 'Attachment',           icon: Paperclip,               color: '#6b7280', group: 'Other' },
+  { value: 'linkedRecord',       label: 'Linked Record',       icon: ArrowSquareOut,           color: '#8b5cf6', group: 'Other' },
+  { value: 'object',             label: 'Object',              icon: CubeTransparent,          color: '#6b7280', group: 'Other' },
+  // Computed
+  { value: 'formula',            label: 'Formula',             icon: MathOperations,          color: '#ef4444', group: 'Computed' },
+  { value: 'rollup',             label: 'Rollup',              icon: ArrowsClockwise,         color: '#ef4444', group: 'Computed' },
+  { value: 'lookup',             label: 'Lookup',              icon: MagnifyingGlass,         color: '#ef4444', group: 'Computed' },
+  { value: 'count',              label: 'Count',               icon: ListNumbers,             color: '#ef4444', group: 'Computed' },
+  // Metadata
+  { value: 'autoNumber',         label: 'Auto Number',         icon: NumberCircleOne,         color: '#94a3b8', group: 'Metadata' },
+  { value: 'createdTime',        label: 'Created Time',        icon: Clock,                   color: '#94a3b8', group: 'Metadata' },
+  { value: 'lastModifiedTime',   label: 'Modified Time',       icon: ClockCounterClockwise,   color: '#94a3b8', group: 'Metadata' },
+  { value: 'createdBy',          label: 'Created By',          icon: UserCircle,              color: '#94a3b8', group: 'Metadata' },
+  { value: 'lastModifiedBy',     label: 'Modified By',         icon: UserCircleMinus,         color: '#94a3b8', group: 'Metadata' },
+];
+
+/** Quick lookup: ColumnType → icon + color info. */
+export const COLUMN_TYPE_ICON_MAP = new Map<ColumnType, ColumnTypeInfo>(
+  COLUMN_TYPE_DEFS.map(d => [d.value, d]),
+);
+
+// ─── Group ordering ─────────────────────────────────────────────────────────
+
+const GROUP_ORDER = ['Basic', 'Numeric', 'Select', 'Date & Time', 'Other', 'Computed', 'Metadata'];
+
+function groupedTypes(): Array<{ group: string; items: ColumnTypeInfo[] }> {
+  const map = new Map<string, ColumnTypeInfo[]>();
+  for (const def of COLUMN_TYPE_DEFS) {
+    const arr = map.get(def.group) || [];
+    arr.push(def);
+    map.set(def.group, arr);
+  }
+  return GROUP_ORDER.filter(g => map.has(g)).map(g => ({ group: g, items: map.get(g)! }));
+}
+
+// ─── Component ──────────────────────────────────────────────────────────────
 
 interface ColumnTypeSelectorProps {
   currentType: string;
-  /** Whether the current type comes from a schema DEF (true) or data inference (false) */
   isDefined: boolean;
   onSelect: (type: string) => void;
   onClear: () => void;
@@ -27,6 +114,7 @@ export function ColumnTypeSelector({
 }: ColumnTypeSelectorProps) {
   const { theme } = useTheme();
   const s = makeStyles(theme);
+  const groups = groupedTypes();
 
   return (
     <div style={s.container}>
@@ -34,36 +122,42 @@ export function ColumnTypeSelector({
         <span style={s.title}>⊢ COLUMN TYPE</span>
         <button style={s.closeBtn} onClick={onClose}>&times;</button>
       </div>
-      <div style={s.types}>
-        {COLUMN_TYPES.map((ct) => {
-          const isActive = currentType === ct.value;
-          return (
-            <button
-              key={ct.value}
-              onClick={() => onSelect(ct.value)}
-              style={{
-                ...s.typeBtn,
-                background: isActive ? `${ct.color}15` : 'transparent',
-                borderColor: isActive ? ct.color : 'transparent',
-                color: isActive ? ct.color : theme.text,
-              }}
-              onMouseEnter={(e) => {
-                if (!isActive) (e.currentTarget as HTMLElement).style.background = theme.bgHover;
-              }}
-              onMouseLeave={(e) => {
-                if (!isActive) (e.currentTarget as HTMLElement).style.background = 'transparent';
-              }}
-            >
-              <span style={{ ...s.dot, background: ct.color }} />
-              <span style={{ flex: 1 }}>{ct.label}</span>
-              {isActive && (
-                <span style={s.sourceLabel}>
-                  {isDefined ? 'defined' : 'inferred'}
-                </span>
-              )}
-            </button>
-          );
-        })}
+      <div style={s.scrollArea}>
+        {groups.map(({ group, items }) => (
+          <div key={group}>
+            <div style={s.groupLabel}>{group}</div>
+            {items.map((ct) => {
+              const isActive = currentType === ct.value;
+              const IconComp = ct.icon;
+              return (
+                <button
+                  key={ct.value}
+                  onClick={() => onSelect(ct.value)}
+                  style={{
+                    ...s.typeBtn,
+                    background: isActive ? `${ct.color}15` : 'transparent',
+                    borderColor: isActive ? ct.color : 'transparent',
+                    color: isActive ? ct.color : theme.text,
+                  }}
+                  onMouseEnter={(e) => {
+                    if (!isActive) (e.currentTarget as HTMLElement).style.background = theme.bgHover;
+                  }}
+                  onMouseLeave={(e) => {
+                    if (!isActive) (e.currentTarget as HTMLElement).style.background = 'transparent';
+                  }}
+                >
+                  <IconComp size={14} weight="regular" color={isActive ? ct.color : theme.textMuted} />
+                  <span style={{ flex: 1 }}>{ct.label}</span>
+                  {isActive && (
+                    <span style={s.sourceLabel}>
+                      {isDefined ? 'defined' : 'inferred'}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        ))}
       </div>
       {isDefined && (
         <button style={s.clearBtn} onClick={onClear}>
@@ -102,17 +196,29 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       padding: '0 2px',
       lineHeight: 1,
     },
-    types: {
+    scrollArea: {
       display: 'flex',
       flexDirection: 'column',
       gap: 2,
+      maxHeight: 400,
+      overflowY: 'auto',
+    },
+    groupLabel: {
+      fontSize: 8,
+      fontWeight: 700,
+      letterSpacing: '0.1em',
+      textTransform: 'uppercase' as const,
+      color: t.textMuted,
+      fontFamily: "'JetBrains Mono', monospace",
+      padding: '6px 10px 2px',
+      marginTop: 4,
     },
     typeBtn: {
       display: 'flex',
       alignItems: 'center',
       gap: 8,
       width: '100%',
-      padding: '6px 10px',
+      padding: '5px 10px',
       border: '1px solid transparent',
       borderRadius: 6,
       cursor: 'pointer',
@@ -120,12 +226,6 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       fontFamily: 'inherit',
       textAlign: 'left' as const,
       transition: 'background 0.1s',
-    },
-    dot: {
-      width: 8,
-      height: 8,
-      borderRadius: '50%',
-      flexShrink: 0,
     },
     sourceLabel: {
       fontSize: 9,

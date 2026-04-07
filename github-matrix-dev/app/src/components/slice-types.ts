@@ -92,11 +92,36 @@ export function createDefaultConfig(): TableSliceConfig {
 /** Default column width by type */
 export function defaultColumnWidth(type: string): number {
   switch (type) {
-    case 'number': return 120;
-    case 'boolean': return 80;
-    case 'date': return 150;
-    case 'select': return 150;
-    case 'object': return 200;
+    case 'number':
+    case 'currency':
+    case 'percent':
+    case 'autoNumber':
+    case 'count':
+      return 120;
+    case 'rating':
+    case 'boolean':
+      return 80;
+    case 'duration':
+      return 110;
+    case 'date':
+    case 'createdTime':
+    case 'lastModifiedTime':
+    case 'select':
+    case 'multiSelect':
+      return 150;
+    case 'email':
+    case 'url':
+    case 'phone':
+      return 180;
+    case 'object':
+    case 'attachment':
+    case 'linkedRecord':
+    case 'formula':
+    case 'rollup':
+    case 'lookup':
+    case 'createdBy':
+    case 'lastModifiedBy':
+      return 200;
     default: return 200;
   }
 }

@@ -2,7 +2,8 @@ import { describe, it, expect } from 'vitest';
 import {
   classifyFieldType,
   COMPUTED_TYPES,
-  METADATA_TYPES,
+  INGESTABLE_METADATA,
+  FOLD_METADATA,
   LINK_TYPES,
   SKIP_VALUE_TYPES,
 } from '../src/ingestion/field-rules.js';
@@ -17,14 +18,20 @@ describe('COMPUTED_TYPES', () => {
   });
 });
 
-describe('METADATA_TYPES', () => {
-  it('contains auto-populated field types', () => {
-    expect(METADATA_TYPES.has('createdTime')).toBe(true);
-    expect(METADATA_TYPES.has('lastModifiedTime')).toBe(true);
-    expect(METADATA_TYPES.has('createdBy')).toBe(true);
-    expect(METADATA_TYPES.has('lastModifiedBy')).toBe(true);
-    expect(METADATA_TYPES.has('autoNumber')).toBe(true);
-    expect(METADATA_TYPES.size).toBe(5);
+describe('INGESTABLE_METADATA', () => {
+  it('contains factual metadata field types (set once)', () => {
+    expect(INGESTABLE_METADATA.has('createdTime')).toBe(true);
+    expect(INGESTABLE_METADATA.has('createdBy')).toBe(true);
+    expect(INGESTABLE_METADATA.has('autoNumber')).toBe(true);
+    expect(INGESTABLE_METADATA.size).toBe(3);
+  });
+});
+
+describe('FOLD_METADATA', () => {
+  it('contains fold-computed metadata field types', () => {
+    expect(FOLD_METADATA.has('lastModifiedTime')).toBe(true);
+    expect(FOLD_METADATA.has('lastModifiedBy')).toBe(true);
+    expect(FOLD_METADATA.size).toBe(2);
   });
 });
 
@@ -36,10 +43,9 @@ describe('LINK_TYPES', () => {
 });
 
 describe('SKIP_VALUE_TYPES', () => {
-  it('is the union of computed and metadata types', () => {
+  it('contains only computed types (not metadata)', () => {
     for (const t of COMPUTED_TYPES) expect(SKIP_VALUE_TYPES.has(t)).toBe(true);
-    for (const t of METADATA_TYPES) expect(SKIP_VALUE_TYPES.has(t)).toBe(true);
-    expect(SKIP_VALUE_TYPES.size).toBe(COMPUTED_TYPES.size + METADATA_TYPES.size);
+    expect(SKIP_VALUE_TYPES.size).toBe(COMPUTED_TYPES.size);
   });
 });
 
@@ -51,10 +57,15 @@ describe('classifyFieldType', () => {
     expect(classifyFieldType('count')).toBe('skip');
   });
 
-  it('classifies metadata fields as skip', () => {
-    expect(classifyFieldType('createdTime')).toBe('skip');
-    expect(classifyFieldType('lastModifiedTime')).toBe('skip');
-    expect(classifyFieldType('autoNumber')).toBe('skip');
+  it('classifies fold-computed metadata as eva', () => {
+    expect(classifyFieldType('lastModifiedTime')).toBe('eva');
+    expect(classifyFieldType('lastModifiedBy')).toBe('eva');
+  });
+
+  it('classifies ingestable metadata as def', () => {
+    expect(classifyFieldType('createdTime')).toBe('def');
+    expect(classifyFieldType('createdBy')).toBe('def');
+    expect(classifyFieldType('autoNumber')).toBe('def');
   });
 
   it('classifies link fields as con', () => {
