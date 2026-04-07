@@ -222,7 +222,7 @@ export class GDriveSyncService {
         data_base64: base64Data,
       };
 
-      const dataType = `eodb-${this.spaceName.replace(/[^\w-]/g, '_')}`;
+      const dataType = `eodb-${this.spaceId}`;
 
       const result = await gdriveStore(
         this.matrixAccessToken,

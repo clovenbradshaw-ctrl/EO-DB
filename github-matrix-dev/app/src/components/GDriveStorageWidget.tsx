@@ -57,7 +57,7 @@ export function GDriveStorageWidget() {
 
   const spaceName = currentSpaceId ? (spaceDisplayNames[currentSpaceId] || currentSpaceId) : null;
   const lastSync = currentSpaceId ? lastSyncAt[currentSpaceId] : null;
-  const dataType = spaceName ? `eodb-${spaceName.replace(/[^\w-]/g, '_')}` : null;
+  const dataType = currentSpaceId ? `eodb-${currentSpaceId}` : null;
 
   const loadFiles = useCallback(async () => {
     if (!matrixAccessToken || !dataType) return;
