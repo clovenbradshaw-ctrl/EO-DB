@@ -5,7 +5,7 @@ import { resolveAlias } from './helpers';
 import { readLogForTarget } from './log';
 import type {
   EoEvent, EoState, EvaRegistration, HorizonResponse, GroundEntry, SignalEntry,
-  NearbyEntry, GovernanceEntry, LoggableOperator, AncestryEntry, TrajectoryEntry,
+  NearbyEntry, SimilarityDimensions, GovernanceEntry, LoggableOperator, AncestryEntry, TrajectoryEntry,
   TrajectoryFingerprint, CadenceInfo, CadenceClass, GraphMetrics, GraphRole,
   RecResult, RecCycleInfo,
 } from './types';
@@ -244,9 +244,11 @@ async function getNearby(store: EoStore, target: string): Promise<NearbyEntry[]>
   const figureState = await getState(store, target);
   if (!figureState) return [];
 
-  const figureFields = extractTraits(figureState);
+  const figureKeys = extractFieldKeys(figureState);
   const figureEdges = await getEdgesFrom(store, target);
   const figureLinked = new Set(figureEdges.map(e => e.dest));
+  const figureFp = figureState._fold?.trajectoryFingerprint;
+  const figureOpCounts = figureFp?.opCounts;
 
   const siblings = await getStateByPrefix(store, collectionPrefix + '.');
   const candidates: NearbyEntry[] = [];
@@ -256,48 +258,93 @@ async function getNearby(store: EoStore, target: string): Promise<NearbyEntry[]>
     if (sib.value?._alias) continue;
     if (sib.target.split('.').length !== parts.length) continue;
 
-    const sibTraits = extractTraits(sib);
-    const shared: string[] = [];
+    const dims: SimilarityDimensions = {};
 
-    for (const trait of figureFields) {
-      if (sibTraits.includes(trait)) {
-        shared.push(trait);
-      }
+    // ─── Dimension 1: Hash — exact trajectory fingerprint match ───
+    const sibFp = sib._fold?.trajectoryFingerprint;
+    if (figureFp && sibFp && figureFp.fingerprint === sibFp.fingerprint) {
+      dims.hash = true;
     }
 
-    const sibEdges = await getEdgesFrom(store, sib.target);
-    for (const edge of sibEdges) {
-      if (figureLinked.has(edge.dest)) {
-        shared.push(`linked:${edge.dest}`);
-      }
+    // ─── Dimension 2: Trajectory — op-count cosine similarity ───
+    const sibOpCounts = sibFp?.opCounts;
+    if (figureOpCounts && sibOpCounts) {
+      dims.trajectory = cosineSimilarity(figureOpCounts, sibOpCounts);
     }
 
-    if (shared.length > 0) {
+    // ─── Dimension 3: State — field-key Jaccard overlap ───
+    const sibKeys = extractFieldKeys(sib);
+    if (figureKeys.size > 0 || sibKeys.size > 0) {
+      let intersection = 0;
+      for (const k of figureKeys) if (sibKeys.has(k)) intersection++;
+      const union = figureKeys.size + sibKeys.size - intersection;
+      dims.state = union > 0 ? intersection / union : 0;
+    }
+
+    // ─── Dimension 4: Connections — shared link ratio ───
+    if (figureLinked.size > 0) {
+      const sibEdges = await getEdgesFrom(store, sib.target);
+      const sibLinked = new Set(sibEdges.map(e => e.dest));
+      let sharedLinks = 0;
+      for (const l of figureLinked) if (sibLinked.has(l)) sharedLinks++;
+      const linkUnion = figureLinked.size + sibLinked.size - sharedLinks;
+      dims.connections = linkUnion > 0 ? sharedLinks / linkUnion : 0;
+    }
+
+    // ─── Composite score (weighted) ───
+    const score = compositeScore(dims);
+    if (score > 0.05) {
       candidates.push({
         target: sib.target,
-        shared,
-        distance: figureFields.length > 0
-          ? Math.max(1, figureFields.length - shared.length + 1)
-          : 1,
+        score,
+        dimensions: dims,
+        shared: [],   // deprecated
+        distance: score > 0 ? Math.round(1 / score) : 999,
       });
     }
   }
 
-  candidates.sort((a, b) => a.distance - b.distance);
+  candidates.sort((a, b) => b.score - a.score);
   return candidates.slice(0, 10);
 }
 
-function extractTraits(state: EoState): string[] {
-  const traits: string[] = [];
-  if (!state.value || typeof state.value !== 'object') return traits;
-
-  for (const [key, value] of Object.entries(state.value)) {
-    if (key.startsWith('_')) continue;
-    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
-      traits.push(`${key}:${value}`);
-    }
+/** Extract non-internal field keys from a state value. */
+function extractFieldKeys(state: EoState): Set<string> {
+  const keys = new Set<string>();
+  if (!state.value || typeof state.value !== 'object') return keys;
+  for (const key of Object.keys(state.value)) {
+    if (!key.startsWith('_')) keys.add(key);
   }
-  return traits;
+  return keys;
+}
+
+/** Cosine similarity between two op-count vectors. */
+function cosineSimilarity(
+  a: Record<string, number>,
+  b: Record<string, number>,
+): number {
+  const allKeys = new Set([...Object.keys(a), ...Object.keys(b)]);
+  let dot = 0, magA = 0, magB = 0;
+  for (const k of allKeys) {
+    const va = a[k] ?? 0;
+    const vb = b[k] ?? 0;
+    dot += va * vb;
+    magA += va * va;
+    magB += vb * vb;
+  }
+  const denom = Math.sqrt(magA) * Math.sqrt(magB);
+  return denom > 0 ? dot / denom : 0;
+}
+
+/** Weighted composite of similarity dimensions. */
+function compositeScore(dims: SimilarityDimensions): number {
+  let score = 0;
+  let weight = 0;
+  if (dims.hash) { score += 0.3; weight += 0.3; }
+  if (dims.trajectory !== undefined) { score += dims.trajectory * 0.3; weight += 0.3; }
+  if (dims.state !== undefined) { score += dims.state * 0.2; weight += 0.2; }
+  if (dims.connections !== undefined) { score += dims.connections * 0.2; weight += 0.2; }
+  return weight > 0 ? score / weight : 0;
 }
 
 // --- Layer 4: Governance ---

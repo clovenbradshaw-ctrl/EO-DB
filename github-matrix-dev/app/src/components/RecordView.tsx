@@ -418,10 +418,10 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
         </Section>
       )}
 
-      {/* Similar Records — lazy: O(N) edge lookups */}
+      {/* Similar Records — multi-dimensional similarity */}
       <LazySection
         title="Similar Records"
-        subtitle="nearby in the key-space"
+        subtitle="by hash, trajectory, state & connections"
         color={theme.teal}
         loaded={nearby !== undefined}
         loading={nearbyLoading}

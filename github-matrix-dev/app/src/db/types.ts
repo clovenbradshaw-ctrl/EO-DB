@@ -142,9 +142,27 @@ export interface GroundEntry {
   distance: number;
 }
 
+/** Similarity dimensions — which axes contributed to the match. */
+export interface SimilarityDimensions {
+  /** Exact trajectory fingerprint match (identical op sequence). */
+  hash?: boolean;
+  /** Trajectory op-count cosine similarity (0–1). */
+  trajectory?: number;
+  /** Field-key Jaccard overlap (0–1). */
+  state?: number;
+  /** Shared connection ratio (0–1). */
+  connections?: number;
+}
+
 export interface NearbyEntry {
   target: string;
+  /** Overall similarity score (0–1, higher = more similar). */
+  score: number;
+  /** Which dimensions contributed to the score. */
+  dimensions: SimilarityDimensions;
+  /** @deprecated kept for backward compat — may be empty. */
   shared: string[];
+  /** @deprecated use 1/score instead. */
   distance: number;
 }
 
