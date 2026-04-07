@@ -7,9 +7,11 @@ import { RoomDataViewer } from './RoomDataViewer';
 import { MatrixRoomsViewer } from './MatrixRoomsViewer';
 import { UserRoomsBySpaces } from './UserRoomsBySpaces';
 import { FilenStorageWidget } from './FilenStorageWidget';
+import { GDriveStorageWidget } from './GDriveStorageWidget';
 import { OP_COLORS, TRIAD_LABELS } from './LogView';
 import { ArchivedSpacesSection } from './ArchivedSpaces';
 import { AirtableSettingsSection } from './AirtableSettings';
+import { useGDriveStore } from '../google-drive/gdrive-store';
 
 interface SettingsViewProps {
   session: MatrixSession;
@@ -37,6 +39,8 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
   const store = useEoStore((s) => s.store);
   const syncManager = useEoStore((s) => s.syncManager);
   const filenSync = useEoStore((s) => s.filenSync);
+  const gdriveSync = useEoStore((s) => s.gdriveSync);
+  const gdriveConnected = useGDriveStore((s) => s.connected);
   const manualSnapshot = useEoStore((s) => s.manualSnapshot);
   const [showRoomData, setShowRoomData] = useState(false);
   const [showAllRooms, setShowAllRooms] = useState(false);
@@ -207,6 +211,13 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
               status={filenSync ? 'ok' : 'off'}
               detail={filenSync ? 'Backup sync active' : 'Not connected'}
             />
+            {/* Google Drive */}
+            <StatusRow
+              theme={theme}
+              label="Google Drive"
+              status={gdriveSync ? 'ok' : gdriveConnected ? 'pending' : 'off'}
+              detail={gdriveSync ? 'Backup sync active' : gdriveConnected ? 'Initializing...' : 'Not connected'}
+            />
 
             {/* Error banner with action */}
             {connectionError && (
@@ -285,6 +296,13 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
         {(filenSync || (matrixClient && roomId)) && (
           <Section title="Filen Cloud Storage" theme={theme}>
             <FilenStorageWidget />
+          </Section>
+        )}
+
+        {/* Google Drive Cloud Storage */}
+        {(gdriveSync || gdriveConnected) && (
+          <Section title="Google Drive Storage" theme={theme}>
+            <GDriveStorageWidget />
           </Section>
         )}
 

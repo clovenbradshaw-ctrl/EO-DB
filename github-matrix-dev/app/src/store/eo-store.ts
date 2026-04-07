@@ -10,6 +10,7 @@ import { readLogSince } from '../db/log';
 import { backfillFoldCaches } from '../db/fold-cache';
 import type { SyncManager } from '../matrix/sync-manager';
 import type { FilenSyncService } from '../filen/filen-sync';
+import type { GDriveSyncService } from '../google-drive/gdrive-sync';
 import type { ResolvedPermissions } from '../permissions/types';
 
 interface EoDbState {
@@ -19,6 +20,8 @@ interface EoDbState {
   syncManager: SyncManager | null;
   /** The Filen sync service for backup/restore */
   filenSync: FilenSyncService | null;
+  /** The Google Drive sync service for backup */
+  gdriveSync: GDriveSyncService | null;
   /** Recent events processed through the fold */
   recentEvents: EoEvent[];
   /** Current sequence number */
@@ -41,6 +44,9 @@ interface EoDbState {
 
   /** Set the Filen sync service */
   setFilenSync: (filenSync: FilenSyncService) => void;
+
+  /** Set the Google Drive sync service */
+  setGDriveSync: (gdriveSync: GDriveSyncService) => void;
 
   /** Set resolved permissions for the current space */
   setPermissions: (permissions: ResolvedPermissions | null) => void;
@@ -81,6 +87,7 @@ export const useEoStore = create<EoDbState>((set, get) => ({
   store: null,
   syncManager: null,
   filenSync: null,
+  gdriveSync: null,
   recentEvents: [],
   lastSeq: 0,
   ready: false,
@@ -152,6 +159,10 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     set({ filenSync });
   },
 
+  setGDriveSync(gdriveSync: GDriveSyncService) {
+    set({ gdriveSync });
+  },
+
   setPermissions(permissions: ResolvedPermissions | null) {
     set({ resolvedPermissions: permissions });
   },
@@ -200,11 +211,16 @@ export const useEoStore = create<EoDbState>((set, get) => ({
       }));
     });
 
-    // Upload to Filen immediately after import (don't wait for 30s timer)
-    const { filenSync } = get();
+    // Upload to Filen + Google Drive immediately after import (don't wait for 30s timer)
+    const { filenSync, gdriveSync } = get();
     if (filenSync) {
       filenSync.forceSave().catch((e) =>
         console.warn('[EO-DB] Filen upload after import failed:', e),
+      );
+    }
+    if (gdriveSync) {
+      gdriveSync.forceSave().catch((e) =>
+        console.warn('[EO-DB] Google Drive upload after import failed:', e),
       );
     }
 
@@ -249,6 +265,6 @@ export const useEoStore = create<EoDbState>((set, get) => ({
   teardown() {
     const { store } = get();
     if (store) store.close();
-    set({ store: null, syncManager: null, filenSync: null, ready: false, recentEvents: [], lastSeq: 0, resolvedPermissions: null, activeUserType: null });
+    set({ store: null, syncManager: null, filenSync: null, gdriveSync: null, ready: false, recentEvents: [], lastSeq: 0, resolvedPermissions: null, activeUserType: null });
   },
 }));
