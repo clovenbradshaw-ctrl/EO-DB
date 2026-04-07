@@ -673,15 +673,19 @@ export class FilenSyncService {
     if (snapshots.length > 0) {
       const latest = snapshots[0];
       if (latest.key) {
-        const raw = await filenDownloadFile(
-          auth.apiKey, latest.uuid, latest.key, latest.region, latest.bucket,
-        );
-        const data = keyring ? await decryptSnapshot(raw, keyring) : raw;
-        const eodb = unpackEodb(data);
-        for (const event of eodb.events) {
-          if (event.seq <= localSeq) continue;
-          const seq = await processEvent(store, event, onEvent);
-          lastAppliedSeq = Math.max(lastAppliedSeq, seq);
+        try {
+          const raw = await filenDownloadFile(
+            auth.apiKey, latest.uuid, latest.key, latest.region, latest.bucket,
+          );
+          const data = keyring ? await decryptSnapshot(raw, keyring) : raw;
+          const eodb = unpackEodb(data);
+          for (const event of eodb.events) {
+            if (event.seq <= localSeq) continue;
+            const seq = await processEvent(store, event, onEvent);
+            lastAppliedSeq = Math.max(lastAppliedSeq, seq);
+          }
+        } catch (e) {
+          console.warn('[EO-DB] Failed to download/apply snapshot:', latest.name, e);
         }
       }
     }

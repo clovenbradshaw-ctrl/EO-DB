@@ -568,8 +568,6 @@ export async function filenDownloadFile(
   bucket?: string,
   version?: number,
 ): Promise<Uint8Array> {
-  const egestUrl = pickRandom(FILEN_EGEST_SERVERS);
-
   const params = new URLSearchParams({
     uuid: fileUuid,
     region: region || 'de-1',
@@ -577,17 +575,37 @@ export async function filenDownloadFile(
     index: '0',
   });
 
-  const res = await fetch(`${egestUrl}/v3/download?${params}`, {
-    method: 'GET',
-    headers: { 'Authorization': `Bearer ${apiKey}` },
-  });
+  // Try multiple egest servers — some may be down or block CORS for this origin.
+  // Shuffle the list so we don't always hit them in the same order.
+  const servers = [...FILEN_EGEST_SERVERS].sort(() => Math.random() - 0.5);
+  const maxAttempts = Math.min(servers.length, 3);
+  let lastError: unknown;
 
-  if (!res.ok) {
-    throw new Error(`Download failed: ${res.status} ${res.statusText}`);
+  for (let i = 0; i < maxAttempts; i++) {
+    const egestUrl = servers[i];
+    try {
+      const res = await fetch(`${egestUrl}/v3/download?${params}`, {
+        method: 'GET',
+        headers: { 'Authorization': `Bearer ${apiKey}` },
+      });
+
+      if (!res.ok) {
+        lastError = new Error(`Download failed: ${res.status} ${res.statusText}`);
+        continue;
+      }
+
+      const encrypted = new Uint8Array(await res.arrayBuffer());
+      return decryptFileContent(encrypted, fileKey);
+    } catch (e) {
+      // TypeError: Failed to fetch — typically CORS or network error
+      lastError = e;
+      console.warn(`[EO-DB] Download attempt ${i + 1}/${maxAttempts} failed (${egestUrl}):`, e);
+    }
   }
 
-  const encrypted = new Uint8Array(await res.arrayBuffer());
-  return decryptFileContent(encrypted, fileKey);
+  throw lastError instanceof Error
+    ? lastError
+    : new Error(`Download failed after ${maxAttempts} attempts: ${lastError}`);
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -701,8 +719,7 @@ export async function filenDownloadPublicLink(
     fileKey = decryptedMeta;
   }
 
-  // Download the encrypted file content
-  const egestUrl = pickRandom(FILEN_EGEST_SERVERS);
+  // Download the encrypted file content with retry across egest servers
   const params = new URLSearchParams({
     uuid: info.data.uuid,
     region: info.data.region || 'de-1',
@@ -710,16 +727,33 @@ export async function filenDownloadPublicLink(
     index: '0',
   });
 
-  const downloadRes = await fetch(`${egestUrl}/v3/download?${params}`, {
-    method: 'GET',
-  });
+  const servers = [...FILEN_EGEST_SERVERS].sort(() => Math.random() - 0.5);
+  const maxAttempts = Math.min(servers.length, 3);
+  let lastError: unknown;
 
-  if (!downloadRes.ok) {
-    throw new Error(`Public link download failed: ${downloadRes.status}`);
+  for (let i = 0; i < maxAttempts; i++) {
+    const egestUrl = servers[i];
+    try {
+      const downloadRes = await fetch(`${egestUrl}/v3/download?${params}`, {
+        method: 'GET',
+      });
+
+      if (!downloadRes.ok) {
+        lastError = new Error(`Public link download failed: ${downloadRes.status}`);
+        continue;
+      }
+
+      const encrypted = new Uint8Array(await downloadRes.arrayBuffer());
+      return decryptFileContent(encrypted, fileKey);
+    } catch (e) {
+      lastError = e;
+      console.warn(`[EO-DB] Public link download attempt ${i + 1}/${maxAttempts} failed (${egestUrl}):`, e);
+    }
   }
 
-  const encrypted = new Uint8Array(await downloadRes.arrayBuffer());
-  return decryptFileContent(encrypted, fileKey);
+  throw lastError instanceof Error
+    ? lastError
+    : new Error(`Public link download failed after ${maxAttempts} attempts: ${lastError}`);
 }
 
 /**
