@@ -11,8 +11,8 @@ import { FilterBar } from './FilterBar';
 import { SortPanel, type SortRule } from './SortPanel';
 import type { ResolvedPermissions } from '../permissions/types';
 import { syncEditToAirtable } from '../ingestion/airtable-writeback';
-import { useViewStore } from '../store/view-store';
-import { defaultColumnWidth, MIN_COLUMN_WIDTH } from './view-types';
+import { useSliceStore } from '../store/slice-store';
+import { defaultColumnWidth, MIN_COLUMN_WIDTH } from './slice-types';
 import { formatName } from './scope-picker-utils';
 import { useIdResolver, isEntityId, isEntityIdArray, type IdResolver } from '../hooks/useIdResolver';
 import { groupSchemaStates, extractColumnTypeOverrides, schemaTypeTarget, schemaConstraintTarget, schemaResolveTarget, type FieldSchema } from '../db/schema-rules';
@@ -21,11 +21,13 @@ import { useIsMobile, useIsNarrow } from '../hooks/useIsMobile';
 import { ColumnManagerPanel } from './ColumnManagerPanel';
 import {
   DndContext,
+  DragOverlay,
   closestCenter,
   PointerSensor,
   useSensor,
   useSensors,
   type DragEndEvent,
+  type DragStartEvent,
 } from '@dnd-kit/core';
 import {
   SortableContext,
@@ -44,8 +46,8 @@ interface TableViewProps {
   session: { userId: string };
   timeScrubberFilter?: TimeScrubberFilter;
   permissions?: ResolvedPermissions | null;
-  /** When true, the current view is read-only for this user's type */
-  viewReadOnly?: boolean;
+  /** When true, the current slice is read-only for this user's type */
+  sliceReadOnly?: boolean;
 }
 
 function formatRelativeTime(ts: string): string {
@@ -378,7 +380,7 @@ function renderCell(value: any, key: string, onNavigate: (t: string) => void, t:
   return <span>{String(value)}</span>;
 }
 
-export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, activeRecord, session, timeScrubberFilter, permissions, viewReadOnly }: TableViewProps) {
+export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, activeRecord, session, timeScrubberFilter, permissions, sliceReadOnly }: TableViewProps) {
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
   const getState = useEoStore((s) => s.getState);
   const dispatch = useEoStore((s) => s.dispatch);
@@ -411,9 +413,9 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   const { theme } = useTheme();
   const s = makeStyles(theme);
 
-  // --- View store (SIG) ---
-  const viewStore = useViewStore();
-  const viewConfig = viewStore.getConfig(scope);
+  // --- Slice store (SIG) ---
+  const sliceStore = useSliceStore();
+  const viewConfig = sliceStore.getConfig(scope);
   const sorts = viewConfig.sorts;
   const advancedFilters = viewConfig.filters;
   const filterConjunction = viewConfig.filterConjunction;
@@ -437,21 +439,22 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   const [showProfilePicker, setShowProfilePicker] = useState(false);
   const [showColumnManager, setShowColumnManager] = useState(false);
 
-  const setSorts = useCallback((s: SortRule[]) => viewStore.setSorts(scope, s), [scope, viewStore]);
-  const setAdvancedFilters = useCallback((f: FilterRule[]) => viewStore.setFilters(scope, f), [scope, viewStore]);
-  const setFilterConjunction = useCallback((c: 'AND' | 'OR') => viewStore.setFilterConjunction(scope, c), [scope, viewStore]);
+  const setSorts = useCallback((s: SortRule[]) => sliceStore.setSorts(scope, s), [scope, sliceStore]);
+  const setAdvancedFilters = useCallback((f: FilterRule[]) => sliceStore.setFilters(scope, f), [scope, sliceStore]);
+  const setFilterConjunction = useCallback((c: 'AND' | 'OR') => sliceStore.setFilterConjunction(scope, c), [scope, sliceStore]);
   const setHiddenColumns = useCallback((fn: Set<string> | ((prev: Set<string>) => Set<string>)) => {
     const next = typeof fn === 'function' ? fn(hiddenColumns) : fn;
-    viewStore.setHiddenColumns(scope, [...next]);
-  }, [scope, viewStore, hiddenColumns]);
+    sliceStore.setHiddenColumns(scope, [...next]);
+  }, [scope, sliceStore, hiddenColumns]);
 
   // --- Column resize state ---
   const [resizing, setResizing] = useState<{ key: string; startX: number; startWidth: number } | null>(null);
   const tableRef = useRef<HTMLTableElement>(null);
+  const [activeDragId, setActiveDragId] = useState<string | null>(null);
 
-  // --- DnD sensors ---
+  // --- DnD sensors (delay-based to prevent accidental drags while resizing) ---
   const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
+    useSensor(PointerSensor, { activationConstraint: { delay: 200, tolerance: 5 } }),
   );
 
   const scopeDepth = scope.split('.').length;
@@ -462,7 +465,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     const handleMouseMove = (e: MouseEvent) => {
       const delta = e.clientX - resizing.startX;
       const newWidth = Math.max(MIN_COLUMN_WIDTH, resizing.startWidth + delta);
-      viewStore.setColumnWidth(scope, resizing.key, newWidth);
+      sliceStore.setColumnWidth(scope, resizing.key, newWidth);
     };
     const handleMouseUp = () => setResizing(null);
     document.addEventListener('mousemove', handleMouseMove);
@@ -471,10 +474,14 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [resizing, scope, viewStore]);
+  }, [resizing, scope, sliceStore]);
 
-  // --- Column drag-end handler ---
+  // --- Column drag handlers ---
+  function handleColumnDragStart(event: DragStartEvent) {
+    setActiveDragId(event.active.id as string);
+  }
   function handleColumnDragEnd(event: DragEndEvent) {
+    setActiveDragId(null);
     const { active, over } = event;
     if (!over || active.id === over.id) return;
     const currentOrder = orderedColumns.map((c) => c.key);
@@ -482,7 +489,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     const newIndex = currentOrder.indexOf(over.id as string);
     if (oldIndex === -1 || newIndex === -1) return;
     const newOrder = arrayMove(currentOrder, oldIndex, newIndex);
-    viewStore.setColumnOrder(scope, newOrder);
+    sliceStore.setColumnOrder(scope, newOrder);
   }
 
   // Load records and field metadata
@@ -799,12 +806,12 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     }
     items.push({
       label: 'Hide column',
-      onClick: () => viewStore.toggleHiddenColumn(scope, colKey),
+      onClick: () => sliceStore.toggleHiddenColumn(scope, colKey),
     });
     if (hiddenColumns.size > 0) {
       items.push({
         label: `Show all columns (${hiddenColumns.size} hidden)`,
-        onClick: () => viewStore.showAllColumns(scope),
+        onClick: () => sliceStore.showAllColumns(scope),
       });
     }
     return items;
@@ -909,7 +916,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     } catch { /* ignore */ }
   }
 
-  const canEdit = viewReadOnly ? false : (permissions ? (permissions.can_edit_any_record || permissions.can_edit_own_records) : true);
+  const canEdit = sliceReadOnly ? false : (permissions ? (permissions.can_edit_any_record || permissions.can_edit_own_records) : true);
 
   function handleCellDoubleClick(rec: EoState, colKey: string) {
     if (!canEdit) return;
@@ -1108,7 +1115,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
               return (
                 <button
                   key={h}
-                  onClick={() => viewStore.setRowHeight(scope, h)}
+                  onClick={() => sliceStore.setRowHeight(scope, h)}
                   title={h.charAt(0).toUpperCase() + h.slice(1)}
                   style={{
                     ...s.toggleBtn,
@@ -1140,7 +1147,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
               return (
                 <button
                   key={mode}
-                  onClick={() => viewStore.setCellOverflow(scope, mode)}
+                  onClick={() => sliceStore.setCellOverflow(scope, mode)}
                   title={label}
                   aria-label={label}
                   aria-pressed={isActive}
@@ -1166,7 +1173,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
           {/* Field ID toggle — hidden on mobile */}
           {!isMobile && (
           <button
-            onClick={() => viewStore.setShowFieldIds(scope, !showFieldIds)}
+            onClick={() => sliceStore.setShowFieldIds(scope, !showFieldIds)}
             title={showFieldIds ? 'Showing raw field IDs — click for display names' : 'Showing display names — click for raw field IDs'}
             aria-label="Toggle field ID display"
             aria-pressed={showFieldIds}
@@ -1210,12 +1217,12 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                 ]}
                 columnOrder={columnOrder}
                 hiddenColumns={hiddenColumns}
-                onToggleColumn={(key) => viewStore.toggleHiddenColumn(scope, key)}
-                onReorder={(order) => viewStore.setColumnOrder(scope, order)}
-                onShowAll={() => viewStore.showAllColumns(scope)}
+                onToggleColumn={(key) => sliceStore.toggleHiddenColumn(scope, key)}
+                onReorder={(order) => sliceStore.setColumnOrder(scope, order)}
+                onShowAll={() => sliceStore.showAllColumns(scope)}
                 onHideAll={() => {
                   const allKeys = entityColumns.map((c) => c.key).concat(['_record', '_last_updated']);
-                  viewStore.setHiddenColumns(scope, allKeys);
+                  sliceStore.setHiddenColumns(scope, allKeys);
                 }}
                 onClose={() => setShowColumnManager(false)}
               />
@@ -1269,7 +1276,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                             const next = isChecked
                               ? current.filter((k) => k !== col.key)
                               : [...current, col.key];
-                            viewStore.setProfileFields(scope, next.length === entityColumns.length ? undefined : next);
+                            sliceStore.setProfileFields(scope, next.length === entityColumns.length ? undefined : next);
                           }}
                         />
                         {col.label}
@@ -1278,13 +1285,13 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                   })}
                   <div style={{ display: 'flex', gap: 8, marginTop: 8, borderTop: `1px solid ${theme.border}`, paddingTop: 8 }}>
                     <button
-                      onClick={() => viewStore.setProfileFields(scope, undefined)}
+                      onClick={() => sliceStore.setProfileFields(scope, undefined)}
                       style={{ fontSize: 10, background: 'none', border: 'none', color: theme.accent, cursor: 'pointer' }}
                     >
                       Select All
                     </button>
                     <button
-                      onClick={() => viewStore.setProfileFields(scope, [])}
+                      onClick={() => sliceStore.setProfileFields(scope, [])}
                       style={{ fontSize: 10, background: 'none', border: 'none', color: theme.textMuted, cursor: 'pointer' }}
                     >
                       Clear
@@ -1299,9 +1306,10 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
 
       {/* Table */}
       <div style={s.tableWrap}>
-        <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleColumnDragEnd}>
+        <DndContext sensors={sensors} collisionDetection={closestCenter} onDragStart={handleColumnDragStart} onDragEnd={handleColumnDragEnd} onDragCancel={() => setActiveDragId(null)}>
           <table ref={tableRef} style={{ ...s.table, tableLayout: 'fixed' }}>
             <colgroup>
+              <col style={{ width: 40 }} />
               {orderedColumns.map((col) => (
                 <col key={col.key} style={{ width: columnWidths[col.key] || defaultColumnWidth(col.type) }} />
               ))}
@@ -1309,6 +1317,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
             <thead>
               <SortableContext items={orderedColumns.map((c) => c.key)} strategy={horizontalListSortingStrategy}>
                 <tr>
+                  <th style={{ ...s.th, width: 40, textAlign: 'center', padding: '8px 4px', userSelect: 'none' }}>#</th>
                   {orderedColumns.map((col) => (
                     <SortableColumnHeader
                       key={col.key}
@@ -1319,6 +1328,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                       renameCol={renameCol}
                       permissions={permissions}
                       isResizing={resizing?.key === col.key}
+                      isAnyResizing={resizing !== null}
                       disabled={col.key === '_record'}
                       onContextMenu={(e) => handleColumnContextMenu(e, col)}
                       onRename={(val) => handleColumnRename(col.key, val)}
@@ -1335,7 +1345,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
             <tbody>
               {filtered.length === 0 && (
                 <tr>
-                  <td colSpan={orderedColumns.length} style={s.emptyRow}>
+                  <td colSpan={orderedColumns.length + 1} style={s.emptyRow}>
                     {records.length === 0 ? 'No records in this scope' : 'No records match the current filter'}
                   </td>
                 </tr>
@@ -1356,12 +1366,21 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                       if (!isActive) (e.currentTarget as HTMLElement).style.background = zebraBg;
                     }}
                   >
+                    <td style={{
+                      ...s.td,
+                      width: 40,
+                      textAlign: 'center',
+                      padding: `${rowHeight === 'compact' ? 4 : rowHeight === 'tall' ? 18 : 10}px 4px`,
+                      fontFamily: "'JetBrains Mono', monospace",
+                      fontSize: 10,
+                      color: theme.textMuted,
+                      userSelect: 'none',
+                      borderLeft: `3px solid ${theme.accent}`,
+                    }}>{rowIndex + 1}</td>
                     {orderedColumns.map((col, colIndex) => {
                       const isRedacted = permissions?.redacted_fields?.includes(col.key);
                       const isLocked = permissions?.locked_fields?.includes(col.key);
-                      const tdStyle = colIndex === 0
-                        ? { ...s.td, borderLeft: `3px solid ${theme.accent}` }
-                        : s.td;
+                      const tdStyle = s.td;
                       const isEditingThis = editingCell?.target === rec.target && editingCell?.fieldKey === col.key;
                       const isEditableCol = col.key !== '_record' && col.key !== '_last_updated' && !isRedacted && !isLocked && canEdit;
                       return (
@@ -1440,6 +1459,28 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
               })}
             </tbody>
           </table>
+          <DragOverlay dropAnimation={null}>
+            {activeDragId && (() => {
+              const col = orderedColumns.find(c => c.key === activeDragId);
+              if (!col) return null;
+              return (
+                <div style={{
+                  padding: '6px 10px',
+                  background: theme.bgCard,
+                  border: `2px solid ${theme.accent}`,
+                  borderRadius: 4,
+                  fontSize: 11,
+                  fontWeight: 600,
+                  color: theme.text,
+                  boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+                  whiteSpace: 'nowrap',
+                  opacity: 0.9,
+                }}>
+                  {col.label}
+                </div>
+              );
+            })()}
+          </DragOverlay>
         </DndContext>
       </div>
 
@@ -1532,6 +1573,7 @@ interface SortableColumnHeaderProps {
   renameCol: { key: string; value: string } | null;
   permissions?: ResolvedPermissions | null;
   isResizing: boolean;
+  isAnyResizing: boolean;
   disabled: boolean;
   onContextMenu: (e: React.MouseEvent) => void;
   onRename: (val: string) => void;
@@ -1539,10 +1581,13 @@ interface SortableColumnHeaderProps {
   onResizeStart: (startX: number) => void;
 }
 
+const DRAG_DEAD_ZONE_PX = 16; // suppress column drag near right edge (resize area)
+
 function SortableColumnHeader({
   col, theme, thStyle, sorts, renameCol, permissions,
-  isResizing, disabled, onContextMenu, onRename, onCancelRename, onResizeStart,
+  isResizing, isAnyResizing, disabled, onContextMenu, onRename, onCancelRename, onResizeStart,
 }: SortableColumnHeaderProps) {
+  const effectivelyDisabled = disabled || isAnyResizing;
   const {
     attributes,
     listeners,
@@ -1550,18 +1595,36 @@ function SortableColumnHeader({
     transform,
     transition,
     isDragging,
-  } = useSortable({ id: col.key, disabled });
+  } = useSortable({ id: col.key, disabled: effectivelyDisabled });
+
+  // Wrap dnd-kit listeners to add a dead zone near the resize handle edge
+  const filteredListeners = useMemo(() => {
+    if (effectivelyDisabled || !listeners) return {};
+    return Object.fromEntries(
+      Object.entries(listeners).map(([key, handler]) => {
+        if (key === 'onPointerDown') {
+          return [key, (e: React.PointerEvent) => {
+            const rect = e.currentTarget.getBoundingClientRect();
+            if (rect.right - e.clientX < DRAG_DEAD_ZONE_PX) return;
+            (handler as (e: React.PointerEvent) => void)(e);
+          }];
+        }
+        return [key, handler];
+      })
+    );
+  }, [listeners, effectivelyDisabled]);
 
   const style: React.CSSProperties = {
     ...thStyle,
-    cursor: disabled ? 'default' : 'grab',
+    cursor: effectivelyDisabled ? 'default' : 'grab',
     userSelect: 'none',
     position: 'sticky' as const,
     top: 0,
     transform: CSS.Transform.toString(transform ? { ...transform, y: 0 } : null),
     transition,
-    opacity: isDragging ? 0.5 : 1,
+    opacity: isDragging ? 0.3 : 1,
     zIndex: isDragging ? 10 : 2,
+    background: isDragging ? theme.bgHover : thStyle.background,
   };
 
   const isLocked = permissions?.locked_fields?.includes(col.key);
@@ -1571,7 +1634,7 @@ function SortableColumnHeader({
       ref={setNodeRef}
       style={style}
       {...attributes}
-      {...(disabled ? {} : listeners)}
+      {...filteredListeners}
       onContextMenu={onContextMenu}
     >
       {renameCol?.key === col.key ? (
@@ -1601,17 +1664,17 @@ function SortableColumnHeader({
           )}
         </span>
       )}
-      {/* Resize handle */}
+      {/* Resize handle — wide invisible hit area with narrow visible indicator */}
       <div
         style={{
           position: 'absolute',
           top: 0,
-          right: 0,
-          width: 5,
+          right: -4,
+          width: 12,
           height: '100%',
           cursor: 'col-resize',
-          background: isResizing ? theme.accent : theme.border,
           zIndex: 3,
+          background: 'transparent',
         }}
         onMouseDown={(e) => {
           e.stopPropagation();
@@ -1619,12 +1682,26 @@ function SortableColumnHeader({
           onResizeStart(e.clientX);
         }}
         onMouseEnter={(e) => {
-          if (!isResizing) (e.currentTarget as HTMLElement).style.background = theme.borderDivider;
+          const indicator = e.currentTarget.firstElementChild as HTMLElement;
+          if (!isResizing && indicator) indicator.style.background = theme.borderDivider;
         }}
         onMouseLeave={(e) => {
-          if (!isResizing) (e.currentTarget as HTMLElement).style.background = theme.border;
+          const indicator = e.currentTarget.firstElementChild as HTMLElement;
+          if (!isResizing && indicator) indicator.style.background = theme.border;
         }}
-      />
+      >
+        <div
+          style={{
+            position: 'absolute',
+            top: 0,
+            right: 4,
+            width: 5,
+            height: '100%',
+            background: isResizing ? theme.accent : theme.border,
+            pointerEvents: 'none',
+          }}
+        />
+      </div>
     </th>
   );
 }
