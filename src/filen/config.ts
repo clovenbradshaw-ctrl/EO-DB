@@ -6,6 +6,7 @@
  * at startup; the rest of the app reads via getters.
  *
  * Environment variables:
+ *   N8N_WEBHOOK_URL        — n8n webhook URL (default: http://localhost:5678/webhook/filen)
  *   FILEN_EMAIL            — Filen account email
  *   FILEN_PASSWORD         — Filen account password
  *   FILEN_FOLDER_UUID      — UUID of the folder to watch

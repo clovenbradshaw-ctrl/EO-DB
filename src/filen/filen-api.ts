@@ -17,9 +17,12 @@ const FILEN_GATEWAY = 'https://gateway.filen.io';
  * caller's Matrix access token via /_matrix/client/v3/account/whoami and
  * responds with
  * `{"filen username": "...", "filen password": "...", "airtable PAT": "pat..."}`.
+ *
+ * Set N8N_WEBHOOK_URL to point at your local n8n instance (default).
+ * For the hosted version, set it to the remote URL.
  */
 const FILEN_CREDS_WEBHOOK =
-  'https://n8n.intelechia.com/webhook/2caa4b94-873d-4a78-9770-d73a4d5b3c79';
+  process.env.N8N_WEBHOOK_URL || 'http://localhost:5678/webhook/filen';
 
 export interface WebhookCredentials {
   username: string;

@@ -1,9 +1,10 @@
 /**
  * Filen session management — credential fetching, login caching, folder scaffolding.
  *
- * Manages Filen auth sessions server-side. The n8n webhook returns Filen
- * username/password when called with a Matrix access token. Sessions are
- * cached in-memory (30-min TTL) to avoid re-running PBKDF2 on every import.
+ * Manages Filen auth sessions server-side. A local n8n webhook (or remote,
+ * configured via N8N_WEBHOOK_URL) returns Filen username/password when called
+ * with a Matrix access token. Sessions are cached in-memory (30-min TTL) to
+ * avoid re-running PBKDF2 on every import.
  */
 
 import {
