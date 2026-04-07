@@ -1,0 +1,17 @@
+{
+  "name": "eo-code-analysis",
+  "version": "1.0.0",
+  "description": "Analyze the EO-DB codebase using EO's own nine-operator transformation calculus",
+  "type": "module",
+  "scripts": {
+    "analyze": "tsx src/index.ts --all",
+    "report": "tsx src/index.ts --report",
+    "graph": "tsx src/index.ts --graph",
+    "events": "tsx src/index.ts --json"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.2",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0"
+  }
+}
