@@ -122,6 +122,112 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
+// ─── Rate-limit detection ──────────────────────────────────────────────────
+
+/**
+ * Extract retry delay from a Matrix 429 response error, or null if not
+ * rate-limited.
+ *
+ * Works with matrix-js-sdk MatrixError, plain fetch responses, and various
+ * error wrapper shapes. Shared by SyncManager, withRetry, and other callers.
+ */
+export function extractRateLimitDelay(error: unknown): number | null {
+  if (!error) return null;
+  const e = error as any;
+
+  const isRateLimit =
+    e.httpStatus === 429 ||
+    e.statusCode === 429 ||
+    e.errcode === 'M_LIMIT_EXCEEDED' ||
+    e.data?.errcode === 'M_LIMIT_EXCEEDED' ||
+    (e.message && /429|too many|rate.?limit|M_LIMIT_EXCEEDED/i.test(String(e.message))) ||
+    (e.name && /MatrixError/i.test(String(e.name)) && /429|limit/i.test(String(e.message)));
+
+  if (!isRateLimit) return null;
+
+  const retryAfter = e.data?.retry_after_ms ?? e.retry_after_ms;
+  return typeof retryAfter === 'number' && retryAfter > 0
+    ? retryAfter + 100
+    : 2000;
+}
+
+/**
+ * Check whether an error represents a transient failure (worth retrying)
+ * vs a permanent one (4xx client error, should not retry).
+ */
+export function isTransientError(error: unknown): boolean {
+  if (!error) return false;
+  const e = error as any;
+
+  // Rate-limited = transient
+  if (extractRateLimitDelay(e) !== null) return true;
+
+  // Network errors = transient
+  if (e.name === 'TypeError' || e.code === 'ECONNREFUSED' || e.code === 'ETIMEDOUT' ||
+      e.code === 'ENOTFOUND' || e.code === 'UND_ERR_CONNECT_TIMEOUT' ||
+      e.message?.includes('fetch failed') || e.message?.includes('network')) {
+    return true;
+  }
+
+  // 5xx server errors = transient
+  const status = e.httpStatus ?? e.statusCode ?? e.status;
+  if (typeof status === 'number' && status >= 500) return true;
+
+  // 4xx (except 429) = permanent
+  if (typeof status === 'number' && status >= 400 && status < 500) return false;
+
+  // Unknown errors — assume transient (safer to retry than to drop)
+  return true;
+}
+
+// ─── Generic SDK-call retry ────────────────────────────────────────────────
+
+/**
+ * Retry any async operation with exponential backoff.
+ *
+ * Complements fetchWithRetry (which wraps raw fetch). This wraps SDK calls
+ * like client.createRoom(), client.sendStateEvent(), etc.
+ *
+ * - Retries on network errors, 5xx, and 429 (rate limit)
+ * - No retry on 4xx (permanent client errors)
+ * - Honors server-provided retry_after_ms on 429
+ */
+export async function withRetry<T>(
+  fn: () => Promise<T>,
+  opts?: RetryOptions,
+): Promise<T> {
+  const maxRetries = opts?.maxRetries ?? 3;
+  const baseDelay = opts?.baseDelay ?? 2000;
+  const multiplier = opts?.multiplier ?? 2;
+  const maxDelay = opts?.maxDelay ?? 30_000;
+
+  let lastError: unknown = null;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      opts?.signal?.throwIfAborted();
+      return await fn();
+    } catch (err: any) {
+      if (err.name === 'AbortError') throw err;
+      lastError = err;
+
+      if (attempt >= maxRetries) break;
+
+      // Don't retry permanent failures
+      if (!isTransientError(err)) throw err;
+
+      // Compute delay — prefer server-provided rate-limit delay
+      const rateLimitDelay = extractRateLimitDelay(err);
+      const computedDelay = Math.min(baseDelay * Math.pow(multiplier, attempt), maxDelay);
+      const delay = rateLimitDelay ?? computedDelay;
+
+      await sleep(delay, opts?.signal);
+    }
+  }
+
+  throw lastError;
+}
+
 // ─── Connection Monitor ─────────────────────────────────────────────────────
 
 const DEFAULT_HEALTH_INTERVAL = 30_000; // 30s

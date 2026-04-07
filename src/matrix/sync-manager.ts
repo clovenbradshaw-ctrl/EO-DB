@@ -37,6 +37,8 @@ import {
   IMPORT_CHUNK_SIZE,
 } from './snapshot.js';
 import { SendBuffer } from './send-buffer.js';
+import { extractRateLimitDelay, isTransientError } from './connection-resilience.js';
+import { getConnectionStatus } from '../auth/matrix.js';
 
 // ─── Async Mutex (inline to avoid circular deps) ──────────────────────────
 
@@ -81,7 +83,10 @@ const queueMutex = new QueueMutex();
  * Login and local fold still work — only outbound writes to Matrix are disabled.
  * Set to false when the new storage backend is ready.
  */
-const MATRIX_UPLOAD_DISABLED = false;
+/** Upload is disabled when Matrix is known offline (prevents hammering a dead homeserver). */
+function isMatrixUploadDisabled(): boolean {
+  return getConnectionStatus() === 'offline';
+}
 
 // ─── Meta key helpers ──────────────────────────────────────────────────────
 
@@ -122,6 +127,9 @@ export class SyncManager {
   /** Optional callback for sync status changes (confirmed, queued, rate-limited). */
   onSyncStatus?: (status: 'confirmed' | 'queued' | 'rate-limited') => void;
 
+  /** Optional callback when events are dropped after exhausting retries. */
+  onEventDropped?: (count: number, reason: string) => void;
+
   /** Coalescing buffer — batches outbound events into periodic snapshot uploads. */
   private sendBuffer: SendBuffer;
 
@@ -141,7 +149,7 @@ export class SyncManager {
     // Wire up the send buffer with delegate callbacks
     this.sendBuffer = new SendBuffer({
       uploadBufferedEvents: () => this.flushSendBuffer(),
-      isUploadDisabled: () => MATRIX_UPLOAD_DISABLED,
+      isUploadDisabled: () => isMatrixUploadDisabled(),
       getRateLimitedUntil: () => this.rateLimitedUntil,
     });
   }
@@ -203,9 +211,15 @@ export class SyncManager {
   async initialize(): Promise<void> {
     const currentSeq = await getCurrentSeq(this.db);
 
-    // On a fresh device, restore from the latest Matrix media snapshot
+    // On a fresh device, restore from the latest Matrix media snapshot.
+    // Non-fatal: a missing or corrupt snapshot shouldn't block sync —
+    // timeline replay will still pick up events from the room.
     if (currentSeq === 0) {
-      await this.hydrateFromSnapshot();
+      try {
+        await this.hydrateFromSnapshot();
+      } catch (e) {
+        console.warn('[EO-DB] Snapshot hydration failed, continuing with timeline replay:', e);
+      }
     }
 
     // Replay EO events already in the room timeline (from initial sync).
@@ -351,7 +365,7 @@ export class SyncManager {
    * Called on page unload / visibility hidden so data is always persisted.
    */
   async saveSnapshot(): Promise<void> {
-    if (MATRIX_UPLOAD_DISABLED) return;
+    if (isMatrixUploadDisabled()) return;
 
     // Flush the send buffer first so all buffered events get included
     await this.sendBuffer.flush();
@@ -373,7 +387,7 @@ export class SyncManager {
    * uploads to Matrix media, and records the mxc URI in a NUL log event.
    */
   async manualSnapshot(): Promise<{ mxc: string; seq: number }> {
-    if (MATRIX_UPLOAD_DISABLED) {
+    if (isMatrixUploadDisabled()) {
       throw new Error('Matrix uploads are currently disabled');
     }
 
@@ -429,7 +443,7 @@ export class SyncManager {
     toSeq: number,
     importMeta?: ImportMeta,
   ): Promise<{ mxc: string; from_seq: number; to_seq: number; event_count: number }> {
-    if (MATRIX_UPLOAD_DISABLED) {
+    if (isMatrixUploadDisabled()) {
       return { mxc: '', from_seq: fromSeq, to_seq: toSeq, event_count: 0 };
     }
 
@@ -711,30 +725,10 @@ export class SyncManager {
 
   /**
    * Extract retry delay from a Matrix 429 response, or null if not rate-limited.
-   *
-   * The matrix-js-sdk MatrixError shape varies across bundled versions —
-   * check multiple paths to be resilient against minification/wrapping.
+   * Delegates to shared extractRateLimitDelay() in connection-resilience.
    */
   private static getRetryDelay(error: unknown): number | null {
-    if (!error) return null;
-    const e = error as any;
-
-    // Check all possible indicators of a 429 rate-limit
-    const isRateLimit =
-      e.httpStatus === 429 ||
-      e.statusCode === 429 ||
-      e.errcode === 'M_LIMIT_EXCEEDED' ||
-      e.data?.errcode === 'M_LIMIT_EXCEEDED' ||
-      (e.message && /429|too many|rate.?limit|M_LIMIT_EXCEEDED/i.test(String(e.message))) ||
-      (e.name && /MatrixError/i.test(String(e.name)) && /429|limit/i.test(String(e.message)));
-
-    if (!isRateLimit) return null;
-
-    // Prefer server-provided retry_after_ms
-    const retryAfter = e.data?.retry_after_ms ?? e.retry_after_ms;
-    return typeof retryAfter === 'number' && retryAfter > 0
-      ? retryAfter + 100
-      : 2000;
+    return extractRateLimitDelay(error);
   }
 
   /**
@@ -753,7 +747,7 @@ export class SyncManager {
    * already received (e.g., via peer sync or auto-snapshot) is harmless.
    */
   private async flushUnsyncedEvents(): Promise<void> {
-    if (MATRIX_UPLOAD_DISABLED) return;
+    if (isMatrixUploadDisabled()) return;
 
     await queueMutex.run(async () => {
       const raw: any[] = (await getMeta<any[]>(this.db, 'meta:offline_queue')) || [];
@@ -795,17 +789,32 @@ export class SyncManager {
             setTimeout(() => { if (!this.destroyed) this.flushUnsyncedEvents(); }, retryDelay);
           }
           this.onSyncStatus?.('rate-limited');
+        } else if (!isTransientError(err)) {
+          // Permanent failure (4xx except 429) — drop immediately, retrying won't help
+          console.warn(
+            '[EO-DB] Dropping', queue.length, 'queued events due to permanent error:',
+            (err as any)?.httpStatus ?? (err as any)?.message ?? err,
+          );
+          await setMeta(this.db, 'meta:offline_queue', []);
+          this.onEventDropped?.(queue.length, `permanent error: ${(err as any)?.httpStatus ?? (err as any)?.message ?? 'unknown'}`);
+          this.onSyncStatus?.('queued');
         } else {
-          // Non-rate-limit error — increment attempts on all entries
+          // Transient error (network, 5xx) — increment attempts, retry with backoff
           const nextAttempts = batchAttempts + 1;
           if (nextAttempts >= SyncManager.MAX_QUEUE_ATTEMPTS) {
             console.warn(
               '[EO-DB] Dropping', queue.length, 'queued events after', nextAttempts, 'failed batch attempts',
             );
             await setMeta(this.db, 'meta:offline_queue', []);
+            this.onEventDropped?.(queue.length, `${nextAttempts} failed attempts`);
           } else {
             const bumped = queue.map(e => ({ ...e, attempts: nextAttempts }));
             await setMeta(this.db, 'meta:offline_queue', bumped);
+            // Schedule retry with exponential backoff
+            const backoff = Math.min(2000 * Math.pow(2, nextAttempts), 30_000);
+            if (!this.destroyed) {
+              setTimeout(() => { if (!this.destroyed) this.flushUnsyncedEvents(); }, backoff);
+            }
           }
           this.onSyncStatus?.('queued');
         }

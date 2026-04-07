@@ -1,6 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   fetchWithRetry,
+  withRetry,
+  extractRateLimitDelay,
+  isTransientError,
   MatrixConnectionMonitor,
   type ConnectionState,
 } from '../src/matrix/connection-resilience.js';
@@ -217,5 +220,151 @@ describe('MatrixConnectionMonitor', () => {
     expect(monitor.getState().status).toBe('online');
 
     monitor.stop();
+  });
+});
+
+describe('extractRateLimitDelay', () => {
+  it('returns null for non-rate-limit errors', () => {
+    expect(extractRateLimitDelay(null)).toBe(null);
+    expect(extractRateLimitDelay({ httpStatus: 404 })).toBe(null);
+    expect(extractRateLimitDelay({ httpStatus: 500 })).toBe(null);
+    expect(extractRateLimitDelay(new Error('some error'))).toBe(null);
+  });
+
+  it('detects 429 via httpStatus', () => {
+    const delay = extractRateLimitDelay({ httpStatus: 429 });
+    expect(delay).toBe(2000); // default fallback
+  });
+
+  it('detects 429 via statusCode', () => {
+    const delay = extractRateLimitDelay({ statusCode: 429 });
+    expect(delay).toBe(2000);
+  });
+
+  it('detects M_LIMIT_EXCEEDED errcode', () => {
+    const delay = extractRateLimitDelay({ errcode: 'M_LIMIT_EXCEEDED' });
+    expect(delay).toBe(2000);
+  });
+
+  it('extracts retry_after_ms from data', () => {
+    const delay = extractRateLimitDelay({
+      httpStatus: 429,
+      data: { retry_after_ms: 5000 },
+    });
+    expect(delay).toBe(5100); // 5000 + 100 buffer
+  });
+
+  it('extracts retry_after_ms from top-level', () => {
+    const delay = extractRateLimitDelay({
+      httpStatus: 429,
+      retry_after_ms: 3000,
+    });
+    expect(delay).toBe(3100);
+  });
+
+  it('detects rate limit from message text', () => {
+    const delay = extractRateLimitDelay({ message: 'Too many requests (429)' });
+    expect(delay).toBe(2000);
+  });
+});
+
+describe('isTransientError', () => {
+  it('returns false for null/undefined', () => {
+    expect(isTransientError(null)).toBe(false);
+    expect(isTransientError(undefined)).toBe(false);
+  });
+
+  it('returns true for rate-limited errors', () => {
+    expect(isTransientError({ httpStatus: 429 })).toBe(true);
+  });
+
+  it('returns true for network errors', () => {
+    expect(isTransientError({ name: 'TypeError', message: 'fetch failed' })).toBe(true);
+    expect(isTransientError({ code: 'ECONNREFUSED' })).toBe(true);
+    expect(isTransientError({ code: 'ETIMEDOUT' })).toBe(true);
+  });
+
+  it('returns true for 5xx server errors', () => {
+    expect(isTransientError({ httpStatus: 500 })).toBe(true);
+    expect(isTransientError({ httpStatus: 502 })).toBe(true);
+    expect(isTransientError({ httpStatus: 503 })).toBe(true);
+  });
+
+  it('returns false for 4xx client errors (except 429)', () => {
+    expect(isTransientError({ httpStatus: 400 })).toBe(false);
+    expect(isTransientError({ httpStatus: 403 })).toBe(false);
+    expect(isTransientError({ httpStatus: 404 })).toBe(false);
+  });
+
+  it('returns true for unknown errors (safe default)', () => {
+    expect(isTransientError(new Error('something weird'))).toBe(true);
+  });
+});
+
+describe('withRetry', () => {
+  it('returns immediately on success', async () => {
+    const fn = vi.fn().mockResolvedValue('ok');
+    const result = await withRetry(fn, { maxRetries: 3, baseDelay: 10 });
+    expect(result).toBe('ok');
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries on transient error then succeeds', async () => {
+    const fn = vi.fn()
+      .mockRejectedValueOnce({ httpStatus: 500, message: 'Internal Server Error' })
+      .mockResolvedValueOnce('ok');
+
+    const result = await withRetry(fn, { maxRetries: 3, baseDelay: 10 });
+    expect(result).toBe('ok');
+    expect(fn).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not retry on permanent 4xx error', async () => {
+    const err = { httpStatus: 403, message: 'Forbidden' };
+    const fn = vi.fn().mockRejectedValue(err);
+
+    await expect(withRetry(fn, { maxRetries: 3, baseDelay: 10 })).rejects.toBe(err);
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries on 429 with server-provided delay', async () => {
+    const fn = vi.fn()
+      .mockRejectedValueOnce({ httpStatus: 429, data: { retry_after_ms: 50 } })
+      .mockResolvedValueOnce('ok');
+
+    const result = await withRetry(fn, { maxRetries: 3, baseDelay: 10 });
+    expect(result).toBe('ok');
+    expect(fn).toHaveBeenCalledTimes(2);
+  });
+
+  it('throws after all retries exhausted', async () => {
+    const err = { httpStatus: 500, message: 'Server Error' };
+    const fn = vi.fn().mockRejectedValue(err);
+
+    await expect(
+      withRetry(fn, { maxRetries: 2, baseDelay: 10 }),
+    ).rejects.toBe(err);
+    expect(fn).toHaveBeenCalledTimes(3); // initial + 2 retries
+  });
+
+  it('respects abort signal', async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    const fn = vi.fn().mockResolvedValue('ok');
+    await expect(
+      withRetry(fn, { maxRetries: 3, baseDelay: 10, signal: controller.signal }),
+    ).rejects.toThrow();
+  });
+
+  it('retries on network error', async () => {
+    const networkErr = new TypeError('fetch failed');
+    const fn = vi.fn()
+      .mockRejectedValueOnce(networkErr)
+      .mockResolvedValueOnce('ok');
+
+    const result = await withRetry(fn, { maxRetries: 3, baseDelay: 10 });
+    expect(result).toBe('ok');
+    expect(fn).toHaveBeenCalledTimes(2);
   });
 });

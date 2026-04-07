@@ -9,6 +9,7 @@
 import type { MatrixClient } from 'matrix-js-sdk';
 import type { SpaceConfig, FieldAssignment, AccessRole } from './types';
 import { EO_POWER_LEVEL_CONTENT, ROLE_POWER_LEVELS } from './types';
+import { withRetry } from '../matrix/connection-resilience';
 
 // --- Custom Matrix event types ---
 
@@ -31,7 +32,7 @@ export async function createRestrictedRoom(
   spaceName: string,
   mainRoomId: string,
 ): Promise<string> {
-  const result = await client.createRoom({
+  const result = await withRetry(() => client.createRoom({
     name: `${spaceName} (restricted)`,
     room_alias_name: undefined,
     visibility: 'private' as any,
@@ -56,7 +57,7 @@ export async function createRestrictedRoom(
         },
       },
     ],
-  });
+  }));
 
   return result.room_id;
 }
@@ -71,7 +72,7 @@ export async function createGovernanceRoom(
   spaceName: string,
   mainRoomId: string,
 ): Promise<string> {
-  const result = await client.createRoom({
+  const result = await withRetry(() => client.createRoom({
     name: `${spaceName} (governance)`,
     room_alias_name: undefined,
     visibility: 'private' as any,
@@ -96,7 +97,7 @@ export async function createGovernanceRoom(
         },
       },
     ],
-  });
+  }));
 
   return result.room_id;
 }
@@ -113,7 +114,7 @@ export async function createSliceRoom(
   sliceName: string,
   ownerUserId: string,
 ): Promise<string> {
-  const result = await client.createRoom({
+  const result = await withRetry(() => client.createRoom({
     name: `${spaceName} — slice: ${sliceName}`,
     room_alias_name: undefined,
     visibility: 'private' as any,
@@ -141,7 +142,7 @@ export async function createSliceRoom(
         },
       },
     ],
-  });
+  }));
 
   return result.room_id;
 }
