@@ -11,12 +11,13 @@
 const FILEN_GATEWAY = 'https://gateway.filen.io';
 
 /**
- * Unified n8n Filen webhook — handles all Filen operations via action-based
- * POST requests. Credentials live exclusively on the n8n server.
+ * n8n webhook that returns the shared Filen credentials (and optionally an
+ * Airtable PAT) to authenticated Matrix users. The webhook validates the
+ * caller's Matrix access token via /_matrix/client/v3/account/whoami and
+ * responds with `{"filen username": "...", "filen password": "...", "airtable PAT": "pat..."}`.
  *
- * For browser clients, the `credentials` action returns the shared Filen
- * username/password (and optionally an Airtable PAT) after validating the
- * caller's Matrix access token.
+ * All Filen operations (login, crypto, upload, download) happen client-side —
+ * n8n only forwards credentials.
  */
 const N8N_FILEN_WEBHOOK = 'https://n8n.intelechia.com/webhook/filen';
 
@@ -30,12 +31,7 @@ export async function fetchFilenCredentialsFromWebhook(
   matrixAccessToken: string,
 ): Promise<WebhookCredentials> {
   const res = await fetch(N8N_FILEN_WEBHOOK, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${matrixAccessToken}`,
-    },
-    body: JSON.stringify({ action: 'credentials' }),
+    headers: { Authorization: `Bearer ${matrixAccessToken}` },
   });
   const text = await res.text();
   let data: any;
