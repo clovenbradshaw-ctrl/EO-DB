@@ -1240,20 +1240,11 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       // (n8n's Google Drive node uses folderId mode "name", which auto-creates).
       let gdriveSync: GDriveSyncService | null = null;
 
-      console.log('[EO-DB] GDrive init check:', {
-        selectedSpace: !!selectedSpace,
-        hasAccessToken: !!session.accessToken,
-        homeserver: session.homeserver,
-        isAminoHomeserver,
-      });
-
-      if (selectedSpace && session.accessToken && isAminoHomeserver) {
+      if (selectedSpace && session.accessToken) {
         try {
           // Connect to Google Drive via n8n webhook (validates Matrix token)
           const gdriveState = useGDriveStore.getState();
-          console.log('[EO-DB] GDrive state:', { connected: gdriveState.connected, connecting: gdriveState.connecting });
           if (!gdriveState.connected) {
-            console.log('[EO-DB] Calling GDrive connect with Matrix token...');
             await gdriveState.connect(session.accessToken);
             console.log('[EO-DB] Google Drive auto-connected via n8n webhook');
           }
