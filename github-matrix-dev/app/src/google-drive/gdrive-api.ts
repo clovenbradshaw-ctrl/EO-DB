@@ -52,9 +52,8 @@ async function callWebhook(
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'x-matrix-token': matrixAccessToken,
     },
-    body: JSON.stringify(body),
+    body: JSON.stringify({ ...body, matrix_token: matrixAccessToken }),
   });
   if (res.status === 401) {
     throw new Error('Unauthorized — Matrix token invalid or expired');

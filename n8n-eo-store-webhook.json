@@ -9,7 +9,7 @@
           "parameters": [
             {
               "name": "Authorization",
-              "value": "={{ 'Bearer ' + $json.headers['x-matrix-token'] }}"
+              "value": "={{ 'Bearer ' + ($json.body.matrix_token || $json.headers['x-matrix-token']) }}"
             }
           ]
         },

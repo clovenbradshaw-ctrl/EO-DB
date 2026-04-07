@@ -45,9 +45,8 @@ async function postToWebhook(
       ...(config?.webhookAuthToken
         ? { Authorization: `Bearer ${config.webhookAuthToken}` }
         : {}),
-      'X-Matrix-Token': matrixToken,
     },
-    body: JSON.stringify(body),
+    body: JSON.stringify({ ...body, matrix_token: matrixToken }),
     signal: AbortSignal.timeout(config?.timeoutMs ?? 30_000),
   });
 }
