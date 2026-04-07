@@ -138,7 +138,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const files = $json.files || [];\nconst folderName = $('Prep Store').first().json.folderName;\n\nif (files.length > 0) {\n  return [{ json: { folderId: files[0].id } }];\n}\n\n// Folder not found — signal downstream to create it\nreturn [{ json: { folderId: null, folderName } }];"
+        "jsCode": "const files = $json.files || [];\nconst folderName = $('Prep Store').first().json.folderName;\n\nif (files.length > 0) {\n  return [{ json: { folderId: files[0].id, found: true } }];\n}\n\n// Folder not found — signal downstream to create it\nreturn [{ json: { folderId: '', folderName, found: false } }];"
       },
       "id": "a1b2c3d4-1111-4444-aaaa-000000000002",
       "name": "Check Store Folder",
@@ -153,11 +153,11 @@
           "conditions": [
             {
               "id": "cond-folder-exists",
-              "leftValue": "={{ $json.folderId }}",
-              "rightValue": "",
+              "leftValue": "={{ $json.found }}",
+              "rightValue": true,
               "operator": {
-                "type": "string",
-                "operation": "isNotEmpty"
+                "type": "boolean",
+                "operation": "equals"
               }
             }
           ],
