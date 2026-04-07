@@ -170,14 +170,11 @@
     },
     {
       "parameters": {
+        "method": "POST",
         "url": "https://www.googleapis.com/drive/v3/files",
         "sendBody": true,
-        "bodyParameters": {
-          "parameters": [
-            { "name": "name", "value": "={{ $('Check Store Folder').first().json.folderName }}" },
-            { "name": "mimeType", "value": "application/vnd.google-apps.folder" }
-          ]
-        },
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ name: $('Check Store Folder').first().json.folderName, mimeType: 'application/vnd.google-apps.folder' }) }}",
         "authentication": "predefinedCredentialType",
         "nodeCredentialType": "googleDriveOAuth2Api",
         "options": {}
