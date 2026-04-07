@@ -204,8 +204,10 @@ export class GDriveSyncService {
       const base64Data = btoa(String.fromCharCode(...encrypted));
 
       // Compute content hash for deterministic file naming
+      // NOTE: Must NOT include Date.now() — the hash must be stable for a
+      // given space+seq so that repeated uploads overwrite the same Drive file.
       const contentHash = await computeContentHash(
-        `${this.spaceId}:backup:${currentSeq}:${Date.now()}`,
+        `${this.spaceId}:backup:${currentSeq}`,
       );
 
       // Upload via n8n webhook
@@ -229,7 +231,7 @@ export class GDriveSyncService {
         this.matrixAccessToken,
         envelope,
         dataType,
-        `backup-${currentSeq}-${Date.now()}`,
+        `backup-${currentSeq}`,
         contentHash,
       );
 
