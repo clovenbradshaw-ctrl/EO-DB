@@ -86,6 +86,9 @@ export { discoverSpacesFromMatrix } from './space-discovery.js';
 // Connection Resilience
 export {
   fetchWithRetry,
+  withRetry,
+  extractRateLimitDelay,
+  isTransientError,
   MatrixConnectionMonitor,
 } from './connection-resilience.js';
 export type {

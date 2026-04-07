@@ -26,6 +26,7 @@ import { eventHash } from '../db/hash';
 import { AsyncMutex } from '../db/mutex';
 import { EO_EVENT_TYPE, getDataRoom, matrixEventToEo, sendEoEvent } from './event-bridge';
 import { findLatestSnapshot, maybeCreateSnapshot, createDeltaSnapshot, uploadDeltaSnapshot, setSnapshotStateEvent, restoreFromDeltaChain } from './snapshot';
+import { isTransientError } from './connection-resilience';
 
 /** Mutex protecting the offline queue from concurrent read-modify-write. */
 const queueMutex = new AsyncMutex();
@@ -78,8 +79,14 @@ export class SyncManager {
   /** Late room arrival listener — cleaned up in destroy(). */
   private lateRoomHandler: ((room: any) => void) | null = null;
 
+  /** Timeout for late room arrival — prevents indefinite waiting. */
+  private lateRoomTimeout: ReturnType<typeof setTimeout> | null = null;
+
   /** Whether this manager has been destroyed. */
   private destroyed = false;
+
+  /** Optional callback when events are dropped after exhausting retries. */
+  onEventDropped?: (count: number, reason: string) => void;
 
   constructor(
     client: MatrixClient,
@@ -151,6 +158,10 @@ export class SyncManager {
       this.client.off('Room' as any, this.lateRoomHandler);
       this.lateRoomHandler = null;
     }
+    if (this.lateRoomTimeout) {
+      clearTimeout(this.lateRoomTimeout);
+      this.lateRoomTimeout = null;
+    }
   }
 
   /**
@@ -169,16 +180,31 @@ export class SyncManager {
     }
     console.warn('[EO-DB] Room', this.roomId, 'not available after polling — registering late arrival listener');
     // Register a one-shot listener so we can hydrate/replay when the room
-    // eventually appears from the sync stream.
+    // eventually appears from the sync stream. Timeout after 60s to avoid
+    // indefinite waiting if the room is genuinely unreachable.
     const handler = (arrivedRoom: any) => {
       if (this.destroyed) return;
       if (arrivedRoom.roomId !== this.roomId) return;
       this.client.off('Room' as any, handler);
       this.lateRoomHandler = null;
+      if (this.lateRoomTimeout) {
+        clearTimeout(this.lateRoomTimeout);
+        this.lateRoomTimeout = null;
+      }
       this.lateInitialize();
     };
     this.lateRoomHandler = handler;
     this.client.on('Room' as any, handler);
+
+    // Safety timeout — give up after 60 seconds
+    this.lateRoomTimeout = setTimeout(() => {
+      if (this.destroyed) return;
+      this.client.off('Room' as any, handler);
+      this.lateRoomHandler = null;
+      this.lateRoomTimeout = null;
+      console.warn('[EO-DB] Room', this.roomId, 'did not arrive within 60s timeout');
+    }, 60_000);
+
     return null;
   }
 
@@ -569,18 +595,30 @@ export class SyncManager {
       );
 
       const remaining: Array<{ event: EoEventInput; attempts: number }> = [];
+      let dropped = 0;
       for (const entry of queue) {
         try {
           await sendEoEvent(this.client, this.roomId, entry.event);
-        } catch {
-          const attempts = entry.attempts + 1;
-          if (attempts < SyncManager.MAX_QUEUE_ATTEMPTS) {
-            remaining.push({ event: entry.event, attempts });
-          } else {
+        } catch (err) {
+          if (!isTransientError(err)) {
+            // Permanent failure (4xx) — drop immediately
             console.warn(
-              '[EO-DB] Dropping queued event after', attempts, 'failed attempts:',
+              '[EO-DB] Dropping queued event due to permanent error:',
               entry.event.client_event_id,
+              (err as any)?.httpStatus ?? (err as any)?.message,
             );
+            dropped++;
+          } else {
+            const attempts = entry.attempts + 1;
+            if (attempts < SyncManager.MAX_QUEUE_ATTEMPTS) {
+              remaining.push({ event: entry.event, attempts });
+            } else {
+              console.warn(
+                '[EO-DB] Dropping queued event after', attempts, 'failed attempts:',
+                entry.event.client_event_id,
+              );
+              dropped++;
+            }
           }
           // Don't break — try the rest. Individual event failures
           // (e.g., size limit) shouldn't block other events.
@@ -588,6 +626,9 @@ export class SyncManager {
         }
       }
 
+      if (dropped > 0) {
+        this.onEventDropped?.(dropped, `${dropped} events failed permanently or exceeded retry limit`);
+      }
       await this.store.put('meta:offline_queue', remaining);
     });
   }

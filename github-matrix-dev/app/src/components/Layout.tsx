@@ -60,9 +60,10 @@ import { resolvePermissionsFromSharing } from '../permissions/resolve';
 import { MultiUserTestView } from './MultiUserTestView';
 import { RecycleBin, addDeletedSpace, isSpaceDeleted, removeDeletedSpace, getDeletedSpaces } from './RecycleBin';
 import { addArchivedSpace, isSpaceArchived, removeArchivedSpace, getArchivedSpaces } from './ArchivedSpaces';
-import { setSpaceConfig, getSpaceConfig, applyEoPowerLevels, createGovernanceRoom, EO_SPACE_CONFIG_TYPE } from '../permissions/room-topology';
+import { setSpaceConfig, getSpaceConfig, applyEoPowerLevels, EO_SPACE_CONFIG_TYPE } from '../permissions/room-topology';
 import { EO_POWER_LEVEL_CONTENT } from '../permissions/types';
 import { listAllHomeserverUsers } from '../matrix/user-discovery';
+import { withRetry } from '../matrix/connection-resilience';
 
 /** Set to false to disable all Matrix activity (sync, room creation, discovery).
  *  When false, the app uses Filen as the sole sync layer. */
@@ -206,13 +207,13 @@ async function createSpaceRoom(
         try {
           result = await client.createRoom(createArgs);
         } catch (err2: any) {
-          // Last resort: bare-minimum room (no custom power levels, no invites)
-          console.warn('[EO-DB] Private room also rejected — trying minimal room:', err2);
-          result = await client.createRoom({
+          // Last resort: bare-minimum room with retry on transient failures
+          console.warn('[EO-DB] Private room also rejected — trying minimal room with retry:', err2);
+          result = await withRetry(() => client.createRoom({
             name: spaceName,
             visibility: 'private' as any,
             preset: 'private_chat' as any,
-          });
+          }));
         }
       } else {
         throw err;
@@ -220,37 +221,21 @@ async function createSpaceRoom(
     }
     const roomId = result.room_id;
 
-    // A space spans multiple rooms. Create the governance room eagerly so
-    // admins have somewhere to publish policies / schema changes from day
-    // one. The restricted room stays lazy (created on first restricted
-    // field assignment) per spec. Only the owner is a member initially;
-    // admins are invited when they're granted the admin role.
-    let governanceRoomId: string | null = null;
-    try {
-      governanceRoomId = await createGovernanceRoom(client as any, spaceName, roomId);
-    } catch (e) {
-      console.warn('[EO-DB] Failed to create governance room for', spaceName, e);
-    }
+    // Governance room deferred: EVAs live in LevelDB, not Matrix. The
+    // governance room can be created lazily if an admin needs to publish
+    // governance-specific state events. The restricted room is also lazy
+    // (created on first restricted field assignment) per spec.
 
     // Publish space config so discoverSpacesFromMatrix() can find this room.
     // The config is authoritative and lists every associated room.
     const spaceConfig: any = {
       name: spaceName,
-      rooms: { main: roomId, ...(governanceRoomId ? { governance: governanceRoomId } : {}) },
+      rooms: { main: roomId },
       field_assignments: [],
       space_settings: {},
       discoverability,
     };
     await setSpaceConfig(client, roomId, spaceConfig);
-    // Mirror the config into the governance room as well so admins joining
-    // via the governance room can resolve the space topology.
-    if (governanceRoomId) {
-      try {
-        await setSpaceConfig(client, governanceRoomId, spaceConfig);
-      } catch (e) {
-        console.warn('[EO-DB] Failed to mirror space config to governance room:', e);
-      }
-    }
 
     // Best-effort: retry any invites that the homeserver rejected during
     // createRoom (Synapse drops invalid user IDs silently). This also
@@ -272,12 +257,11 @@ async function createSpaceRoom(
     }
 
     console.info(
-      '[EO-DB] Created Matrix rooms for space', spaceName,
+      '[EO-DB] Created Matrix room for space', spaceName,
       '→ main:', roomId,
-      governanceRoomId ? `governance: ${governanceRoomId}` : '(governance: skipped)',
       '(', discoverability, ',', inviteUserIds.length, 'invited)',
     );
-    return { mainRoomId: roomId, governanceRoomId };
+    return { mainRoomId: roomId, governanceRoomId: null };
   } catch (e) {
     console.warn('[EO-DB] Failed to create Matrix room for space', spaceName, e);
     return null;

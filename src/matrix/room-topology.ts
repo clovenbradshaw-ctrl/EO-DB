@@ -28,6 +28,7 @@ import type {
 } from './types.js';
 import { EO_POWER_LEVEL_CONTENT, ROLE_POWER_LEVELS } from './types.js';
 import { EO_SPACE_CONFIG_TYPE, EO_SCHEMA_MANIFEST_TYPE } from './event-bridge.js';
+import { withRetry } from './connection-resilience.js';
 
 // ─── Room Creation ─────────────────────────────────────────────────────────
 
@@ -41,7 +42,7 @@ export async function createRestrictedRoom(
   spaceName: string,
   _mainRoomId: string,
 ): Promise<string> {
-  const result = await client.createRoom({
+  const result = await withRetry(() => client.createRoom({
     name: `${spaceName} (restricted)`,
     visibility: 'private',
     preset: 'private_chat',
@@ -65,7 +66,7 @@ export async function createRestrictedRoom(
         },
       },
     ],
-  });
+  }));
 
   return result.room_id;
 }
@@ -80,7 +81,7 @@ export async function createGovernanceRoom(
   spaceName: string,
   _mainRoomId: string,
 ): Promise<string> {
-  const result = await client.createRoom({
+  const result = await withRetry(() => client.createRoom({
     name: `${spaceName} (governance)`,
     visibility: 'private',
     preset: 'private_chat',
@@ -104,7 +105,7 @@ export async function createGovernanceRoom(
         },
       },
     ],
-  });
+  }));
 
   return result.room_id;
 }
@@ -121,7 +122,7 @@ export async function createSliceRoom(
   sliceName: string,
   ownerUserId: string,
 ): Promise<string> {
-  const result = await client.createRoom({
+  const result = await withRetry(() => client.createRoom({
     name: `${spaceName} — slice: ${sliceName}`,
     visibility: 'private',
     preset: 'private_chat',
@@ -148,7 +149,7 @@ export async function createSliceRoom(
         },
       },
     ],
-  });
+  }));
 
   return result.room_id;
 }
