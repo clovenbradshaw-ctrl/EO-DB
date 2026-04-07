@@ -11,9 +11,11 @@ interface ConnectionStatusProps {
   state: ConnectionState;
   onRetry?: () => void;
   errorMessage?: string;
+  /** Label for the action button (default: "Retry") */
+  retryLabel?: string;
 }
 
-export function ConnectionStatus({ state, onRetry, errorMessage }: ConnectionStatusProps) {
+export function ConnectionStatus({ state, onRetry, errorMessage, retryLabel }: ConnectionStatusProps) {
   const { theme } = useTheme();
 
   const stateConfig: Record<ConnectionState, { color: string; bg: string; borderColor: string; label: string }> = {
@@ -68,7 +70,7 @@ export function ConnectionStatus({ state, onRetry, errorMessage }: ConnectionSta
             marginLeft: 2,
           }}
         >
-          Retry
+          {retryLabel || 'Retry'}
         </button>
       )}
     </div>
