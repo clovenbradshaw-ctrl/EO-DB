@@ -1662,6 +1662,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             </>
           )}
 
+          {selectedScope && (
           <nav style={s.sidebarNav}>
             <div style={s.navGroupLabel}>Actions</div>
             {(['compose', 'import'] as View[]).map((view) => (
@@ -1745,6 +1746,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               Multi-User Test
             </button>
           </nav>
+          )}
         </aside>
 
         <main style={s.main} key={selectedSpace ?? '__all__'}>
