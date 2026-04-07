@@ -1,0 +1,88 @@
+{
+  "name": "EO-DB Drive Watcher",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [{ "mode": "everyMinute" }]
+        },
+        "triggerOn": "specificFolder",
+        "folderToWatch": {
+          "__rl": true,
+          "mode": "id",
+          "value": "GOOGLE_DRIVE_FOLDER_ID"
+        },
+        "event": "fileCreated",
+        "options": {}
+      },
+      "id": "node-drive-trigger",
+      "name": "Drive Trigger",
+      "type": "n8n-nodes-base.googleDriveTrigger",
+      "typeVersion": 1,
+      "position": [0, 0],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "GOOGLE_DRIVE_CREDENTIAL_ID",
+          "name": "Google Drive"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build the Matrix event payload for eo.n8n.drive.change\nconst file = $json;\nreturn [{\n  json: {\n    type: 'eo.n8n.drive.change',\n    content: {\n      file_id: file.id,\n      file_name: file.name,\n      mime_type: file.mimeType || 'application/octet-stream',\n      size: parseInt(file.size || '0', 10),\n      change_type: 'created',\n      drive_folder: file.parents ? file.parents[0] : '',\n      detected_at: new Date().toISOString()\n    }\n  }\n}];"
+      },
+      "id": "node-build-event",
+      "name": "Build Matrix Event",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [250, 0]
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "=https://app.aminoimmigration.com/_matrix/client/v3/rooms/MATRIX_ROOM_ID/send/eo.n8n.drive.change/{{ $runIndex }}-{{ Date.now() }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer MATRIX_BOT_ACCESS_TOKEN"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "body",
+              "value": "={{ JSON.stringify($json.content) }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-send-matrix",
+      "name": "Send to Matrix Room",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [500, 0]
+    }
+  ],
+  "connections": {
+    "Drive Trigger": {
+      "main": [[{ "node": "Build Matrix Event", "type": "main", "index": 0 }]]
+    },
+    "Build Matrix Event": {
+      "main": [[{ "node": "Send to Matrix Room", "type": "main", "index": 0 }]]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": ""
+  }
+}
