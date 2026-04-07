@@ -101,7 +101,7 @@ export interface FieldAssignment {
 
 export interface SpaceSettings {
   creators_can_delete_own?: boolean;
-  lock_shared_views?: boolean;
+  lock_shared_slices?: boolean;
 }
 
 export interface SpaceConfig {

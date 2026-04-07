@@ -6,10 +6,10 @@ import { useTheme, type Theme } from '../theme';
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 import { TypeSelector, TypeBadge } from './TypeSelector';
 import { buildTree, formatName, type TreeNode } from './scope-picker-utils';
-import { useViewStore } from '../store/view-store';
+import { useSliceStore } from '../store/slice-store';
 import { Modal } from './Modal';
 import { usePanelPosition } from '../hooks/usePanelPosition';
-import { VIEW_TYPE_META, createDefaultConfig, type ViewType, type SavedView } from './view-types';
+import { SLICE_TYPE_META, createDefaultConfig, type SliceType, type SavedSlice } from './slice-types';
 
 function navCacheKey(prefix: string): string {
   return `eo-nav-cache:${prefix}`;
@@ -21,7 +21,7 @@ interface HolonNavProps {
   onSelectSegment?: (scope: string, segment: FilterDefinition) => void;
   /** Prefix to scope which records are loaded. Empty string = all records. */
   statePrefix?: string;
-  /** Matrix user ID — needed for creating views. */
+  /** Matrix user ID — needed for creating slices. */
   userId?: string;
 }
 
@@ -44,13 +44,13 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
   const [renaming, setRenaming] = useState<{ target: string; currentName: string } | null>(null);
   /** When set, only this top-level entity type is shown (drill-down mode) */
   const [focusedEntity, setFocusedEntity] = useState<string | null>(null);
-  const viewStore = useViewStore();
+  const sliceStore = useSliceStore();
 
-  // --- Create-view inline form state ---
-  const [showCreateView, setShowCreateView] = useState(false);
-  const [newViewName, setNewViewName] = useState('');
-  const [newViewType, setNewViewType] = useState<ViewType>('grid');
-  const [newViewVisibility, setNewViewVisibility] = useState<'private' | 'shared'>('shared');
+  // --- Create-slice inline form state ---
+  const [showCreateSlice, setShowCreateSlice] = useState(false);
+  const [newSliceName, setNewSliceName] = useState('');
+  const [newSliceType, setNewSliceType] = useState<SliceType>('grid');
+  const [newSliceVisibility, setNewSliceVisibility] = useState<'private' | 'shared'>('shared');
   const [creating, setCreating] = useState(false);
   const { theme } = useTheme();
   const s = makeStyles(theme);
@@ -78,7 +78,7 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
   useEffect(() => {
     setExpanded(new Set());
     setFocusedEntity(null);
-    setShowCreateView(false);
+    setShowCreateSlice(false);
     try {
       const raw = localStorage.getItem(navCacheKey(statePrefix));
       if (raw) setAllStates(JSON.parse(raw));
@@ -156,28 +156,28 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
   }
 
   function resetCreateForm() {
-    setNewViewName('');
-    setNewViewType('grid');
-    setNewViewVisibility('shared');
-    setShowCreateView(false);
+    setNewSliceName('');
+    setNewSliceType('grid');
+    setNewSliceVisibility('shared');
+    setShowCreateSlice(false);
   }
 
-  async function handleCreateView() {
-    if (!focusedEntity || !newViewName.trim() || creating || !userId) return;
+  async function handleCreateSlice() {
+    if (!focusedEntity || !newSliceName.trim() || creating || !userId) return;
     setCreating(true);
-    const viewId = crypto.randomUUID().replace(/-/g, '').slice(0, 12);
+    const sliceId = crypto.randomUUID().replace(/-/g, '').slice(0, 12);
     const now = new Date().toISOString();
     const config = createDefaultConfig();
-    const name = newViewName.trim();
+    const name = newSliceName.trim();
     try {
       await dispatch({
         op: 'INS',
-        target: `${focusedEntity}._views.${viewId}`,
+        target: `${focusedEntity}._slices.${sliceId}`,
         operand: {
           name,
-          viewType: newViewType,
+          sliceType: newSliceType,
           config,
-          visibility: newViewVisibility,
+          visibility: newSliceVisibility,
           createdBy: userId,
           createdAt: now,
           updatedAt: now,
@@ -188,21 +188,21 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
         client_event_id: crypto.randomUUID(),
       });
     } catch (err) {
-      console.error('[HolonNav] Failed to create view:', err);
+      console.error('[HolonNav] Failed to create slice:', err);
     }
-    const savedView: SavedView = {
-      id: viewId,
+    const savedSlice: SavedSlice = {
+      id: sliceId,
       name,
       scope: focusedEntity,
-      viewType: newViewType,
+      sliceType: newSliceType,
       config,
-      visibility: newViewVisibility,
+      visibility: newSliceVisibility,
       createdBy: userId,
       createdAt: now,
       updatedAt: now,
     };
-    viewStore.registerSavedViews([savedView]);
-    viewStore.activateView(focusedEntity, savedView);
+    sliceStore.registerSavedSlices([savedSlice]);
+    sliceStore.activateSlice(focusedEntity, savedSlice);
     onSelectScope(focusedEntity);
     resetCreateForm();
     setCreating(false);
@@ -259,8 +259,8 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
           onClick={() => {
             onSelectScope(node.fullPath);
             // Default to grid view when clicking a collection
-            viewStore.resetToDefault(node.fullPath);
-            viewStore.openScope(node.fullPath);
+            sliceStore.resetToDefault(node.fullPath);
+            sliceStore.openScope(node.fullPath);
             // Drill-down: clicking a top-level entity focuses it
             if (isTopLevel && !focusedEntity) {
               setFocusedEntity(node.fullPath);
@@ -327,8 +327,8 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
 
         {/* Built-in Grid view */}
         {isExpanded && (() => {
-          const sig = viewStore.getSig(node.fullPath);
-          const isGridActive = sig.activeViewId === null && selectedScope === node.fullPath;
+          const sig = sliceStore.getSig(node.fullPath);
+          const isGridActive = sig.activeSliceId === null && selectedScope === node.fullPath;
           return (
             <div
               style={{
@@ -337,38 +337,38 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
                 ...(isGridActive ? { color: theme.accent, fontWeight: 600 } : {}),
               }}
               onClick={() => {
-                viewStore.resetToDefault(node.fullPath);
+                sliceStore.resetToDefault(node.fullPath);
                 onSelectScope(node.fullPath);
               }}
             >
-              <span style={{ marginRight: 4, fontSize: 10, opacity: 0.6 }}>{VIEW_TYPE_META.grid.icon}</span>
+              <span style={{ marginRight: 4, fontSize: 10, opacity: 0.6 }}>{SLICE_TYPE_META.grid.icon}</span>
               <span style={s.segName}>Grid view</span>
             </div>
           );
         })()}
 
-        {/* Saved views */}
+        {/* Saved slices */}
         {isExpanded && (() => {
-          const views = viewStore.getViewsForScope(node.fullPath);
-          if (views.length === 0) return null;
-          const sig = viewStore.getSig(node.fullPath);
-          return views.map((view) => (
+          const slices = sliceStore.getSlicesForScope(node.fullPath);
+          if (slices.length === 0) return null;
+          const sig = sliceStore.getSig(node.fullPath);
+          return slices.map((slice) => (
             <div
-              key={`view:${view.id}`}
+              key={`slice:${slice.id}`}
               style={{
                 ...s.segItem,
                 paddingLeft: 28 + depth * 16,
-                ...(sig.activeViewId === view.id ? { color: theme.accent, fontWeight: 600 } : {}),
+                ...(sig.activeSliceId === slice.id ? { color: theme.accent, fontWeight: 600 } : {}),
               }}
               onClick={() => {
-                viewStore.activateView(node.fullPath, view);
+                sliceStore.activateSlice(node.fullPath, slice);
                 onSelectScope(node.fullPath);
               }}
             >
               <span style={{ marginRight: 4, fontSize: 10, opacity: 0.6 }}>
-                {view.visibility === 'private' ? '\uD83D\uDD12' : '\u25A6'}
+                {slice.visibility === 'private' ? '\uD83D\uDD12' : '\u25A6'}
               </span>
-              <span style={s.segName}>{view.name}</span>
+              <span style={s.segName}>{slice.name}</span>
             </div>
           ));
         })()}
@@ -412,8 +412,8 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
             </div>
             {renderNode(focusedNode, 0, undefined, false)}
 
-            {/* + New view button / inline form */}
-            {!showCreateView ? (
+            {/* + New slice button / inline form */}
+            {!showCreateSlice ? (
               <div
                 style={{
                   ...s.segItem,
@@ -422,32 +422,32 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
                   fontWeight: 500,
                   marginTop: 4,
                 }}
-                onClick={() => setShowCreateView(true)}
+                onClick={() => setShowCreateSlice(true)}
               >
                 <span style={{ fontSize: 12, opacity: 0.8 }}>+</span>
-                <span style={s.segName}>New view</span>
+                <span style={s.segName}>New slice</span>
               </div>
             ) : (
-              <div style={s.createViewForm}>
+              <div style={s.createSliceForm}>
                 <input
                   autoFocus
-                  value={newViewName}
-                  onChange={(e) => setNewViewName(e.target.value)}
+                  value={newSliceName}
+                  onChange={(e) => setNewSliceName(e.target.value)}
                   onKeyDown={(e) => {
-                    if (e.key === 'Enter') handleCreateView();
+                    if (e.key === 'Enter') handleCreateSlice();
                     if (e.key === 'Escape') resetCreateForm();
                   }}
-                  placeholder="View name..."
-                  style={s.createViewInput}
+                  placeholder="Slice name..."
+                  style={s.createSliceInput}
                 />
                 <div style={{ display: 'flex', gap: 4, marginTop: 6, flexWrap: 'wrap' as const }}>
-                  {(Object.keys(VIEW_TYPE_META) as ViewType[]).map((vt) => {
-                    const meta = VIEW_TYPE_META[vt];
-                    const active = newViewType === vt;
+                  {(Object.keys(SLICE_TYPE_META) as SliceType[]).map((vt) => {
+                    const meta = SLICE_TYPE_META[vt];
+                    const active = newSliceType === vt;
                     return (
                       <button
                         key={vt}
-                        onClick={() => setNewViewType(vt)}
+                        onClick={() => setNewSliceType(vt)}
                         style={{
                           display: 'inline-flex', alignItems: 'center', gap: 3,
                           padding: '3px 7px', fontSize: 10, fontWeight: active ? 600 : 400,
@@ -465,24 +465,24 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
                 </div>
                 <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
                   <button
-                    style={newViewVisibility === 'private' ? s.createViewVisBtnActive : s.createViewVisBtn}
-                    onClick={() => setNewViewVisibility('private')}
+                    style={newSliceVisibility === 'private' ? s.createSliceVisBtnActive : s.createSliceVisBtn}
+                    onClick={() => setNewSliceVisibility('private')}
                   >
                     {'\uD83D\uDD12'} Private
                   </button>
                   <button
-                    style={newViewVisibility === 'shared' ? s.createViewVisBtnActive : s.createViewVisBtn}
-                    onClick={() => setNewViewVisibility('shared')}
+                    style={newSliceVisibility === 'shared' ? s.createSliceVisBtnActive : s.createSliceVisBtn}
+                    onClick={() => setNewSliceVisibility('shared')}
                   >
                     {'\uD83D\uDD13'} Shared
                   </button>
                 </div>
                 <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
-                  <button style={s.createViewCancelBtn} onClick={resetCreateForm}>Cancel</button>
+                  <button style={s.createSliceCancelBtn} onClick={resetCreateForm}>Cancel</button>
                   <button
-                    style={(!newViewName.trim() || creating) ? s.createViewSubmitBtnDisabled : s.createViewSubmitBtn}
-                    onClick={handleCreateView}
-                    disabled={!newViewName.trim() || creating}
+                    style={(!newSliceName.trim() || creating) ? s.createSliceSubmitBtnDisabled : s.createSliceSubmitBtn}
+                    onClick={handleCreateSlice}
+                    disabled={!newSliceName.trim() || creating}
                   >
                     {creating ? 'Creating...' : 'Create'}
                   </button>
@@ -733,14 +733,14 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       textOverflow: 'ellipsis',
       whiteSpace: 'nowrap' as const,
     },
-    createViewForm: {
+    createSliceForm: {
       margin: '6px 12px 4px',
       padding: 10,
       background: t.bgCard,
       border: `1px solid ${t.border}`,
       borderRadius: 6,
     },
-    createViewInput: {
+    createSliceInput: {
       width: '100%',
       height: 28,
       fontSize: 11,
@@ -752,7 +752,7 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       outline: 'none',
       boxSizing: 'border-box' as const,
     },
-    createViewVisBtn: {
+    createSliceVisBtn: {
       flex: 1,
       padding: '4px 0',
       fontSize: 10,
@@ -763,7 +763,7 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       color: t.textMuted,
       cursor: 'pointer',
     },
-    createViewVisBtnActive: {
+    createSliceVisBtnActive: {
       flex: 1,
       padding: '4px 0',
       fontSize: 10,
@@ -774,7 +774,7 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       color: t.accent,
       cursor: 'pointer',
     },
-    createViewCancelBtn: {
+    createSliceCancelBtn: {
       flex: 1,
       padding: '5px 0',
       fontSize: 11,
@@ -785,7 +785,7 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       color: t.textSecondary,
       cursor: 'pointer',
     },
-    createViewSubmitBtn: {
+    createSliceSubmitBtn: {
       flex: 1,
       padding: '5px 0',
       fontSize: 11,
@@ -796,7 +796,7 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       color: '#fff',
       cursor: 'pointer',
     },
-    createViewSubmitBtnDisabled: {
+    createSliceSubmitBtnDisabled: {
       flex: 1,
       padding: '5px 0',
       fontSize: 11,
