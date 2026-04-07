@@ -2,7 +2,7 @@
  * Google Drive API — n8n webhook proxy for EO-DB storage on Google Drive.
  *
  * All operations go through the n8n webhook at /webhook/eo-store.
- * The webhook authenticates via the Matrix access token (x-matrix-token header),
+ * The webhook authenticates via the Matrix access token (matrix_token body field),
  * then uses its own Google Drive OAuth credentials to perform operations.
  *
  * Actions:
@@ -53,9 +53,8 @@ async function callWebhook(
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'x-matrix-token': matrixAccessToken,
     },
-    body: JSON.stringify(body),
+    body: JSON.stringify({ ...body, matrix_token: matrixAccessToken }),
   });
   console.log('[EO-DB] GDrive webhook response:', res.status, res.statusText);
   if (res.status === 401) {
