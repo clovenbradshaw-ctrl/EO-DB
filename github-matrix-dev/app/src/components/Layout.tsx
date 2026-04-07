@@ -58,7 +58,7 @@ import { MultiUserTestView } from './MultiUserTestView';
 import { RecycleBin, addDeletedSpace, isSpaceDeleted, removeDeletedSpace, getDeletedSpaces } from './RecycleBin';
 import { addArchivedSpace, isSpaceArchived, removeArchivedSpace, getArchivedSpaces } from './ArchivedSpaces';
 import { setSpaceConfig, getSpaceConfig, applyEoPowerLevels, createGovernanceRoom, EO_SPACE_CONFIG_TYPE } from '../permissions/room-topology';
-import { EO_POWER_LEVEL_CONTENT, type SpaceConfig } from '../permissions/types';
+import { EO_POWER_LEVEL_CONTENT } from '../permissions/types';
 import { listAllHomeserverUsers } from '../matrix/user-discovery';
 
 /** Set to false to disable all Matrix activity (sync, room creation, discovery).
@@ -1184,28 +1184,36 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       }
 
       // ── Retroactive storage provisioning ──
-      // For existing spaces that were created before storage tracking, ensure
-      // Filen folders exist and update the space config with storage paths.
-      if (MATRIX_ENABLED && spaceRoomId && matrixClientRef.current && resolvedSpaceRooms) {
+      // For existing spaces created before storage tracking, record Filen folder
+      // paths in the space config. Skip for freshly created spaces (onCreate
+      // already published storage) — detected by checking if getSpaceConfig
+      // returns a config that's missing the storage field. getSpaceConfig reads
+      // from the SDK's in-memory room state, so it only returns data for rooms
+      // that have completed sync (not brand-new rooms whose state hasn't arrived).
+      if (MATRIX_ENABLED && spaceRoomId && matrixClientRef.current && resolvedSpaceRooms && filenSync) {
         try {
-          const existingConfig = getSpaceConfig(matrixClientRef.current as any, spaceRoomId);
-          if (existingConfig && !existingConfig.storage?.filen && filenSync) {
-            // Filen folder was just created by ensureSpaceFolder above — record it
-            const filenFolderUuid = useFilenStore.getState().spaceFolders?.[selectedSpace!];
-            if (filenFolderUuid) {
-              const spaceName = existingConfig.name || selectedSpace!;
-              const updatedConfig = {
-                ...existingConfig,
-                storage: {
-                  ...existingConfig.storage,
-                  filen: { folderUuid: filenFolderUuid, path: `/EO-DB/${spaceName}` },
-                },
-              };
-              await setSpaceConfig(matrixClientRef.current as any, spaceRoomId, updatedConfig);
-              if (resolvedSpaceRooms.governance) {
-                await setSpaceConfig(matrixClientRef.current as any, resolvedSpaceRooms.governance, updatedConfig).catch(() => {});
+          const room = (matrixClientRef.current as any).getRoom?.(spaceRoomId);
+          // Only proceed if the room is actually available in the SDK store.
+          // Freshly created rooms may not have synced state events yet.
+          if (room) {
+            const existingConfig = getSpaceConfig(matrixClientRef.current as any, spaceRoomId);
+            if (existingConfig && !existingConfig.storage?.filen) {
+              const filenFolderUuid = useFilenStore.getState().spaceFolders?.[selectedSpace!];
+              if (filenFolderUuid) {
+                const spaceName = existingConfig.name || selectedSpace!;
+                const updatedConfig = {
+                  ...existingConfig,
+                  storage: {
+                    ...existingConfig.storage,
+                    filen: { folderUuid: filenFolderUuid, path: `/EO-DB/${spaceName}` },
+                  },
+                };
+                await setSpaceConfig(matrixClientRef.current as any, spaceRoomId, updatedConfig);
+                if (resolvedSpaceRooms.governance) {
+                  await setSpaceConfig(matrixClientRef.current as any, resolvedSpaceRooms.governance, updatedConfig).catch(() => {});
+                }
+                console.info('[EO-DB] Retroactively added Filen storage path to space config for', selectedSpace);
               }
-              console.info('[EO-DB] Retroactively added Filen storage path to space config for', selectedSpace);
             }
           }
         } catch (e) {
