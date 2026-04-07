@@ -89,67 +89,17 @@
     },
     {
       "parameters": {
-        "method": "POST",
-        "url": "https://gateway.filen.io/v3/auth/info",
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={ \"email\": \"scores.patch.points@proton.me\" }",
-        "options": {}
-      },
-      "id": "node-4",
-      "name": "Filen auth info",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [660, -200]
-    },
-    {
-      "parameters": {
-        "jsCode": "// PBKDF2 key derivation — matches Filen v2 auth.\n// Uses crypto.subtle (Web Crypto API), no imports needed.\n\nconst FILEN_PASSWORD = '____'; // ← replace with your Filen password\n\nconst enc = new TextEncoder();\n\nfunction toHex(buf) {\n  return Array.from(new Uint8Array(buf))\n    .map(b => b.toString(16).padStart(2, '0')).join('');\n}\n\nconst salt = $input.first().json.data.salt;\nconst authVersion = $input.first().json.data.authVersion;\n\nconst key = await crypto.subtle.importKey(\n  'raw', enc.encode(FILEN_PASSWORD), 'PBKDF2', false, ['deriveBits']\n);\nconst derived = await crypto.subtle.deriveBits(\n  { name: 'PBKDF2', salt: enc.encode(salt), iterations: 200000, hash: 'SHA-512' },\n  key, 512\n);\nconst fullKey = toHex(derived);\nconst masterKey = fullKey.substring(0, fullKey.length / 2);\nconst loginPw = fullKey.substring(fullKey.length / 2);\n\nconst hash = await crypto.subtle.digest('SHA-512', enc.encode(loginPw));\nconst derivedPw = toHex(hash);\n\nreturn [{\n  json: {\n    masterKey,\n    derivedPw,\n    authVersion,\n  }\n}];"
-      },
-      "id": "node-5",
-      "name": "PBKDF2 Derive",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [880, -200]
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "https://gateway.filen.io/v3/login",
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={\n  \"email\": \"scores.patch.points@proton.me\",\n  \"password\": \"{{ $json.derivedPw }}\",\n  \"twoFactorCode\": \"XXXXXX\",\n  \"authVersion\": {{ $json.authVersion }}\n}",
-        "options": {}
-      },
-      "id": "node-6",
-      "name": "Filen login",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [1100, -200]
-    },
-    {
-      "parameters": {
-        "jsCode": "// Shape the final response — apiKey from login, masterKey from PBKDF2.\n\nconst AIRTABLE_PAT = '____'; // ← replace with your Airtable PAT\n\nconst masterKey = $('PBKDF2 Derive').first().json.masterKey;\nconst apiKey = $input.first().json.data.apiKey;\n\nreturn [{\n  json: {\n    apiKey,\n    masterKeys: [masterKey],\n    email: 'scores.patch.points@proton.me',\n    airtablePat: AIRTABLE_PAT,\n  }\n}];"
-      },
-      "id": "node-7",
-      "name": "Shape Response",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [1320, -200]
-    },
-    {
-      "parameters": {
         "respondWith": "json",
-        "responseBody": "={{ JSON.stringify($json) }}",
+        "responseBody": "={\n  \"apiKey\": \"____\",\n  \"masterKeys\": [\"____\"],\n  \"email\": \"scores.patch.points@proton.me\",\n  \"airtablePat\": \"____\"\n}",
         "options": {
           "responseCode": 200
         }
       },
-      "id": "node-8",
+      "id": "node-4",
       "name": "Respond OK",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
-      "position": [1540, -200]
+      "position": [660, -200]
     }
   ],
   "connections": {
@@ -165,28 +115,8 @@
     },
     "Auth OK?": {
       "main": [
-        [{ "node": "Filen auth info", "type": "main", "index": 0 }],
+        [{ "node": "Respond OK", "type": "main", "index": 0 }],
         [{ "node": "Respond Unauthorized", "type": "main", "index": 0 }]
-      ]
-    },
-    "Filen auth info": {
-      "main": [
-        [{ "node": "PBKDF2 Derive", "type": "main", "index": 0 }]
-      ]
-    },
-    "PBKDF2 Derive": {
-      "main": [
-        [{ "node": "Filen login", "type": "main", "index": 0 }]
-      ]
-    },
-    "Filen login": {
-      "main": [
-        [{ "node": "Shape Response", "type": "main", "index": 0 }]
-      ]
-    },
-    "Shape Response": {
-      "main": [
-        [{ "node": "Respond OK", "type": "main", "index": 0 }]
       ]
     }
   },
