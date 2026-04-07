@@ -10,6 +10,7 @@ import type { Feed } from './feed.js';
 import { seedHash, chainHash, eventHash } from './hash.js';
 import { SigTracker } from './sig.js';
 import type { SigEvent } from './sig.js';
+import { detectAndEmitCrystallization } from './crystallize.js';
 
 /** Global SIG tracker — ephemeral, in-memory only. */
 const sigTracker = new SigTracker();
@@ -120,7 +121,10 @@ export async function processEvent(
   // 9. Cascade upward: if this target is a constituent of any derived entity, re-evaluate it
   await cascadeUpward(db, fullEvent.target, fullEvent, feed);
 
-  // 10. Notify changefeed
+  // 10. Crystallization: check if any scope containing this target has stabilized
+  await detectAndEmitCrystallization(db, fullEvent.target, fullEvent, feed);
+
+  // 11. Notify changefeed
   if (feed) {
     feed.notify(fullEvent);
   }
@@ -327,6 +331,11 @@ export async function processEventBatch(
   for (const [target, ev] of lastEventPerTarget) {
     await detectAndEmitREC(db, target, ev, feed);
     await cascadeUpward(db, target, ev, feed);
+  }
+
+  // Crystallization — check if any scopes have stabilized
+  for (const [target, ev] of lastEventPerTarget) {
+    await detectAndEmitCrystallization(db, target, ev, feed);
   }
 
   // ── Phase 6: batch feed notifications ──────────────────────────────
