@@ -9,7 +9,7 @@
  */
 
 import { create } from 'zustand';
-import { fetchFilenCredentialsFromWebhook } from '../filen/filen-api';
+import { fetchFilenSessionFromWebhook } from '../filen/filen-api';
 import { AirtableClient } from './airtable-client';
 import type { HydrationManifest, HydrationResult, UpdateSyncResult } from './airtable-sync';
 
@@ -103,7 +103,7 @@ export const useAirtableStore = create<AirtableSyncState>((set, get) => ({
   async connectFromWebhook(matrixAccessToken: string): Promise<void> {
     set({ connecting: true, error: null });
     try {
-      const result = await fetchFilenCredentialsFromWebhook(matrixAccessToken);
+      const result = await fetchFilenSessionFromWebhook(matrixAccessToken);
       const key = result.airtablePat;
       if (!key) {
         throw new Error('Webhook did not return an Airtable API key');
