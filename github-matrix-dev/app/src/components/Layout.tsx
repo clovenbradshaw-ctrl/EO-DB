@@ -997,6 +997,10 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       setScopeFieldNameMap(new Map());
       setShowMembers(false);
       setShowRecycleBin(false);
+      // Clear connection error from previous space (e.g. stale "resolve failed")
+      setConnectionError(null);
+      // Clear presence so MultiUserTestView doesn't show stale peer data
+      setPresence(null);
       // Reset builder store so old space's views don't persist
       useBuilderStore.getState().reset();
       // Reset sync store so old space's peer/snapshot data doesn't persist
@@ -1112,6 +1116,47 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       if (savedMeta?.mainRoomId) {
         console.log('[EO-DB] Using cached room ID from space-meta for', selectedSpace);
         return savedMeta.mainRoomId;
+      }
+
+      // 2d. Public room discovery + join: the user may have navigated to a
+      //     space URL but hasn't joined the room yet (invite failed, different
+      //     device, URL shared directly). Query the homeserver's public room
+      //     directory for a matching space and attempt to join/knock.
+      if (matrixClientRef.current) {
+        try {
+          const publicSpaces = await discoverPublicSpaces(matrixClientRef.current);
+          const match = publicSpaces.find((e) => e.spaceTarget === selectedSpace);
+          if (match?.mainRoomId) {
+            console.log('[EO-DB] Found public room for space', selectedSpace, '→', match.mainRoomId);
+            try {
+              // Try joining directly first (works for public rooms)
+              await (matrixClientRef.current as any).joinRoom(match.mainRoomId);
+              console.log('[EO-DB] Joined public room', match.mainRoomId, 'for space', selectedSpace);
+            } catch (joinErr: any) {
+              // If direct join fails, try knocking (for knock-only rooms)
+              try {
+                await (matrixClientRef.current as any).knockRoom(match.mainRoomId, {
+                  reason: 'Auto-join via space URL',
+                });
+                console.log('[EO-DB] Knocked on room', match.mainRoomId, 'for space', selectedSpace);
+              } catch (knockErr) {
+                console.warn('[EO-DB] Could not join or knock on public room', match.mainRoomId, joinErr, knockErr);
+              }
+            }
+
+            // After joining, re-scan to pick up the full room topology
+            const postJoinScan = findSpaceRoomByDirectScan(matrixClientRef.current, selectedSpace!);
+            if (postJoinScan) {
+              resolvedSpaceRooms = postJoinScan.rooms;
+              return postJoinScan.mainRoomId;
+            }
+            // Even if direct scan doesn't work yet (state still syncing),
+            // return the mainRoomId from the public listing
+            return match.mainRoomId;
+          }
+        } catch (e) {
+          console.warn('[EO-DB] Public room discovery during resolve failed:', e);
+        }
       }
 
       // 3. Room genuinely doesn't exist — create it.

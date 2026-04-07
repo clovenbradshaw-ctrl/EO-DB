@@ -96,11 +96,18 @@ export const useEoStore = create<EoDbState>((set, get) => ({
 
   async init(store: EoStore) {
     // Set the store immediately so the UI can start reading from it.
-    // Keep ready=true if we already were ready (e.g. cached store re-init)
-    // to avoid a loading flash — the data is local, so it's always accessible.
+    // Always clear stale recentEvents and lastSeq when switching stores
+    // to prevent old space data from flashing in the UI. Keep ready=true
+    // if we already were ready (cached store re-init) to avoid a loading
+    // flash — the new store's data will be hydrated below.
     const wasReady = get().ready;
-    if (wasReady) {
+    const prevStore = get().store;
+    const isSameStore = prevStore === store;
+    if (wasReady && isSameStore) {
       set({ store });
+    } else if (wasReady) {
+      // Different store (space switch) — clear stale events immediately
+      set({ store, recentEvents: [], lastSeq: 0 });
     } else {
       set({ store, ready: false, recentEvents: [], lastSeq: 0 });
     }
