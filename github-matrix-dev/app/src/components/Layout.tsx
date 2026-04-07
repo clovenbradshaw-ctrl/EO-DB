@@ -1208,6 +1208,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   const viewStore = useViewStore();
   const viewSigs = viewStore.sigs;
   const viewSavedViews = viewStore.savedViews;
+  const openScopes = viewStore.openScopes;
   const activeViewType: ViewType = useMemo(() => {
     if (!selectedScope) return 'grid';
     const sig = viewSigs[selectedScope];
@@ -1605,7 +1606,16 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                 ) : selectedScope ? (
                   <>
                     <ViewTabs
-                      scope={selectedScope}
+                      openScopes={openScopes.length > 0 ? openScopes : [selectedScope]}
+                      activeScope={selectedScope}
+                      onSelectScope={(sc) => navigate({ view: 'records', scope: sc, record: null })}
+                      onCloseScope={(sc) => {
+                        viewStore.closeScope(sc);
+                        if (sc === selectedScope) {
+                          const remaining = viewStore.getOpenScopes();
+                          navigate({ scope: remaining[0] || null, record: null });
+                        }
+                      }}
                       session={{ userId: session.userId }}
                       activeUserType={activeUserType}
                       userTypeDefinitions={spaceUserTypeDefinitions}

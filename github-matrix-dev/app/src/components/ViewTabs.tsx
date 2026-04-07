@@ -1,13 +1,21 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import { useViewStore } from '../store/view-store';
 import { useEoStore } from '../store/eo-store';
 import { useTheme, type Theme } from '../theme';
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 import { VIEW_TYPE_META, type SavedView, type TableViewConfig, type ViewType } from './view-types';
+import { formatName } from './scope-picker-utils';
 import type { UserTypeDefinition } from '../permissions/types';
 
 interface ViewTabsProps {
-  scope: string;
+  /** All scopes that have open tabs */
+  openScopes: string[];
+  /** Currently active/selected scope */
+  activeScope: string;
+  /** Callback when user clicks a tab from a different collection */
+  onSelectScope: (scope: string) => void;
+  /** Callback when user closes all tabs for a collection */
+  onCloseScope: (scope: string) => void;
   session: { userId: string };
   /** Currently active user type ID (for filtering type-scoped views) */
   activeUserType?: string | null;
@@ -17,7 +25,7 @@ interface ViewTabsProps {
   canManageViews?: boolean;
 }
 
-export function ViewTabs({ scope, session, activeUserType, userTypeDefinitions, canManageViews }: ViewTabsProps) {
+export function ViewTabs({ openScopes, activeScope, onSelectScope, onCloseScope, session, activeUserType, userTypeDefinitions, canManageViews }: ViewTabsProps) {
   const viewStore = useViewStore();
   const dispatch = useEoStore((s) => s.dispatch);
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
@@ -26,6 +34,8 @@ export function ViewTabs({ scope, session, activeUserType, userTypeDefinitions, 
   const { theme } = useTheme();
   const s = makeStyles(theme);
 
+  // Use activeScope for operations that need a single scope context
+  const scope = activeScope;
   const sig = viewStore.getSig(scope);
   const savedViews = viewStore.getViewsForScope(scope);
 
@@ -39,44 +49,40 @@ export function ViewTabs({ scope, session, activeUserType, userTypeDefinitions, 
   const [renameValue, setRenameValue] = useState('');
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; viewId: string } | null>(null);
 
-  const prevViewsKeyRef = useRef<string>('');
-
-  // Load saved views from DB
+  // Load saved views from DB for all open scopes
   useEffect(() => {
     if (!ready) return;
-    getStateByPrefix(`${scope}._views.`).then((states) => {
-      const key = states.map(s => s.target + ':' + s.last_seq).join('|');
-      if (key === prevViewsKeyRef.current) return;
-      prevViewsKeyRef.current = key;
-
-      const viewDepth = scope.split('.').length + 2; // scope._views.viewId
-      const views: SavedView[] = states
-        .filter((st) => st.target.split('.').length === viewDepth && st.value?.name)
-        .map((st) => ({
-          id: st.target.split('.').pop()!,
-          name: st.value.name,
-          scope,
-          viewType: st.value.viewType || 'grid',
-          config: st.value.config || {
-            columnOrder: [],
-            columnWidths: {},
-            hiddenColumns: [],
-            sorts: [],
-            filters: [],
-            filterConjunction: 'AND',
-            showLastUpdated: true,
-          },
-          visibility: st.value.visibility || 'shared',
-          createdBy: st.value.createdBy || st.last_agent,
-          createdAt: st.value.createdAt || st.last_ts,
-          updatedAt: st.value.updatedAt || st.last_ts,
-          roomId: st.value.roomId,
-          visibleToTypes: st.value.visibleToTypes,
-          readOnlyForTypes: st.value.readOnlyForTypes,
-        }));
-      viewStore.registerSavedViews(views);
-    });
-  }, [ready, lastSeq, getStateByPrefix, scope, viewStore]);
+    for (const sc of openScopes) {
+      getStateByPrefix(`${sc}._views.`).then((states) => {
+        const viewDepth = sc.split('.').length + 2; // scope._views.viewId
+        const views: SavedView[] = states
+          .filter((st) => st.target.split('.').length === viewDepth && st.value?.name)
+          .map((st) => ({
+            id: st.target.split('.').pop()!,
+            name: st.value.name,
+            scope: sc,
+            viewType: st.value.viewType || 'grid',
+            config: st.value.config || {
+              columnOrder: [],
+              columnWidths: {},
+              hiddenColumns: [],
+              sorts: [],
+              filters: [],
+              filterConjunction: 'AND',
+              showLastUpdated: true,
+            },
+            visibility: st.value.visibility || 'shared',
+            createdBy: st.value.createdBy || st.last_agent,
+            createdAt: st.value.createdAt || st.last_ts,
+            updatedAt: st.value.updatedAt || st.last_ts,
+            roomId: st.value.roomId,
+            visibleToTypes: st.value.visibleToTypes,
+            readOnlyForTypes: st.value.readOnlyForTypes,
+          }));
+        if (views.length > 0) viewStore.registerSavedViews(views);
+      });
+    }
+  }, [ready, lastSeq, getStateByPrefix, openScopes, viewStore]);
 
   async function handleSaveNew() {
     if (!newViewName.trim()) return;
@@ -283,73 +289,101 @@ export function ViewTabs({ scope, session, activeUserType, userTypeDefinitions, 
   return (
     <div style={s.wrapper}>
       <div style={s.container}>
-        {/* Default view tab */}
-        <button
-          style={sig.activeViewId === null ? s.tabActive : s.tab}
-          onClick={() => viewStore.resetToDefault(scope)}
-        >
-          <span style={{ fontSize: 11, opacity: 0.7 }}>{VIEW_TYPE_META.grid.icon}</span> Grid view
-        </button>
+        {openScopes.map((sc, idx) => {
+          const scSig = viewStore.getSig(sc);
+          const scSavedViews = viewStore.getViewsForScope(sc);
+          const collectionName = formatName(sc.split('.').pop() || sc);
+          const isActive = sc === activeScope;
 
-        {/* Schema tab — always visible, not removable */}
-        <button
-          style={sig.activeViewId === '__schema' ? s.tabActive : s.tab}
-          onClick={() => viewStore.activateView(scope, {
-            id: '__schema', name: 'Schema', scope, viewType: 'schema',
-            config: { columnOrder: [], columnWidths: {}, hiddenColumns: [], sorts: [], filters: [], filterConjunction: 'AND', showLastUpdated: false },
-            visibility: 'shared', createdBy: '', createdAt: '', updatedAt: '',
-          })}
-        >
-          <span style={{ fontSize: 11, opacity: 0.7 }}>{VIEW_TYPE_META.schema.icon}</span> Schema
-        </button>
+          const handleTabClick = (activateFn: () => void) => {
+            if (!isActive) onSelectScope(sc);
+            activateFn();
+          };
 
-        {/* Saved view tabs — filtered by active user type */}
-        {savedViews.filter((v) => {
-          if (viewStore.savedViews[v.id]?.scope && viewStore.savedViews[v.id]?.scope !== scope) return false;
-          // Filter by type visibility
-          const vt = v.visibleToTypes;
-          if (vt && vt.length > 0 && activeUserType && !vt.includes(activeUserType)) return false;
-          return true;
-        }).map((view) => {
-          const vtMeta = VIEW_TYPE_META[view.viewType || 'grid'];
           return (
-            <button
-              key={view.id}
-              style={sig.activeViewId === view.id ? s.tabActive : s.tab}
-              onClick={() => viewStore.activateView(scope, view)}
-              onContextMenu={(e) => {
-                e.preventDefault();
-                setCtxMenu({ x: e.clientX, y: e.clientY, viewId: view.id });
-              }}
-            >
-              {renaming === view.id ? (
-                <input
-                  autoFocus
-                  value={renameValue}
-                  onChange={(e) => setRenameValue(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') handleRename(view.id);
-                    if (e.key === 'Escape') setRenaming(null);
-                  }}
-                  onBlur={() => handleRename(view.id)}
-                  onClick={(e) => e.stopPropagation()}
-                  style={s.renameInput}
-                />
-              ) : (
-                <>
-                  <span style={{ fontSize: 11, opacity: 0.7 }}>{vtMeta.icon}</span>
-                  {view.visibility === 'private' && <span style={{ marginRight: 2, fontSize: 10 }}>{'\uD83D\uDD12'}</span>}
-                  {view.name}
-                  {sig.activeViewId === view.id && sig.dirty && (
-                    <span style={s.dirtyDot} title="Unsaved changes" />
-                  )}
-                </>
+            <div key={sc} style={{ display: 'inline-flex', alignItems: 'center', gap: 0, ...(idx > 0 ? { borderLeft: `1px solid ${theme.border}`, marginLeft: 4, paddingLeft: 4 } : {}) }}>
+              {/* Schema tab — first */}
+              <button
+                style={isActive && scSig.activeViewId === '__schema' ? s.tabActive : s.tab}
+                onClick={() => handleTabClick(() => viewStore.activateView(sc, {
+                  id: '__schema', name: 'Schema', scope: sc, viewType: 'schema',
+                  config: { columnOrder: [], columnWidths: {}, hiddenColumns: [], sorts: [], filters: [], filterConjunction: 'AND', showLastUpdated: false },
+                  visibility: 'shared', createdBy: '', createdAt: '', updatedAt: '',
+                }))}
+              >
+                <span style={{ fontSize: 11, opacity: 0.7 }}>{VIEW_TYPE_META.schema.icon}</span>
+                <span style={{ opacity: 0.5, fontSize: 10 }}>{collectionName}</span> / Schema
+              </button>
+
+              {/* Grid tab — second */}
+              <button
+                style={isActive && scSig.activeViewId === null ? s.tabActive : s.tab}
+                onClick={() => handleTabClick(() => viewStore.resetToDefault(sc))}
+              >
+                <span style={{ fontSize: 11, opacity: 0.7 }}>{VIEW_TYPE_META.grid.icon}</span>
+                <span style={{ opacity: 0.5, fontSize: 10 }}>{collectionName}</span> / Grid
+              </button>
+
+              {/* Saved view tabs — filtered by active user type */}
+              {scSavedViews.filter((v) => {
+                if (viewStore.savedViews[v.id]?.scope && viewStore.savedViews[v.id]?.scope !== sc) return false;
+                const vt = v.visibleToTypes;
+                if (vt && vt.length > 0 && activeUserType && !vt.includes(activeUserType)) return false;
+                return true;
+              }).map((view) => {
+                const vtMeta = VIEW_TYPE_META[view.viewType || 'grid'];
+                return (
+                  <button
+                    key={view.id}
+                    style={isActive && scSig.activeViewId === view.id ? s.tabActive : s.tab}
+                    onClick={() => handleTabClick(() => viewStore.activateView(sc, view))}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      setCtxMenu({ x: e.clientX, y: e.clientY, viewId: view.id });
+                    }}
+                  >
+                    {renaming === view.id ? (
+                      <input
+                        autoFocus
+                        value={renameValue}
+                        onChange={(e) => setRenameValue(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') handleRename(view.id);
+                          if (e.key === 'Escape') setRenaming(null);
+                        }}
+                        onBlur={() => handleRename(view.id)}
+                        onClick={(e) => e.stopPropagation()}
+                        style={s.renameInput}
+                      />
+                    ) : (
+                      <>
+                        <span style={{ fontSize: 11, opacity: 0.7 }}>{vtMeta.icon}</span>
+                        {view.visibility === 'private' && <span style={{ marginRight: 2, fontSize: 10 }}>{'\uD83D\uDD12'}</span>}
+                        <span style={{ opacity: 0.5, fontSize: 10 }}>{collectionName}</span> / {view.name}
+                        {isActive && scSig.activeViewId === view.id && scSig.dirty && (
+                          <span style={s.dirtyDot} title="Unsaved changes" />
+                        )}
+                      </>
+                    )}
+                  </button>
+                );
+              })}
+
+              {/* Close button for this collection's tab group */}
+              {openScopes.length > 1 && (
+                <button
+                  style={s.closeBtn}
+                  onClick={(e) => { e.stopPropagation(); onCloseScope(sc); }}
+                  title={`Close ${collectionName} tabs`}
+                >
+                  {'\u00D7'}
+                </button>
               )}
-            </button>
+            </div>
           );
         })}
 
-        {/* Save / Update button */}
+        {/* Save / Update button — only for active scope */}
         {sig.dirty && (
           sig.activeViewId ? (
             <button style={s.saveBtn} onClick={handleUpdateView}>
@@ -556,6 +590,22 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       color: t.accent,
       borderBottomColor: t.accent,
       fontWeight: 600,
+    },
+    closeBtn: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      width: 18,
+      height: 18,
+      fontSize: 12,
+      fontWeight: 600,
+      border: 'none',
+      borderRadius: 3,
+      background: 'transparent',
+      color: t.textMuted,
+      cursor: 'pointer',
+      marginLeft: 2,
+      opacity: 0.6,
     },
     dirtyDot: {
       display: 'inline-block',

@@ -258,12 +258,9 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
           }}
           onClick={() => {
             onSelectScope(node.fullPath);
-            // Default to schema view when clicking a collection
-            viewStore.activateView(node.fullPath, {
-              id: '__schema', name: 'Schema', scope: node.fullPath, viewType: 'schema',
-              config: { columnOrder: [], columnWidths: {}, hiddenColumns: [], sorts: [], filters: [], filterConjunction: 'AND', showLastUpdated: false },
-              visibility: 'shared', createdBy: '', createdAt: '', updatedAt: '',
-            });
+            // Default to grid view when clicking a collection
+            viewStore.resetToDefault(node.fullPath);
+            viewStore.openScope(node.fullPath);
             // Drill-down: clicking a top-level entity focuses it
             if (isTopLevel && !focusedEntity) {
               setFocusedEntity(node.fullPath);
