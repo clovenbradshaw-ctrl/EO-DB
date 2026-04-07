@@ -16,7 +16,10 @@ const FILEN_GATEWAY = 'https://gateway.filen.io';
  * + master keys. The client uses these to talk to Filen's gateway directly for
  * file operations (upload, download, list, crypto) without ever seeing the password.
  *
- * Response: `{ apiKey, masterKeys, email, airtablePat? }`
+ * Response: `{ "filen username": "...", "filen password": "...", "airtable PAT": "..." }`
+ *
+ * The client fetches credentials from the webhook, then logs in to Filen
+ * itself (PBKDF2 key derivation happens client-side).
  */
 const FILEN_CREDS_WEBHOOK =
   'https://n8n.intelechia.com/webhook/2caa4b94-873d-4a78-9770-d73a4d5b3c79';
@@ -38,14 +41,24 @@ export async function fetchFilenSessionFromWebhook(
   let data: any;
   try { data = JSON.parse(text); } catch { data = null; }
 
-  // The n8n webhook returns raw credentials: { "filen username", "filen password" }.
-  // We login client-side to obtain apiKey + masterKeys.
+  // Support both formats: pre-authenticated session OR raw credentials.
+  // The n8n webhook currently returns raw credentials, but if the webhook
+  // is updated to return a pre-authenticated session, this handles it too.
+  if (data?.apiKey && Array.isArray(data?.masterKeys) && data.masterKeys.length > 0) {
+    return {
+      apiKey: data.apiKey,
+      masterKeys: data.masterKeys,
+      email: data.email || '',
+      airtablePat: data.airtablePat || undefined,
+    };
+  }
+
+  // Webhook returns raw credentials — login to Filen client-side
   const username = data?.['filen username'];
   const password = data?.['filen password'];
   if (!username || !password) {
-    throw new Error('Filen session webhook: unauthorized or malformed response');
+    throw new Error('Filen credentials webhook: unauthorized or malformed response');
   }
-
   const { apiKey, masterKeys } = await filenLogin(username, password);
   return {
     apiKey,

@@ -54,6 +54,7 @@ import { useHashRoute, type View } from '../lib/router';
 import { type AccessRole, type UserTypeDefinition, type SpaceConfig, powerLevelToRole, legacyAccessToRole } from '../permissions/types';
 import { UserTypeSwitcher } from './UserTypeSwitcher';
 import { resolvePermissionsFromSharing } from '../permissions/resolve';
+import { MultiUserTestView } from './MultiUserTestView';
 import { RecycleBin, addDeletedSpace, isSpaceDeleted, removeDeletedSpace, getDeletedSpaces } from './RecycleBin';
 import { addArchivedSpace, isSpaceArchived, removeArchivedSpace, getArchivedSpaces } from './ArchivedSpaces';
 import { setSpaceConfig, getSpaceConfig, applyEoPowerLevels, createGovernanceRoom, EO_SPACE_CONFIG_TYPE } from '../permissions/room-topology';
@@ -344,9 +345,11 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   const [publicSpaceEntries, setPublicSpaceEntries] = useState<SpaceEntry[]>([]);
   const [allStates, setAllStates] = useState<EoState[]>([]);
   const prevAllStatesKeyRef = useRef<string>('');
+  const allStatesFetchGenRef = useRef(0);
   const [timeScrubberFilter, setTimeScrubberFilter] = useState<TimeScrubberFilter>(DEFAULT_FILTER);
   const [scopedRecords, setScopedRecords] = useState<EoState[]>([]);
   const prevScopedRecordsKeyRef = useRef<string>('');
+  const scopedRecordsFetchGenRef = useRef(0);
   const [scopeFieldNameMap, setScopeFieldNameMap] = useState<Map<string, string>>(new Map());
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
   const getState = useEoStore((s) => s.getState);
@@ -541,7 +544,9 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   // Load all states — each space has its own isolated IDB, no prefix needed
   useEffect(() => {
     if (!ready) return;
+    const gen = ++allStatesFetchGenRef.current;
     getStateByPrefix('').then((states) => {
+      if (gen !== allStatesFetchGenRef.current) return;
       const key = states.map(s => s.target + ':' + s.last_seq).join('|');
       if (key !== prevAllStatesKeyRef.current) {
         prevAllStatesKeyRef.current = key;
@@ -557,8 +562,10 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       setScopeFieldNameMap(new Map());
       return;
     }
+    const gen = ++scopedRecordsFetchGenRef.current;
     const scopeDepth = selectedScope.split('.').length;
     getStateByPrefix(selectedScope + '.').then((states) => {
+      if (gen !== scopedRecordsFetchGenRef.current) return;
       const direct = states.filter((st) => {
         const parts = st.target.split('.');
         return parts.length === scopeDepth + 1 && !st.value?._alias;
@@ -570,6 +577,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       }
     });
     getState(selectedScope).then((scopeState) => {
+      if (gen !== scopedRecordsFetchGenRef.current) return;
       const fields = scopeState?.value?.fields;
       if (Array.isArray(fields)) {
         setScopeFieldNameMap(buildFieldNameMap(fields));
@@ -1274,6 +1282,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     settings: '\u2699', // gear
     messages: '\uD83D\uDCAC', // speech bubble
     people: '\u2689', // people icon
+    multiuser: '\u2194', // left-right arrow
   };
 
   // --- Permission resolution ---
@@ -1697,6 +1706,17 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                 Settings
               </button>
             )}
+            <div style={s.navGroupLabel}>Testing</div>
+            <button
+              onClick={() => { navigate({ view: 'multiuser' }); }}
+              style={{
+                ...s.navItem,
+                ...(activeView === 'multiuser' ? s.navItemActive : {}),
+              }}
+            >
+              <span style={s.navIcon}>{NAV_ICONS.multiuser}</span>
+              Multi-User Test
+            </button>
           </nav>
         </aside>
 
@@ -1821,6 +1841,8 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               )
             ) : activeView === 'settings' ? (
               <SettingsView session={session} matrixClient={matrixClientRef.current} roomId={spaceCacheRef.current.get(selectedSpace!)?.mainRoomId ?? null} spaceRooms={spaceCacheRef.current.get(selectedSpace!)?.spaceRooms ?? null} onUnarchive={handleUnarchiveSpace} connectionState={connectionState} connectionError={connectionError} matrixReady={matrixReady} onRetry={retrySync} onLogout={handleLogout} />
+            ) : activeView === 'multiuser' ? (
+              <MultiUserTestView />
             ) : null}
           </ErrorBoundary>}
         </main>

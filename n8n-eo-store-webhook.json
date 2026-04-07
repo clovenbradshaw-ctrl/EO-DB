@@ -1,0 +1,319 @@
+{
+  "name": "EO-DB Encrypted Store",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "eo-store",
+        "responseMode": "responseNode",
+        "options": { "rawBody": true }
+      },
+      "id": "node-webhook",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "eo-store"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://app.aminoimmigration.com/_matrix/client/v3/account/whoami",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $json.headers['x-matrix-token'] }}"
+            }
+          ]
+        },
+        "options": {
+          "response": { "response": { "neverError": true } }
+        }
+      },
+      "id": "node-auth",
+      "name": "Matrix Auth",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [250, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "cond-auth",
+              "leftValue": "={{ $json.user_id }}",
+              "rightValue": "",
+              "operator": { "type": "string", "operation": "isNotEmpty" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "node-auth-check",
+      "name": "Auth OK?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [500, 0]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"error\": \"unauthorized\" }",
+        "options": { "responseCode": 401 }
+      },
+      "id": "node-401",
+      "name": "Respond 401",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [750, 200]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "rules": [
+            {
+              "outputKey": "store",
+              "value": "store"
+            },
+            {
+              "outputKey": "retrieve",
+              "value": "retrieve"
+            },
+            {
+              "outputKey": "list",
+              "value": "list"
+            }
+          ]
+        },
+        "dataType": "string",
+        "value": "={{ $('Webhook').first().json.body.action }}"
+      },
+      "id": "node-switch",
+      "name": "Route by Action",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [750, -200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Ensure the data_type subfolder exists in Drive, then upload.\nconst body = $('Webhook').first().json.body;\nconst dataType = body.data_type || 'default';\nconst hash = body.envelope.content_hash;\nconst dataId = body.data_id;\n\n// Pass to next node: Google Drive Upload\nreturn [{\n  json: {\n    fileName: `${hash}.json`,\n    folderName: dataType,\n    fileContent: JSON.stringify({\n      envelope: body.envelope,\n      data_id: dataId,\n      data_type: dataType,\n      stored_at: new Date().toISOString()\n    }),\n    content_hash: hash\n  }\n}];"
+      },
+      "id": "node-prep-store",
+      "name": "Prep Store",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1000, -400]
+    },
+    {
+      "parameters": {
+        "operation": "upload",
+        "name": "={{ $json.fileName }}",
+        "driveId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "My Drive"
+        },
+        "folderId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "={{ $json.folderName }}"
+        },
+        "inputDataFieldName": "={{ $json.fileContent }}",
+        "options": {
+          "mimeType": "application/json"
+        }
+      },
+      "id": "node-drive-upload",
+      "name": "Drive: Upload",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [1250, -400],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "GOOGLE_DRIVE_CREDENTIAL_ID",
+          "name": "Google Drive"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: true, content_hash: $('Prep Store').first().json.content_hash, drive_file_id: $json.id }) }}",
+        "options": { "responseCode": 200 }
+      },
+      "id": "node-store-ok",
+      "name": "Respond Store OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1500, -400]
+    },
+    {
+      "parameters": {
+        "operation": "search",
+        "queryString": "=name = '{{ $('Webhook').first().json.body.content_hash }}.json'",
+        "driveId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "My Drive"
+        },
+        "options": {
+          "fields": ["id", "name", "mimeType"]
+        }
+      },
+      "id": "node-drive-search",
+      "name": "Drive: Search",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [1000, -200],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "GOOGLE_DRIVE_CREDENTIAL_ID",
+          "name": "Google Drive"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "download",
+        "fileId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $json.id }}"
+        },
+        "options": {}
+      },
+      "id": "node-drive-download",
+      "name": "Drive: Download",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [1250, -200],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "GOOGLE_DRIVE_CREDENTIAL_ID",
+          "name": "Google Drive"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse the downloaded file and return the envelope.\nconst data = JSON.parse($json.data);\nreturn [{ json: { ok: true, envelope: data.envelope } }];"
+      },
+      "id": "node-parse-retrieve",
+      "name": "Parse Retrieved",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1500, -200]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": { "responseCode": 200 }
+      },
+      "id": "node-retrieve-ok",
+      "name": "Respond Retrieve OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1750, -200]
+    },
+    {
+      "parameters": {
+        "operation": "search",
+        "queryString": "=mimeType = 'application/json' and '{{ $('Webhook').first().json.body.data_type || '' }}' = '' or name contains '.json'",
+        "driveId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "My Drive"
+        },
+        "options": {
+          "fields": ["id", "name", "createdTime", "parents"]
+        }
+      },
+      "id": "node-drive-list",
+      "name": "Drive: List",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [1000, 0],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "GOOGLE_DRIVE_CREDENTIAL_ID",
+          "name": "Google Drive"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Map Drive file list into structured entries.\nconst files = $input.all();\nconst entries = files.map(f => {\n  const name = f.json.name || '';\n  const hash = name.replace('.json', '');\n  return {\n    data_id: f.json.id,\n    content_hash: hash,\n    data_type: (f.json.parents && f.json.parents[0]) || 'unknown',\n    stored_at: f.json.createdTime || ''\n  };\n});\nreturn [{ json: { ok: true, entries } }];"
+      },
+      "id": "node-format-list",
+      "name": "Format List",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1250, 0]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": { "responseCode": 200 }
+      },
+      "id": "node-list-ok",
+      "name": "Respond List OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1500, 0]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [[{ "node": "Matrix Auth", "type": "main", "index": 0 }]]
+    },
+    "Matrix Auth": {
+      "main": [[{ "node": "Auth OK?", "type": "main", "index": 0 }]]
+    },
+    "Auth OK?": {
+      "main": [
+        [{ "node": "Route by Action", "type": "main", "index": 0 }],
+        [{ "node": "Respond 401", "type": "main", "index": 0 }]
+      ]
+    },
+    "Route by Action": {
+      "main": [
+        [{ "node": "Prep Store", "type": "main", "index": 0 }],
+        [{ "node": "Drive: Search", "type": "main", "index": 0 }],
+        [{ "node": "Drive: List", "type": "main", "index": 0 }]
+      ]
+    },
+    "Prep Store": {
+      "main": [[{ "node": "Drive: Upload", "type": "main", "index": 0 }]]
+    },
+    "Drive: Upload": {
+      "main": [[{ "node": "Respond Store OK", "type": "main", "index": 0 }]]
+    },
+    "Drive: Search": {
+      "main": [[{ "node": "Drive: Download", "type": "main", "index": 0 }]]
+    },
+    "Drive: Download": {
+      "main": [[{ "node": "Parse Retrieved", "type": "main", "index": 0 }]]
+    },
+    "Parse Retrieved": {
+      "main": [[{ "node": "Respond Retrieve OK", "type": "main", "index": 0 }]]
+    },
+    "Drive: List": {
+      "main": [[{ "node": "Format List", "type": "main", "index": 0 }]]
+    },
+    "Format List": {
+      "main": [[{ "node": "Respond List OK", "type": "main", "index": 0 }]]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": ""
+  }
+}

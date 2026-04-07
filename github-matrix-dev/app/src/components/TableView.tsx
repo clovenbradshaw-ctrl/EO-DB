@@ -410,6 +410,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   const prevRecordsKeyRef = useRef<string>('');
   const prevSchemaKeyRef = useRef<string>('');
   const prevScopeNameRef = useRef<string | null>(null);
+  const fetchGenRef = useRef(0);
   const { theme } = useTheme();
   const s = makeStyles(theme);
 
@@ -495,7 +496,10 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   // Load records and field metadata
   useEffect(() => {
     if (!ready) return;
+    const gen = ++fetchGenRef.current;
     getStateByPrefix(scope + '.').then((states) => {
+      // Skip stale fetch results (a newer load has already started)
+      if (gen !== fetchGenRef.current) return;
       const direct = states
         .filter((st) => {
           const parts = st.target.split('.');
@@ -528,6 +532,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     });
     // Fetch field metadata: prefer per-field schema entities, fall back to array on table state
     getStateByPrefix(scope + '._schema.').then((allSchemaStates) => {
+      if (gen !== fetchGenRef.current) return;
       // Only process schema if it actually changed
       const schemaKey = allSchemaStates.map(s => s.target + ':' + s.last_seq).join('|');
       if (schemaKey === prevSchemaKeyRef.current) return;
@@ -544,6 +549,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
       } else {
         // Fallback: read field metadata from table state array
         getState(scope).then((scopeState) => {
+          if (gen !== fetchGenRef.current) return;
           const fields = scopeState?.value?.fields;
           if (Array.isArray(fields)) {
             setFieldNameMap(buildFieldNameMap(fields));
@@ -559,6 +565,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     });
     // Fetch scope display name and auditable display field
     getState(scope).then((scopeState) => {
+      if (gen !== fetchGenRef.current) return;
       const name = scopeState?.value?.name ?? null;
       if (name !== prevScopeNameRef.current) {
         prevScopeNameRef.current = name;
@@ -568,9 +575,15 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     });
   }, [ready, lastSeq, getStateByPrefix, getState, scope, scopeDepth]);
 
-  // When scope has no records and no state of its own, navigate up to parent scope
+  // When scope has no records and no state of its own, navigate up to parent scope.
+  // Only check on the FIRST successful load after a scope change — not on every
+  // sync-triggered re-fetch, which could see transient empty states (e.g. during
+  // SYN merges that temporarily alias all records).
+  const hasCheckedEmptyScopeRef = useRef(false);
+  useEffect(() => { hasCheckedEmptyScopeRef.current = false; }, [scope]);
   useEffect(() => {
-    if (!recordsLoaded) return;
+    if (!recordsLoaded || hasCheckedEmptyScopeRef.current) return;
+    hasCheckedEmptyScopeRef.current = true;
     if (records.length === 0 && onEmptyScope) {
       // Don't navigate away if the scope itself has state — it's a leaf record
       getState(scope).then((scopeState) => {
@@ -584,7 +597,10 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     }
   }, [records, recordsLoaded, scope, onEmptyScope, getState]);
 
-  // Reset filter and loaded state when scope changes
+  // Reset filter and loaded state when scope changes.
+  // NOTE: records are NOT cleared here — the stale-fetch guard (fetchGenRef)
+  // prevents wrong-scope data, and keeping the old records avoids a flash of
+  // "No records in this scope" that could trigger onEmptyScope navigation.
   useEffect(() => {
     setFilterText('');
     setDebouncedFilterText('');
@@ -1343,7 +1359,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
               </SortableContext>
             </thead>
             <tbody>
-              {filtered.length === 0 && (
+              {filtered.length === 0 && recordsLoaded && (
                 <tr>
                   <td colSpan={orderedColumns.length + 1} style={s.emptyRow}>
                     {records.length === 0 ? 'No records in this scope' : 'No records match the current filter'}
