@@ -77,6 +77,9 @@ export interface SpaceConfig {
     filen?: { folderUuid: string; path: string };
     gdrive?: { folderId: string; path: string };
   };
+  /** Canonical Matrix room alias for deterministic room lookup.
+   *  e.g. "#eo-db_drive_test_2:app.aminoimmigration.com" */
+  canonical_alias?: string;
   /** Whether this space is listed in the homeserver's public room directory.
    *  'public' (default) — anyone on the homeserver can discover the space and knock to request access.
    *  'private' — only invited members know the space exists. */

@@ -107,7 +107,56 @@ export interface CreateSpaceOptions {
 }
 
 /**
+ * Generate the canonical Matrix room alias local-part for a space.
+ * e.g. spaceName "Drive Test 2" → "eo-db_drive_test_2"
+ * Full alias becomes #eo-db_drive_test_2:<homeserver>.
+ */
+function spaceAliasLocal(spaceName: string): string {
+  return `eo-db_${spaceName.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_.-]/g, '')}`;
+}
+
+/**
+ * Build the full canonical alias (#local:server) from a space name + user ID.
+ */
+function spaceAliasFull(spaceName: string, userId: string): string {
+  const server = userId.split(':').slice(1).join(':');
+  return `#${spaceAliasLocal(spaceName)}:${server}`;
+}
+
+/**
+ * Try to resolve a canonical space alias and join the room.
+ * Returns the room ID if successful, null otherwise.
+ */
+async function resolveCanonicalAlias(
+  client: ReturnType<typeof createMatrixClient>,
+  spaceName: string,
+  userId: string,
+): Promise<string | null> {
+  const alias = spaceAliasFull(spaceName, userId);
+  try {
+    const resolved = await (client as any).resolveRoomAlias(alias);
+    const roomId = resolved?.room_id;
+    if (!roomId) return null;
+
+    // Ensure we're joined
+    const room = client.getRoom(roomId);
+    if (!room || room.getMyMembership?.() !== 'join') {
+      try {
+        await (client as any).joinRoom(roomId);
+      } catch {
+        // May already be joined or room requires invite — non-fatal
+      }
+    }
+    console.info('[EO-DB] Resolved canonical alias', alias, '→', roomId);
+    return roomId;
+  } catch {
+    return null; // Alias doesn't exist yet
+  }
+}
+
+/**
  * Create a Matrix room for a space and publish the space config state event.
+ * Sets a canonical alias so all clients can find the same room.
  * Returns the new room ID, or null if creation fails.
  */
 async function createSpaceRoom(
@@ -156,8 +205,32 @@ async function createSpaceRoom(
       },
     ];
 
+    // Before creating, check if the canonical alias already exists.
+    // If it does, another client already created this space's room — join it.
+    const existingRoomId = await resolveCanonicalAlias(client, spaceName, ownerUserId);
+    if (existingRoomId) {
+      // Ensure it has a space config (may be missing if the creator crashed mid-setup)
+      const room = client.getRoom(existingRoomId);
+      const hasConfig = room?.currentState?.getStateEvents?.(EO_SPACE_CONFIG_TYPE, '');
+      if (!hasConfig) {
+        try {
+          await setSpaceConfig(client, existingRoomId, {
+            name: spaceName,
+            rooms: { main: existingRoomId },
+            field_assignments: [],
+            space_settings: {},
+            discoverability,
+          } as any);
+        } catch { /* non-fatal — config may already exist server-side */ }
+      }
+      return { mainRoomId: existingRoomId, governanceRoomId: null };
+    }
+
+    const aliasLocal = spaceAliasLocal(spaceName);
+
     const createArgs: any = {
       name: spaceName,
+      room_alias_name: aliasLocal,
       initial_state: initialState,
     };
 
@@ -193,6 +266,11 @@ async function createSpaceRoom(
     try {
       result = await client.createRoom(createArgs);
     } catch (err: any) {
+      // Alias already taken → another client won the race. Resolve + join.
+      if (err?.errcode === 'M_ROOM_IN_USE') {
+        const raceRoomId = await resolveCanonicalAlias(client, spaceName, ownerUserId);
+        if (raceRoomId) return { mainRoomId: raceRoomId, governanceRoomId: null };
+      }
       // Homeserver may forbid public room creation (403). Progressive
       // fallback: private with custom state → bare-minimum room.
       if (err?.httpStatus === 403 && discoverability === 'public') {
@@ -207,6 +285,11 @@ async function createSpaceRoom(
         try {
           result = await client.createRoom(createArgs);
         } catch (err2: any) {
+          // Alias collision on fallback → resolve existing
+          if (err2?.errcode === 'M_ROOM_IN_USE') {
+            const raceRoomId = await resolveCanonicalAlias(client, spaceName, ownerUserId);
+            if (raceRoomId) return { mainRoomId: raceRoomId, governanceRoomId: null };
+          }
           // Last resort: bare-minimum room with retry on transient failures
           console.warn('[EO-DB] Private room also rejected — trying minimal room with retry:', err2);
           result = await withRetry(() => client.createRoom({
@@ -234,6 +317,7 @@ async function createSpaceRoom(
       field_assignments: [],
       space_settings: {},
       discoverability,
+      canonical_alias: spaceAliasFull(spaceName, ownerUserId),
     };
     await setSpaceConfig(client, roomId, spaceConfig);
 
@@ -1178,7 +1262,23 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         }
       }
 
-      // 3. Room genuinely doesn't exist — create it.
+      // 2e. Canonical alias resolution: the room may exist but we haven't
+      //     joined it yet and discovery didn't find it. The canonical alias
+      //     is the single source of truth for "which room IS this space".
+      if (matrixClientRef.current) {
+        const displayName = formatSpaceName(selectedSpace!.replace(/^space_/, ''));
+        const aliasRoomId = await resolveCanonicalAlias(
+          matrixClientRef.current, displayName, session.userId,
+        );
+        if (aliasRoomId) {
+          const scan = findSpaceRoomByDirectScan(matrixClientRef.current, selectedSpace!);
+          if (scan) resolvedSpaceRooms = scan.rooms;
+          else resolvedSpaceRooms = { main: aliasRoomId };
+          return aliasRoomId;
+        }
+      }
+
+      // 3. Room genuinely doesn't exist — create it (with canonical alias).
       if (matrixReady && matrixClientRef.current) {
         const displayName = formatSpaceName(selectedSpace!.replace(/^space_/, ''));
         const result = await createSpaceRoom(
