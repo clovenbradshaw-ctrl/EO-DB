@@ -254,6 +254,28 @@ interface LayoutProps {
   localMode?: boolean;
 }
 
+function getHttpStatus(err: any): number | undefined {
+  const status = err?.httpStatus ?? err?.statusCode ?? err?.data?.statusCode ?? err?.event?.status;
+  return typeof status === 'number' ? status : undefined;
+}
+
+function describeMatrixError(err: any): { phase: 'auth' | 'crypto' | 'sync' | 'room'; message: string } {
+  const status = getHttpStatus(err);
+  const code = String(err?.errcode ?? err?.data?.errcode ?? '');
+  const raw = err?.message ? String(err.message) : String(err);
+
+  if (status === 401 || code === 'M_UNKNOWN_TOKEN') {
+    return { phase: 'auth', message: 'Matrix auth failed (401/M_UNKNOWN_TOKEN). Your session may be expired — please log out and sign in again.' };
+  }
+  if (status === 403 || code === 'M_FORBIDDEN') {
+    return { phase: 'auth', message: 'Matrix permission denied (403/M_FORBIDDEN). Account may lack access to one or more rooms.' };
+  }
+  if (status === 404) {
+    return { phase: 'sync', message: `Matrix endpoint missing (404). This is often homeserver feature mismatch (for example optional cross-signing routes). ${raw}` };
+  }
+  return { phase: 'sync', message: raw || 'Matrix connection failed' };
+}
+
 interface CachedSpace {
   store: ReturnType<typeof createStore>;
   syncManager: SyncManager | null;
@@ -307,6 +329,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     phase: 'auth' | 'crypto' | 'sync' | 'room';
     message: string;
   } | null>(null);
+  const [connectionDetail, setConnectionDetail] = useState<string | null>(null);
   const [retryCount, setRetryCount] = useState(0);
   // Deferred loading flag — only show "Initializing store" after a short delay
   // so quick re-inits (cached stores) don't cause a visible blink.
@@ -321,6 +344,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   }, [ready]);
   const retrySync = useCallback(() => {
     setConnectionError(null);
+    setConnectionDetail(null);
     setMatrixReady(false);
     setRetryCount(c => c + 1);
   }, []);
@@ -336,8 +360,11 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         : connectionError
           ? 'error'
           : matrixReady
-            ? 'syncing'
-            : 'offline';
+            ? 'online'
+            : 'syncing';
+  const connectionMessage = connectionError?.message
+    ?? connectionDetail
+    ?? (connectionState === 'syncing' ? 'Matrix is starting and performing initial sync.' : undefined);
 
   // Helper to select a space and persist the choice
   function selectSpace(target: string) {
@@ -587,12 +614,30 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           try {
             await client.getCrypto()?.bootstrapCrossSigning({});
           } catch (e) {
-            console.warn('[EO-DB] cross-signing bootstrap skipped:', e);
+            if (getHttpStatus(e) === 404) {
+              console.info('[EO-DB] cross-signing bootstrap unavailable on this homeserver (404). Continuing without cross-signing bootstrap.');
+            } else {
+              console.warn('[EO-DB] cross-signing bootstrap skipped:', e);
+            }
           }
         } catch (e) {
           console.warn('[EO-DB] rust crypto init failed — E2EE rooms will not work:', e);
           // Non-fatal: continue without E2EE — sync still works for unencrypted rooms
         }
+
+        const onSync = (state: string, _prevState: string, data?: any) => {
+          if (!mounted) return;
+          if (state === 'ERROR') {
+            const described = describeMatrixError(data?.error);
+            setConnectionError(described);
+          } else if (state === 'RECONNECTING') {
+            setConnectionDetail('Matrix reconnecting after a network interruption.');
+          } else if (state === 'SYNCING' || state === 'PREPARED') {
+            setConnectionDetail(null);
+            setConnectionError(null);
+          }
+        };
+        client.on('sync' as any, onSync);
 
         await client.startClient({ initialSyncLimit: 20 });
 
@@ -630,14 +675,12 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         }
 
         setConnectionError(null);
+        setConnectionDetail(null);
         setMatrixReady(true);
       } catch (e) {
         console.warn('[EO-DB] startMatrix failed:', e);
         if (mounted) {
-          setConnectionError({
-            phase: 'sync',
-            message: e instanceof Error ? e.message : 'Matrix connection failed',
-          });
+          setConnectionError(describeMatrixError(e));
         }
       }
     }
@@ -651,6 +694,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       roomIdRef.current = null;
       setMatrixReady(false);
       setConnectionError(null);
+      setConnectionDetail(null);
     };
   }, [session, retryCount]);
 
@@ -1393,7 +1437,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           <ConnectionStatus
             state={connectionState}
             onRetry={retrySync}
-            errorMessage={connectionError?.message}
+            errorMessage={connectionMessage}
           />
           {!isMobile && <SyncToast status={syncToastStatus} seq={syncToastSeq} />}
           {selectedSpace && !isMobile && (

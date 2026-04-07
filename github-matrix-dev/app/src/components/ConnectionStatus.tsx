@@ -39,7 +39,7 @@ export function ConnectionStatus({ state, onRetry, errorMessage }: ConnectionSta
       fontWeight: 500,
       flexShrink: 0,
       whiteSpace: 'nowrap' as const,
-    }} title={state === 'error' && errorMessage ? errorMessage : undefined}>
+    }} title={errorMessage || undefined}>
       <div style={{
         width: 6,
         height: 6,
