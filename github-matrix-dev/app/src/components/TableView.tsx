@@ -575,9 +575,15 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     });
   }, [ready, lastSeq, getStateByPrefix, getState, scope, scopeDepth]);
 
-  // When scope has no records and no state of its own, navigate up to parent scope
+  // When scope has no records and no state of its own, navigate up to parent scope.
+  // Only check on the FIRST successful load after a scope change — not on every
+  // sync-triggered re-fetch, which could see transient empty states (e.g. during
+  // SYN merges that temporarily alias all records).
+  const hasCheckedEmptyScopeRef = useRef(false);
+  useEffect(() => { hasCheckedEmptyScopeRef.current = false; }, [scope]);
   useEffect(() => {
-    if (!recordsLoaded) return;
+    if (!recordsLoaded || hasCheckedEmptyScopeRef.current) return;
+    hasCheckedEmptyScopeRef.current = true;
     if (records.length === 0 && onEmptyScope) {
       // Don't navigate away if the scope itself has state — it's a leaf record
       getState(scope).then((scopeState) => {
@@ -591,11 +597,13 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     }
   }, [records, recordsLoaded, scope, onEmptyScope, getState]);
 
-  // Reset filter and loaded state when scope changes
+  // Reset filter and loaded state when scope changes.
+  // NOTE: records are NOT cleared here — the stale-fetch guard (fetchGenRef)
+  // prevents wrong-scope data, and keeping the old records avoids a flash of
+  // "No records in this scope" that could trigger onEmptyScope navigation.
   useEffect(() => {
     setFilterText('');
     setDebouncedFilterText('');
-    setRecords([]);
     setRecordsLoaded(false);
     prevRecordsKeyRef.current = '';
     prevSchemaKeyRef.current = '';
@@ -1351,7 +1359,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
               </SortableContext>
             </thead>
             <tbody>
-              {filtered.length === 0 && (
+              {filtered.length === 0 && recordsLoaded && (
                 <tr>
                   <td colSpan={orderedColumns.length + 1} style={s.emptyRow}>
                     {records.length === 0 ? 'No records in this scope' : 'No records match the current filter'}
