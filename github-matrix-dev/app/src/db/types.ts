@@ -42,6 +42,7 @@ export interface EoState {
   _fold?: EoStateFold;
   graphMetrics?: GraphMetrics;    // maintained by CON/SYN on edge changes
   _lastRecSeq?: number;           // seq of latest REC event on this target (for RecCycleInfo)
+  classification?: EntityClassification;   // population-relative entity type
 }
 
 export interface EoStateFold {
@@ -124,6 +125,7 @@ export interface HorizonResponse {
   cadence?: CadenceInfo;
   graphMetrics?: GraphMetrics;
   recCycle?: RecCycleInfo;
+  classification?: EntityClassification;
 }
 
 export interface AncestryEntry {
@@ -223,4 +225,45 @@ export interface RecCycleInfo {
   triggeringSeq?: number;
   result: RecResult;
   edges: Array<{ source: string; dest: string }>;
+}
+
+// ─── Population-Relative Entity Classification ──────────────────────────
+
+/** Raw signals extracted from an entity's fold/card state. */
+export interface EntitySignals {
+  periodicity:  number;   // 0–1: regularity of event intervals
+  momentum:     number;   // recent activity rate
+  conflictRate: number;   // ratio of overwrite ops (DEF+SYN) to total
+  convergence:  number;   // 0–1: whether entity has settled
+  diffSize:     number;   // distance from card prototype
+}
+
+/** Online mean + std (Welford internals). */
+export interface PopulationStats {
+  mean: number;
+  std: number;
+  n: number;
+  m2: number;   // sum of squared diffs for Welford
+}
+
+/** Per-signal population statistics, maintained per collection prefix. */
+export interface SpaceStatistics {
+  periodicity:  PopulationStats;
+  momentum:     PopulationStats;
+  conflictRate: PopulationStats;
+  convergence:  PopulationStats;
+  diffSize:     PopulationStats;
+}
+
+/** Behavioural entity type — population-relative, not absolute. */
+export type EntityType = 'emanon' | 'protogon' | 'holon';
+
+/** Classification result stored on EoState. */
+export interface EntityClassification {
+  type: EntityType;
+  confidence: number;                         // 0–1: how clearly one type dominates
+  zScores: Record<string, number>;            // per-signal z-score
+  signals: EntitySignals;                     // raw signal values
+  population: string;                         // collection prefix used
+  populationSize: number;                     // N at classification time
 }

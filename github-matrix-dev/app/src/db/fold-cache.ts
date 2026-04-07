@@ -17,6 +17,7 @@ import type {
   CadenceInfo, CadenceClass, LoggableOperator, GraphMetrics, GraphRole,
 } from './types';
 import { extractCard, getChunkWriter, getCardBuffer } from './card-encoder';
+import { classifyAndUpdateStats } from './space-statistics';
 
 const ALL_LOGGABLE_OPS: LoggableOperator[] = ['NUL', 'INS', 'SEG', 'CON', 'SYN', 'DEF', 'EVA', 'REC'];
 const INTERVAL_WINDOW = 200;              // cap intervalsSorted length (sliding)
@@ -173,7 +174,10 @@ export async function updateFoldCache(store: EoStore, event: EoEvent): Promise<v
     state._lastRecSeq = event.seq;
   }
 
-  await setState(store, { ...state, _fold });
+  // ── Classification: population-relative entity type ──
+  const classification = await classifyAndUpdateStats(store, event.target, _fold);
+
+  await setState(store, { ...state, _fold, classification });
 
   // ── Card encoder hook: extract compact card summary + persist to chunk ──
   const writer = getChunkWriter();

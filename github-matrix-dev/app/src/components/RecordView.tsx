@@ -17,6 +17,7 @@ import { Governance } from './Governance';
 import { Signals } from './Signals';
 import { HashCohort } from './HashCohort';
 import { RecCycleMap } from './RecCycleMap';
+import { EntityClassBadge } from './EntityClassBadge';
 import { CadenceBadge } from './CadenceBadge';
 import { GraphRoleBadge } from './GraphRoleBadge';
 import { TypeBadge } from './TypeSelector';
@@ -339,6 +340,7 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
         <div style={s.headerTop}>
           <div style={s.clientName}>{value.name || formatName(target.split('.').pop() || target)}</div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            {data.classification && <EntityClassBadge classification={data.classification} />}
             {value._type && <TypeBadge type={value._type} />}
             <div style={{ ...s.statusBadge, ...statusStyleMap[statusClass] }}>
               {value.status || 'unknown'}

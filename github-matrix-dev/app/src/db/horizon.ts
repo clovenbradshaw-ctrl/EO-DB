@@ -67,6 +67,7 @@ export async function horizonGet(
     cadence,
     graphMetrics,
     recCycle,
+    classification: figure.classification,
   };
 }
 
