@@ -37,17 +37,21 @@ export async function fetchFilenSessionFromWebhook(
   const text = await res.text();
   let data: any;
   try { data = JSON.parse(text); } catch { data = null; }
-  const apiKey = data?.apiKey;
-  const masterKeys = data?.masterKeys;
-  const email = data?.email;
-  if (!apiKey || !Array.isArray(masterKeys) || masterKeys.length === 0) {
+
+  // The n8n webhook returns raw credentials: { "filen username", "filen password" }.
+  // We login client-side to obtain apiKey + masterKeys.
+  const username = data?.['filen username'];
+  const password = data?.['filen password'];
+  if (!username || !password) {
     throw new Error('Filen session webhook: unauthorized or malformed response');
   }
+
+  const { apiKey, masterKeys } = await filenLogin(username, password);
   return {
     apiKey,
     masterKeys,
-    email: email || '',
-    airtablePat: data?.airtablePat || undefined,
+    email: username,
+    airtablePat: data?.['airtable PAT'] || undefined,
   };
 }
 
