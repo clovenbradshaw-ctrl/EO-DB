@@ -58,7 +58,7 @@ import { MultiUserTestView } from './MultiUserTestView';
 import { RecycleBin, addDeletedSpace, isSpaceDeleted, removeDeletedSpace, getDeletedSpaces } from './RecycleBin';
 import { addArchivedSpace, isSpaceArchived, removeArchivedSpace, getArchivedSpaces } from './ArchivedSpaces';
 import { setSpaceConfig, getSpaceConfig, applyEoPowerLevels, createGovernanceRoom, EO_SPACE_CONFIG_TYPE } from '../permissions/room-topology';
-import { EO_POWER_LEVEL_CONTENT } from '../permissions/types';
+import { EO_POWER_LEVEL_CONTENT, type SpaceConfig } from '../permissions/types';
 import { listAllHomeserverUsers } from '../matrix/user-discovery';
 
 /** Set to false to disable all Matrix activity (sync, room creation, discovery).
@@ -82,7 +82,7 @@ async function createSpaceRoom(
   spaceName: string,
   ownerUserId: string,
   opts: CreateSpaceOptions = {},
-): Promise<string | null> {
+): Promise<{ mainRoomId: string; governanceRoomId: string | null } | null> {
   const discoverability = opts.discoverability ?? 'public';
   let inviteUserIds = opts.inviteUserIds ?? [];
 
@@ -229,7 +229,7 @@ async function createSpaceRoom(
       governanceRoomId ? `governance: ${governanceRoomId}` : '(governance: skipped)',
       '(', discoverability, ',', inviteUserIds.length, 'invited)',
     );
-    return roomId;
+    return { mainRoomId: roomId, governanceRoomId };
   } catch (e) {
     console.warn('[EO-DB] Failed to create Matrix room for space', spaceName, e);
     return null;
@@ -982,19 +982,20 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       //    and the direct scan confirmed no room exists.
       if (matrixReady && matrixClientRef.current) {
         const displayName = formatSpaceName(selectedSpace!.replace(/^space_/, ''));
-        const newRoomId = await createSpaceRoom(
+        const result = await createSpaceRoom(
           matrixClientRef.current, displayName, session.userId,
         );
-        if (newRoomId) {
+        if (result) {
+          resolvedSpaceRooms = {
+            main: result.mainRoomId,
+            ...(result.governanceRoomId ? { governance: result.governanceRoomId } : {}),
+          };
           // Re-run space discovery so the new room appears in the browser
           try {
             const entries = discoverSpacesFromMatrix(matrixClientRef.current);
             if (entries.length > 0) setSpaceEntries(entries);
           } catch { /* best effort */ }
-          // Scan for the topology we just created (config was published by createSpaceRoom)
-          const scanResult = findSpaceRoomByDirectScan(matrixClientRef.current, selectedSpace!);
-          if (scanResult) resolvedSpaceRooms = scanResult.rooms;
-          return newRoomId;
+          return result.mainRoomId;
         }
       }
 
@@ -1179,6 +1180,36 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         } catch (e) {
           console.warn('[EO-DB] Filen sync start failed for space', selectedSpace, e);
           filenSync = null;
+        }
+      }
+
+      // ── Retroactive storage provisioning ──
+      // For existing spaces that were created before storage tracking, ensure
+      // Filen folders exist and update the space config with storage paths.
+      if (MATRIX_ENABLED && spaceRoomId && matrixClientRef.current && resolvedSpaceRooms) {
+        try {
+          const existingConfig = getSpaceConfig(matrixClientRef.current as any, spaceRoomId);
+          if (existingConfig && !existingConfig.storage?.filen && filenSync) {
+            // Filen folder was just created by ensureSpaceFolder above — record it
+            const filenFolderUuid = useFilenStore.getState().spaceFolders?.[selectedSpace!];
+            if (filenFolderUuid) {
+              const spaceName = existingConfig.name || selectedSpace!;
+              const updatedConfig = {
+                ...existingConfig,
+                storage: {
+                  ...existingConfig.storage,
+                  filen: { folderUuid: filenFolderUuid, path: `/EO-DB/${spaceName}` },
+                },
+              };
+              await setSpaceConfig(matrixClientRef.current as any, spaceRoomId, updatedConfig);
+              if (resolvedSpaceRooms.governance) {
+                await setSpaceConfig(matrixClientRef.current as any, resolvedSpaceRooms.governance, updatedConfig).catch(() => {});
+              }
+              console.info('[EO-DB] Retroactively added Filen storage path to space config for', selectedSpace);
+            }
+          }
+        } catch (e) {
+          console.warn('[EO-DB] Retroactive storage provisioning failed:', e);
         }
       }
 
@@ -1421,6 +1452,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             <SpaceBrowser
               entries={activeEntries}
               loading={MATRIX_ENABLED && !matrixReady && activeEntries.length === 0}
+              matrixReady={!MATRIX_ENABLED || matrixReady}
               activeSpace={selectedSpace}
               onSelect={(target) => {
                 selectSpace(target);
@@ -1430,39 +1462,89 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               }}
               onClose={() => setSpaceOpen(false)}
               onCreate={async (name, opts) => {
-                const spaceTarget = `space_${name.toLowerCase().replace(/\s+/g, '_')}`;
+                // ── Gate: Matrix MUST be connected ──
+                if (MATRIX_ENABLED && (!matrixReady || !matrixClientRef.current)) {
+                  throw new Error('Cannot create a space while Matrix is disconnected. Wait for connection or check your login.');
+                }
 
-                // Create Matrix room first (if client is ready) so sync works immediately
-                let mainRoomId: string | null = null;
-                if (matrixReady && matrixClientRef.current) {
-                  mainRoomId = await createSpaceRoom(
-                    matrixClientRef.current, name, session.userId,
-                    {
-                      discoverability: opts?.discoverability ?? 'public',
-                      inviteUserIds: opts?.inviteUserIds,
-                    },
-                  );
-                  // Refresh space entries so the new room is discoverable
-                  if (mainRoomId) {
-                    try {
-                      const entries = discoverSpacesFromMatrix(matrixClientRef.current);
-                      if (entries.length > 0) setSpaceEntries(entries);
-                    } catch { /* best effort */ }
+                const spaceTarget = `space_${name.toLowerCase().replace(/\s+/g, '_')}`;
+                const client = matrixClientRef.current!;
+
+                // ── Step 1: Create Matrix rooms (main + governance) ──
+                const roomResult = await createSpaceRoom(
+                  client, name, session.userId,
+                  {
+                    discoverability: opts?.discoverability ?? 'public',
+                    inviteUserIds: opts?.inviteUserIds,
+                  },
+                );
+                if (!roomResult) {
+                  throw new Error('Failed to create Matrix rooms for this space. The homeserver may be unreachable or restricting room creation.');
+                }
+                const { mainRoomId, governanceRoomId } = roomResult;
+                const spaceRooms: SpaceConfig['rooms'] = {
+                  main: mainRoomId,
+                  ...(governanceRoomId ? { governance: governanceRoomId } : {}),
+                };
+
+                // ── Step 2: Create Filen folder (if connected) ──
+                // Non-fatal: rooms are the hard requirement; Filen can be retried in setupSpaceStore.
+                let filenStorage: { folderUuid: string; path: string } | undefined;
+                const filenState = useFilenStore.getState();
+                if (filenState.connected) {
+                  try {
+                    const folderUuid = await filenState.ensureSpaceFolder(spaceTarget, name);
+                    filenStorage = { folderUuid, path: `/EO-DB/${name}` };
+                  } catch (e) {
+                    console.warn('[EO-DB] Filen folder creation failed during space creation (will retry later):', e);
                   }
                 }
 
-                // Initialize the space store before dispatching so store is not null
+                // ── Step 3: Update space config with storage paths ──
+                const storageConfig: SpaceConfig['storage'] = {};
+                if (filenStorage) storageConfig.filen = filenStorage;
+                if (Object.keys(storageConfig).length > 0) {
+                  try {
+                    const updatedConfig: any = {
+                      name,
+                      rooms: spaceRooms,
+                      field_assignments: [],
+                      space_settings: {},
+                      storage: storageConfig,
+                      discoverability: opts?.discoverability ?? 'public',
+                    };
+                    await setSpaceConfig(client, mainRoomId, updatedConfig);
+                    if (governanceRoomId) {
+                      await setSpaceConfig(client, governanceRoomId, updatedConfig).catch(() => {});
+                    }
+                  } catch (e) {
+                    console.warn('[EO-DB] Failed to update space config with storage paths:', e);
+                  }
+                }
+
+                // ── Step 4: Refresh discovery ──
+                try {
+                  const entries = discoverSpacesFromMatrix(client);
+                  if (entries.length > 0) setSpaceEntries(entries);
+                } catch { /* best effort */ }
+
+                // ── Step 5: Create local IDB store ──
                 const idb = await createIdb(spaceTarget);
                 const key = await deriveKey(session.userId, session.deviceId);
                 const spaceStore = createStore(idb, key);
                 await init(spaceStore);
 
-                // Matrix sync disabled — events fold locally, Filen handles sync
+                // Cache with full topology so Settings and sync resolve correctly
+                spaceCacheRef.current.set(spaceTarget, {
+                  store: spaceStore,
+                  syncManager: null,
+                  filenSync: null,
+                  mainRoomId,
+                  presence: null,
+                  spaceRooms,
+                });
 
-                // Cache it so setupSpaceStore reuses it instead of re-opening
-                spaceCacheRef.current.set(spaceTarget, { store: spaceStore, syncManager: null, filenSync: null, mainRoomId, presence: null });
-
-                // Now dispatch is safe — store is initialized (and sync will send to Matrix)
+                // Dispatch INS event
                 const dispatch = useEoStore.getState().dispatch;
                 await dispatch({
                   op: 'INS',
@@ -1487,7 +1569,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                   last_acquired_ts: now,
                 } as EoState]);
 
-                // Register space in root IDB so it survives page reload without Matrix
+                // Register in root IDB so it survives page reload without Matrix
                 const rootIdb = await createIdb();
                 const rootKey = await deriveKey(session.userId, session.deviceId);
                 const rootSt = createStore(rootIdb, rootKey);
@@ -1662,22 +1744,26 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             </>
           )}
 
-          {selectedScope && (
+          {selectedSpace && (
           <nav style={s.sidebarNav}>
-            <div style={s.navGroupLabel}>Actions</div>
-            {(['compose', 'import'] as View[]).map((view) => (
-              <button
-                key={view}
-                onClick={() => { navigate({ view }); }}
-                style={{
-                  ...s.navItem,
-                  ...(activeView === view ? s.navItemActive : {}),
-                }}
-              >
-                <span style={s.navIcon}>{NAV_ICONS[view]}</span>
-                {view === 'compose' ? '+ Compose' : view.charAt(0).toUpperCase() + view.slice(1)}
-              </button>
-            ))}
+            {selectedScope && (
+              <>
+                <div style={s.navGroupLabel}>Actions</div>
+                {(['compose', 'import'] as View[]).map((view) => (
+                  <button
+                    key={view}
+                    onClick={() => { navigate({ view }); }}
+                    style={{
+                      ...s.navItem,
+                      ...(activeView === view ? s.navItemActive : {}),
+                    }}
+                  >
+                    <span style={s.navIcon}>{NAV_ICONS[view]}</span>
+                    {view === 'compose' ? '+ Compose' : view.charAt(0).toUpperCase() + view.slice(1)}
+                  </button>
+                ))}
+              </>
+            )}
             <div style={s.navGroupLabel}>Collaborate</div>
             <button
               onClick={() => navigate({ view: 'people' })}

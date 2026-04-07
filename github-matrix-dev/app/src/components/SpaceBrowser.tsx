@@ -21,10 +21,12 @@ export interface CreateSpaceUIOptions {
 interface SpaceBrowserProps {
   entries: SpaceEntry[];
   loading: boolean;
+  /** Whether the Matrix connection is ready (required for space creation) */
+  matrixReady?: boolean;
   activeSpace: string | null;
   onSelect: (spaceTarget: string) => void;
   onClose: () => void;
-  onCreate: (name: string, opts: CreateSpaceUIOptions) => void;
+  onCreate: (name: string, opts: CreateSpaceUIOptions) => void | Promise<void>;
   onDelete?: (spaceTarget: string) => void;
   onArchive?: (spaceTarget: string) => void;
   onOpenRecycleBin?: () => void;
@@ -58,7 +60,7 @@ function formatDate(ts: number): string {
   });
 }
 
-export function SpaceBrowser({ entries, loading, activeSpace, onSelect, onClose, onCreate, onDelete, onArchive, onOpenRecycleBin, deletedCount = 0, archivedCount = 0, publicEntries = [], onRequestAccess }: SpaceBrowserProps) {
+export function SpaceBrowser({ entries, loading, matrixReady = true, activeSpace, onSelect, onClose, onCreate, onDelete, onArchive, onOpenRecycleBin, deletedCount = 0, archivedCount = 0, publicEntries = [], onRequestAccess }: SpaceBrowserProps) {
   const { theme } = useTheme();
   const s = makeStyles(theme);
 
@@ -68,6 +70,8 @@ export function SpaceBrowser({ entries, loading, activeSpace, onSelect, onClose,
   const [newDiscoverability, setNewDiscoverability] = useState<'public' | 'private'>('public');
   const [newInviteInput, setNewInviteInput] = useState('');
   const [newInviteList, setNewInviteList] = useState<string[]>([]);
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
 
   const sorted = useMemo(() => {
     const list = [...entries];
@@ -93,18 +97,26 @@ export function SpaceBrowser({ entries, loading, activeSpace, onSelect, onClose,
     );
   }
 
-  function handleCreate() {
+  async function handleCreate() {
     const trimmed = newName.trim();
-    if (!trimmed) return;
-    onCreate(trimmed, {
-      discoverability: newDiscoverability,
-      inviteUserIds: newInviteList.length > 0 ? newInviteList : undefined,
-    });
-    setNewName('');
-    setNewDiscoverability('public');
-    setNewInviteList([]);
-    setNewInviteInput('');
-    setShowCreate(false);
+    if (!trimmed || creating) return;
+    setCreating(true);
+    setCreateError(null);
+    try {
+      await onCreate(trimmed, {
+        discoverability: newDiscoverability,
+        inviteUserIds: newInviteList.length > 0 ? newInviteList : undefined,
+      });
+      setNewName('');
+      setNewDiscoverability('public');
+      setNewInviteList([]);
+      setNewInviteInput('');
+      setShowCreate(false);
+    } catch (e: any) {
+      setCreateError(e?.message || 'Space creation failed');
+    } finally {
+      setCreating(false);
+    }
   }
 
   function addInvite() {
@@ -133,8 +145,10 @@ export function SpaceBrowser({ entries, loading, activeSpace, onSelect, onClose,
           </div>
           <div style={{ display: 'flex', gap: 6 }}>
             <button
-              style={s.newButton}
-              onClick={() => setShowCreate(!showCreate)}
+              style={{ ...s.newButton, ...(!matrixReady ? { opacity: 0.4, cursor: 'not-allowed' } : {}) }}
+              onClick={() => matrixReady && setShowCreate(!showCreate)}
+              title={matrixReady ? 'Create a new space' : 'Matrix must be connected to create spaces'}
+              disabled={!matrixReady}
             >
               + New
             </button>
@@ -403,16 +417,30 @@ export function SpaceBrowser({ entries, loading, activeSpace, onSelect, onClose,
               </div>
             )}
 
+            {createError && (
+              <div style={{
+                marginTop: 8,
+                padding: '6px 10px',
+                fontSize: 11,
+                fontFamily: "'JetBrains Mono', monospace",
+                color: theme.danger,
+                background: `${theme.danger}12`,
+                border: `1px solid ${theme.danger}30`,
+                borderRadius: 4,
+              }}>
+                {createError}
+              </div>
+            )}
             <div style={{ display: 'flex', gap: 6, marginTop: 10, justifyContent: 'flex-end' }}>
-              <button style={s.cancelButton} onClick={() => { setShowCreate(false); setNewName(''); setNewInviteList([]); setNewInviteInput(''); setNewDiscoverability('public'); }}>
+              <button style={s.cancelButton} onClick={() => { setShowCreate(false); setCreateError(null); setNewName(''); setNewInviteList([]); setNewInviteInput(''); setNewDiscoverability('public'); }}>
                 Cancel
               </button>
               <button
-                style={{ ...s.newButton, opacity: newName.trim() ? 1 : 0.5 }}
+                style={{ ...s.newButton, opacity: newName.trim() && !creating ? 1 : 0.5 }}
                 onClick={handleCreate}
-                disabled={!newName.trim()}
+                disabled={!newName.trim() || creating}
               >
-                Create
+                {creating ? 'Creating...' : 'Create'}
               </button>
             </div>
           </div>

@@ -72,6 +72,11 @@ export interface SpaceConfig {
   };
   field_assignments: FieldAssignment[];
   space_settings: SpaceSettings;
+  /** Cloud storage paths provisioned when the space was created. */
+  storage?: {
+    filen?: { folderUuid: string; path: string };
+    gdrive?: { folderId: string; path: string };
+  };
   /** Whether this space is listed in the homeserver's public room directory.
    *  'public' (default) — anyone on the homeserver can discover the space and knock to request access.
    *  'private' — only invited members know the space exists. */
