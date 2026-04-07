@@ -22,31 +22,71 @@
       "position": [0, 0],
       "credentials": {
         "googleDriveOAuth2Api": {
-          "id": "GOOGLE_DRIVE_CREDENTIAL_ID",
-          "name": "Google Drive"
+          "id": "aAKNhRE1Lbsc2eVY",
+          "name": "RK LAcy Law App"
         }
       }
     },
     {
       "parameters": {
-        "jsCode": "// Build the Matrix event payload for eo.n8n.drive.change\nconst file = $json;\nreturn [{\n  json: {\n    type: 'eo.n8n.drive.change',\n    content: {\n      file_id: file.id,\n      file_name: file.name,\n      mime_type: file.mimeType || 'application/octet-stream',\n      size: parseInt(file.size || '0', 10),\n      change_type: 'created',\n      drive_folder: file.parents ? file.parents[0] : '',\n      detected_at: new Date().toISOString()\n    }\n  }\n}];"
+        "jsCode": "// Build the drive change notification payload.\n// This is POSTed directly to the EO-DB server's /n8n/drive-change endpoint\n// AND sent to the Matrix room as an eo.n8n.drive.change event.\nconst file = $json;\nreturn [{\n  json: {\n    type: 'eo.n8n.drive.change',\n    content: {\n      file_id: file.id,\n      file_name: file.name,\n      mime_type: file.mimeType || 'application/octet-stream',\n      size: parseInt(file.size || '0', 10),\n      change_type: 'created',\n      drive_folder: file.parents ? file.parents[0] : '',\n      detected_at: new Date().toISOString()\n    }\n  }\n}];"
       },
       "id": "node-build-event",
-      "name": "Build Matrix Event",
+      "name": "Build Change Event",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [250, 0]
     },
     {
       "parameters": {
-        "method": "PUT",
-        "url": "=https://app.aminoimmigration.com/_matrix/client/v3/rooms/MATRIX_ROOM_ID/send/eo.n8n.drive.change/{{ $runIndex }}-{{ Date.now() }}",
+        "method": "POST",
+        "url": "={{ $env.EO_SERVER_URL || 'http://localhost:3000' }}/n8n/drive-change",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
             {
               "name": "Authorization",
-              "value": "Bearer MATRIX_BOT_ACCESS_TOKEN"
+              "value": "={{ 'Bearer ' + $env.MATRIX_BOT_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "body",
+              "value": "={{ JSON.stringify($json.content) }}"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "node-post-eo",
+      "name": "POST to EO-DB",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [500, -100]
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "={{ 'https://app.aminoimmigration.com/_matrix/client/v3/rooms/' + $env.MATRIX_ROOM_ID + '/send/eo.n8n.drive.change/' + $runIndex + '-' + Date.now() }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.MATRIX_BOT_TOKEN }}"
             },
             {
               "name": "Content-Type",
@@ -69,20 +109,25 @@
       "name": "Send to Matrix Room",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [500, 0]
+      "position": [500, 100]
     }
   ],
   "connections": {
     "Drive Trigger": {
-      "main": [[{ "node": "Build Matrix Event", "type": "main", "index": 0 }]]
+      "main": [[{ "node": "Build Change Event", "type": "main", "index": 0 }]]
     },
-    "Build Matrix Event": {
-      "main": [[{ "node": "Send to Matrix Room", "type": "main", "index": 0 }]]
+    "Build Change Event": {
+      "main": [
+        [
+          { "node": "POST to EO-DB", "type": "main", "index": 0 },
+          { "node": "Send to Matrix Room", "type": "main", "index": 0 }
+        ]
+      ]
     }
   },
   "pinData": {},
   "meta": {
     "templateCredsSetupCompleted": true,
-    "instanceId": ""
+    "instanceId": "5c737be3fd9beebae6ccb42a087a71b95589b90d613100d5ba10c73188a40d22"
   }
 }

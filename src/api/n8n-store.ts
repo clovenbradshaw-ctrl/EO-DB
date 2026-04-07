@@ -4,24 +4,22 @@
  * Exposes the n8n webhook pipeline as REST endpoints so clients can
  * store, retrieve, and list encrypted blobs in Google Drive via n8n.
  *
- * All data is AES-256-GCM encrypted before leaving the device.
- * The n8n workflow (n8n-eo-store-webhook.json) handles:
- *   - Matrix token auth forwarding
- *   - Action routing (store / retrieve / list)
- *   - Google Drive file operations via "RK LAcy Law App" OAuth2
+ * Also provides the drive-change ingestion endpoint — the same pattern
+ * Filen uses: external file changes are folded into the EO event log.
  *
  * Routes:
- *   POST /n8n/store     — encrypt & store a blob
- *   POST /n8n/retrieve  — fetch & decrypt a blob by manifest
- *   POST /n8n/list      — list stored blobs (optionally filtered)
- *   GET  /n8n/status     — check if n8n integration is configured
+ *   POST /n8n/store        — encrypt & store a blob
+ *   POST /n8n/retrieve     — fetch & decrypt a blob by manifest
+ *   POST /n8n/list         — list stored blobs (optionally filtered)
+ *   POST /n8n/drive-change — ingest Google Drive change notifications
+ *   GET  /n8n/status       — check if n8n integration is configured
  */
 
 import type { FastifyInstance } from 'fastify';
 import type { EoDb } from '../db/level.js';
 import type { Feed } from '../db/feed.js';
 import type { AuthenticatedRequest } from '../auth/matrix.js';
-import type { ManifestDataType, ManifestEntry } from '../n8n/types.js';
+import type { ManifestDataType, ManifestEntry, DriveChangeNotification } from '../n8n/types.js';
 import { getN8nConfig } from '../n8n/config.js';
 import {
   storeViaN8n,
@@ -29,6 +27,7 @@ import {
   retrieveViaN8n,
   listViaN8n,
 } from '../n8n/webhook-client.js';
+import { DriveChangeBridge } from '../n8n/drive-change-bridge.js';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
@@ -45,9 +44,12 @@ function extractMatrixToken(request: AuthenticatedRequest): string | null {
 
 export function registerN8nRoutes(
   app: FastifyInstance,
-  _db: EoDb,
-  _feed: Feed,
+  db: EoDb,
+  feed: Feed,
 ): void {
+  // Drive change bridge — folds Google Drive file changes into the EO event log,
+  // same pattern as FilenPipelineBridge folds Filen file changes.
+  const driveBridge = new DriveChangeBridge(db, feed);
   /**
    * GET /n8n/status — is n8n configured?
    */
@@ -185,6 +187,40 @@ export function registerN8nRoutes(
       return reply.send(result);
     } catch (e: any) {
       return reply.code(502).send({ error: e.message });
+    }
+  });
+
+  /**
+   * POST /n8n/drive-change — ingest Google Drive file change notifications.
+   *
+   * Called by the n8n Drive Watcher workflow (n8n-drive-watcher.json) or
+   * by Matrix event handlers when they see `eo.n8n.drive.change` events.
+   *
+   * This is the Google Drive equivalent of the Filen pipeline — file
+   * changes are folded into the EO event log as INS/DEF/NUL operators.
+   *
+   * Body: DriveChangeNotification | DriveChangeNotification[]
+   *   { file_id, file_name, mime_type, size, change_type, drive_folder, detected_at }
+   */
+  app.post('/n8n/drive-change', async (request: AuthenticatedRequest, reply) => {
+    const body = request.body as DriveChangeNotification | DriveChangeNotification[];
+
+    try {
+      if (Array.isArray(body)) {
+        const seqs = await driveBridge.handleBatch(body);
+        return reply.send({ ok: true, count: seqs.length, sequences: seqs });
+      }
+
+      if (!body.file_id || !body.change_type) {
+        return reply.code(400).send({
+          error: 'Missing required fields: file_id, change_type',
+        });
+      }
+
+      const seq = await driveBridge.handleChange(body);
+      return reply.send({ ok: true, seq });
+    } catch (e: any) {
+      return reply.code(500).send({ error: e.message });
     }
   });
 }
