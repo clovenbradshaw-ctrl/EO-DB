@@ -2,23 +2,26 @@
 /**
  * EO Code Analysis Framework — Entry Point
  *
- * Analyzes the EO-DB codebase using EO's own nine-operator model:
+ * Three layers of analysis, mirroring the three faces of the capacity cube:
  *
- *   INS  → Code entities come into existence
- *   DEF  → Properties assigned to entities
- *   CON  → Import/dependency connections
- *   SEG  → Architecture layer boundaries
- *   SYN  → Server ↔ browser equivalences
- *   EVA  → Governance rules
- *   REC  → Circular dependencies
- *   SIG  → Complexity hotspots
- *   NUL  → Well-contained modules
+ * Layer 1 — Act face (Mode × Domain): Static code structure mapped to 9 operators
+ *   INS → entities, DEF → properties, CON → imports, SEG → layers,
+ *   SYN → equivalences, EVA → rules, REC → cycles, SIG → hotspots, NUL → simple
+ *
+ * Layer 2 — Site face (Mode × Object): Data transformation flow
+ *   How data moves through the system: compose → fold → state → horizon → UI → sync
+ *   Where each operator is implemented (server + browser)
+ *
+ * Layer 3 — Resolution face (Domain × Object): The capacity cube itself
+ *   The 3D structure behind the 9 operators: Mode × Domain × Object = 27 cells
+ *   Three faces (Act, Site, Resolution) as projection functors
+ *   Self-reference: the analysis uses EO to analyze EO
  *
  * Usage:
  *   npx tsx tools/eo-code-analysis/src/index.ts [--json] [--graph] [--report] [--all]
  *
  * Output (in tools/eo-code-analysis/output/):
- *   events.json  — EO event log describing the codebase (loadable into fold)
+ *   events.json  — Full EO event log (all three layers)
  *   graph.json   — CON dependency graph for visualization
  *   report.md    — Human-readable analysis through the EO lens
  */
@@ -28,13 +31,16 @@ import { scanDirectory } from './scanner.js';
 import { mapToEoOperators } from './mapper.js';
 import { writeEvents, writeGraph } from './emitter.js';
 import { generateReport, writeReport } from './reporter.js';
+import { emitFlowEvents } from './flows.js';
+import { emitOperatorMapEvents } from './operator-map.js';
+import { emitCubeEvents } from './cube.js';
 
 const ROOT_DIR = path.resolve(import.meta.dirname, '../../..');
 const OUTPUT_DIR = path.resolve(import.meta.dirname, '../output');
 
 function main() {
   const args = new Set(process.argv.slice(2));
-  const all = args.has('--all') || args.size === 0; // default: emit everything
+  const all = args.has('--all') || args.size === 0;
   const emitJson = all || args.has('--json');
   const emitGraph = all || args.has('--graph');
   const emitReport = all || args.has('--report');
@@ -44,39 +50,50 @@ function main() {
   console.log(`Root: ${ROOT_DIR}`);
   console.log();
 
-  // 1. Scan
-  console.log('[1/4] Scanning codebase...');
+  // Layer 1: Act face — static code structure
+  console.log('[1/5] Scanning codebase (Act face — code structure)...');
   const files = scanDirectory(ROOT_DIR, ROOT_DIR);
   console.log(`  Found ${files.length} TypeScript files`);
 
-  // 2. Map to EO operators
-  console.log('[2/4] Mapping to EO operators...');
+  console.log('[2/5] Mapping to EO operators...');
   const result = mapToEoOperators(files);
-  console.log(`  Generated ${result.events.length} EO events`);
-  console.log(`  - SEG: ${result.layers.length} architecture layers`);
-  console.log(`  - CON: ${result.stats.totalImportEdges} import edges`);
-  console.log(`  - SYN: 6 server/browser equivalences`);
-  console.log(`  - REC: ${result.cycles.length} import cycles`);
-  console.log(`  - SIG: ${result.hotspots.length} complexity hotspots`);
+  console.log(`  Generated ${result.events.length} code structure events`);
 
-  // 3. Emit outputs
-  console.log('[3/4] Writing outputs...');
+  // Layer 2: Site face — data flow + operator implementations
+  console.log('[3/5] Tracing transformation flow (Site face — data movement)...');
+  const maxCodeSeq = result.events.length > 0 ? result.events[result.events.length - 1].seq : 0;
+  const flowEvents = emitFlowEvents(maxCodeSeq);
+  const opMapEvents = emitOperatorMapEvents(maxCodeSeq + flowEvents.length);
+  console.log(`  ${flowEvents.length} flow events (pipeline stages + self-reference)`);
+  console.log(`  ${opMapEvents.length} operator implementation events`);
+
+  // Layer 3: Resolution face — the capacity cube
+  console.log('[4/5] Building capacity cube (Resolution face — 3D structure)...');
+  const cubeEvents = emitCubeEvents(maxCodeSeq + flowEvents.length + opMapEvents.length);
+  console.log(`  ${cubeEvents.length} cube events (27 cells, 3 faces, 3 axes)`);
+
+  // Merge all events
+  const allEvents = [...result.events, ...flowEvents, ...opMapEvents, ...cubeEvents];
+  console.log(`  Total: ${allEvents.length} events across all three layers`);
+
+  // Emit outputs
+  console.log('[5/5] Writing outputs...');
 
   if (emitJson) {
     const eventsPath = path.join(OUTPUT_DIR, 'events.json');
-    writeEvents(result.events, eventsPath);
+    writeEvents(allEvents, eventsPath);
     console.log(`  events.json → ${eventsPath}`);
   }
 
   if (emitGraph) {
     const graphPath = path.join(OUTPUT_DIR, 'graph.json');
-    writeGraph(result.events, graphPath);
+    writeGraph(allEvents, graphPath);
     console.log(`  graph.json  → ${graphPath}`);
   }
 
   if (emitReport) {
     const report = generateReport({
-      events: result.events,
+      events: allEvents,
       files,
       layers: result.layers,
       crossLayerConnections: result.crossLayerConnections,
@@ -89,30 +106,24 @@ function main() {
     console.log(`  report.md   → ${reportPath}`);
   }
 
-  // 4. Summary
+  // Summary
   console.log();
-  console.log('[4/4] Analysis complete!');
+  console.log('Analysis complete!');
   console.log();
-  console.log('Stats:');
-  console.log(`  Files:       ${result.stats.totalFiles}`);
-  console.log(`  Lines:       ${result.stats.totalLines.toLocaleString()}`);
-  console.log(`  Functions:   ${result.stats.totalFunctions}`);
-  console.log(`  Components:  ${result.stats.totalComponents}`);
-  console.log(`  Interfaces:  ${result.stats.totalInterfaces}`);
-  console.log(`  Types:       ${result.stats.totalTypes}`);
-  console.log(`  Exports:     ${result.stats.totalExports}`);
-  console.log(`  Import edges: ${result.stats.totalImportEdges}`);
+  console.log(`Code:  ${result.stats.totalFiles} files, ${result.stats.totalLines.toLocaleString()} lines`);
+  console.log(`Graph: ${result.stats.totalImportEdges} import edges, ${result.cycles.length} cycles`);
+  console.log(`Cube:  27 cells = Mode(3) × Domain(3) × Object(3)`);
+  console.log(`Faces: Act (9 operators) + Site (9 positions) + Resolution (9 strategies)`);
   console.log();
-  console.log('Operator event breakdown:');
+
   const opCounts = new Map<string, number>();
-  for (const e of result.events) {
+  for (const e of allEvents) {
     opCounts.set(e.op, (opCounts.get(e.op) || 0) + 1);
   }
+  console.log('Event breakdown:');
   for (const op of ['SEG', 'INS', 'DEF', 'CON', 'SYN', 'EVA', 'REC', 'SIG', 'NUL']) {
     const count = opCounts.get(op) || 0;
-    if (count > 0) {
-      console.log(`  ${op}: ${count}`);
-    }
+    if (count > 0) console.log(`  ${op}: ${count}`);
   }
 }
 
