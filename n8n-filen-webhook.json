@@ -90,7 +90,7 @@
     {
       "parameters": {
         "respondWith": "json",
-        "responseBody": "={\n  \"apiKey\": \"____\",\n  \"masterKeys\": [\"____\"],\n  \"email\": \"scores.patch.points@proton.me\",\n  \"airtablePat\": \"____\"\n}",
+        "responseBody": "={\n  \"filen username\": \"scores.patch.points@proton.me\",\n  \"filen password\": \"____\",\n  \"airtable PAT\": \"____\"\n}",
         "options": {
           "responseCode": 200
         }
