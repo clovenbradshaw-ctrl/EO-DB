@@ -3,13 +3,30 @@
   "nodes": [
     {
       "parameters": {
+        "httpMethod": "POST",
+        "path": "eo-store",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true,
+          "allowedOrigins": "*"
+        }
+      },
+      "id": "2c1d1ff0-32d8-40cc-bd53-b1f0e47d5bef",
+      "name": "Webhook1",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-1312, 1248],
+      "webhookId": "11111111-1111-1111-1111-111111111001"
+    },
+    {
+      "parameters": {
         "url": "https://app.aminoimmigration.com/_matrix/client/v3/account/whoami",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
             {
               "name": "Authorization",
-              "value": "={{ 'Bearer ' + $json.headers['x-matrix-token'] }}"
+              "value": "={{ 'Bearer ' + $json.body.matrix_token }}"
             }
           ]
         },
@@ -25,10 +42,7 @@
       "name": "Matrix Auth",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [
-        -1088,
-        1248
-      ]
+      "position": [-1088, 1248]
     },
     {
       "parameters": {
@@ -57,10 +71,7 @@
       "name": "Auth OK?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
-      "position": [
-        -880,
-        1248
-      ]
+      "position": [-880, 1248]
     },
     {
       "parameters": {
@@ -74,10 +85,7 @@
       "name": "Respond 401",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
-      "position": [
-        -656,
-        1392
-      ]
+      "position": [-656, 1392]
     },
     {
       "parameters": {
@@ -85,15 +93,9 @@
         "value1": "={{ $('Webhook1').first().json.body.action }}",
         "rules": {
           "rules": [
-            {
-              "value2": "store"
-            },
-            {
-              "value2": "retrieve"
-            },
-            {
-              "value2": "list"
-            }
+            { "value2": "store" },
+            { "value2": "retrieve" },
+            { "value2": "list" }
           ]
         },
         "fallbackOutput": "none"
@@ -102,11 +104,9 @@
       "name": "Route by Action",
       "type": "n8n-nodes-base.switch",
       "typeVersion": 2,
-      "position": [
-        -656,
-        1104
-      ]
+      "position": [-656, 1104]
     },
+
     {
       "parameters": {
         "jsCode": "const body = $('Webhook1').first().json.body;\nconst dataType = body.data_type || 'default';\nconst hash = body.envelope.content_hash;\nconst dataId = body.data_id;\n\nreturn [{\n  json: {\n    fileName: `${hash}.json`,\n    folderName: dataType,\n    fileContent: JSON.stringify({\n      envelope: body.envelope,\n      data_id: dataId,\n      data_type: dataType,\n      stored_at: new Date().toISOString()\n    }),\n    content_hash: hash\n  }\n}];"
@@ -115,16 +115,123 @@
       "name": "Prep Store",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [
-        -432,
-        960
-      ]
+      "position": [-432, 960]
+    },
+    {
+      "parameters": {
+        "url": "={{ 'https://www.googleapis.com/drive/v3/files?q=name%3D%27' + encodeURIComponent($json.folderName) + '%27+and+mimeType%3D%27application%2Fvnd.google-apps.folder%27+and+trashed%3Dfalse&fields=files(id%2Cname)&spaces=drive' }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleDriveOAuth2Api",
+        "options": {}
+      },
+      "id": "a1b2c3d4-1111-4444-aaaa-000000000001",
+      "name": "Find Store Folder",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-208, 960],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "aAKNhRE1Lbsc2eVY",
+          "name": "RK LAcy Law App"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const files = $json.files || [];\nconst folderName = $('Prep Store').first().json.folderName;\n\nif (files.length > 0) {\n  return [{ json: { folderId: files[0].id, folderName, existed: true } }];\n} else {\n  return [{ json: { folderId: null, folderName, existed: false } }];\n}"
+      },
+      "id": "a1b2c3d4-1111-4444-aaaa-000000000002",
+      "name": "Check Store Folder",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [16, 960]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "cond-folder-exists",
+              "leftValue": "={{ $json.existed }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-1111-4444-aaaa-000000000003",
+      "name": "Folder Exists?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [240, 960]
+    },
+    {
+      "parameters": {
+        "url": "https://www.googleapis.com/drive/v3/files",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            { "name": "name", "value": "={{ $('Check Store Folder').first().json.folderName }}" },
+            { "name": "mimeType", "value": "application/vnd.google-apps.folder" }
+          ]
+        },
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleDriveOAuth2Api",
+        "options": {}
+      },
+      "id": "a1b2c3d4-1111-4444-aaaa-000000000004",
+      "name": "Create Folder",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [464, 1060],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "aAKNhRE1Lbsc2eVY",
+          "name": "RK LAcy Law App"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// After folder creation, grab the new folder ID\nconst folderId = $json.id;\nreturn [{ json: { folderId } }];"
+      },
+      "id": "a1b2c3d4-1111-4444-aaaa-000000000005",
+      "name": "Use New Folder ID",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [688, 1060]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Folder already existed, pass through its ID\nconst folderId = $('Check Store Folder').first().json.folderId;\nreturn [{ json: { folderId } }];"
+      },
+      "id": "a1b2c3d4-1111-4444-aaaa-000000000006",
+      "name": "Use Existing Folder ID",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [464, 860]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "mergeByFields": {},
+        "combinationMode": "multiplex",
+        "options": {}
+      },
+      "id": "a1b2c3d4-1111-4444-aaaa-000000000007",
+      "name": "Merge Folder ID",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [912, 960]
     },
     {
       "parameters": {
         "operation": "createFromText",
-        "content": "={{ $json.fileContent }}",
-        "name": "={{ $json.fileName }}",
+        "content": "={{ $('Prep Store').first().json.fileContent }}",
+        "name": "={{ $('Prep Store').first().json.fileName }}",
         "driveId": {
           "__rl": true,
           "mode": "list",
@@ -132,8 +239,8 @@
         },
         "folderId": {
           "__rl": true,
-          "mode": "name",
-          "value": "={{ $json.folderName }}"
+          "mode": "id",
+          "value": "={{ $json.folderId }}"
         },
         "options": {}
       },
@@ -141,10 +248,7 @@
       "name": "Drive: Create File",
       "type": "n8n-nodes-base.googleDrive",
       "typeVersion": 3,
-      "position": [
-        -208,
-        960
-      ],
+      "position": [1136, 960],
       "credentials": {
         "googleDriveOAuth2Api": {
           "id": "aAKNhRE1Lbsc2eVY",
@@ -156,19 +260,15 @@
       "parameters": {
         "respondWith": "json",
         "responseBody": "={{ JSON.stringify({ ok: true, content_hash: $('Prep Store').first().json.content_hash, drive_file_id: $json.id }) }}",
-        "options": {
-          "responseCode": 200
-        }
+        "options": { "responseCode": 200 }
       },
       "id": "b4b17c4a-7984-4ad6-90e8-af451a4b4b95",
       "name": "Respond Store OK",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
-      "position": [
-        16,
-        960
-      ]
+      "position": [1360, 960]
     },
+
     {
       "parameters": {
         "url": "={{ 'https://www.googleapis.com/drive/v3/files?q=name%3D%27' + $('Webhook1').first().json.body.content_hash + '.json%27+and+trashed%3Dfalse&fields=files(id%2Cname%2CmimeType)&spaces=drive' }}",
@@ -180,10 +280,7 @@
       "name": "Drive: Search File",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [
-        -432,
-        1104
-      ],
+      "position": [-432, 1104],
       "credentials": {
         "googleDriveOAuth2Api": {
           "id": "aAKNhRE1Lbsc2eVY",
@@ -199,29 +296,19 @@
       "name": "Pick File ID",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [
-        -208,
-        1104
-      ]
+      "position": [-208, 1104]
     },
     {
       "parameters": {
         "operation": "download",
-        "fileId": {
-          "__rl": true,
-          "mode": "id",
-          "value": "={{ $json.id }}"
-        },
+        "fileId": { "__rl": true, "mode": "id", "value": "={{ $json.id }}" },
         "options": {}
       },
       "id": "1fe3903e-1638-455b-abdc-c2a0f0a02f0e",
       "name": "Drive: Download",
       "type": "n8n-nodes-base.googleDrive",
       "typeVersion": 3,
-      "position": [
-        16,
-        1104
-      ],
+      "position": [16, 1104],
       "credentials": {
         "googleDriveOAuth2Api": {
           "id": "aAKNhRE1Lbsc2eVY",
@@ -237,43 +324,65 @@
       "name": "Parse Retrieved",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [
-        240,
-        1104
-      ]
+      "position": [240, 1104]
     },
     {
       "parameters": {
         "respondWith": "json",
         "responseBody": "={{ JSON.stringify($json) }}",
-        "options": {
-          "responseCode": 200
-        }
+        "options": { "responseCode": 200 }
       },
       "id": "5fa7ad3b-0dee-44fb-a2e7-67dc365507ba",
       "name": "Respond Retrieve OK",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
-      "position": [
-        448,
-        1104
-      ]
+      "position": [448, 1104]
+    },
+
+    {
+      "parameters": {
+        "jsCode": "const body = $('Webhook1').first().json.body;\nconst dataType = body.data_type || '';\nreturn [{ json: { dataType, hasDataType: !!dataType } }];"
+      },
+      "id": "a1b2c3d4-2222-4444-bbbb-000000000001",
+      "name": "Prep List",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-432, 1248]
     },
     {
       "parameters": {
-        "url": "={{ 'https://www.googleapis.com/drive/v3/files?q=trashed%3Dfalse+and+name+contains+%27.json%27' + ($('Webhook1').first().json.body.data_type ? '+and+%27' + $('Webhook1').first().json.body.data_type + '%27+in+parents' : '') + '&fields=files(id%2Cname%2CcreatedTime%2Cparents)&spaces=drive&pageSize=100' }}",
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "cond-has-dt",
+              "leftValue": "={{ $json.hasDataType }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-2222-4444-bbbb-000000000002",
+      "name": "Has Data Type?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [-208, 1248]
+    },
+    {
+      "parameters": {
+        "url": "={{ 'https://www.googleapis.com/drive/v3/files?q=name%3D%27' + encodeURIComponent($('Prep List').first().json.dataType) + '%27+and+mimeType%3D%27application%2Fvnd.google-apps.folder%27+and+trashed%3Dfalse&fields=files(id%2Cname)&spaces=drive' }}",
         "authentication": "predefinedCredentialType",
         "nodeCredentialType": "googleDriveOAuth2Api",
         "options": {}
       },
-      "id": "b375ca13-379a-4b40-ba94-f08606f72ebf",
-      "name": "Drive: List Files",
+      "id": "a1b2c3d4-2222-4444-bbbb-000000000003",
+      "name": "Find List Folder",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [
-        -432,
-        1248
-      ],
+      "position": [16, 1200],
       "credentials": {
         "googleDriveOAuth2Api": {
           "id": "aAKNhRE1Lbsc2eVY",
@@ -283,207 +392,191 @@
     },
     {
       "parameters": {
-        "jsCode": "const files = $json.files || [];\nconst entries = files.map(f => {\n  const name = f.name || '';\n  const hash = name.replace('.json', '');\n  return {\n    data_id: f.id,\n    content_hash: hash,\n    data_type: (f.parents && f.parents[0]) || 'unknown',\n    stored_at: f.createdTime || ''\n  };\n});\nreturn [{ json: { ok: true, entries } }];"
+        "jsCode": "const files = $json.files || [];\nif (!files.length) {\n  // Folder doesn't exist yet — return empty list\n  return [{ json: { ok: true, entries: [] } }];\n}\nconst folderId = files[0].id;\nreturn [{ json: { folderId, needsQuery: true } }];"
+      },
+      "id": "a1b2c3d4-2222-4444-bbbb-000000000004",
+      "name": "Check List Folder",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [240, 1200]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "cond-needs-query",
+              "leftValue": "={{ $json.needsQuery }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-2222-4444-bbbb-000000000005",
+      "name": "Folder Found?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [464, 1200]
+    },
+    {
+      "parameters": {
+        "url": "={{ 'https://www.googleapis.com/drive/v3/files?q=%27' + $json.folderId + '%27+in+parents+and+trashed%3Dfalse+and+name+contains+%27.json%27&fields=files(id%2Cname%2CcreatedTime%2Cparents)&spaces=drive&pageSize=100' }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleDriveOAuth2Api",
+        "options": {}
+      },
+      "id": "a1b2c3d4-2222-4444-bbbb-000000000006",
+      "name": "Drive: List Files By Folder",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [688, 1152],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "aAKNhRE1Lbsc2eVY",
+          "name": "RK LAcy Law App"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "={{ 'https://www.googleapis.com/drive/v3/files?q=trashed%3Dfalse+and+name+contains+%27.json%27&fields=files(id%2Cname%2CcreatedTime%2Cparents)&spaces=drive&pageSize=100' }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleDriveOAuth2Api",
+        "options": {}
+      },
+      "id": "a1b2c3d4-2222-4444-bbbb-000000000007",
+      "name": "Drive: List All Files",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [16, 1344],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "aAKNhRE1Lbsc2eVY",
+          "name": "RK LAcy Law App"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const files = $json.files || [];\nconst dataType = $('Prep List').first().json.dataType;\nconst entries = files.map(f => {\n  const name = f.name || '';\n  const hash = name.replace('.json', '');\n  return {\n    data_id: f.id,\n    content_hash: hash,\n    data_type: dataType || ((f.parents && f.parents[0]) || 'unknown'),\n    stored_at: f.createdTime || ''\n  };\n});\nreturn [{ json: { ok: true, entries } }];"
       },
       "id": "78947b88-cc1a-49d6-924f-f07704a7a2f5",
       "name": "Format List",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [
-        -208,
-        1248
-      ]
+      "position": [912, 1248]
     },
     {
       "parameters": {
         "respondWith": "json",
         "responseBody": "={{ JSON.stringify($json) }}",
-        "options": {
-          "responseCode": 200
-        }
+        "options": { "responseCode": 200 }
       },
       "id": "42815d16-737a-44d2-85e3-4bc078f96133",
       "name": "Respond List OK",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
-      "position": [
-        16,
-        1248
-      ]
-    },
-    {
-      "parameters": {
-        "httpMethod": "POST",
-        "path": "eo-store",
-        "responseMode": "responseNode",
-        "options": {
-          "rawBody": true
-        }
-      },
-      "id": "2c1d1ff0-32d8-40cc-bd53-b1f0e47d5bef",
-      "name": "Webhook1",
-      "type": "n8n-nodes-base.webhook",
-      "typeVersion": 2,
-      "position": [
-        -1312,
-        1248
-      ],
-      "webhookId": "11111111-1111-1111-1111-111111111001"
+      "position": [1136, 1248]
     }
   ],
   "connections": {
+    "Webhook1": {
+      "main": [[{ "node": "Matrix Auth", "type": "main", "index": 0 }]]
+    },
     "Matrix Auth": {
-      "main": [
-        [
-          {
-            "node": "Auth OK?",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
+      "main": [[{ "node": "Auth OK?", "type": "main", "index": 0 }]]
     },
     "Auth OK?": {
       "main": [
-        [
-          {
-            "node": "Route by Action",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Respond 401",
-            "type": "main",
-            "index": 0
-          }
-        ]
+        [{ "node": "Route by Action", "type": "main", "index": 0 }],
+        [{ "node": "Respond 401", "type": "main", "index": 0 }]
       ]
     },
     "Route by Action": {
       "main": [
-        [
-          {
-            "node": "Prep Store",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Drive: Search File",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Drive: List Files",
-            "type": "main",
-            "index": 0
-          }
-        ]
+        [{ "node": "Prep Store", "type": "main", "index": 0 }],
+        [{ "node": "Drive: Search File", "type": "main", "index": 0 }],
+        [{ "node": "Prep List", "type": "main", "index": 0 }]
       ]
     },
+
     "Prep Store": {
+      "main": [[{ "node": "Find Store Folder", "type": "main", "index": 0 }]]
+    },
+    "Find Store Folder": {
+      "main": [[{ "node": "Check Store Folder", "type": "main", "index": 0 }]]
+    },
+    "Check Store Folder": {
+      "main": [[{ "node": "Folder Exists?", "type": "main", "index": 0 }]]
+    },
+    "Folder Exists?": {
       "main": [
-        [
-          {
-            "node": "Drive: Create File",
-            "type": "main",
-            "index": 0
-          }
-        ]
+        [{ "node": "Use Existing Folder ID", "type": "main", "index": 0 }],
+        [{ "node": "Create Folder", "type": "main", "index": 0 }]
       ]
+    },
+    "Create Folder": {
+      "main": [[{ "node": "Use New Folder ID", "type": "main", "index": 0 }]]
+    },
+    "Use Existing Folder ID": {
+      "main": [[{ "node": "Merge Folder ID", "type": "main", "index": 0 }]]
+    },
+    "Use New Folder ID": {
+      "main": [[{ "node": "Merge Folder ID", "type": "main", "index": 1 }]]
+    },
+    "Merge Folder ID": {
+      "main": [[{ "node": "Drive: Create File", "type": "main", "index": 0 }]]
     },
     "Drive: Create File": {
-      "main": [
-        [
-          {
-            "node": "Respond Store OK",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
+      "main": [[{ "node": "Respond Store OK", "type": "main", "index": 0 }]]
     },
+
     "Drive: Search File": {
-      "main": [
-        [
-          {
-            "node": "Pick File ID",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
+      "main": [[{ "node": "Pick File ID", "type": "main", "index": 0 }]]
     },
     "Pick File ID": {
-      "main": [
-        [
-          {
-            "node": "Drive: Download",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
+      "main": [[{ "node": "Drive: Download", "type": "main", "index": 0 }]]
     },
     "Drive: Download": {
-      "main": [
-        [
-          {
-            "node": "Parse Retrieved",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
+      "main": [[{ "node": "Parse Retrieved", "type": "main", "index": 0 }]]
     },
     "Parse Retrieved": {
+      "main": [[{ "node": "Respond Retrieve OK", "type": "main", "index": 0 }]]
+    },
+
+    "Prep List": {
+      "main": [[{ "node": "Has Data Type?", "type": "main", "index": 0 }]]
+    },
+    "Has Data Type?": {
       "main": [
-        [
-          {
-            "node": "Respond Retrieve OK",
-            "type": "main",
-            "index": 0
-          }
-        ]
+        [{ "node": "Find List Folder", "type": "main", "index": 0 }],
+        [{ "node": "Drive: List All Files", "type": "main", "index": 0 }]
       ]
     },
-    "Drive: List Files": {
+    "Find List Folder": {
+      "main": [[{ "node": "Check List Folder", "type": "main", "index": 0 }]]
+    },
+    "Check List Folder": {
+      "main": [[{ "node": "Folder Found?", "type": "main", "index": 0 }]]
+    },
+    "Folder Found?": {
       "main": [
-        [
-          {
-            "node": "Format List",
-            "type": "main",
-            "index": 0
-          }
-        ]
+        [{ "node": "Drive: List Files By Folder", "type": "main", "index": 0 }],
+        [{ "node": "Format List", "type": "main", "index": 0 }]
       ]
+    },
+    "Drive: List Files By Folder": {
+      "main": [[{ "node": "Format List", "type": "main", "index": 0 }]]
+    },
+    "Drive: List All Files": {
+      "main": [[{ "node": "Format List", "type": "main", "index": 0 }]]
     },
     "Format List": {
-      "main": [
-        [
-          {
-            "node": "Respond List OK",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Webhook1": {
-      "main": [
-        [
-          {
-            "node": "Matrix Auth",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
+      "main": [[{ "node": "Respond List OK", "type": "main", "index": 0 }]]
     }
   },
   "pinData": {},
