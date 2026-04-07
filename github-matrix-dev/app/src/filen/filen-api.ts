@@ -18,7 +18,7 @@ const FILEN_GATEWAY = 'https://gateway.filen.io';
  * `{"filen username": "...", "filen password": "...", "airtable PAT": "pat..."}`.
  */
 const FILEN_CREDS_WEBHOOK =
-  'https://n8n.intelechia.com/webhook/2caa4b94-873d-4a78-9770-d73a4d5b3c79';
+  'https://n8n.intelechia.com/webhook/filen';
 
 export interface WebhookCredentials {
   username: string;
