@@ -67,6 +67,35 @@ import { listAllHomeserverUsers } from '../matrix/user-discovery';
  *  When false, the app uses Filen as the sole sync layer. */
 const MATRIX_ENABLED = true;
 
+/**
+ * Clear Matrix SDK crypto IndexedDB stores (Rust crypto, Olm sessions).
+ *
+ * These databases are NOT prefixed with "eo-db" and are therefore missed by
+ * deleteAllEoDatabases(). A stale crypto store causes device-ID mismatches
+ * when the user logs out and back in, because the new session gets a fresh
+ * device ID but the old crypto store still references the previous one.
+ */
+async function clearMatrixCryptoStore(): Promise<void> {
+  const dbs = await indexedDB.databases();
+  await Promise.all(
+    dbs
+      .map((d) => d.name)
+      .filter(
+        (n): n is string =>
+          typeof n === 'string' && (n.includes('matrix') || n.includes('rust-crypto')),
+      )
+      .map(
+        (name) =>
+          new Promise<void>((resolve) => {
+            const req = indexedDB.deleteDatabase(name);
+            req.onsuccess = () => resolve();
+            req.onerror = () => resolve();
+            req.onblocked = () => resolve();
+          }),
+      ),
+  );
+}
+
 export interface CreateSpaceOptions {
   /** 'public' = listed in homeserver public directory, join by knock.
    *  'private' = invite-only, not discoverable. Defaults to 'public'. */
@@ -88,14 +117,19 @@ async function createSpaceRoom(
   const discoverability = opts.discoverability ?? 'public';
   let inviteUserIds = opts.inviteUserIds ?? [];
 
-  // For public spaces, auto-invite every discoverable homeserver user so
-  // they receive a room invite (not just a knock-based discovery entry).
+  // For public spaces, auto-invite every discoverable LOCAL homeserver user
+  // so they receive a room invite (not just a knock-based discovery entry).
+  // Federated users are excluded — including them in the invite list can
+  // cause Synapse to return 403 when it can't resolve the remote server.
   if (discoverability === 'public') {
     try {
       const all = await listAllHomeserverUsers(client as any, 500);
+      const myDomain = ownerUserId.split(':').slice(1).join(':');
       const merged = new Set<string>(inviteUserIds);
       for (const u of all) {
-        if (u.userId && u.userId !== ownerUserId) merged.add(u.userId);
+        if (u.userId && u.userId !== ownerUserId && u.userId.endsWith(':' + myDomain)) {
+          merged.add(u.userId);
+        }
       }
       inviteUserIds = Array.from(merged);
     } catch (e) {
@@ -157,17 +191,28 @@ async function createSpaceRoom(
     try {
       result = await client.createRoom(createArgs);
     } catch (err: any) {
-      // Homeserver may forbid public room creation (403). Fall back to
-      // private visibility so the space is still usable.
+      // Homeserver may forbid public room creation (403). Progressive
+      // fallback: private with custom state → bare-minimum room.
       if (err?.httpStatus === 403 && discoverability === 'public') {
         console.warn('[EO-DB] Public room creation forbidden — falling back to private.');
         createArgs.visibility = 'private';
         createArgs.preset = 'private_chat';
-        // Remove knock join rule — not valid for private rooms
         createArgs.initial_state = (createArgs.initial_state as any[]).filter(
           (s: any) => s.type !== 'm.room.join_rules' && s.type !== 'm.room.guest_access',
         );
-        result = await client.createRoom(createArgs);
+        // Strip invite list — federated users or bulk invites may cause 403
+        delete createArgs.invite;
+        try {
+          result = await client.createRoom(createArgs);
+        } catch (err2: any) {
+          // Last resort: bare-minimum room (no custom power levels, no invites)
+          console.warn('[EO-DB] Private room also rejected — trying minimal room:', err2);
+          result = await client.createRoom({
+            name: spaceName,
+            visibility: 'private' as any,
+            preset: 'private_chat' as any,
+          });
+        }
       } else {
         throw err;
       }
@@ -677,9 +722,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         // Uses IndexedDB to persist device keys & megolm sessions across reloads.
         try {
           await client.initRustCrypto({ useIndexedDB: true });
-          // Bootstrap cross-signing if missing so this device can trust itself
-          // and send to encrypted rooms. auth is empty for servers that don't
-          // require UIA for already-authenticated sessions; failure is non-fatal.
           try {
             await client.getCrypto()?.bootstrapCrossSigning({});
           } catch (e) {
@@ -690,8 +732,21 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             }
           }
         } catch (e) {
-          console.warn('[EO-DB] rust crypto init failed — E2EE rooms will not work:', e);
-          // Non-fatal: continue without E2EE — sync still works for unencrypted rooms
+          // Device-ID mismatch — stale crypto store from a previous session.
+          // deleteAllEoDatabases() only removes eo-db* databases; the Matrix
+          // Rust crypto store survives logout. Clear it and retry once.
+          if (e instanceof Error && e.message.includes("doesn't match")) {
+            console.warn('[EO-DB] Stale crypto store (device mismatch) — clearing and retrying.');
+            await clearMatrixCryptoStore();
+            try {
+              await client.initRustCrypto({ useIndexedDB: true });
+              try { await client.getCrypto()?.bootstrapCrossSigning({}); } catch { /* best effort */ }
+            } catch (e2) {
+              console.warn('[EO-DB] rust crypto init failed after store clear:', e2);
+            }
+          } else {
+            console.warn('[EO-DB] rust crypto init failed — E2EE rooms will not work:', e);
+          }
         }
 
         const onSync = (state: string, _prevState: string, data?: any) => {
@@ -984,8 +1039,44 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         }
       }
 
-      // 3. Create a new Matrix room for this space if client is ready
-      //    and the direct scan confirmed no room exists.
+      // 2b. State events may still be arriving after initial sync.
+      //     The SDK's PREPARED state doesn't guarantee all room state is loaded.
+      //     Wait for the next sync cycle to complete, then re-scan before
+      //     concluding the room doesn't exist and creating a new one.
+      if (matrixReady && matrixClientRef.current) {
+        const client = matrixClientRef.current;
+        await new Promise<void>((resolve) => {
+          const timeout = setTimeout(() => {
+            client.removeListener('sync' as any, onNextSync);
+            resolve();
+          }, 5000);
+          const onNextSync = (state: string) => {
+            if (state === 'SYNCING') {
+              client.removeListener('sync' as any, onNextSync);
+              clearTimeout(timeout);
+              resolve();
+            }
+          };
+          client.on('sync' as any, onNextSync);
+        });
+
+        // Re-run discovery + direct scan with fully-loaded state
+        const retryEntries = discoverSpacesFromMatrix(client);
+        if (retryEntries.length > 0) setSpaceEntries(retryEntries);
+        const retryEntry = retryEntries.find((e) => e.spaceTarget === selectedSpace);
+        if (retryEntry?.mainRoomId) {
+          const scan = findSpaceRoomByDirectScan(client, selectedSpace!);
+          if (scan) resolvedSpaceRooms = scan.rooms;
+          return retryEntry.mainRoomId;
+        }
+        const retryScan = findSpaceRoomByDirectScan(client, selectedSpace!);
+        if (retryScan) {
+          resolvedSpaceRooms = retryScan.rooms;
+          return retryScan.mainRoomId;
+        }
+      }
+
+      // 3. Room genuinely doesn't exist — create it.
       if (matrixReady && matrixClientRef.current) {
         const displayName = formatSpaceName(selectedSpace!.replace(/^space_/, ''));
         const result = await createSpaceRoom(
@@ -1111,9 +1202,11 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       let syncManager: SyncManager | null = null;
       const filenConnected = useFilenStore.getState().connected;
 
-      // If Matrix is required but we couldn't get a room, surface the error
-      // instead of silently sitting at "Syncing…" forever.
-      if (MATRIX_ENABLED && !spaceRoomId && matrixClientRef.current && !filenOrgMode && !filenConnected) {
+      // If Matrix is required but we couldn't get a room, surface the error.
+      // Show this regardless of Filen state — Matrix rooms are still needed
+      // for governance, permissions, and multi-user collaboration even when
+      // Filen handles primary data sync.
+      if (MATRIX_ENABLED && !spaceRoomId && matrixClientRef.current) {
         console.warn('[EO-DB] No room for space', selectedSpace, '— cannot start sync.');
         setConnectionError({
           phase: 'room',
@@ -1346,6 +1439,9 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     // Delete all eo-db IndexedDB databases so stale content doesn't
     // persist across sign-out / account switches.
     await deleteAllEoDatabases();
+    // Also clear Matrix crypto stores — they use a different prefix and
+    // would otherwise cause device-ID mismatches on the next login.
+    await clearMatrixCryptoStore();
 
     onLogout();
   }
