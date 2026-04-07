@@ -1,9 +1,9 @@
 {
-  "name": "Filen Credential Webhook (Local)",
+  "name": "Filen Credential Webhook",
   "nodes": [
     {
       "parameters": {
-        "httpMethod": "POST",
+        "httpMethod": "={{$json[\"httpMethod\"] || 'GET'}}",
         "path": "filen",
         "responseMode": "responseNode",
         "options": {
@@ -19,6 +19,33 @@
     },
     {
       "parameters": {
+        "method": "GET",
+        "url": "https://app.aminoimmigration.com/_matrix/client/v3/account/whoami",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ $json.headers.authorization }}"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "node-1",
+      "name": "Matrix whoami",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
         "conditions": {
           "options": {
             "caseSensitive": true,
@@ -28,7 +55,7 @@
           "conditions": [
             {
               "id": "cond-auth",
-              "leftValue": "={{ $json.headers.authorization }}",
+              "leftValue": "={{ $json.user_id }}",
               "rightValue": "",
               "operator": {
                 "type": "string",
@@ -40,50 +67,55 @@
         },
         "options": {}
       },
-      "id": "node-1",
-      "name": "Has Auth Header?",
+      "id": "node-2",
+      "name": "Auth OK?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
-      "position": [220, 0]
+      "position": [440, 0]
     },
     {
       "parameters": {
         "respondWith": "json",
-        "responseBody": "={ \"error\": \"unauthorized — include an Authorization header\" }",
+        "responseBody": "={ \"error\": \"unauthorized\" }",
         "options": {
           "responseCode": 401
         }
       },
-      "id": "node-2",
+      "id": "node-3",
       "name": "Respond Unauthorized",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
-      "position": [440, 200]
+      "position": [660, 200]
     },
     {
       "parameters": {
         "respondWith": "json",
-        "responseBody": "={\n  \"filen username\": \"YOUR_FILEN_EMAIL\",\n  \"filen password\": \"YOUR_FILEN_PASSWORD\",\n  \"airtable PAT\": \"YOUR_AIRTABLE_PAT_OR_REMOVE_THIS_LINE\"\n}",
+        "responseBody": "={\n  \"filen username\": \"scores.patch.points@proton.me\",\n  \"filen password\": \"____\",\n  \"airtable PAT\": \"____\"\n}",
         "options": {
           "responseCode": 200
         }
       },
-      "id": "node-3",
-      "name": "Respond With Credentials",
+      "id": "node-4",
+      "name": "Respond OK",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
-      "position": [440, -200]
+      "position": [660, -200]
     }
   ],
   "connections": {
     "Webhook": {
       "main": [
-        [{ "node": "Has Auth Header?", "type": "main", "index": 0 }]
+        [{ "node": "Matrix whoami", "type": "main", "index": 0 }]
       ]
     },
-    "Has Auth Header?": {
+    "Matrix whoami": {
       "main": [
-        [{ "node": "Respond With Credentials", "type": "main", "index": 0 }],
+        [{ "node": "Auth OK?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Auth OK?": {
+      "main": [
+        [{ "node": "Respond OK", "type": "main", "index": 0 }],
         [{ "node": "Respond Unauthorized", "type": "main", "index": 0 }]
       ]
     }
