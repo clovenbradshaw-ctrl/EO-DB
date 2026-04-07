@@ -17,6 +17,8 @@ import { formatName } from './scope-picker-utils';
 import { useIdResolver, isEntityId, isEntityIdArray, type IdResolver } from '../hooks/useIdResolver';
 import { groupSchemaStates, extractColumnTypeOverrides, schemaTypeTarget, schemaConstraintTarget, schemaResolveTarget, type FieldSchema } from '../db/schema-rules';
 import { ColumnTypeSelector } from './ColumnTypeSelector';
+import { ResolutionPolicyComposer, summarizePolicy, type ResolvePolicy } from './ResolutionPolicyComposer';
+import { ConstraintComposer } from './ConstraintComposer';
 import { useIsMobile, useIsNarrow } from '../hooks/useIsMobile';
 import { ColumnManagerPanel } from './ColumnManagerPanel';
 import {
@@ -478,6 +480,8 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   const [fieldSchemas, setFieldSchemas] = useState<Map<string, FieldSchema>>(new Map());
   const [columnTypeOverrides, setColumnTypeOverrides] = useState<Map<string, any>>(new Map());
   const [columnTypeSelector, setColumnTypeSelector] = useState<{ x: number; y: number; key: string } | null>(null);
+  const [resolutionComposer, setResolutionComposer] = useState<{ x: number; y: number; key: string } | null>(null);
+  const [constraintComposer, setConstraintComposer] = useState<{ x: number; y: number; key: string } | null>(null);
   const [editingCell, setEditingCell] = useState<{ target: string; fieldKey: string; value: string } | null>(null);
   const prevRecordsKeyRef = useRef<string>('');
   const prevSchemaKeyRef = useRef<string>('');
@@ -842,27 +846,36 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
             setColumnMenu(null);
           },
         },
-        // List existing constraints
+        // List existing constraints (click to remove)
         ...fs?.constraints.map(c => ({
           label: `Constraint: ${c.name}`,
-          disabled: true,
-          onClick: () => {},
+          onClick: () => handleRemoveConstraint(colKey, c.name),
         })) ?? [],
+        {
+          label: 'Add constraint...',
+          onClick: () => {
+            setConstraintComposer({ key: colKey, x: columnMenu?.x ?? 0, y: columnMenu?.y ?? 0 });
+            setColumnMenu(null);
+          },
+        },
       );
 
       // ─── ⊨ Evaluations ───
+      const currentPolicy: ResolvePolicy | null = fs?.resolve?.value?.stances
+        ? fs.resolve.value as ResolvePolicy
+        : fs?.resolve?.value?.strategy
+          ? { stances: [{ stance: 'dissecting', subType: fs.resolve.value.strategy }] }
+          : null;
       items.push(
         { label: '', onClick: () => {}, separator: true },
         { header: true, icon: '⊨', label: 'Evaluations', onClick: () => {} },
         {
-          label: fs?.resolve
-            ? `Resolution: ${fs.resolve.value?.strategy ?? 'unknown'}`
+          label: currentPolicy
+            ? `Resolution: ${summarizePolicy(currentPolicy)}`
             : 'Set resolution...',
           onClick: () => {
-            // Resolution selector — dispatch EVA with latest-wins for now
-            if (!fs?.resolve) {
-              handleSetResolution(colKey);
-            }
+            setResolutionComposer({ key: colKey, x: columnMenu?.x ?? 0, y: columnMenu?.y ?? 0 });
+            setColumnMenu(null);
           },
         },
       );
@@ -982,12 +995,12 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     setColumnTypeSelector(null);
   }
 
-  async function handleSetResolution(fieldKey: string) {
+  async function handleSetResolution(fieldKey: string, policy: ResolvePolicy) {
     try {
       await dispatch({
         op: 'EVA',
         target: schemaResolveTarget(scope, fieldKey),
-        operand: { strategy: 'latest' },
+        operand: policy,
         agent: `user:${session.userId}`,
         ts: new Date().toISOString(),
         acquired_ts: new Date().toISOString(),
@@ -997,8 +1010,76 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
         const existing = next.get(fieldKey) ?? { fieldKey, constraints: [] };
         next.set(fieldKey, {
           ...existing,
-          resolve: { target: schemaResolveTarget(scope, fieldKey), value: { strategy: 'latest' } },
+          resolve: { target: schemaResolveTarget(scope, fieldKey), value: policy },
         });
+        return next;
+      });
+    } catch { /* ignore */ }
+    setResolutionComposer(null);
+  }
+
+  async function handleClearResolution(fieldKey: string) {
+    try {
+      await dispatch({
+        op: 'DEF',
+        target: schemaResolveTarget(scope, fieldKey),
+        operand: {},
+        agent: `user:${session.userId}`,
+        ts: new Date().toISOString(),
+        acquired_ts: new Date().toISOString(),
+      });
+      setFieldSchemas((prev) => {
+        const next = new Map(prev);
+        const existing = next.get(fieldKey);
+        if (existing) {
+          next.set(fieldKey, { ...existing, resolve: undefined });
+        }
+        return next;
+      });
+    } catch { /* ignore */ }
+    setResolutionComposer(null);
+  }
+
+  async function handleAddConstraint(fieldKey: string, name: string, value: any) {
+    try {
+      await dispatch({
+        op: 'DEF',
+        target: schemaConstraintTarget(scope, fieldKey, name),
+        operand: value,
+        agent: `user:${session.userId}`,
+        ts: new Date().toISOString(),
+        acquired_ts: new Date().toISOString(),
+      });
+      setFieldSchemas((prev) => {
+        const next = new Map(prev);
+        const existing = next.get(fieldKey) ?? { fieldKey, constraints: [] };
+        const constraints = existing.constraints.filter(c => c.name !== name);
+        constraints.push({ target: schemaConstraintTarget(scope, fieldKey, name), name, value });
+        next.set(fieldKey, { ...existing, constraints });
+        return next;
+      });
+    } catch { /* ignore */ }
+  }
+
+  async function handleRemoveConstraint(fieldKey: string, name: string) {
+    try {
+      await dispatch({
+        op: 'DEF',
+        target: schemaConstraintTarget(scope, fieldKey, name),
+        operand: {},
+        agent: `user:${session.userId}`,
+        ts: new Date().toISOString(),
+        acquired_ts: new Date().toISOString(),
+      });
+      setFieldSchemas((prev) => {
+        const next = new Map(prev);
+        const existing = next.get(fieldKey);
+        if (existing) {
+          next.set(fieldKey, {
+            ...existing,
+            constraints: existing.constraints.filter(c => c.name !== name),
+          });
+        }
         return next;
       });
     } catch { /* ignore */ }
@@ -1647,6 +1728,60 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
           </div>
         </>
       )}
+      {resolutionComposer && (() => {
+        const fs = fieldSchemas.get(resolutionComposer.key);
+        const currentPolicy: ResolvePolicy | null = fs?.resolve?.value?.stances
+          ? fs.resolve.value as ResolvePolicy
+          : fs?.resolve?.value?.strategy
+            ? { stances: [{ stance: 'dissecting', subType: fs.resolve.value.strategy }] }
+            : null;
+        return (
+          <>
+            <div
+              style={{ position: 'fixed', inset: 0, zIndex: 9998 }}
+              onClick={() => setResolutionComposer(null)}
+            />
+            <div style={{
+              position: 'fixed',
+              left: Math.min(resolutionComposer.x, window.innerWidth - 800),
+              top: Math.min(resolutionComposer.y, window.innerHeight - 600),
+              zIndex: 9999,
+            }}>
+              <ResolutionPolicyComposer
+                currentPolicy={currentPolicy}
+                onApply={(policy) => handleSetResolution(resolutionComposer.key, policy)}
+                onClear={() => handleClearResolution(resolutionComposer.key)}
+                onClose={() => setResolutionComposer(null)}
+              />
+            </div>
+          </>
+        );
+      })()}
+      {constraintComposer && (() => {
+        const fs = fieldSchemas.get(constraintComposer.key);
+        return (
+          <>
+            <div
+              style={{ position: 'fixed', inset: 0, zIndex: 9998 }}
+              onClick={() => setConstraintComposer(null)}
+            />
+            <div style={{
+              position: 'fixed',
+              left: Math.min(constraintComposer.x, window.innerWidth - 800),
+              top: Math.min(constraintComposer.y, window.innerHeight - 600),
+              zIndex: 9999,
+            }}>
+              <ConstraintComposer
+                fieldKey={constraintComposer.key}
+                existingConstraints={fs?.constraints ?? []}
+                onAdd={(name, value) => handleAddConstraint(constraintComposer.key, name, value)}
+                onRemove={(name) => handleRemoveConstraint(constraintComposer.key, name)}
+                onClose={() => setConstraintComposer(null)}
+              />
+            </div>
+          </>
+        );
+      })()}
     </div>
   );
 }
