@@ -11,44 +11,42 @@
 const FILEN_GATEWAY = 'https://gateway.filen.io';
 
 /**
- * Unified n8n Filen webhook — handles all Filen operations via action-based
- * POST requests. Credentials live exclusively on the n8n server.
+ * n8n webhook that authenticates the caller's Matrix access token, logs into
+ * Filen server-side (password never leaves n8n), and returns a session API key
+ * + master keys. The client uses these to talk to Filen's gateway directly for
+ * file operations (upload, download, list, crypto) without ever seeing the password.
  *
- * For browser clients, the `credentials` action returns the shared Filen
- * username/password (and optionally an Airtable PAT) after validating the
- * caller's Matrix access token.
+ * Response: `{ apiKey, masterKeys, email, airtablePat? }`
  */
 const N8N_FILEN_WEBHOOK = 'https://n8n.intelechia.com/webhook/filen';
 
-export interface WebhookCredentials {
-  username: string;
-  password: string;
+export interface WebhookSessionResult {
+  apiKey: string;
+  masterKeys: string[];
+  email: string;
   airtablePat?: string;
 }
 
-export async function fetchFilenCredentialsFromWebhook(
+export async function fetchFilenSessionFromWebhook(
   matrixAccessToken: string,
-): Promise<WebhookCredentials> {
+): Promise<WebhookSessionResult> {
   const res = await fetch(N8N_FILEN_WEBHOOK, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${matrixAccessToken}`,
-    },
-    body: JSON.stringify({ action: 'credentials' }),
+    headers: { Authorization: `Bearer ${matrixAccessToken}` },
   });
   const text = await res.text();
   let data: any;
   try { data = JSON.parse(text); } catch { data = null; }
-  const username = data?.['filen username'];
-  const password = data?.['filen password'];
-  if (!username || !password) {
-    throw new Error('Filen credentials webhook: unauthorized or malformed response');
+  const apiKey = data?.apiKey;
+  const masterKeys = data?.masterKeys;
+  const email = data?.email;
+  if (!apiKey || !Array.isArray(masterKeys) || masterKeys.length === 0) {
+    throw new Error('Filen session webhook: unauthorized or malformed response');
   }
   return {
-    username,
-    password,
-    airtablePat: data?.['airtable PAT'] || undefined,
+    apiKey,
+    masterKeys,
+    email: email || '',
+    airtablePat: data?.airtablePat || undefined,
   };
 }
 
