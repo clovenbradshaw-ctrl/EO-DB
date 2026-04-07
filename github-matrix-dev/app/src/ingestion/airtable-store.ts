@@ -13,6 +13,29 @@ import { fetchFilenCredentialsFromWebhook } from '../filen/filen-api';
 import { AirtableClient } from './airtable-client';
 import type { HydrationManifest, HydrationResult, UpdateSyncResult } from './airtable-sync';
 
+/**
+ * Configurable sync settings — persisted to Matrix room state
+ * (`eo.airtable.config`) so all devices in the room share them.
+ */
+export interface AirtableSyncSettings {
+  /** Seconds between automatic sync polls. Min 15, max 600, default 30. */
+  syncIntervalSec: number;
+  /** What triggers a sync check: 'lastModified' uses Airtable's LAST_MODIFIED_TIME,
+   *  'fullDiff' re-fetches all and diffs locally (more thorough but heavier). */
+  syncStrategy: 'lastModified' | 'fullDiff';
+  /** Whether to preserve existing EO-DB values (never overwrite). */
+  preserveExisting: boolean;
+  /** Maximum records per table per sync (0 = no limit). */
+  recordLimit: number;
+}
+
+export const DEFAULT_SYNC_SETTINGS: AirtableSyncSettings = {
+  syncIntervalSec: 30,
+  syncStrategy: 'lastModified',
+  preserveExisting: true,
+  recordLimit: 0,
+};
+
 export interface AirtableSyncState {
   /** Airtable Personal Access Token (in-memory only, from webhook). */
   apiKey: string | null;
@@ -32,10 +55,14 @@ export interface AirtableSyncState {
   lastSyncAt: string | null;
   /** Result of the last sync run by this client. */
   lastSyncResult: HydrationResult | UpdateSyncResult | null;
-  /** Whether the 30s continuous sync loop is enabled. */
+  /** Whether the continuous sync loop is enabled. */
   continuousSyncEnabled: boolean;
   /** Whether a remote device currently holds the sync lock (via to-device signal). */
   remoteLockHeld: boolean;
+
+  // ── Sync settings (shared across room via Matrix state) ──
+  /** Configurable sync parameters. */
+  syncSettings: AirtableSyncSettings;
 
   // ── Schema cache (in-memory) ──
   /** Discovered Airtable schema (bases/tables/fields). */
@@ -55,6 +82,7 @@ export interface AirtableSyncState {
   setLastSyncResult: (r: HydrationResult | UpdateSyncResult | null) => void;
   setContinuousSync: (v: boolean) => void;
   setRemoteLockHeld: (v: boolean) => void;
+  setSyncSettings: (s: Partial<AirtableSyncSettings>) => void;
   setError: (e: string | null) => void;
 }
 
@@ -69,6 +97,7 @@ export const useAirtableStore = create<AirtableSyncState>((set, get) => ({
   lastSyncResult: null,
   continuousSyncEnabled: false,
   remoteLockHeld: false,
+  syncSettings: { ...DEFAULT_SYNC_SETTINGS },
   manifest: null,
 
   async connectFromWebhook(matrixAccessToken: string): Promise<void> {
@@ -112,6 +141,7 @@ export const useAirtableStore = create<AirtableSyncState>((set, get) => ({
       lastSyncResult: null,
       continuousSyncEnabled: false,
       remoteLockHeld: false,
+      syncSettings: { ...DEFAULT_SYNC_SETTINGS },
       manifest: null,
     });
   },
@@ -123,5 +153,10 @@ export const useAirtableStore = create<AirtableSyncState>((set, get) => ({
   setLastSyncResult(r) { set({ lastSyncResult: r }); },
   setContinuousSync(v) { set({ continuousSyncEnabled: v }); },
   setRemoteLockHeld(v) { set({ remoteLockHeld: v }); },
+  setSyncSettings(s) {
+    set((state) => ({
+      syncSettings: { ...state.syncSettings, ...s },
+    }));
+  },
   setError(e) { set({ error: e }); },
 }));

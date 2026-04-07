@@ -31,16 +31,18 @@ import {
   type HydrationResult,
   type UpdateSyncResult,
 } from './airtable-sync';
-import { useAirtableStore } from './airtable-store';
+import { useAirtableStore, DEFAULT_SYNC_SETTINGS, type AirtableSyncSettings } from './airtable-store';
 import { airtableSyncEventTypes } from '../lib/matrix-domain';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
-const SYNC_INTERVAL_MS = 30_000;          // 30 seconds
+const MIN_SYNC_INTERVAL_SEC = 15;
+const MAX_SYNC_INTERVAL_SEC = 600;
 const STALE_THRESHOLD_MS = 2 * 60_000;   // 2 minutes — claim is stale after this
 const FIRST_SYNC_DELAY_MS = 3_000;       // 3 seconds — let connections settle
 
 const EO_AIRTABLE_HEAD = 'eo.airtable.head';
+const EO_AIRTABLE_CONFIG = 'eo.airtable.config';
 
 const SIGNAL_TYPE = airtableSyncEventTypes().signal;
 const LOCK_TYPE = airtableSyncEventTypes().lock;
@@ -79,10 +81,20 @@ export class AirtableSyncService {
     this.deviceId = this.matrixClient.getDeviceId() ?? `browser-${Date.now()}`;
   }
 
-  /** Begin the 30-second continuous sync loop. */
+  /** Get the effective sync interval in ms, clamped to [15s, 600s]. */
+  private getSyncIntervalMs(): number {
+    const sec = useAirtableStore.getState().syncSettings.syncIntervalSec;
+    const clamped = Math.max(MIN_SYNC_INTERVAL_SEC, Math.min(MAX_SYNC_INTERVAL_SEC, sec));
+    return clamped * 1000;
+  }
+
+  /** Begin the continuous sync loop at the configured interval. */
   async start(): Promise<void> {
     if (this.running) return;
     this.running = true;
+
+    // Load sync settings from room state (shared config)
+    this.loadSyncSettingsFromRoom();
 
     // Listen for to-device sync signals from other clients
     this.matrixClient.on('toDeviceEvent' as any, this.handleToDeviceEvent);
@@ -92,9 +104,16 @@ export class AirtableSyncService {
       if (!this.running) return;
       await this.tick();
 
-      // Start the interval
-      this.timer = setInterval(() => this.tick(), SYNC_INTERVAL_MS);
+      // Start the interval at configured rate
+      this.restartTimer();
     }, FIRST_SYNC_DELAY_MS);
+  }
+
+  /** Restart the sync timer (call after settings change). */
+  private restartTimer(): void {
+    if (this.timer) clearInterval(this.timer);
+    if (!this.running) return;
+    this.timer = setInterval(() => this.tick(), this.getSyncIntervalMs());
   }
 
   /** Stop the sync loop and release the primary syncer claim. */
@@ -159,6 +178,64 @@ export class AirtableSyncService {
       } catch {
         // Non-fatal — peer may be offline; next broadcast will retry.
       }
+    }
+  }
+
+  // ─── Sync settings (room state persistence) ────────────────────────────────
+
+  /**
+   * Read sync settings from Matrix room state. Settings are shared across
+   * all devices in the room so everyone uses the same interval/strategy.
+   */
+  private loadSyncSettingsFromRoom(): void {
+    try {
+      const room = this.matrixClient.getRoom(this.roomId);
+      if (!room) return;
+      const event = room.currentState.getStateEvents(EO_AIRTABLE_CONFIG, '');
+      if (!event) return;
+      const content = (event as any).getContent?.() ?? event;
+      if (content && typeof content === 'object') {
+        const partial: Partial<AirtableSyncSettings> = {};
+        if (typeof content.syncIntervalSec === 'number') {
+          partial.syncIntervalSec = Math.max(MIN_SYNC_INTERVAL_SEC, Math.min(MAX_SYNC_INTERVAL_SEC, content.syncIntervalSec));
+        }
+        if (content.syncStrategy === 'lastModified' || content.syncStrategy === 'fullDiff') {
+          partial.syncStrategy = content.syncStrategy;
+        }
+        if (typeof content.preserveExisting === 'boolean') {
+          partial.preserveExisting = content.preserveExisting;
+        }
+        if (typeof content.recordLimit === 'number') {
+          partial.recordLimit = Math.max(0, content.recordLimit);
+        }
+        useAirtableStore.getState().setSyncSettings(partial);
+      }
+    } catch {
+      // Fall back to defaults
+    }
+  }
+
+  /**
+   * Save sync settings to Matrix room state so all devices share them.
+   * Also restarts the timer if the interval changed.
+   */
+  async saveSyncSettings(settings: Partial<AirtableSyncSettings>): Promise<void> {
+    const current = useAirtableStore.getState().syncSettings;
+    const merged = { ...current, ...settings };
+
+    // Clamp interval
+    merged.syncIntervalSec = Math.max(MIN_SYNC_INTERVAL_SEC, Math.min(MAX_SYNC_INTERVAL_SEC, merged.syncIntervalSec));
+
+    try {
+      await this.matrixClient.sendStateEvent(this.roomId, EO_AIRTABLE_CONFIG as any, merged, '');
+      useAirtableStore.getState().setSyncSettings(merged);
+
+      // Restart timer if interval changed
+      if (settings.syncIntervalSec !== undefined && this.running) {
+        this.restartTimer();
+      }
+    } catch (e) {
+      console.warn('[EO-DB] Failed to save Airtable sync settings:', e);
     }
   }
 
@@ -307,16 +384,33 @@ export class AirtableSyncService {
       const client = new AirtableClient(apiKey);
       const isHydrated = headBefore?.hydrated ?? false;
 
+      // Merge sync settings into customization
+      const { syncSettings } = useAirtableStore.getState();
+      const effectiveCustomization: SyncCustomization = {
+        ...this.customization,
+        preserveExisting: syncSettings.preserveExisting,
+        recordLimit: syncSettings.recordLimit > 0 ? syncSettings.recordLimit : undefined,
+      };
+
       let result: HydrationResult | UpdateSyncResult;
 
       if (!isHydrated) {
         result = await hydrationSync(this.store, client, this.agent, {
-          customization: this.customization,
+          customization: effectiveCustomization,
         });
       } else {
-        result = await updateSync(this.store, client, this.agent, {
-          customization: this.customization,
-        });
+        // 'fullDiff' strategy: pass null cursor by re-hydrating with
+        // preserveExisting=false, so every field is compared.
+        // 'lastModified' strategy (default): incremental via LAST_MODIFIED_TIME cursor.
+        if (syncSettings.syncStrategy === 'fullDiff') {
+          result = await hydrationSync(this.store, client, this.agent, {
+            customization: { ...effectiveCustomization, preserveExisting: false },
+          });
+        } else {
+          result = await updateSync(this.store, client, this.agent, {
+            customization: effectiveCustomization,
+          });
+        }
       }
 
       useAirtableStore.getState().setLastSyncResult(result);
