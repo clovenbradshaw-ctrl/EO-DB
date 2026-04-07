@@ -7,13 +7,41 @@
  *
  * Replaces the old fake Alice/Bob in-memory event bus simulation.
  */
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import type { MatrixClient, MatrixEvent } from 'matrix-js-sdk';
 import type { Presence, PresenceUser } from '../matrix/presence';
 import { testEventTypes } from '../lib/matrix-domain';
 import { useTheme, type Theme } from '../theme';
+import { EO_SPACE_CONFIG_TYPE } from '../matrix/event-bridge';
 
 const TEST_PING_TYPE = testEventTypes().ping;
+
+/**
+ * Collect all room IDs that belong to the same space as `roomId`.
+ * Handles the case where duplicate rooms exist for the same space —
+ * messages from any of them should be accepted.
+ */
+function findSpaceRoomIds(client: MatrixClient, roomId: string): Set<string> {
+  const set = new Set<string>([roomId]);
+  const myRoom = client.getRoom(roomId);
+  if (!myRoom) return set;
+  const myConfig = myRoom.currentState?.getStateEvents?.(EO_SPACE_CONFIG_TYPE, '');
+  if (!myConfig) return set;
+  const myName = (myConfig.getContent() as any)?.name;
+  if (!myName) return set;
+
+  for (const room of client.getRooms()) {
+    const config = room.currentState?.getStateEvents?.(EO_SPACE_CONFIG_TYPE, '');
+    if (!config) continue;
+    const name = (config.getContent() as any)?.name;
+    if (name === myName) {
+      set.add(room.roomId);
+      const rooms = (config.getContent() as any)?.rooms;
+      if (rooms?.main) set.add(rooms.main);
+    }
+  }
+  return set;
+}
 
 /** Build the Map<userId, Map<deviceId, content>> structure for sendToDevice. */
 function toDeviceContent(userId: string, deviceId: string, content: Record<string, any>) {
@@ -58,6 +86,12 @@ export function MultiUserTestView({ matrixClient, roomId, presence }: MultiUserT
   const myUserId = matrixClient?.getUserId() ?? null;
   const myDeviceId = matrixClient?.getDeviceId() ?? null;
 
+  // All room IDs belonging to this space (handles duplicate rooms).
+  const spaceRoomIds = useMemo(() => {
+    if (!matrixClient || !roomId) return new Set<string>();
+    return findSpaceRoomIds(matrixClient, roomId);
+  }, [matrixClient, roomId]);
+
   // Default message text
   const effectiveMessage = messageText || `hello from ${myUserId ?? 'unknown'}`;
 
@@ -89,8 +123,8 @@ export function MultiUserTestView({ matrixClient, roomId, presence }: MultiUserT
         ts?: number;
         message?: string;
       };
-      // Scope to this room
-      if (content.room_id && content.room_id !== roomId) return;
+      // Scope to this space (accept from any room belonging to the same space)
+      if (content.room_id && !spaceRoomIds.has(content.room_id)) return;
       const sender = event.getSender();
       if (!sender) return;
 
@@ -117,7 +151,7 @@ export function MultiUserTestView({ matrixClient, roomId, presence }: MultiUserT
     return () => {
       matrixClient.removeListener('toDeviceEvent' as any, handler);
     };
-  }, [matrixClient, roomId]);
+  }, [matrixClient, roomId, spaceRoomIds]);
 
   // Subscribe to presence
   useEffect(() => {

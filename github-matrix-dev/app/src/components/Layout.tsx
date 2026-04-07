@@ -282,6 +282,9 @@ function findSpaceRoomByDirectScan(
   spaceTarget: string,
 ): { mainRoomId: string; rooms: SpaceConfig['rooms'] } | null {
   const rooms = (client as any).getRooms?.() ?? [];
+  // When multiple rooms match (duplicate space creation), pick the one with
+  // the lexicographically smallest mainRoomId so all clients converge.
+  let best: { mainRoomId: string; rooms: SpaceConfig['rooms'] } | null = null;
   for (const room of rooms) {
     const configEvent = room.currentState?.getStateEvents?.(EO_SPACE_CONFIG_TYPE, '');
     if (!configEvent) continue;
@@ -291,10 +294,12 @@ function findSpaceRoomByDirectScan(
 
     const target = `space_${config.name.toLowerCase().replace(/\s+/g, '_')}`;
     if (target === spaceTarget) {
-      return { mainRoomId: config.rooms.main, rooms: config.rooms };
+      if (!best || config.rooms.main < best.mainRoomId) {
+        best = { mainRoomId: config.rooms.main, rooms: config.rooms };
+      }
     }
   }
-  return null;
+  return best;
 }
 
 /** Normalize any space target to canonical "space_foo" format (strips IDB "space." prefix) */
