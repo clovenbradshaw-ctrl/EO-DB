@@ -18,7 +18,8 @@ const FILEN_GATEWAY = 'https://gateway.filen.io';
  *
  * Response: `{ apiKey, masterKeys, email, airtablePat? }`
  */
-const N8N_FILEN_WEBHOOK = 'https://n8n.intelechia.com/webhook/filen';
+const FILEN_CREDS_WEBHOOK =
+  'https://n8n.intelechia.com/webhook/2caa4b94-873d-4a78-9770-d73a4d5b3c79';
 
 export interface WebhookSessionResult {
   apiKey: string;
@@ -30,7 +31,7 @@ export interface WebhookSessionResult {
 export async function fetchFilenSessionFromWebhook(
   matrixAccessToken: string,
 ): Promise<WebhookSessionResult> {
-  const res = await fetch(N8N_FILEN_WEBHOOK, {
+  const res = await fetch(FILEN_CREDS_WEBHOOK, {
     headers: { Authorization: `Bearer ${matrixAccessToken}` },
   });
   const text = await res.text();

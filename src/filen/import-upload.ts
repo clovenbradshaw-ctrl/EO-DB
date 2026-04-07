@@ -1,23 +1,22 @@
 /**
- * Import archive upload — binary archive creation, n8n Filen upload, and job tracking.
+ * Import archive upload — binary archive creation, Filen upload, and job tracking.
  *
  * Archives raw source data (completely unmodified) in .eodb binary format
- * and uploads to Filen via the n8n webhook before processing. This serves two purposes:
+ * and uploads to Filen before processing. This serves two purposes:
  * 1. Audit trail: compare original input vs processed EO events to detect translation errors
  * 2. Resumability: if processing is interrupted, re-download and resume
  *
  * Archive format: [4-byte "EODB" magic][msgpack body]
  * The body is an ImportArchive with raw_data preserved verbatim.
- *
- * All Filen operations route through the n8n webhook — no direct Filen
- * credentials or crypto on this server.
  */
 
 import { pack, unpack } from 'msgpackr';
 import { randomUUID } from 'crypto';
 import type { EoDb } from '../db/level.js';
 import { encode, decode } from '../db/level.js';
-import { sha256, filenUpload, filenDownload } from './filen-api.js';
+import { sha256 } from './filen-api.js';
+import { filenUploadFile, filenDownloadFile } from './filen-api.js';
+import type { FilenSession } from './filen-session.js';
 
 // ──────────────────────────────────────────────────────────────
 // Archive format
@@ -66,8 +65,10 @@ export interface ImportJob {
   completed_at?: string;
   error?: string;
 
-  /** Remote path in Filen (via n8n webhook). */
-  filen_remote_path?: string;
+  // Filen archive reference
+  filen_file_uuid?: string;
+  filen_file_key?: string;
+  filen_folder_uuid?: string;
 
   // Resume tracking
   content_hash: string;
@@ -142,45 +143,37 @@ export async function computeContentHash(data: string): Promise<string> {
 }
 
 // ──────────────────────────────────────────────────────────────
-// Filen upload / download (via n8n webhook)
+// Filen upload / download
 // ──────────────────────────────────────────────────────────────
 
 /**
- * Upload a raw import archive to Filen via the n8n webhook.
- * Archives land in /EO-DB/uploads/archives/ (or spaceId-scoped path).
+ * Upload a raw import archive to Filen.
+ * The archive contains the original source data completely unmodified.
  */
 export async function uploadImportArchive(
+  session: FilenSession,
   jobId: string,
   source: string,
   archiveBinary: Uint8Array,
-  spaceId?: string,
-): Promise<{ remotePath: string }> {
+): Promise<{ uuid: string; fileKey: string }> {
   const filename = `archive-${source}-${jobId}-${Date.now()}.eodb`;
-  const result = await filenUpload(archiveBinary, filename, {
-    spaceId,
-    subPath: 'archives',
-  });
-
-  if (!result.success) {
-    throw new Error(result.error || 'Upload failed');
-  }
-
-  return { remotePath: result.remotePath || '' };
+  return filenUploadFile(
+    session.apiKey,
+    session.uploadsFolderUuid,
+    filename,
+    archiveBinary,
+    session.masterKeys[0],
+  );
 }
 
 /**
- * Download and unpack an import archive from Filen via n8n webhook.
+ * Download and unpack an import archive from Filen.
  */
 export async function downloadImportArchive(
-  remotePath: string,
-  spaceId?: string,
+  session: FilenSession,
+  fileUuid: string,
+  fileKey: string,
 ): Promise<ImportArchive> {
-  const result = await filenDownload({ path: remotePath, spaceId });
-
-  if (!result.success || !result.data) {
-    throw new Error(result.error || 'Download failed or no data returned');
-  }
-
-  const binary = Uint8Array.from(atob(result.data), c => c.charCodeAt(0));
-  return unpackImportArchive(binary);
+  const data = await filenDownloadFile(session.apiKey, fileUuid, fileKey);
+  return unpackImportArchive(data);
 }
