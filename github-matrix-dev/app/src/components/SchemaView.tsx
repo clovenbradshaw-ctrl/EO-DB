@@ -4,6 +4,7 @@ import { groupSchemaStates, schemaFieldTarget, type FieldSchema } from '../db/sc
 import { readLogForPrefix } from '../db/log';
 import { useTheme, type Theme } from '../theme';
 import { formatName } from './scope-picker-utils';
+import { deriveColumns, buildFieldNameMap } from './filter-types';
 import type { EoEvent, EoState } from '../db/types';
 
 // ─── Operator colors (matches LogView) ──────────────────────────────────
@@ -202,6 +203,7 @@ export function SchemaView({ scope }: SchemaViewProps) {
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [collectionDisplayName, setCollectionDisplayName] = useState<string | null>(null);
   const [rollups, setRollups] = useState<Array<{ id: string; name: string; value: any; unit?: string }>>([]);
+  const [isInferred, setIsInferred] = useState(false);
 
   // Resolve collection display name from state
   useEffect(() => {
@@ -213,17 +215,57 @@ export function SchemaView({ scope }: SchemaViewProps) {
     });
   }, [ready, lastSeq, scope, getState]);
 
-  // Load schema fields
+  // Load schema fields — fall back to inferring from records if no explicit schema
   useEffect(() => {
     if (!ready) return;
     setLoading(true);
     const schemaPrefix = `${scope}._schema.`;
-    getStateByPrefix(schemaPrefix).then((states) => {
+    getStateByPrefix(schemaPrefix).then(async (states) => {
       const grouped = groupSchemaStates(states, schemaPrefix);
-      setFieldSchemas(grouped);
+      if (grouped.size > 0) {
+        setFieldSchemas(grouped);
+        setIsInferred(false);
+        setLoading(false);
+        return;
+      }
+
+      // No explicit schema — infer from records
+      const allStates = await getStateByPrefix(scope + '.');
+      const scopeDepth = scope.split('.').length;
+      const records = allStates.filter((st) => {
+        const parts = st.target.split('.');
+        if (parts.length !== scopeDepth + 1) return false;
+        const seg = parts[scopeDepth];
+        return !seg.startsWith('_');
+      });
+
+      if (records.length === 0) {
+        setFieldSchemas(new Map());
+        setIsInferred(false);
+        setLoading(false);
+        return;
+      }
+
+      // Get field name map from table state (Airtable field metadata)
+      const scopeState = await getState(scope);
+      const fieldMeta = scopeState?.value?.fields;
+      const fieldNameMap = Array.isArray(fieldMeta) ? buildFieldNameMap(fieldMeta) : undefined;
+
+      const columns = deriveColumns(records, fieldNameMap);
+      const inferred = new Map<string, FieldSchema>();
+      for (const col of columns) {
+        inferred.set(col.key, {
+          fieldKey: col.key,
+          name: col.label !== col.key ? col.label : undefined,
+          ingestedType: col.type,
+          constraints: [],
+        });
+      }
+      setFieldSchemas(inferred);
+      setIsInferred(true);
       setLoading(false);
     });
-  }, [ready, lastSeq, scope, getStateByPrefix]);
+  }, [ready, lastSeq, scope, getState, getStateByPrefix]);
 
   // Load record count and last updated
   useEffect(() => {
@@ -324,7 +366,7 @@ export function SchemaView({ scope }: SchemaViewProps) {
         <div style={{ fontSize: 24, opacity: 0.3, marginBottom: 8 }}>{'\u2261'}</div>
         <div style={{ fontSize: 13, fontWeight: 500 }}>No schema defined</div>
         <div style={{ fontSize: 11, opacity: 0.7, marginTop: 4 }}>
-          This collection has no schema defined yet
+          This collection has no records to infer a schema from
         </div>
       </div>
     );
@@ -368,6 +410,19 @@ export function SchemaView({ scope }: SchemaViewProps) {
       <div style={s.header}>
         <span style={s.headerTitle}>Schema</span>
         <span style={s.headerCount}>{sortedFields.length} field{sortedFields.length !== 1 ? 's' : ''}</span>
+        {isInferred && (
+          <span style={{
+            fontSize: 10,
+            fontWeight: 500,
+            color: theme.textMuted,
+            background: theme.bgMuted,
+            padding: '2px 8px',
+            borderRadius: 4,
+            marginLeft: 4,
+          }}>
+            Inferred from records
+          </span>
+        )}
       </div>
 
       <div style={s.tableWrapper}>
