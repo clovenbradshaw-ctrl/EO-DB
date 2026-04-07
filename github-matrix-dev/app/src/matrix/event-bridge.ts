@@ -96,7 +96,7 @@ export async function resolveDataRoom(client: MatrixClient): Promise<string> {
     }
   }
 
-  // Fall back to directory lookup (may 404 — caller should catch).
-  const result = await client.getRoomIdForAlias(alias);
-  return result.room_id;
+  // Per-space rooms are the norm — skip the directory API call to avoid a
+  // 404 network request that clutters the browser console.
+  throw new Error(`No joined room matches alias ${alias}`);
 }
