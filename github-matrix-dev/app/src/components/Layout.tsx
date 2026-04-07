@@ -314,9 +314,11 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   const [publicSpaceEntries, setPublicSpaceEntries] = useState<SpaceEntry[]>([]);
   const [allStates, setAllStates] = useState<EoState[]>([]);
   const prevAllStatesKeyRef = useRef<string>('');
+  const allStatesFetchGenRef = useRef(0);
   const [timeScrubberFilter, setTimeScrubberFilter] = useState<TimeScrubberFilter>(DEFAULT_FILTER);
   const [scopedRecords, setScopedRecords] = useState<EoState[]>([]);
   const prevScopedRecordsKeyRef = useRef<string>('');
+  const scopedRecordsFetchGenRef = useRef(0);
   const [scopeFieldNameMap, setScopeFieldNameMap] = useState<Map<string, string>>(new Map());
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
   const getState = useEoStore((s) => s.getState);
@@ -511,7 +513,9 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   // Load all states — each space has its own isolated IDB, no prefix needed
   useEffect(() => {
     if (!ready) return;
+    const gen = ++allStatesFetchGenRef.current;
     getStateByPrefix('').then((states) => {
+      if (gen !== allStatesFetchGenRef.current) return;
       const key = states.map(s => s.target + ':' + s.last_seq).join('|');
       if (key !== prevAllStatesKeyRef.current) {
         prevAllStatesKeyRef.current = key;
@@ -527,8 +531,10 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       setScopeFieldNameMap(new Map());
       return;
     }
+    const gen = ++scopedRecordsFetchGenRef.current;
     const scopeDepth = selectedScope.split('.').length;
     getStateByPrefix(selectedScope + '.').then((states) => {
+      if (gen !== scopedRecordsFetchGenRef.current) return;
       const direct = states.filter((st) => {
         const parts = st.target.split('.');
         return parts.length === scopeDepth + 1 && !st.value?._alias;
@@ -540,6 +546,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       }
     });
     getState(selectedScope).then((scopeState) => {
+      if (gen !== scopedRecordsFetchGenRef.current) return;
       const fields = scopeState?.value?.fields;
       if (Array.isArray(fields)) {
         setScopeFieldNameMap(buildFieldNameMap(fields));
