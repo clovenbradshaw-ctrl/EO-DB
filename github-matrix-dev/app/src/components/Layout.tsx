@@ -54,6 +54,7 @@ import { useHashRoute, type View } from '../lib/router';
 import { type AccessRole, type UserTypeDefinition, powerLevelToRole, legacyAccessToRole } from '../permissions/types';
 import { UserTypeSwitcher } from './UserTypeSwitcher';
 import { resolvePermissionsFromSharing } from '../permissions/resolve';
+import { MultiUserTestView } from './MultiUserTestView';
 import { RecycleBin, addDeletedSpace, isSpaceDeleted, removeDeletedSpace, getDeletedSpaces } from './RecycleBin';
 import { addArchivedSpace, isSpaceArchived, removeArchivedSpace, getArchivedSpaces } from './ArchivedSpaces';
 import { setSpaceConfig, getSpaceConfig, applyEoPowerLevels, createGovernanceRoom } from '../permissions/room-topology';
@@ -1218,6 +1219,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     settings: '\u2699', // gear
     messages: '\uD83D\uDCAC', // speech bubble
     people: '\u2689', // people icon
+    multiuser: '\u2194', // left-right arrow
   };
 
   // --- Permission resolution ---
@@ -1641,6 +1643,17 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                 Settings
               </button>
             )}
+            <div style={s.navGroupLabel}>Testing</div>
+            <button
+              onClick={() => { navigate({ view: 'multiuser' }); }}
+              style={{
+                ...s.navItem,
+                ...(activeView === 'multiuser' ? s.navItemActive : {}),
+              }}
+            >
+              <span style={s.navIcon}>{NAV_ICONS.multiuser}</span>
+              Multi-User Test
+            </button>
           </nav>
         </aside>
 
@@ -1765,6 +1778,8 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               )
             ) : activeView === 'settings' ? (
               <SettingsView session={session} matrixClient={matrixClientRef.current} roomId={spaceCacheRef.current.get(selectedSpace!)?.mainRoomId ?? null} onUnarchive={handleUnarchiveSpace} connectionState={connectionState} connectionError={connectionError} matrixReady={matrixReady} onRetry={retrySync} onLogout={handleLogout} />
+            ) : activeView === 'multiuser' ? (
+              <MultiUserTestView />
             ) : null}
           </ErrorBoundary>}
         </main>
