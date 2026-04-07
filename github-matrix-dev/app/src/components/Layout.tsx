@@ -923,7 +923,14 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
 
       // 1. Try the space's own mainRoomId from discovery
       const spaceEntry = mergedEntries.find((e) => e.spaceTarget === selectedSpace);
-      if (spaceEntry?.mainRoomId) return spaceEntry.mainRoomId;
+      if (spaceEntry?.mainRoomId) {
+        // Also run the direct scan to populate the full room topology for Settings.
+        if (matrixClientRef.current) {
+          const scanResult = findSpaceRoomByDirectScan(matrixClientRef.current, selectedSpace!);
+          if (scanResult) resolvedSpaceRooms = scanResult.rooms;
+        }
+        return spaceEntry.mainRoomId;
+      }
 
       // 2. Direct scan: search ALL joined rooms for a space config matching
       //    this space. Catches premade/existing spaces that discovery hasn't
@@ -949,6 +956,9 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             const entries = discoverSpacesFromMatrix(matrixClientRef.current);
             if (entries.length > 0) setSpaceEntries(entries);
           } catch { /* best effort */ }
+          // Scan for the topology we just created (config was published by createSpaceRoom)
+          const scanResult = findSpaceRoomByDirectScan(matrixClientRef.current, selectedSpace!);
+          if (scanResult) resolvedSpaceRooms = scanResult.rooms;
           return newRoomId;
         }
       }
