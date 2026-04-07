@@ -1816,24 +1816,20 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
 
           {selectedSpace && (
           <nav style={s.sidebarNav}>
-            {selectedScope && (
-              <>
-                <div style={s.navGroupLabel}>Actions</div>
-                {(['compose', 'import'] as View[]).map((view) => (
-                  <button
-                    key={view}
-                    onClick={() => { navigate({ view }); }}
-                    style={{
-                      ...s.navItem,
-                      ...(activeView === view ? s.navItemActive : {}),
-                    }}
-                  >
-                    <span style={s.navIcon}>{NAV_ICONS[view]}</span>
-                    {view === 'compose' ? '+ Compose' : view.charAt(0).toUpperCase() + view.slice(1)}
-                  </button>
-                ))}
-              </>
-            )}
+            <div style={s.navGroupLabel}>Actions</div>
+            {(['compose', 'import'] as View[]).map((view) => (
+              <button
+                key={view}
+                onClick={() => { navigate({ view }); }}
+                style={{
+                  ...s.navItem,
+                  ...(activeView === view ? s.navItemActive : {}),
+                }}
+              >
+                <span style={s.navIcon}>{NAV_ICONS[view]}</span>
+                {view === 'compose' ? '+ Compose' : view.charAt(0).toUpperCase() + view.slice(1)}
+              </button>
+            ))}
             <div style={s.navGroupLabel}>Collaborate</div>
             <button
               onClick={() => navigate({ view: 'people' })}
