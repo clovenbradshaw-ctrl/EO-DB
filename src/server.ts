@@ -21,6 +21,8 @@ import { MatrixConnectionMonitor } from './matrix/connection-resilience.js';
 import { loadFilenConfig, configureFilenListener } from './filen/config.js';
 import { FilenSocketListener } from './filen/listener.js';
 import { FilenPipelineBridge } from './filen/pipeline-bridge.js';
+import { loadN8nConfig, configureN8nWebhook } from './n8n/config.js';
+import { registerN8nRoutes } from './api/n8n-store.js';
 
 const PORT = parseInt(process.env.EO_PORT || '3000', 10);
 const DATA_DIR = process.env.EO_DATA_DIR || './data';
@@ -95,10 +97,18 @@ async function start(): Promise<void> {
     registerRoomSyncRoutes(protectedApp, db, coordinator);
     registerDedupRoutes(protectedApp, db, feed);
     registerChatRoutes(protectedApp, db, chatFeed);
+    registerN8nRoutes(protectedApp, db, feed);
   });
 
   // Start the room sync coordinator after routes are registered
   await coordinator.start();
+
+  // n8n Google Drive storage — optional, enabled when N8N_WEBHOOK_URL is set
+  const n8nConfig = loadN8nConfig();
+  if (n8nConfig) {
+    configureN8nWebhook(n8nConfig);
+    app.log.info(`n8n webhook configured → ${n8nConfig.baseUrl}${n8nConfig.webhookPath}`);
+  }
 
   // Filen socket listener — optional, enabled when FILEN_FOLDER_UUID is set
   let filenListener: FilenSocketListener | undefined;
