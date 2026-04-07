@@ -16,9 +16,19 @@ interface SettingsViewProps {
   matrixClient?: MatrixClient | null;
   roomId?: string | null;
   onUnarchive?: (target: string) => void;
+  /** Current connection status for the header badge */
+  connectionState?: 'online' | 'offline' | 'syncing' | 'local' | 'error';
+  /** Structured error from Matrix/Filen init */
+  connectionError?: { phase: string; message: string } | null;
+  /** Whether the Matrix SDK initial sync completed */
+  matrixReady?: boolean;
+  /** Retry callback (re-init Matrix) */
+  onRetry?: () => void;
+  /** Logout callback (for auth errors) */
+  onLogout?: () => void;
 }
 
-export function SettingsView({ session, matrixClient, roomId, onUnarchive }: SettingsViewProps) {
+export function SettingsView({ session, matrixClient, roomId, onUnarchive, connectionState, connectionError, matrixReady, onRetry, onLogout }: SettingsViewProps) {
   const { theme } = useTheme();
   const lastSeq = useEoStore((s) => s.lastSeq);
   const recentEvents = useEoStore((s) => s.recentEvents);
@@ -113,19 +123,102 @@ export function SettingsView({ session, matrixClient, roomId, onUnarchive }: Set
           <Field label="Architecture" value="Browser-native (no server)" theme={theme} />
         </Section>
 
-        {/* Sync & Snapshots */}
-        <Section title="Sync & Snapshots" theme={theme}>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <div style={{
-              width: 6, height: 6, borderRadius: '50%',
-              background: syncManager ? '#22c55e' : filenSync ? theme.accent : theme.textMuted,
-              boxShadow: syncManager ? '0 0 6px #22c55e' : filenSync ? `0 0 6px ${theme.accent}` : 'none',
-            }} />
-            <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: theme.text }}>
-              {syncManager ? 'Matrix sync: connected' : filenSync ? 'Filen sync: active' : 'Sync: local only'}
-            </span>
+        {/* Connection & Sync Status */}
+        <Section title="Connection & Sync Status" theme={theme}>
+          <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 10 }}>
+            {/* Matrix SDK */}
+            <StatusRow
+              theme={theme}
+              label="Matrix SDK"
+              status={
+                connectionError?.phase === 'auth' ? 'error'
+                : connectionError?.phase === 'sync' ? 'error'
+                : matrixReady ? 'ok'
+                : connectionState === 'syncing' ? 'pending'
+                : connectionState === 'local' ? 'off'
+                : 'off'
+              }
+              detail={
+                connectionError?.phase === 'auth' ? connectionError.message
+                : connectionError?.phase === 'sync' ? connectionError.message
+                : matrixReady ? `Connected to ${session.homeserver.replace(/^https?:\/\//, '')}`
+                : connectionState === 'syncing' ? 'Performing initial sync...'
+                : connectionState === 'local' ? 'Disabled (local mode)'
+                : 'Not connected'
+              }
+            />
+            {/* Matrix Room */}
+            <StatusRow
+              theme={theme}
+              label="Space Room"
+              status={
+                connectionError?.phase === 'room' ? 'error'
+                : roomId ? 'ok'
+                : matrixReady ? 'pending'
+                : 'off'
+              }
+              detail={
+                connectionError?.phase === 'room' ? connectionError.message
+                : roomId ? `Room: ${roomId}`
+                : matrixReady ? 'Resolving room...'
+                : 'Waiting for Matrix'
+              }
+            />
+            {/* Sync Manager (Matrix timeline sync) */}
+            <StatusRow
+              theme={theme}
+              label="Matrix Sync"
+              status={syncManager ? 'ok' : filenSync ? 'off' : matrixReady && roomId ? 'pending' : 'off'}
+              detail={
+                syncManager ? 'Timeline sync active'
+                : filenSync ? 'Skipped (Filen is primary data store)'
+                : matrixReady && roomId ? 'Initializing...'
+                : 'Not started'
+              }
+            />
+            {/* Filen */}
+            <StatusRow
+              theme={theme}
+              label="Filen Storage"
+              status={filenSync ? 'ok' : 'off'}
+              detail={filenSync ? 'Backup sync active' : 'Not connected'}
+            />
+
+            {/* Error banner with action */}
+            {connectionError && (
+              <div style={{
+                marginTop: 4,
+                padding: '8px 12px',
+                background: `${theme.danger}15`,
+                border: `1px solid ${theme.danger}40`,
+                borderRadius: 6,
+                display: 'flex',
+                flexDirection: 'column' as const,
+                gap: 8,
+              }}>
+                <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: theme.danger }}>
+                  {connectionError.message}
+                </span>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  {connectionError.phase === 'auth' && onLogout && (
+                    <button style={{ ...s.actionBtn, background: theme.danger, borderColor: theme.danger, color: '#fff' }} onClick={onLogout}>
+                      Re-login
+                    </button>
+                  )}
+                  {onRetry && (
+                    <button style={{ ...s.actionBtn, background: 'transparent', color: theme.accent, borderColor: theme.accent }} onClick={onRetry}>
+                      Retry Connection
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
-          <div style={{ marginTop: 8, display: 'flex', gap: 8, alignItems: 'center' }}>
+        </Section>
+
+        {/* Snapshots & Tools */}
+        <Section title="Snapshots & Tools" theme={theme}>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' as const }}>
             <button style={s.actionBtn} onClick={handleSnapshot}>
               Take Snapshot
             </button>
@@ -298,6 +391,43 @@ function Field({ label, value, theme }: { label: string; value: string; theme: T
     <div style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0' }}>
       <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: theme.textMuted }}>{label}</span>
       <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: theme.text }}>{value}</span>
+    </div>
+  );
+}
+
+function StatusRow({ theme, label, status, detail }: {
+  theme: Theme;
+  label: string;
+  status: 'ok' | 'error' | 'pending' | 'off';
+  detail: string;
+}) {
+  const colors = {
+    ok: '#22c55e',
+    error: theme.danger,
+    pending: theme.warning,
+    off: theme.textMuted,
+  };
+  const color = colors[status];
+  return (
+    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+      <div style={{
+        width: 6, height: 6, borderRadius: '50%',
+        background: color,
+        boxShadow: status === 'ok' ? `0 0 6px ${color}` : status === 'error' ? `0 0 6px ${color}` : 'none',
+        marginTop: 4,
+        flexShrink: 0,
+      }} />
+      <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 1, minWidth: 0 }}>
+        <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, fontWeight: 600, color: theme.text }}>
+          {label}
+        </span>
+        <span style={{
+          fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: status === 'error' ? theme.danger : theme.textMuted,
+          wordBreak: 'break-word' as const,
+        }}>
+          {detail}
+        </span>
+      </div>
     </div>
   );
 }

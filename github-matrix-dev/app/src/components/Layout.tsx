@@ -641,15 +641,27 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
 
         await client.startClient({ initialSyncLimit: 20 });
 
-        // Wait for initial sync with a 30s timeout to avoid hanging forever
+        // Wait for initial sync with a 30s timeout to avoid hanging forever.
+        // Also reject immediately on ERROR (e.g. 401 auth) instead of waiting
+        // the full 30s — the onSync listener above will have already set
+        // connectionError, but we need the await to throw so startMatrix()
+        // enters its catch block.
         await Promise.race([
-          new Promise<void>((resolve) => {
+          new Promise<void>((resolve, reject) => {
             if (client!.isInitialSyncComplete()) {
               resolve();
             } else {
-              client!.once('sync' as any, (state: string) => {
-                if (state === 'PREPARED') resolve();
-              });
+              const onInitSync = (state: string, _prev: string | null, data?: any) => {
+                if (state === 'PREPARED') {
+                  client!.removeListener('sync' as any, onInitSync);
+                  resolve();
+                } else if (state === 'ERROR') {
+                  client!.removeListener('sync' as any, onInitSync);
+                  const described = describeMatrixError(data?.error);
+                  reject(new Error(described.message));
+                }
+              };
+              client!.on('sync' as any, onInitSync);
             }
           }),
           new Promise<void>((_, reject) =>
@@ -689,7 +701,10 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
 
     return () => {
       mounted = false;
-      if (matrixClientRef.current) matrixClientRef.current.stopClient();
+      if (matrixClientRef.current) {
+        matrixClientRef.current.removeAllListeners('sync' as any);
+        matrixClientRef.current.stopClient();
+      }
       matrixClientRef.current = null;
       roomIdRef.current = null;
       setMatrixReady(false);
@@ -989,6 +1004,17 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       // needed (it would try to hydrate from Matrix media, causing 404 errors).
       let syncManager: SyncManager | null = null;
       const filenConnected = useFilenStore.getState().connected;
+
+      // If Matrix is required but we couldn't get a room, surface the error
+      // instead of silently sitting at "Syncing…" forever.
+      if (MATRIX_ENABLED && !spaceRoomId && matrixClientRef.current && !filenOrgMode && !filenConnected) {
+        console.warn('[EO-DB] No room for space', selectedSpace, '— cannot start sync.');
+        setConnectionError({
+          phase: 'room',
+          message: 'Could not create or find a room for this space. The homeserver may restrict room creation — try logging out and back in.',
+        });
+      }
+
       if (MATRIX_ENABLED && spaceRoomId && matrixClientRef.current && !filenOrgMode && !filenConnected) {
         const maxRetries = 3;
         for (let attempt = 0; attempt < maxRetries; attempt++) {
@@ -1436,8 +1462,9 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           )}
           <ConnectionStatus
             state={connectionState}
-            onRetry={retrySync}
+            onRetry={connectionError?.phase === 'auth' ? handleLogout : retrySync}
             errorMessage={connectionMessage}
+            retryLabel={connectionError?.phase === 'auth' ? 'Re-login' : undefined}
           />
           {!isMobile && <SyncToast status={syncToastStatus} seq={syncToastSeq} />}
           {selectedSpace && !isMobile && (
@@ -1737,7 +1764,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                 </div>
               )
             ) : activeView === 'settings' ? (
-              <SettingsView session={session} matrixClient={matrixClientRef.current} roomId={spaceCacheRef.current.get(selectedSpace!)?.mainRoomId ?? null} onUnarchive={handleUnarchiveSpace} />
+              <SettingsView session={session} matrixClient={matrixClientRef.current} roomId={spaceCacheRef.current.get(selectedSpace!)?.mainRoomId ?? null} onUnarchive={handleUnarchiveSpace} connectionState={connectionState} connectionError={connectionError} matrixReady={matrixReady} onRetry={retrySync} onLogout={handleLogout} />
             ) : null}
           </ErrorBoundary>}
         </main>
