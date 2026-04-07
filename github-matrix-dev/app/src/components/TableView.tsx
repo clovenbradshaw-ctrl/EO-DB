@@ -410,6 +410,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   const prevRecordsKeyRef = useRef<string>('');
   const prevSchemaKeyRef = useRef<string>('');
   const prevScopeNameRef = useRef<string | null>(null);
+  const fetchGenRef = useRef(0);
   const { theme } = useTheme();
   const s = makeStyles(theme);
 
@@ -495,7 +496,10 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   // Load records and field metadata
   useEffect(() => {
     if (!ready) return;
+    const gen = ++fetchGenRef.current;
     getStateByPrefix(scope + '.').then((states) => {
+      // Skip stale fetch results (a newer load has already started)
+      if (gen !== fetchGenRef.current) return;
       const direct = states
         .filter((st) => {
           const parts = st.target.split('.');
@@ -528,6 +532,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     });
     // Fetch field metadata: prefer per-field schema entities, fall back to array on table state
     getStateByPrefix(scope + '._schema.').then((allSchemaStates) => {
+      if (gen !== fetchGenRef.current) return;
       // Only process schema if it actually changed
       const schemaKey = allSchemaStates.map(s => s.target + ':' + s.last_seq).join('|');
       if (schemaKey === prevSchemaKeyRef.current) return;
@@ -544,6 +549,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
       } else {
         // Fallback: read field metadata from table state array
         getState(scope).then((scopeState) => {
+          if (gen !== fetchGenRef.current) return;
           const fields = scopeState?.value?.fields;
           if (Array.isArray(fields)) {
             setFieldNameMap(buildFieldNameMap(fields));
@@ -559,6 +565,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     });
     // Fetch scope display name and auditable display field
     getState(scope).then((scopeState) => {
+      if (gen !== fetchGenRef.current) return;
       const name = scopeState?.value?.name ?? null;
       if (name !== prevScopeNameRef.current) {
         prevScopeNameRef.current = name;
@@ -588,6 +595,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   useEffect(() => {
     setFilterText('');
     setDebouncedFilterText('');
+    setRecords([]);
     setRecordsLoaded(false);
     prevRecordsKeyRef.current = '';
     prevSchemaKeyRef.current = '';
