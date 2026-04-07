@@ -123,10 +123,10 @@ export class GDriveSyncService {
     }
   }
 
-  /** Force an immediate sync. */
+  /** Force an immediate sync (bypasses the 256-event threshold). */
   async forceSave(): Promise<void> {
     if (this.destroyed) return;
-    await this.syncCycle();
+    await this.syncCycle(true);
   }
 
   /**
@@ -149,8 +149,9 @@ export class GDriveSyncService {
 
   /**
    * Core sync cycle — called every 30 seconds.
+   * @param force — bypass the 256-event threshold (used by forceSave)
    */
-  private async syncCycle(): Promise<void> {
+  private async syncCycle(force = false): Promise<void> {
     if (this.syncing || this.destroyed) return;
     this.syncing = true;
     this.onStatus?.('syncing');
@@ -184,77 +185,32 @@ export class GDriveSyncService {
         }
       }
 
-      // Read all events since last sync
-      const events = await readLogSince(this.store, this.lastSyncedSeq);
-      if (events.length === 0) {
+      // Track that we have pending changes but DON'T write to Drive yet.
+      // Only write when the 256-event consolidation threshold is reached.
+      const dataType = `eodb-${this.spaceId}`;
+      const eventsSinceConsolidation = currentSeq - this.lastConsolidatedSeq;
+
+      if (!force && eventsSinceConsolidation < CONSOLIDATE_EVERY_N_EVENTS) {
+        // Not enough events yet — just update local bookkeeping, skip Drive write
+        this.lastSyncedSeq = currentSeq;
+        await this.store.put('meta:gdrive_synced_seq', currentSeq);
         this.onStatus?.('synced');
+        console.log('[EO-DB] GDrive: %d events since consolidation, threshold %d — skipping Drive write',
+          eventsSinceConsolidation, CONSOLIDATE_EVERY_N_EVENTS);
         this.syncing = false;
         return;
       }
 
-      // Pack and encrypt the delta backup
-      const backupFile: EodbFile = {
-        version: 1,
-        type: 'backup',
-        space_id: this.spaceId,
-        space_name: this.spaceName,
-        from_seq: this.lastSyncedSeq,
-        to_seq: currentSeq,
-        created_by: this.userId,
-        created_at: new Date().toISOString(),
-        events,
-        prev_snapshots: [],
-      };
-
-      const binary = packEodb(backupFile);
-      const encrypted = await this.encryptBinary(binary);
-
-      // Convert to base64 for JSON transport via n8n
-      const base64Data = btoa(String.fromCharCode(...encrypted));
-
-      const dataType = `eodb-${this.spaceId}`;
-
-      // Each cycle uploads a small delta file with a unique seq-based hash.
-      // This mirrors Filen's pattern: quick changes → tiny file per cycle.
-      const deltaHash = await computeContentHash(
-        `${this.spaceId}:backup:${currentSeq}`,
-      );
-
-      const envelope = {
-        content_hash: deltaHash,
-        space_id: this.spaceId,
-        space_name: this.spaceName,
-        type: 'backup',
-        from_seq: this.lastSyncedSeq,
-        to_seq: currentSeq,
-        event_count: events.length,
-        size_bytes: encrypted.byteLength,
-        created_by: this.userId,
-        created_at: new Date().toISOString(),
-        data_base64: base64Data,
-      };
-
-      const result = await gdriveStore(
-        this.matrixAccessToken,
-        envelope,
-        dataType,
-        `backup-${currentSeq}`,
-        deltaHash,
-      );
-
-      // Every 256 events, create a consolidated file that aggregates all
-      // events and overwrites the single "card doc" file — same pattern as Filen.
-      const eventsSinceConsolidation = currentSeq - this.lastConsolidatedSeq;
-      if (eventsSinceConsolidation >= CONSOLIDATE_EVERY_N_EVENTS) {
-        await this.consolidateBackup(dataType, currentSeq);
-        this.lastConsolidatedSeq = currentSeq;
-      }
+      // Threshold reached — write consolidated file to Drive (overwrites previous)
+      await this.consolidateBackup(dataType, currentSeq);
+      this.lastConsolidatedSeq = currentSeq;
 
       // Update bookkeeping
       this.lastSyncedSeq = currentSeq;
       await this.store.put('meta:gdrive_synced_seq', currentSeq);
 
       // Signal via Matrix
+      const contentHash = await computeContentHash(`${this.spaceId}:consolidated`);
       const now = Date.now();
       if (this.matrixClient && this.roomId && (now - this.lastSignalAt >= SIGNAL_THROTTLE_MS)) {
         this.lastSignalAt = now;
@@ -263,18 +219,15 @@ export class GDriveSyncService {
           await this.matrixClient.sendEvent(this.roomId, EO_GDRIVE_SIGNAL as any, {
             stream: 'gdrive-backup',
             space_id: this.spaceId,
-            content_hash: deltaHash,
-            drive_file_id: result.drive_file_id,
+            content_hash: contentHash,
             seq: currentSeq,
-            event_count: events.length,
+            event_count: eventsSinceConsolidation,
             uploader: this.userId,
             uploaded_at: new Date().toISOString(),
-            size_bytes: encrypted.byteLength,
           });
 
           await this.matrixClient.sendStateEvent(this.roomId, EO_GDRIVE_HEAD as any, {
-            content_hash: deltaHash,
-            drive_file_id: result.drive_file_id,
+            content_hash: contentHash,
             seq: currentSeq,
             updated_at: new Date().toISOString(),
             updated_by: this.userId,
@@ -286,7 +239,7 @@ export class GDriveSyncService {
 
       useGDriveStore.getState().recordSync(this.spaceId);
       this.onStatus?.('synced');
-      console.log(`[EO-DB] Google Drive backup uploaded: seq ${currentSeq}, ${events.length} events, ${encrypted.byteLength} bytes`);
+      console.log(`[EO-DB] Google Drive consolidated backup uploaded: seq ${currentSeq}, ${eventsSinceConsolidation} events since last consolidation`);
     } catch (e: any) {
       console.warn('[EO-DB] Google Drive sync cycle failed:', e);
       this.onStatus?.('error', e.message);
