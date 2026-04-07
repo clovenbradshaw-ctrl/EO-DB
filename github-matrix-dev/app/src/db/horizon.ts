@@ -10,6 +10,7 @@ import type {
   RecResult, RecCycleInfo,
 } from './types';
 import { seedHash, chainHash } from './hash';
+import { classifyOnDemand } from './space-statistics';
 
 export interface HorizonOpts {
   prefix?: boolean;
@@ -22,6 +23,7 @@ export interface HorizonOpts {
   trajectory?: boolean;   // default true (fast; read from fold cache)
   hashCohort?: boolean;   // default false (opt-in; collection prefix scan)
   recCycle?: boolean;     // default false (opt-in; graph walk)
+  classification?: boolean; // default false (opt-in; population scan + z-score classification)
 }
 
 export async function horizonGet(
@@ -48,7 +50,7 @@ export async function horizonGet(
 
   // Run independent lookups in parallel. Expensive ones are opt-in so the
   // caller (e.g. RecordView on drawer open) can skip them for instant render.
-  const [ancestry, grounds, nearby, governance, signals, hashCohort, recCycle] = await Promise.all([
+  const [ancestry, grounds, nearby, governance, signals, hashCohort, recCycle, classification] = await Promise.all([
     opts?.ancestry !== false ? getAncestry(store, resolved, opts?.ancestryLight !== false) : Promise.resolve(undefined),
     opts?.grounds !== false ? getGrounds(store, resolved) : Promise.resolve([] as GroundEntry[]),
     opts?.nearby === true ? getNearby(store, resolved) : Promise.resolve(undefined),
@@ -58,6 +60,9 @@ export async function horizonGet(
       ? getHashCohortFromStore(store, figure.hash, resolved)
       : Promise.resolve(undefined),
     opts?.recCycle === true ? getRecCycleInfo(store, figure) : Promise.resolve(undefined),
+    opts?.classification === true && fold
+      ? classifyOnDemand(store, resolved, fold)
+      : Promise.resolve(undefined),
   ]);
 
   return {
@@ -67,7 +72,7 @@ export async function horizonGet(
     cadence,
     graphMetrics,
     recCycle,
-    classification: figure.classification,
+    classification,
   };
 }
 

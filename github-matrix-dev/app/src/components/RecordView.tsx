@@ -90,10 +90,9 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
     setRecCycle(undefined); setRecCycleLoaded(false); setRecCycleLoading(false); setRecCycleError(null);
     setHistoryOpen(false);
 
-    // Fast path: figure + ancestry + grounds + trajectory + governance.
-    // Governance is included here so it runs in parallel inside horizonGet's
-    // Promise.all, instead of triggering a separate horizon call.
-    horizon(target, { governance: true })
+    // Fast path: figure + ancestry + grounds + trajectory + governance + classification.
+    // These run in parallel inside horizonGet's Promise.all.
+    horizon(target, { governance: true, classification: true })
       .then((result) => {
         if (cancelled) return;
         if (result && !Array.isArray(result)) {

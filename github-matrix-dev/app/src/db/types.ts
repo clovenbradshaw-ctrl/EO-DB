@@ -42,7 +42,6 @@ export interface EoState {
   _fold?: EoStateFold;
   graphMetrics?: GraphMetrics;    // maintained by CON/SYN on edge changes
   _lastRecSeq?: number;           // seq of latest REC event on this target (for RecCycleInfo)
-  classification?: EntityClassification;   // population-relative entity type
 }
 
 export interface EoStateFold {
