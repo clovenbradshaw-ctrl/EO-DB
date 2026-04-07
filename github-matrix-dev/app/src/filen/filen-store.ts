@@ -8,11 +8,12 @@
 
 import { create } from 'zustand';
 import {
+  filenLogin as apiLogin,
   filenGetBaseFolder,
   filenEnsureFolder,
   filenFindFolder,
   filenCreateFolder,
-  fetchFilenSessionFromWebhook,
+  fetchFilenCredentialsFromWebhook,
   type FilenAuth,
 } from './filen-api';
 
@@ -110,26 +111,27 @@ export const useFilenStore = create<FilenStoreState>((set, get) => ({
   async connectOrgFromWebhook(matrixAccessToken: string): Promise<void> {
     set({ connecting: true, error: null });
     try {
-      // n8n logs into Filen server-side and returns a session (apiKey + masterKeys).
-      // The password never leaves n8n.
-      const session = await fetchFilenSessionFromWebhook(matrixAccessToken);
-      if (session.airtablePat) {
-        set({ webhookAirtableKey: session.airtablePat });
+      const webhookResult = await fetchFilenCredentialsFromWebhook(matrixAccessToken);
+      const { username, password } = webhookResult;
+      // Surface the Airtable API key so callers can pass it to the Airtable store.
+      if (webhookResult.airtablePat) {
+        set({ webhookAirtableKey: webhookResult.airtablePat });
       }
-      const baseFolderUuid = await filenGetBaseFolder(session.apiKey);
+      const result = await apiLogin(username, password);
+      const baseFolderUuid = await filenGetBaseFolder(result.apiKey);
       const eodbFolderUuid = await filenEnsureFolder(
-        session.apiKey, baseFolderUuid, EODB_ROOT_FOLDER, session.masterKeys,
+        result.apiKey, baseFolderUuid, EODB_ROOT_FOLDER, result.masterKeys,
       );
-      const auth: FilenAuth = { apiKey: session.apiKey, email: session.email };
+      const auth: FilenAuth = { apiKey: result.apiKey, email: username };
       set({
         auth,
-        masterKeys: session.masterKeys,
+        masterKeys: result.masterKeys,
         baseFolderUuid,
         eodbFolderUuid,
         connected: true,
         connecting: false,
         isOrgMode: true,
-        orgEmail: session.email,
+        orgEmail: username,
       });
       lastValidatedAt = Date.now();
     } catch (e: any) {
