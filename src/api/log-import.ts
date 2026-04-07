@@ -4,8 +4,9 @@
  * Endpoints for bulk-importing events from JSON, CSV, or TSV.
  * All routes are auth-protected (Matrix Bearer token).
  *
- * Upload-before-process: raw source data is archived to Filen as an
- * immutable binary (.eodb) before processing begins. This enables:
+ * Upload-before-process: raw source data is archived to Filen (via n8n
+ * webhook) as an immutable binary (.eodb) before processing begins. This
+ * enables:
  * - Audit trail: compare original vs processed to detect translation errors
  * - Resumability: if processing crashes, re-download and resume from checkpoint
  *
@@ -25,7 +26,6 @@ import {
   type ImportResult,
 } from '../ingestion/log-import.js';
 import { createEventSink } from '../ingestion/event-sink.js';
-import { tryGetFilenSession, type FilenSession } from '../filen/filen-session.js';
 import {
   computeContentHash,
   createImportJob,
@@ -33,18 +33,16 @@ import {
   findImportJobByHash,
   packImportArchive,
   uploadImportArchive,
-  downloadImportArchive,
   type ImportJob,
   type ImportArchive,
 } from '../filen/import-upload.js';
 
 /**
- * Upload raw data to Filen and return the import job.
+ * Upload raw data to Filen (via n8n) and return the import job.
  * If a prior job with the same content hash exists, resume it.
  */
 async function uploadOrResume(
   db: EoDb,
-  session: FilenSession | null,
   source: 'json' | 'csv',
   agent: string,
   rawData: any,
@@ -65,8 +63,6 @@ async function uploadOrResume(
     // status='uploading' or 'failed' — retry from scratch below
   }
 
-  if (!session) return null; // No Filen — proceed without archive
-
   // Create job and archive
   const job = createImportJob(source, agent, contentHash);
   await saveImportJob(db, job);
@@ -82,11 +78,9 @@ async function uploadOrResume(
       raw_data: rawData, // verbatim, unmodified original input
     };
     const binary = packImportArchive(archive);
-    const { uuid, fileKey } = await uploadImportArchive(session, job.job_id, source, binary);
+    const { remotePath } = await uploadImportArchive(job.job_id, source, binary);
 
-    job.filen_file_uuid = uuid;
-    job.filen_file_key = fileKey;
-    job.filen_folder_uuid = session.uploadsFolderUuid;
+    job.filen_remote_path = remotePath;
     job.status = 'uploaded';
     await saveImportJob(db, job);
 
@@ -158,18 +152,11 @@ export function registerLogImportRoutes(app: FastifyInstance, db: EoDb, feed: Fe
     }
 
     try {
-      // Extract Matrix token for Filen auth
-      const authHeader = request.headers.authorization as string;
-      const matrixToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
-
-      // Get Filen session (graceful failure)
-      const session = matrixToken ? await tryGetFilenSession(matrixToken, agent) : null;
-
       // Serialize raw data for archiving (verbatim — the original events payload)
       const rawString = JSON.stringify(body.events);
 
-      // Upload archive to Filen or resume existing job
-      const job = await uploadOrResume(db, session, 'json', agent, body.events, rawString);
+      // Upload archive to Filen (via n8n) or resume existing job
+      const job = await uploadOrResume(db, 'json', agent, body.events, rawString);
 
       // If job already completed, return idempotent result
       if (job?.status === 'completed') {
@@ -189,7 +176,7 @@ export function registerLogImportRoutes(app: FastifyInstance, db: EoDb, feed: Fe
       const rows = parseJsonImport(body.events, body.target_prefix);
 
       // Attach _import provenance to the first INS event if we have a Filen archive
-      if (job?.filen_file_uuid) {
+      if (job?.filen_remote_path) {
         attachImportProvenance(rows, job);
       }
 
@@ -209,7 +196,7 @@ export function registerLogImportRoutes(app: FastifyInstance, db: EoDb, feed: Fe
         ...result,
         grounded: flushResult,
         import_job_id: job?.job_id,
-        filen_upload: !!job?.filen_file_uuid,
+        filen_upload: !!job?.filen_remote_path,
       });
     } catch (e: any) {
       return reply.code(400).send({ error: e.message });
@@ -231,16 +218,9 @@ export function registerLogImportRoutes(app: FastifyInstance, db: EoDb, feed: Fe
     }
 
     try {
-      // Extract Matrix token for Filen auth
-      const authHeader = request.headers.authorization as string;
-      const matrixToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
-
-      // Get Filen session (graceful failure)
-      const session = matrixToken ? await tryGetFilenSession(matrixToken, agent) : null;
-
-      // Upload archive to Filen or resume existing job
+      // Upload archive to Filen (via n8n) or resume existing job
       // For CSV, raw_data is the raw CSV string — completely unmodified
-      const job = await uploadOrResume(db, session, 'csv', agent, body.csv, body.csv);
+      const job = await uploadOrResume(db, 'csv', agent, body.csv, body.csv);
 
       // If job already completed, return idempotent result
       if (job?.status === 'completed') {
@@ -263,7 +243,7 @@ export function registerLogImportRoutes(app: FastifyInstance, db: EoDb, feed: Fe
       });
 
       // Attach _import provenance to the first INS event
-      if (job?.filen_file_uuid) {
+      if (job?.filen_remote_path) {
         attachImportProvenance(rows, job);
       }
 
@@ -283,7 +263,7 @@ export function registerLogImportRoutes(app: FastifyInstance, db: EoDb, feed: Fe
         ...result,
         grounded: flushResult,
         import_job_id: job?.job_id,
-        filen_upload: !!job?.filen_file_uuid,
+        filen_upload: !!job?.filen_remote_path,
       });
     } catch (e: any) {
       return reply.code(400).send({ error: e.message });
@@ -306,9 +286,7 @@ function attachImportProvenance(
     ...firstIns.meta,
     _import: {
       job_id: job.job_id,
-      archive_uuid: job.filen_file_uuid,
-      archive_key: job.filen_file_key,
-      archive_folder_uuid: job.filen_folder_uuid,
+      archive_path: job.filen_remote_path,
       source: job.source,
       archived_at: job.updated_at,
       content_hash: job.content_hash,
