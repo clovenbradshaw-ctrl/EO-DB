@@ -139,26 +139,3 @@ export interface WebhookListResponse {
   }>;
 }
 
-// ─── Drive Change Notification (arrives via Matrix) ────────────────────────
-
-/**
- * Event content for `eo.n8n.drive.change` Matrix events.
- * Sent by the n8n Drive Watcher workflow when a file appears/changes
- * in the watched Google Drive folder.
- */
-export interface DriveChangeNotification {
-  /** Google Drive file ID. */
-  file_id: string;
-  /** File name. */
-  file_name: string;
-  /** MIME type. */
-  mime_type: string;
-  /** File size in bytes. */
-  size: number;
-  /** What happened. */
-  change_type: 'created' | 'modified' | 'deleted';
-  /** Which Drive folder was being watched. */
-  drive_folder: string;
-  /** ISO-8601 timestamp when n8n detected the change. */
-  detected_at: string;
-}
