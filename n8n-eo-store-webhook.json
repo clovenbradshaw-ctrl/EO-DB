@@ -1,0 +1,228 @@
+{
+  "name": "EO-DB Encrypted Store",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "eo-store",
+        "responseMode": "responseNode",
+        "options": { "rawBody": true }
+      },
+      "id": "node-post-webhook",
+      "name": "POST Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, -200],
+      "webhookId": "eo-store-post"
+    },
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "eo-store",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "node-get-webhook",
+      "name": "GET Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 200],
+      "webhookId": "eo-store-get"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://app.aminoimmigration.com/_matrix/client/v3/account/whoami",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $json.headers['x-matrix-token'] }}"
+            }
+          ]
+        },
+        "options": {
+          "response": { "response": { "neverError": true } }
+        }
+      },
+      "id": "node-auth-post",
+      "name": "Auth POST",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [250, -200]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://app.aminoimmigration.com/_matrix/client/v3/account/whoami",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $json.headers['x-matrix-token'] }}"
+            }
+          ]
+        },
+        "options": {
+          "response": { "response": { "neverError": true } }
+        }
+      },
+      "id": "node-auth-get",
+      "name": "Auth GET",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [250, 200]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "cond-post-auth",
+              "leftValue": "={{ $json.user_id }}",
+              "rightValue": "",
+              "operator": { "type": "string", "operation": "isNotEmpty" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "node-check-post",
+      "name": "POST Auth OK?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [500, -200]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "cond-get-auth",
+              "leftValue": "={{ $json.user_id }}",
+              "rightValue": "",
+              "operator": { "type": "string", "operation": "isNotEmpty" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "node-check-get",
+      "name": "GET Auth OK?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [500, 200]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"error\": \"unauthorized\" }",
+        "options": { "responseCode": 401 }
+      },
+      "id": "node-post-401",
+      "name": "POST 401",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [750, -100]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"error\": \"unauthorized\" }",
+        "options": { "responseCode": 401 }
+      },
+      "id": "node-get-401",
+      "name": "GET 401",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [750, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Store the encrypted envelope keyed by content_hash.\n// n8n's built-in static data acts as a simple KV store.\n// For production, swap this with S3, Postgres, etc.\nconst body = $('POST Webhook').first().json.body;\nconst envelope = body.envelope;\nconst dataId = body.data_id;\nconst hash = envelope.content_hash;\n\n// Use workflow static data as KV store\nconst store = $getWorkflowStaticData('global');\nif (!store.blobs) store.blobs = {};\nstore.blobs[hash] = { envelope, data_id: dataId, stored_at: new Date().toISOString() };\n\nreturn [{ json: { ok: true, content_hash: hash } }];"
+      },
+      "id": "node-store",
+      "name": "Store Blob",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [750, -300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": { "responseCode": 200 }
+      },
+      "id": "node-post-ok",
+      "name": "POST Respond OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1000, -300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Retrieve an encrypted envelope by content_hash.\nconst query = $('GET Webhook').first().json.query;\nconst hash = query.hash;\n\nconst store = $getWorkflowStaticData('global');\nconst blobs = store.blobs || {};\nconst entry = blobs[hash];\n\nif (entry) {\n  return [{ json: { ok: true, envelope: entry.envelope } }];\n} else {\n  return [{ json: { ok: false, error: 'not_found' } }];\n}"
+      },
+      "id": "node-retrieve",
+      "name": "Retrieve Blob",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [750, 100]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": { "responseCode": 200 }
+      },
+      "id": "node-get-ok",
+      "name": "GET Respond OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1000, 100]
+    }
+  ],
+  "connections": {
+    "POST Webhook": {
+      "main": [[{ "node": "Auth POST", "type": "main", "index": 0 }]]
+    },
+    "GET Webhook": {
+      "main": [[{ "node": "Auth GET", "type": "main", "index": 0 }]]
+    },
+    "Auth POST": {
+      "main": [[{ "node": "POST Auth OK?", "type": "main", "index": 0 }]]
+    },
+    "Auth GET": {
+      "main": [[{ "node": "GET Auth OK?", "type": "main", "index": 0 }]]
+    },
+    "POST Auth OK?": {
+      "main": [
+        [{ "node": "Store Blob", "type": "main", "index": 0 }],
+        [{ "node": "POST 401", "type": "main", "index": 0 }]
+      ]
+    },
+    "GET Auth OK?": {
+      "main": [
+        [{ "node": "Retrieve Blob", "type": "main", "index": 0 }],
+        [{ "node": "GET 401", "type": "main", "index": 0 }]
+      ]
+    },
+    "Store Blob": {
+      "main": [[{ "node": "POST Respond OK", "type": "main", "index": 0 }]]
+    },
+    "Retrieve Blob": {
+      "main": [[{ "node": "GET Respond OK", "type": "main", "index": 0 }]]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": ""
+  }
+}
