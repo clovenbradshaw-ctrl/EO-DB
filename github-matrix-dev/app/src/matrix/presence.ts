@@ -57,6 +57,7 @@ export class Presence {
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
   private toDeviceHandler: ((event: MatrixEvent) => void) | null = null;
+  private membershipHandler: ((event: any, member: any, oldMembership: string | null) => void) | null = null;
   private stopped = false;
 
   /** Cached snapshot to avoid rebuilding when nothing changed. */
@@ -74,6 +75,16 @@ export class Presence {
     this.stopped = false;
     this.toDeviceHandler = (event: MatrixEvent) => this.handleToDeviceEvent(event);
     this.client.on('toDeviceEvent' as any, this.toDeviceHandler);
+
+    // When a new member joins this room, ping them immediately instead
+    // of waiting up to PING_INTERVAL_MS for the next heartbeat cycle.
+    this.membershipHandler = (_event: any, member: any, oldMembership: string | null) => {
+      if (member.roomId !== this.roomId) return;
+      if (member.membership === 'join' && oldMembership !== 'join') {
+        void this.broadcastPing();
+      }
+    };
+    this.client.on('RoomMember.membership' as any, this.membershipHandler);
 
     // Broadcast immediately, then on an interval.
     void this.broadcastPing();
@@ -94,6 +105,10 @@ export class Presence {
     if (this.toDeviceHandler) {
       this.client.removeListener('toDeviceEvent' as any, this.toDeviceHandler);
       this.toDeviceHandler = null;
+    }
+    if (this.membershipHandler) {
+      this.client.removeListener('RoomMember.membership' as any, this.membershipHandler);
+      this.membershipHandler = null;
     }
     this.seen.clear();
     this.subscribers.clear();
@@ -144,7 +159,10 @@ export class Presence {
   private async broadcastPing(): Promise<void> {
     if (this.stopped) return;
     const room = this.client.getRoom(this.roomId);
-    if (!room) return;
+    if (!room) {
+      console.warn('[EO-DB] Presence: room not in SDK cache', this.roomId, '— ping skipped');
+      return;
+    }
 
     const myUserId = this.client.getUserId();
     if (!myUserId) return;
@@ -156,8 +174,11 @@ export class Presence {
     };
 
     const members = room.getJoinedMembers();
-    for (const member of members) {
-      if (member.userId === myUserId) continue;
+    const peers = members.filter((m: any) => m.userId !== myUserId);
+    if (peers.length === 0) {
+      console.warn('[EO-DB] Presence: no peers in room', this.roomId, `(${members.length} total members) — broadcast skipped`);
+    }
+    for (const member of peers) {
       try {
         await this.client.sendToDevice(
           PING_TYPE,

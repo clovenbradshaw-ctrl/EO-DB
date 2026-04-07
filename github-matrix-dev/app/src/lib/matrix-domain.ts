@@ -122,6 +122,14 @@ export function collabEventTypes(prefix?: string) {
   } as const;
 }
 
+/** Test / diagnostic event type (to-device, ephemeral). */
+export function testEventTypes(prefix?: string) {
+  const p = prefix ?? _eventPrefix;
+  return {
+    ping: `${p}.test.ping`,
+  } as const;
+}
+
 /** Airtable sync coordination event types (to-device, ephemeral). */
 export function airtableSyncEventTypes(prefix?: string) {
   const p = prefix ?? _eventPrefix;

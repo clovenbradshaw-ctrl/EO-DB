@@ -1,358 +1,315 @@
 /**
- * Multi-User Visibility Test
+ * Multi-User Connectivity Test
  *
- * Simulates two independent users within the same browser tab, each with
- * their own isolated IndexedDB store and fold engine. Actions performed
- * by one user are broadcast to the other via an in-memory event bus,
- * demonstrating that cross-user visibility works correctly.
+ * Real Matrix to-device messaging test between connected accounts.
+ * Sends actual `com.eo-db.test.ping` messages via `sendToDevice` to every
+ * joined member in the current space room and listens for incoming ones.
  *
- * Each panel shows:
- *  - A button to create records (INS) and update them (SYN)
- *  - A live event log of everything the user has processed
- *  - Projected state for all targets
- *  - Visual indicators when events arrive from the OTHER user
+ * Replaces the old fake Alice/Bob in-memory event bus simulation.
  */
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { createIdb } from '../db/idb';
-import { createLocalStore } from '../db/encrypted-store';
-import { processEvent } from '../db/fold';
-import { readLogSince } from '../db/log';
-import { getStateByPrefix } from '../db/state';
-import type { EoStore } from '../db/encrypted-store';
-import type { EoEvent, EoEventInput, EoState } from '../db/types';
+import type { MatrixClient, MatrixEvent } from 'matrix-js-sdk';
+import type { Presence, PresenceUser } from '../matrix/presence';
+import { testEventTypes } from '../lib/matrix-domain';
 import { useTheme, type Theme } from '../theme';
 
-// ---------------------------------------------------------------------------
-// In-memory event bus — simulates network broadcast between users
-// ---------------------------------------------------------------------------
+const TEST_PING_TYPE = testEventTypes().ping;
 
-type BusListener = (event: EoEventInput, fromUser: string) => void;
-
-function createEventBus() {
-  const listeners = new Set<BusListener>();
-  return {
-    subscribe(fn: BusListener) {
-      listeners.add(fn);
-      return () => { listeners.delete(fn); };
-    },
-    publish(event: EoEventInput, fromUser: string) {
-      for (const fn of listeners) fn(event, fromUser);
-    },
-  };
+/** Build the Map<userId, Map<deviceId, content>> structure for sendToDevice. */
+function toDeviceContent(userId: string, deviceId: string, content: Record<string, any>) {
+  const inner = new Map<string, Record<string, any>>();
+  inner.set(deviceId, content);
+  const outer = new Map<string, Map<string, Record<string, any>>>();
+  outer.set(userId, inner);
+  return outer;
 }
 
-// ---------------------------------------------------------------------------
-// Per-user isolated store + fold
-// ---------------------------------------------------------------------------
+interface ReceivedMessage {
+  id: number;
+  sender: string;
+  device: string;
+  message: string;
+  sentTs: number;
+  receivedTs: number;
+  fresh: boolean;
+}
 
-interface UserSession {
+interface MemberInfo {
   userId: string;
-  label: string;
-  color: string;
-  store: EoStore | null;
-  events: EoEvent[];
-  states: EoState[];
-  ready: boolean;
-  /** Tracks targets that just arrived from the remote user (for flash highlight) */
-  remoteFlash: Set<string>;
+  displayName: string | null;
 }
 
-const INITIAL_SESSION = (userId: string, label: string, color: string): UserSession => ({
-  userId, label, color, store: null, events: [], states: [], ready: false, remoteFlash: new Set(),
-});
+interface MultiUserTestViewProps {
+  matrixClient: MatrixClient | null;
+  roomId: string | null;
+  presence: Presence | null;
+}
 
-// ---------------------------------------------------------------------------
-// Component
-// ---------------------------------------------------------------------------
-
-export function MultiUserTestView() {
+export function MultiUserTestView({ matrixClient, roomId, presence }: MultiUserTestViewProps) {
   const { theme } = useTheme();
-  const busRef = useRef(createEventBus());
+  const [members, setMembers] = useState<MemberInfo[]>([]);
+  const [received, setReceived] = useState<ReceivedMessage[]>([]);
+  const [presenceUsers, setPresenceUsers] = useState<PresenceUser[]>([]);
+  const [messageText, setMessageText] = useState('');
+  const [lastSendResult, setLastSendResult] = useState<string | null>(null);
+  const [sending, setSending] = useState(false);
+  const nextId = useRef(0);
 
-  const [userA, setUserA] = useState<UserSession>(() => INITIAL_SESSION('@alice:local', 'Alice', '#6366f1'));
-  const [userB, setUserB] = useState<UserSession>(() => INITIAL_SESSION('@bob:local', 'Bob', '#f59e0b'));
-  const [testLog, setTestLog] = useState<string[]>([]);
+  const myUserId = matrixClient?.getUserId() ?? null;
+  const myDeviceId = matrixClient?.getDeviceId() ?? null;
 
-  const storeARef = useRef<EoStore | null>(null);
-  const storeBRef = useRef<EoStore | null>(null);
+  // Default message text
+  const effectiveMessage = messageText || `hello from ${myUserId ?? 'unknown'}`;
 
-  const log = useCallback((msg: string) => {
-    setTestLog((prev) => [...prev.slice(-49), `[${new Date().toLocaleTimeString()}] ${msg}`]);
-  }, []);
-
-  // --- Initialize isolated stores ---
+  // Poll room members every 5s
   useEffect(() => {
-    let cancelled = false;
-
-    async function init() {
-      // Use unique DB names so the two stores don't collide
-      const idbA = await createIdb('__test_alice__');
-      const idbB = await createIdb('__test_bob__');
-      const storeA = createLocalStore(idbA);
-      const storeB = createLocalStore(idbB);
-      if (cancelled) return;
-
-      storeARef.current = storeA;
-      storeBRef.current = storeB;
-
-      setUserA((prev) => ({ ...prev, store: storeA, ready: true }));
-      setUserB((prev) => ({ ...prev, store: storeB, ready: true }));
+    if (!matrixClient || !roomId) return;
+    function refresh() {
+      const room = matrixClient!.getRoom(roomId!);
+      if (!room) { setMembers([]); return; }
+      const joined = room.getJoinedMembers();
+      setMembers(joined.map((m: any) => ({
+        userId: m.userId,
+        displayName: m.name ?? null,
+      })));
     }
+    refresh();
+    const iv = setInterval(refresh, 5000);
+    return () => clearInterval(iv);
+  }, [matrixClient, roomId]);
 
-    init();
-    return () => { cancelled = true; };
-  }, []);
-
-  // --- Subscribe each user to the event bus (receive remote events) ---
+  // Listen for incoming test pings
   useEffect(() => {
-    const unsub = busRef.current.subscribe(async (event, fromUser) => {
-      // Deliver to the OTHER user's store
-      if (fromUser === '@alice:local' && storeBRef.current) {
-        await processEvent(storeBRef.current, event, () => {});
-        await refreshUser(storeBRef.current, setUserB, event.target);
-        log(`Bob received ${event.op} on ${event.target} from Alice`);
-      } else if (fromUser === '@bob:local' && storeARef.current) {
-        await processEvent(storeARef.current, event, () => {});
-        await refreshUser(storeARef.current, setUserA, event.target);
-        log(`Alice received ${event.op} on ${event.target} from Bob`);
-      }
-    });
-    return unsub;
-  }, [log]);
+    if (!matrixClient) return;
+    const handler = (event: MatrixEvent) => {
+      if (event.getType() !== TEST_PING_TYPE) return;
+      const content = event.getContent() as {
+        room_id?: string;
+        device?: string;
+        ts?: number;
+        message?: string;
+      };
+      // Scope to this room
+      if (content.room_id && content.room_id !== roomId) return;
+      const sender = event.getSender();
+      if (!sender) return;
 
-  async function refreshUser(
-    store: EoStore,
-    setter: React.Dispatch<React.SetStateAction<UserSession>>,
-    flashTarget?: string,
-  ) {
-    const events = await readLogSince(store, 0);
-    const states = await getStateByPrefix(store, '');
-    setter((prev) => {
-      const flash = new Set(prev.remoteFlash);
-      if (flashTarget) flash.add(flashTarget);
-      return { ...prev, events: events.slice(-50), states, remoteFlash: flash };
-    });
-    // Clear flash after 1.5s
-    if (flashTarget) {
+      const msg: ReceivedMessage = {
+        id: nextId.current++,
+        sender,
+        device: content.device || '?',
+        message: content.message || '',
+        sentTs: content.ts || 0,
+        receivedTs: Date.now(),
+        fresh: true,
+      };
+      setReceived((prev) => [msg, ...prev].slice(0, 50));
+
+      // Clear fresh flag after 2s
       setTimeout(() => {
-        setter((prev) => {
-          const flash = new Set(prev.remoteFlash);
-          flash.delete(flashTarget);
-          return { ...prev, remoteFlash: flash };
-        });
-      }, 1500);
-    }
-  }
-
-  // --- Action dispatchers ---
-  const nextId = useRef(1);
-
-  async function dispatchAction(
-    userId: string,
-    store: EoStore,
-    setter: React.Dispatch<React.SetStateAction<UserSession>>,
-    op: 'INS' | 'SYN' | 'DEF' | 'CON',
-    target: string,
-    operand: any,
-  ) {
-    const event: EoEventInput = {
-      op,
-      target,
-      operand,
-      agent: userId,
-      ts: new Date().toISOString(),
-      acquired_ts: new Date().toISOString(),
+        setReceived((prev) =>
+          prev.map((m) => (m.id === msg.id ? { ...m, fresh: false } : m)),
+        );
+      }, 2000);
     };
 
-    await processEvent(store, event, () => {});
-    await refreshUser(store, setter);
+    matrixClient.on('toDeviceEvent' as any, handler);
+    return () => {
+      matrixClient.removeListener('toDeviceEvent' as any, handler);
+    };
+  }, [matrixClient, roomId]);
 
-    const label = userId === '@alice:local' ? 'Alice' : 'Bob';
-    log(`${label} dispatched ${op} on ${target}`);
+  // Subscribe to presence
+  useEffect(() => {
+    if (!presence) { setPresenceUsers([]); return; }
+    const unsub = presence.subscribe(setPresenceUsers);
+    return unsub;
+  }, [presence]);
 
-    // Broadcast to other users via bus
-    busRef.current.publish(event, userId);
-  }
+  // Send test ping to all joined members
+  const handleSend = useCallback(async () => {
+    if (!matrixClient || !roomId) return;
+    setSending(true);
+    setLastSendResult(null);
 
-  function handleCreateRecord(userId: string, store: EoStore | null, setter: React.Dispatch<React.SetStateAction<UserSession>>) {
-    if (!store) return;
-    const id = nextId.current++;
-    const target = `tblTest.rec${id}`;
-    const label = userId === '@alice:local' ? 'Alice' : 'Bob';
-    dispatchAction(userId, store, setter, 'INS', target, {
-      name: `Record ${id} by ${label}`,
-      created_by: label,
-      timestamp: new Date().toLocaleTimeString(),
-    });
-  }
+    const room = matrixClient.getRoom(roomId);
+    if (!room) {
+      setLastSendResult('Room not found in SDK cache');
+      setSending(false);
+      return;
+    }
 
-  function handleUpdateRecord(userId: string, store: EoStore | null, setter: React.Dispatch<React.SetStateAction<UserSession>>, target: string) {
-    if (!store) return;
-    const label = userId === '@alice:local' ? 'Alice' : 'Bob';
-    dispatchAction(userId, store, setter, 'SYN', target, {
-      updated_by: label,
-      updated_at: new Date().toLocaleTimeString(),
-      note: `Edited by ${label}`,
-    });
-  }
+    const joined = room.getJoinedMembers();
+    const peers = joined.filter((m: any) => m.userId !== myUserId);
 
-  function handleDefineField(userId: string, store: EoStore | null, setter: React.Dispatch<React.SetStateAction<UserSession>>) {
-    if (!store) return;
-    const id = nextId.current++;
-    dispatchAction(userId, store, setter, 'DEF', `tblTest.fld${id}`, {
-      type: 'text',
-      label: `Field ${id}`,
-    });
-  }
+    if (peers.length === 0) {
+      setLastSendResult('No other members in room — nothing sent');
+      setSending(false);
+      return;
+    }
 
-  async function handleReset() {
-    // Delete test databases
-    const delDb = (name: string) => new Promise<void>((resolve) => {
-      const req = indexedDB.deleteDatabase(name);
-      req.onsuccess = () => resolve();
-      req.onerror = () => resolve();
-      req.onblocked = () => resolve();
-    });
-    await Promise.all([delDb('eo-db::__test_alice__'), delDb('eo-db::__test_bob__')]);
+    const payload = {
+      room_id: roomId,
+      device: myDeviceId,
+      ts: Date.now(),
+      message: effectiveMessage,
+    };
 
-    // Re-init
-    const idbA = await createIdb('__test_alice__');
-    const idbB = await createIdb('__test_bob__');
-    const storeA = createLocalStore(idbA);
-    const storeB = createLocalStore(idbB);
-    storeARef.current = storeA;
-    storeBRef.current = storeB;
-    nextId.current = 1;
+    const sent: string[] = [];
+    const failed: string[] = [];
+    for (const peer of peers) {
+      try {
+        await matrixClient.sendToDevice(
+          TEST_PING_TYPE,
+          toDeviceContent(peer.userId, '*', payload),
+        );
+        sent.push(peer.userId);
+      } catch (e) {
+        failed.push(`${peer.userId}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
 
-    setUserA({ ...INITIAL_SESSION('@alice:local', 'Alice', '#6366f1'), store: storeA, ready: true });
-    setUserB({ ...INITIAL_SESSION('@bob:local', 'Bob', '#f59e0b'), store: storeB, ready: true });
-    setTestLog([]);
-    log('Test environment reset');
-  }
+    let result = `Sent to ${sent.length} peer${sent.length !== 1 ? 's' : ''}: ${sent.join(', ')}`;
+    if (failed.length > 0) {
+      result += ` | Failed: ${failed.join('; ')}`;
+    }
+    setLastSendResult(result);
+    setSending(false);
+  }, [matrixClient, roomId, myUserId, myDeviceId, effectiveMessage]);
 
   const s = styles(theme);
 
-  return (
-    <div style={s.root}>
-      <div style={s.header}>
-        <h2 style={s.title}>Multi-User Visibility Test</h2>
-        <p style={s.subtitle}>
-          Two simulated users with isolated stores. Actions by one user are broadcast to the other
-          via an in-memory event bus, verifying cross-user visibility.
-        </p>
-        <button style={s.resetBtn} onClick={handleReset}>Reset Test</button>
-      </div>
-
-      <div style={s.panels}>
-        <UserPanel
-          user={userA}
-          theme={theme}
-          onCreateRecord={() => handleCreateRecord('@alice:local', userA.store, setUserA)}
-          onUpdateRecord={(t) => handleUpdateRecord('@alice:local', userA.store, setUserA, t)}
-          onDefineField={() => handleDefineField('@alice:local', userA.store, setUserA)}
-        />
-        <UserPanel
-          user={userB}
-          theme={theme}
-          onCreateRecord={() => handleCreateRecord('@bob:local', userB.store, setUserB)}
-          onUpdateRecord={(t) => handleUpdateRecord('@bob:local', userB.store, setUserB, t)}
-          onDefineField={() => handleDefineField('@bob:local', userB.store, setUserB)}
-        />
-      </div>
-
-      <div style={s.busLog}>
-        <div style={s.busLogTitle}>Event Bus Log</div>
-        <div style={s.busLogScroll}>
-          {testLog.length === 0 && <div style={s.busLogEmpty}>Perform actions above to see cross-user events here</div>}
-          {testLog.map((msg, i) => (
-            <div key={i} style={s.busLogEntry}>{msg}</div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// User Panel sub-component
-// ---------------------------------------------------------------------------
-
-function UserPanel({ user, theme, onCreateRecord, onUpdateRecord, onDefineField }: {
-  user: UserSession;
-  theme: Theme;
-  onCreateRecord: () => void;
-  onUpdateRecord: (target: string) => void;
-  onDefineField: () => void;
-}) {
-  const s = panelStyles(theme, user.color);
-
-  if (!user.ready) {
+  if (!matrixClient) {
     return (
-      <div style={s.panel}>
-        <div style={s.panelHeader}>{user.label}</div>
-        <div style={s.loading}>Initializing store...</div>
+      <div style={s.root}>
+        <div style={s.empty}>Matrix client not ready — log in first.</div>
       </div>
     );
   }
 
   return (
-    <div style={s.panel}>
-      <div style={s.panelHeader}>
-        <span style={s.avatar}>{user.label[0]}</span>
-        <span>{user.label}</span>
-        <span style={s.userId}>{user.userId}</span>
-      </div>
+    <div style={s.root}>
+      <h2 style={s.title}>Multi-User Connectivity Test</h2>
+      <p style={s.subtitle}>
+        Sends real <code>com.eo-db.test.ping</code> to-device messages between
+        connected accounts via the Matrix homeserver. Open this page in two
+        browsers logged into different accounts in the same space.
+      </p>
 
-      <div style={s.actions}>
-        <button style={s.actionBtn} onClick={onCreateRecord}>+ Create Record</button>
-        <button style={s.actionBtn} onClick={onDefineField}>+ Define Field</button>
-      </div>
-
-      {/* Projected State */}
+      {/* Section 1: Connection Info */}
       <div style={s.section}>
-        <div style={s.sectionTitle}>Projected State ({user.states.length})</div>
-        <div style={s.stateList}>
-          {user.states.length === 0 && <div style={s.emptyHint}>No state yet — create a record</div>}
-          {user.states.map((st) => (
-            <div
-              key={st.target}
-              style={{
-                ...s.stateRow,
-                ...(user.remoteFlash.has(st.target) ? s.flashHighlight : {}),
-              }}
-            >
-              <div style={s.stateTarget}>{st.target}</div>
-              <div style={s.stateMeta}>
-                <span>by {st.last_agent}</span>
-                <span style={s.stateOp}>{st.last_op}</span>
-                {st.last_agent !== user.userId && (
-                  <span style={s.remoteBadge}>remote</span>
-                )}
-              </div>
-              <pre style={s.stateValue}>{JSON.stringify(st.value, null, 2)}</pre>
-              <button
-                style={s.miniBtn}
-                onClick={() => onUpdateRecord(st.target)}
-              >
-                SYN (update)
-              </button>
+        <div style={s.sectionTitle}>Connection Info</div>
+        <div style={s.infoGrid}>
+          <span style={s.infoLabel}>User ID</span>
+          <span style={s.infoValue}>{myUserId ?? '—'}</span>
+          <span style={s.infoLabel}>Device ID</span>
+          <span style={s.infoValue}>{myDeviceId ?? '—'}</span>
+          <span style={s.infoLabel}>Room ID</span>
+          <span style={s.infoValue}>{roomId ?? <span style={s.warn}>No room — resolve failed</span>}</span>
+        </div>
+
+        <div style={s.membersHeader}>
+          Joined Members ({members.length})
+          {members.length <= 1 && (
+            <span style={s.warn}> — no peers visible, to-device will have no recipients</span>
+          )}
+        </div>
+        <div style={s.membersList}>
+          {members.length === 0 && <div style={s.muted}>None</div>}
+          {members.map((m) => (
+            <div key={m.userId} style={s.memberRow}>
+              <span style={s.memberName}>{m.displayName || m.userId}</span>
+              <span style={s.memberId}>{m.userId}</span>
+              {m.userId === myUserId && <span style={s.youBadge}>you</span>}
             </div>
           ))}
         </div>
       </div>
 
-      {/* Event Log */}
+      {/* Section 2: Send */}
       <div style={s.section}>
-        <div style={s.sectionTitle}>Event Log ({user.events.length})</div>
-        <div style={s.eventList}>
-          {user.events.length === 0 && <div style={s.emptyHint}>No events yet</div>}
-          {[...user.events].reverse().map((ev) => (
-            <div key={ev.seq} style={s.eventRow}>
-              <span style={s.eventSeq}>#{ev.seq}</span>
-              <span style={s.eventOp}>{ev.op}</span>
-              <span style={s.eventTarget}>{ev.target}</span>
-              <span style={s.eventAgent}>
-                {ev.agent === user.userId ? 'local' : 'remote'}
+        <div style={s.sectionTitle}>Send Test Message</div>
+        <div style={s.sendRow}>
+          <input
+            type="text"
+            value={messageText}
+            onChange={(e) => setMessageText(e.target.value)}
+            placeholder={`hello from ${myUserId ?? 'unknown'}`}
+            style={s.input}
+          />
+          <button
+            onClick={handleSend}
+            disabled={sending || !roomId}
+            style={s.sendBtn}
+          >
+            {sending ? 'Sending...' : 'Send'}
+          </button>
+        </div>
+        {lastSendResult && (
+          <div style={s.sendResult}>{lastSendResult}</div>
+        )}
+      </div>
+
+      {/* Section 3: Received */}
+      <div style={s.section}>
+        <div style={s.sectionTitleRow}>
+          <span style={s.sectionTitle}>
+            Received Messages ({received.length})
+          </span>
+          {received.length > 0 && (
+            <button onClick={() => setReceived([])} style={s.clearBtn}>
+              Clear
+            </button>
+          )}
+        </div>
+        <div style={s.receivedList}>
+          {received.length === 0 && (
+            <div style={s.muted}>
+              No messages received yet — send a test ping from another client
+            </div>
+          )}
+          {received.map((msg) => {
+            const latency = msg.sentTs ? msg.receivedTs - msg.sentTs : null;
+            return (
+              <div
+                key={msg.id}
+                style={{
+                  ...s.receivedRow,
+                  ...(msg.fresh ? s.receivedFresh : {}),
+                }}
+              >
+                <div style={s.receivedMeta}>
+                  <span style={s.receivedSender}>{msg.sender}</span>
+                  <span style={s.receivedDevice}>device: {msg.device}</span>
+                  {latency !== null && (
+                    <span style={s.receivedLatency}>{latency}ms</span>
+                  )}
+                </div>
+                <div style={s.receivedMessage}>{msg.message || '(empty)'}</div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Section 4: Presence */}
+      <div style={s.section}>
+        <div style={s.sectionTitle}>
+          Presence Heartbeat ({presenceUsers.length} online)
+        </div>
+        <div style={s.presenceList}>
+          {!presence && <div style={s.muted}>Presence not active</div>}
+          {presence && presenceUsers.length === 0 && (
+            <div style={s.muted}>No peers detected via presence heartbeat</div>
+          )}
+          {presenceUsers.map((u) => (
+            <div key={u.userId} style={s.presenceRow}>
+              <span style={s.greenDot} />
+              <span>{u.displayName || u.userId}</span>
+              <span style={s.presenceMeta}>
+                {u.devices.length} device{u.devices.length !== 1 ? 's' : ''}
+                {' · '}
+                {Math.max(0, Math.round((Date.now() - u.lastSeen) / 1000))}s ago
               </span>
             </div>
           ))}
@@ -362,147 +319,239 @@ function UserPanel({ user, theme, onCreateRecord, onUpdateRecord, onDefineField 
   );
 }
 
-// ---------------------------------------------------------------------------
-// Styles
-// ---------------------------------------------------------------------------
+// ─── Styles ───────────────────────────────────────────────────────────────────
 
-function styles(theme: Theme): Record<string, React.CSSProperties> {
+function styles(t: Theme): Record<string, React.CSSProperties> {
   return {
     root: {
-      display: 'flex', flexDirection: 'column', height: '100%', overflow: 'auto',
-      padding: 20, gap: 16,
-    },
-    header: {
-      textAlign: 'center', marginBottom: 8,
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 16,
+      padding: 20,
+      height: '100%',
+      overflow: 'auto',
     },
     title: {
-      margin: 0, fontSize: 20, fontWeight: 700, color: theme.text,
+      margin: 0,
+      fontSize: 18,
+      fontWeight: 700,
+      color: t.text,
     },
     subtitle: {
-      margin: '6px 0 0', fontSize: 13, color: theme.textSecondary, maxWidth: 600,
-      marginLeft: 'auto', marginRight: 'auto', lineHeight: 1.5,
+      margin: 0,
+      fontSize: 12,
+      color: t.textSecondary,
+      lineHeight: 1.5,
     },
-    resetBtn: {
-      marginTop: 10, padding: '6px 16px', fontSize: 12, fontWeight: 600,
-      background: theme.dangerBg, color: theme.danger, border: `1px solid ${theme.dangerBorder}`,
-      borderRadius: 6, cursor: 'pointer',
-    },
-    panels: {
-      display: 'flex', gap: 16, flex: 1, minHeight: 0,
-    },
-    busLog: {
-      background: theme.bgCard, border: `1px solid ${theme.border}`, borderRadius: 8,
-      padding: 12, maxHeight: 180, display: 'flex', flexDirection: 'column',
-    },
-    busLogTitle: {
-      fontSize: 13, fontWeight: 600, color: theme.text, marginBottom: 6,
-    },
-    busLogScroll: {
-      flex: 1, overflow: 'auto', fontSize: 11, fontFamily: 'monospace', color: theme.textSecondary,
-    },
-    busLogEmpty: {
-      color: theme.textMuted, fontStyle: 'italic',
-    },
-    busLogEntry: {
-      padding: '2px 0', borderBottom: `1px solid ${theme.borderLight}`,
-    },
-  };
-}
-
-function panelStyles(theme: Theme, color: string): Record<string, React.CSSProperties> {
-  return {
-    panel: {
-      flex: 1, display: 'flex', flexDirection: 'column', gap: 10,
-      background: theme.bgCard, border: `1px solid ${theme.border}`, borderRadius: 10,
-      padding: 14, overflow: 'auto', minWidth: 0,
-    },
-    panelHeader: {
-      display: 'flex', alignItems: 'center', gap: 8,
-      fontSize: 15, fontWeight: 700, color: theme.text,
-      borderBottom: `2px solid ${color}`, paddingBottom: 8,
-    },
-    avatar: {
-      width: 28, height: 28, borderRadius: '50%', background: color,
-      color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center',
-      fontSize: 14, fontWeight: 700, flexShrink: 0,
-    },
-    userId: {
-      fontSize: 11, color: theme.textMuted, fontWeight: 400, marginLeft: 'auto',
-    },
-    loading: {
-      color: theme.textMuted, fontSize: 13, padding: 20, textAlign: 'center',
-    },
-    actions: {
-      display: 'flex', gap: 6, flexWrap: 'wrap',
-    },
-    actionBtn: {
-      padding: '5px 12px', fontSize: 12, fontWeight: 600,
-      background: theme.accentBg, color: theme.accent, border: `1px solid ${theme.accentBorder}`,
-      borderRadius: 6, cursor: 'pointer',
+    empty: {
+      padding: 40,
+      textAlign: 'center',
+      color: t.textMuted,
+      fontSize: 13,
     },
     section: {
-      display: 'flex', flexDirection: 'column', gap: 4,
+      background: t.bgCard,
+      border: `1px solid ${t.border}`,
+      borderRadius: 8,
+      padding: 14,
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 8,
     },
     sectionTitle: {
-      fontSize: 12, fontWeight: 600, color: theme.textSecondary, textTransform: 'uppercase' as const,
+      fontSize: 11,
+      fontWeight: 600,
+      color: t.textSecondary,
+      textTransform: 'uppercase' as const,
       letterSpacing: 0.5,
     },
-    stateList: {
-      display: 'flex', flexDirection: 'column', gap: 6,
+    sectionTitleRow: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
     },
-    stateRow: {
-      background: theme.bgMuted, borderRadius: 6, padding: 8,
-      border: `1px solid ${theme.borderLight}`,
+    infoGrid: {
+      display: 'grid',
+      gridTemplateColumns: '90px 1fr',
+      gap: '4px 10px',
+      fontSize: 12,
+      fontFamily: "'JetBrains Mono', monospace",
+    },
+    infoLabel: {
+      color: t.textMuted,
+      fontWeight: 500,
+    },
+    infoValue: {
+      color: t.text,
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+      whiteSpace: 'nowrap' as const,
+    },
+    warn: {
+      color: '#f59e0b',
+      fontWeight: 500,
+    },
+    membersHeader: {
+      fontSize: 12,
+      fontWeight: 600,
+      color: t.text,
+      marginTop: 6,
+    },
+    membersList: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 4,
+    },
+    memberRow: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      fontSize: 12,
+      fontFamily: "'JetBrains Mono', monospace",
+      padding: '4px 8px',
+      background: t.bgMuted,
+      borderRadius: 4,
+    },
+    memberName: {
+      color: t.text,
+      fontWeight: 500,
+    },
+    memberId: {
+      color: t.textMuted,
+      fontSize: 10,
+      flex: 1,
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+      whiteSpace: 'nowrap' as const,
+    },
+    youBadge: {
+      fontSize: 9,
+      fontWeight: 600,
+      color: t.accent,
+      background: t.accentBg,
+      padding: '1px 5px',
+      borderRadius: 3,
+    },
+    muted: {
+      color: t.textMuted,
+      fontSize: 12,
+      fontStyle: 'italic',
+    },
+    sendRow: {
+      display: 'flex',
+      gap: 8,
+    },
+    input: {
+      flex: 1,
+      padding: '6px 10px',
+      fontSize: 12,
+      fontFamily: "'JetBrains Mono', monospace",
+      background: t.bg,
+      color: t.text,
+      border: `1px solid ${t.border}`,
+      borderRadius: 6,
+      outline: 'none',
+    },
+    sendBtn: {
+      padding: '6px 16px',
+      fontSize: 12,
+      fontWeight: 600,
+      background: t.accentBg,
+      color: t.accent,
+      border: `1px solid ${t.accentBorder}`,
+      borderRadius: 6,
+      cursor: 'pointer',
+      whiteSpace: 'nowrap' as const,
+    },
+    sendResult: {
+      fontSize: 11,
+      fontFamily: "'JetBrains Mono', monospace",
+      color: t.textSecondary,
+      padding: '4px 8px',
+      background: t.bgMuted,
+      borderRadius: 4,
+    },
+    clearBtn: {
+      fontSize: 10,
+      fontWeight: 600,
+      color: t.textMuted,
+      background: 'transparent',
+      border: `1px solid ${t.border}`,
+      borderRadius: 4,
+      padding: '2px 8px',
+      cursor: 'pointer',
+    },
+    receivedList: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 4,
+      maxHeight: 300,
+      overflow: 'auto',
+    },
+    receivedRow: {
+      padding: '6px 8px',
+      background: t.bgMuted,
+      borderRadius: 4,
+      border: `1px solid ${t.borderLight}`,
       transition: 'background 0.3s ease, border-color 0.3s ease',
     },
-    flashHighlight: {
-      background: `${color}22`, borderColor: color,
+    receivedFresh: {
+      background: 'rgba(16,185,129,0.1)',
+      borderColor: '#10b981',
     },
-    stateTarget: {
-      fontSize: 13, fontWeight: 600, color: theme.text, fontFamily: 'monospace',
+    receivedMeta: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 10,
+      fontSize: 11,
+      fontFamily: "'JetBrains Mono', monospace",
     },
-    stateMeta: {
-      display: 'flex', gap: 8, fontSize: 11, color: theme.textMuted, marginTop: 2,
+    receivedSender: {
+      color: t.text,
+      fontWeight: 600,
     },
-    stateOp: {
-      background: theme.accentBg, color: theme.accent, padding: '0 4px',
-      borderRadius: 3, fontSize: 10, fontWeight: 600,
+    receivedDevice: {
+      color: t.textMuted,
+      fontSize: 10,
     },
-    remoteBadge: {
-      background: `${color}33`, color, padding: '0 5px',
-      borderRadius: 3, fontSize: 10, fontWeight: 600,
+    receivedLatency: {
+      color: '#10b981',
+      fontWeight: 600,
+      fontSize: 10,
     },
-    stateValue: {
-      margin: '4px 0 0', fontSize: 11, color: theme.textSecondary, fontFamily: 'monospace',
-      whiteSpace: 'pre-wrap', wordBreak: 'break-all',
-      background: theme.bg, borderRadius: 4, padding: 6, maxHeight: 80, overflow: 'auto',
+    receivedMessage: {
+      fontSize: 12,
+      color: t.textSecondary,
+      marginTop: 2,
+      fontFamily: "'JetBrains Mono', monospace",
     },
-    miniBtn: {
-      marginTop: 4, padding: '3px 8px', fontSize: 10, fontWeight: 600,
-      background: 'transparent', color: theme.accent, border: `1px solid ${theme.accentBorder}`,
-      borderRadius: 4, cursor: 'pointer',
+    presenceList: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 4,
     },
-    eventList: {
-      display: 'flex', flexDirection: 'column', gap: 2, maxHeight: 200, overflow: 'auto',
+    presenceRow: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      fontSize: 12,
+      color: t.text,
+      padding: '4px 8px',
+      background: t.bgMuted,
+      borderRadius: 4,
     },
-    eventRow: {
-      display: 'flex', gap: 8, fontSize: 11, fontFamily: 'monospace',
-      padding: '3px 6px', borderRadius: 4, background: theme.bgMuted,
+    greenDot: {
+      width: 6,
+      height: 6,
+      borderRadius: '50%',
+      background: '#10b981',
+      flexShrink: 0,
     },
-    eventSeq: {
-      color: theme.textMuted, minWidth: 30,
-    },
-    eventOp: {
-      fontWeight: 700, color: theme.accent, minWidth: 30,
-    },
-    eventTarget: {
-      color: theme.text, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis',
-    },
-    eventAgent: {
-      color: theme.textMuted, fontSize: 10,
-    },
-    emptyHint: {
-      color: theme.textMuted, fontStyle: 'italic', fontSize: 12, padding: 8,
+    presenceMeta: {
+      color: t.textMuted,
+      fontSize: 10,
+      fontFamily: "'JetBrains Mono', monospace",
+      marginLeft: 'auto',
     },
   };
 }
