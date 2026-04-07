@@ -15,6 +15,8 @@ interface SettingsViewProps {
   session: MatrixSession;
   matrixClient?: MatrixClient | null;
   roomId?: string | null;
+  /** Full room topology for the current space (main, governance, restricted) */
+  spaceRooms?: { main: string; restricted?: string; governance?: string } | null;
   onUnarchive?: (target: string) => void;
   /** Current connection status for the header badge */
   connectionState?: 'online' | 'offline' | 'syncing' | 'local' | 'error';
@@ -28,7 +30,7 @@ interface SettingsViewProps {
   onLogout?: () => void;
 }
 
-export function SettingsView({ session, matrixClient, roomId, onUnarchive, connectionState, connectionError, matrixReady, onRetry, onLogout }: SettingsViewProps) {
+export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnarchive, connectionState, connectionError, matrixReady, onRetry, onLogout }: SettingsViewProps) {
   const { theme } = useTheme();
   const lastSeq = useEoStore((s) => s.lastSeq);
   const recentEvents = useEoStore((s) => s.recentEvents);
@@ -147,10 +149,10 @@ export function SettingsView({ session, matrixClient, roomId, onUnarchive, conne
                 : 'Not connected'
               }
             />
-            {/* Matrix Room */}
+            {/* Main Room */}
             <StatusRow
               theme={theme}
-              label="Space Room"
+              label="Main Room"
               status={
                 connectionError?.phase === 'room' ? 'error'
                 : roomId ? 'ok'
@@ -159,9 +161,31 @@ export function SettingsView({ session, matrixClient, roomId, onUnarchive, conne
               }
               detail={
                 connectionError?.phase === 'room' ? connectionError.message
-                : roomId ? `Room: ${roomId}`
+                : roomId ? `${roomId}`
                 : matrixReady ? 'Resolving room...'
                 : 'Waiting for Matrix'
+              }
+            />
+            {/* Governance Room */}
+            <StatusRow
+              theme={theme}
+              label="Governance Room"
+              status={spaceRooms?.governance ? 'ok' : roomId ? 'off' : 'off'}
+              detail={
+                spaceRooms?.governance ? `${spaceRooms.governance}`
+                : roomId ? 'Not created'
+                : '—'
+              }
+            />
+            {/* Restricted Room */}
+            <StatusRow
+              theme={theme}
+              label="Restricted Room"
+              status={spaceRooms?.restricted ? 'ok' : roomId ? 'off' : 'off'}
+              detail={
+                spaceRooms?.restricted ? `${spaceRooms.restricted}`
+                : roomId ? 'Not created (created on first restricted field)'
+                : '—'
               }
             />
             {/* Sync Manager (Matrix timeline sync) */}
