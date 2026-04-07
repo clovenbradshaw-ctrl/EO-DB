@@ -1,5 +1,5 @@
 /**
- * GDriveStorageWidget — displays EO-DB backup files stored on Google Drive.
+ * GDriveStorageWidget — displays encrypted .eodb backup files on Google Drive.
  *
  * Files are accessed via the n8n eo-store webhook, which proxies to Google Drive.
  * Mirrors the layout of FilenStorageWidget.
@@ -132,7 +132,7 @@ export function GDriveStorageWidget() {
                 onClick={() => setExpanded(isExpanded ? null : entry.data_id)}
               >
                 <span style={s.fileIcon}>{'\u{1F4E6}'}</span>
-                <span style={s.fileName}>{entry.content_hash.slice(0, 12)}...json</span>
+                <span style={s.fileName}>{entry.content_hash.slice(0, 12)}...eodb</span>
                 <span style={{ ...s.fileTag, background: tagColor.bg, color: tagColor.text, border: `1px solid ${tagColor.border}` }}>
                   BACK
                 </span>
@@ -163,7 +163,7 @@ export function GDriveStorageWidget() {
                   )}
                   <div style={s.detailRow}>
                     <span style={s.detailLabel}>Encrypted</span>
-                    <span style={s.detailValue}>AES-256-GCM (via n8n proxy)</span>
+                    <span style={s.detailValue}>AES-256-GCM (room keyring)</span>
                   </div>
                 </div>
               )}

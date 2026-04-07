@@ -3,13 +3,13 @@
  *
  * Runs in parallel with FilenSyncService. Each sync cycle:
  * 1. Check if there are new events since last sync
- * 2. Pack events into .eodb format
- * 3. Encrypt with keyring (same as Filen)
- * 4. Upload via n8n eo-store webhook (action=store)
+ * 2. Pack events into .eodb binary format (magic header + msgpack)
+ * 3. Encrypt with room keyring (AES-256-GCM, same as Filen — no Filen-specific encryption)
+ * 4. Upload encrypted binary as {content_hash}.eodb via n8n proxy
  * 5. Signal via Matrix timeline + update state event
  *
  * The n8n webhook handles Google Drive folder creation automatically.
- * Files are stored as {content_hash}.json inside a folder named after the space.
+ * Files are stored as {content_hash}.eodb inside a folder named after the space.
  */
 
 import type { MatrixClient } from 'matrix-js-sdk';
@@ -274,30 +274,16 @@ export class GDriveSyncService {
 
       const binary = packEodb(consolidatedFile);
       const encrypted = await this.encryptBinary(binary);
-      const base64Data = btoa(String.fromCharCode(...encrypted));
 
       // Stable hash per space — always overwrites the same file
       const consolidatedHash = await computeContentHash(
         `${this.spaceId}:consolidated`,
       );
 
-      const envelope = {
-        content_hash: consolidatedHash,
-        space_id: this.spaceId,
-        space_name: this.spaceName,
-        type: 'consolidated',
-        from_seq: 0,
-        to_seq: currentSeq,
-        event_count: allEvents.length,
-        size_bytes: encrypted.byteLength,
-        created_by: this.userId,
-        created_at: new Date().toISOString(),
-        data_base64: base64Data,
-      };
-
+      // Upload encrypted binary directly as .eodb (like Filen, without Filen encryption)
       await gdriveStore(
         this.matrixAccessToken,
-        envelope,
+        encrypted,
         dataType,
         'consolidated',
         consolidatedHash,

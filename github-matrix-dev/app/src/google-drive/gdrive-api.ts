@@ -12,6 +12,13 @@
  *   EO-DB / <dataType> /
  * where dataType is typically "eodb-<spaceId>".
  *
+ * Files are stored as encrypted binary .eodb files (same format as Filen),
+ * encrypted with the room keyring (AES-256-GCM) — no Filen-specific encryption.
+ *
+ * Binary data is base64-encoded for transport through the JSON proxy.
+ * The proxy decodes `_raw_content_base64` back to binary before uploading,
+ * and base64-encodes binary responses in `_raw_content_base64`.
+ *
  * Access control is enforced by Matrix — only authenticated users can
  * call the webhook. Sharing works naturally: all space members can
  * read/write the same space folder.
@@ -45,6 +52,29 @@ export interface GDriveListEntry {
 export interface GDriveListResult {
   ok: boolean;
   entries: GDriveListEntry[];
+}
+
+// ──────────────────────────────────────────────────────────────
+// Binary ↔ base64 helpers (for JSON proxy transport)
+// ──────────────────────────────────────────────────────────────
+
+/** Convert Uint8Array to base64 (safe for large arrays). */
+function uint8ToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
+/** Convert base64 string to Uint8Array. */
+function base64ToUint8(b64: string): Uint8Array {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -176,29 +206,23 @@ async function findFileInFolder(
 }
 
 /**
- * Store data on Google Drive.
- * Creates or overwrites `{content_hash}.json` inside EO-DB/<dataType>/.
+ * Store encrypted .eodb binary on Google Drive.
+ * Creates or overwrites `{content_hash}.eodb` inside EO-DB/<dataType>/.
  *
- * If a file with the same content_hash name already exists in the folder,
- * its content is overwritten in-place (PATCH). Otherwise a new file is
- * created (POST). This prevents duplicate files from accumulating.
+ * Binary is base64-encoded for transport through the JSON proxy.
+ * The proxy decodes `_raw_content_base64` → raw binary before uploading.
  */
 export async function gdriveStore(
   matrixAccessToken: string,
-  envelope: Record<string, unknown>,
+  encryptedBinary: Uint8Array,
   dataType: string,
   dataId: string,
   contentHash: string,
 ): Promise<GDriveStoreResult> {
   const folderId = await resolveDataFolder(matrixAccessToken, dataType);
-  const fileName = `${contentHash}.json`;
+  const fileName = `${contentHash}.eodb`;
 
-  const fileContent = JSON.stringify({
-    envelope: { ...envelope, content_hash: contentHash },
-    data_id: dataId,
-    data_type: dataType,
-    stored_at: new Date().toISOString(),
-  });
+  const base64Data = uint8ToBase64(encryptedBinary);
 
   // Check if a file with this name already exists in the folder
   const existingId = await findFileInFolder(matrixAccessToken, fileName, folderId);
@@ -206,25 +230,25 @@ export async function gdriveStore(
   let fileId: string;
 
   if (existingId) {
-    // Overwrite existing file content
     fileId = existingId;
-    console.log('[EO-DB] GDrive overwriting existing file:', fileId, contentHash);
+    console.log('[EO-DB] GDrive overwriting .eodb file:', fileId, contentHash);
   } else {
-    // Create new file (metadata only)
     const metadata: Record<string, unknown> = {
       name: fileName,
       parents: [folderId],
-      description: `EO-DB backup | ${dataType} | ${dataId}`,
+      mimeType: 'application/octet-stream',
+      description: `EO-DB encrypted backup | ${dataType} | ${dataId}`,
     };
     const created = await driveProxy(matrixAccessToken, DRIVE_API, 'POST', metadata);
     fileId = created.id;
-    console.log('[EO-DB] GDrive file created:', fileId, contentHash);
+    console.log('[EO-DB] GDrive .eodb file created:', fileId, contentHash);
   }
 
-  // Upload / overwrite content via media endpoint
+  // Upload binary via media endpoint (base64 for proxy transport)
   const uploadUrl = `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`;
   await driveProxy(matrixAccessToken, uploadUrl, 'PATCH', {
-    _raw_content: fileContent,
+    _raw_content_base64: base64Data,
+    _content_type: 'application/octet-stream',
   });
 
   return {
@@ -235,48 +259,66 @@ export async function gdriveStore(
 }
 
 /**
- * Retrieve data from Google Drive by content_hash.
+ * Retrieve encrypted .eodb binary from Google Drive by content_hash.
+ * Falls back to legacy .json files for backward compatibility.
  */
 export async function gdriveRetrieve(
   matrixAccessToken: string,
   contentHash: string,
 ): Promise<GDriveRetrieveResult> {
-  const q = `name='${contentHash}.json' and trashed=false`;
-  const url = `${DRIVE_API}?q=${encodeURIComponent(q)}&fields=files(id,name)&spaces=drive`;
-  const data = await driveProxy(matrixAccessToken, url);
-  const files = data.files || [];
+  // Try .eodb first, fall back to legacy .json
+  const qEodb = `name='${contentHash}.eodb' and trashed=false`;
+  const urlEodb = `${DRIVE_API}?q=${encodeURIComponent(qEodb)}&fields=files(id,name)&spaces=drive`;
+  const dataEodb = await driveProxy(matrixAccessToken, urlEodb);
+  let files = dataEodb.files || [];
+  let isBinary = true;
+
+  if (!files.length) {
+    const qJson = `name='${contentHash}.json' and trashed=false`;
+    const urlJson = `${DRIVE_API}?q=${encodeURIComponent(qJson)}&fields=files(id,name)&spaces=drive`;
+    const dataJson = await driveProxy(matrixAccessToken, urlJson);
+    files = dataJson.files || [];
+    isBinary = false;
+  }
+
   if (!files.length) {
     throw new Error(`File not found: ${contentHash}`);
   }
 
   const downloadUrl = `${DRIVE_API}/${files[0].id}?alt=media`;
   const content = await driveProxy(matrixAccessToken, downloadUrl);
+
+  if (isBinary) {
+    // Proxy returns base64-encoded binary in _raw_content_base64
+    const b64 = content._raw_content_base64 || content;
+    const binary = typeof b64 === 'string' ? base64ToUint8(b64) : b64;
+    return { ok: true, envelope: binary };
+  }
+
+  // Legacy JSON format
   return { ok: true, envelope: content.envelope || content };
 }
 
 /**
- * List files on Google Drive, optionally scoped to a dataType folder.
- * Shared across all space members.
+ * List .eodb files on Google Drive, optionally scoped to a dataType folder.
+ * Also picks up legacy .json files for backward compatibility.
  */
 export async function gdriveList(
   matrixAccessToken: string,
   dataType?: string,
 ): Promise<GDriveListResult> {
-  let q = "trashed=false and name contains '.json' and mimeType!='application/vnd.google-apps.folder'";
+  let q = "trashed=false and (name contains '.eodb' or name contains '.json') and mimeType!='application/vnd.google-apps.folder'";
 
   if (dataType) {
-    // Try to find the specific folder
     const rootId = await findFolder(matrixAccessToken, 'EO-DB');
     if (rootId) {
       const dataFolderId = await findFolder(matrixAccessToken, dataType, rootId);
       if (dataFolderId) {
-        q = `'${dataFolderId}' in parents and trashed=false and name contains '.json'`;
+        q = `'${dataFolderId}' in parents and trashed=false and (name contains '.eodb' or name contains '.json')`;
       } else {
-        // Folder doesn't exist yet — return empty
         return { ok: true, entries: [] };
       }
     } else {
-      // No EO-DB root — return empty
       return { ok: true, entries: [] };
     }
   }
@@ -287,7 +329,7 @@ export async function gdriveList(
 
   const entries: GDriveListEntry[] = files.map((f: any) => ({
     data_id: f.id,
-    content_hash: (f.name || '').replace('.json', ''),
+    content_hash: (f.name || '').replace(/\.(eodb|json)$/, ''),
     data_type: dataType || 'unknown',
     stored_at: f.createdTime || '',
   }));
