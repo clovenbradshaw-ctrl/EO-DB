@@ -138,7 +138,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Find-or-create: if folder exists return its ID, otherwise create it.\nconst files = $json.files || [];\nconst folderName = $('Prep Store').first().json.folderName;\n\nif (files.length > 0) {\n  return [{ json: { folderId: files[0].id } }];\n}\n\n// Folder not found — create it via Drive API\nconst resp = await fetch('https://www.googleapis.com/drive/v3/files', {\n  method: 'POST',\n  headers: { 'Content-Type': 'application/json' },\n  body: JSON.stringify({ name: folderName, mimeType: 'application/vnd.google-apps.folder' })\n});\n// This Code node runs with the Google Drive OAuth creds on the HTTP Request\n// node before it, but we can't reuse those creds in fetch().\n// So instead we signal that we need to create the folder.\nreturn [{ json: { folderId: null, folderName, needsCreate: true } }];"
+        "jsCode": "const files = $json.files || [];\nconst folderName = $('Prep Store').first().json.folderName;\n\nif (files.length > 0) {\n  return [{ json: { folderId: files[0].id } }];\n}\n\n// Folder not found — signal downstream to create it\nreturn [{ json: { folderId: null, folderName } }];"
       },
       "id": "a1b2c3d4-1111-4444-aaaa-000000000002",
       "name": "Check Store Folder",
