@@ -24,7 +24,7 @@ import {
   type HydrationManifest,
   type SyncCustomization,
 } from '../ingestion/airtable-sync';
-import { useAirtableStore } from '../ingestion/airtable-store';
+import { useAirtableStore, DEFAULT_SYNC_SETTINGS } from '../ingestion/airtable-store';
 import { AirtableSyncService } from '../ingestion/airtable-sync-service';
 import { useTheme, type Theme } from '../theme';
 
@@ -98,6 +98,7 @@ export function AirtableSettingsSection({
   const isPrimarySyncer = useAirtableStore((st) => st.isPrimarySyncer);
   const lastSyncAt = useAirtableStore((st) => st.lastSyncAt);
   const continuousSyncEnabled = useAirtableStore((st) => st.continuousSyncEnabled);
+  const syncSettings = useAirtableStore((st) => st.syncSettings);
   const manifest = useAirtableStore((st) => st.manifest);
 
   // ── Sync state ──
@@ -106,11 +107,11 @@ export function AirtableSettingsSection({
   // ── Table selection: { baseId: [tableId, ...] } ──
   const [tableSelections, setTableSelections] = useState<Record<string, string[]>>({});
 
-  // ── Preserve existing toggle ──
-  const [preserveExisting, setPreserveExisting] = useState(true);
+  // ── Preserve existing toggle (initialized from sync settings) ──
+  const [preserveExisting, setPreserveExisting] = useState(syncSettings.preserveExisting);
 
   // ── Record limit (0 = no limit) ──
-  const [recordLimit, setRecordLimit] = useState(0);
+  const [recordLimit, setRecordLimit] = useState(syncSettings.recordLimit);
 
   // ── Display field per table: { tableId: fieldId } ──
   const [displayFieldSelections, setDisplayFieldSelections] = useState<Record<string, string>>({});
@@ -495,7 +496,11 @@ export function AirtableSettingsSection({
                     <input
                       type="checkbox"
                       checked={preserveExisting}
-                      onChange={(e) => setPreserveExisting(e.target.checked)}
+                      onChange={(e) => {
+                        setPreserveExisting(e.target.checked);
+                        useAirtableStore.getState().setSyncSettings({ preserveExisting: e.target.checked });
+                        syncServiceRef.current?.saveSyncSettings({ preserveExisting: e.target.checked });
+                      }}
                     />
                     <span>Preserve existing data in EO-DB</span>
                   </label>
@@ -520,7 +525,10 @@ export function AirtableSettingsSection({
                       value={recordLimit || ''}
                       onChange={(e) => {
                         const val = parseInt(e.target.value, 10);
-                        setRecordLimit(isNaN(val) ? 0 : Math.max(0, val));
+                        const limit = isNaN(val) ? 0 : Math.max(0, val);
+                        setRecordLimit(limit);
+                        useAirtableStore.getState().setSyncSettings({ recordLimit: limit });
+                        syncServiceRef.current?.saveSyncSettings({ recordLimit: limit });
                       }}
                       style={s.recordLimitInput}
                     />
@@ -629,11 +637,79 @@ export function AirtableSettingsSection({
                     </div>
                     <span style={s.continuousSyncHint}>
                       {continuousSyncEnabled
-                        ? 'This device will automatically pull changes from Airtable. Only one device syncs at a time — others receive data via the shared data store.'
-                        : 'Enable to automatically pull Airtable changes every 30 seconds'}
+                        ? `This device will automatically pull changes from Airtable every ${syncSettings.syncIntervalSec}s. Only one device syncs at a time — others receive data via the shared data store.`
+                        : `Enable to automatically pull Airtable changes every ${syncSettings.syncIntervalSec} seconds`}
                     </span>
                   </div>
                 )}
+
+                {/* ── Sync Settings ── */}
+                <div style={s.syncSettingsSection}>
+                  <div style={s.syncSettingsTitle}>Sync Settings</div>
+
+                  {/* Poll interval */}
+                  <div style={s.settingRow}>
+                    <label style={s.settingLabel}>Poll interval (seconds)</label>
+                    <div style={s.settingInputRow}>
+                      <input
+                        type="number"
+                        min={15}
+                        max={600}
+                        step={5}
+                        value={syncSettings.syncIntervalSec}
+                        onChange={(e) => {
+                          const val = parseInt(e.target.value, 10);
+                          if (!isNaN(val)) {
+                            const clamped = Math.max(15, Math.min(600, val));
+                            useAirtableStore.getState().setSyncSettings({ syncIntervalSec: clamped });
+                            syncServiceRef.current?.saveSyncSettings({ syncIntervalSec: clamped });
+                          }
+                        }}
+                        style={s.settingInput}
+                      />
+                      <span style={s.settingHint}>
+                        How often to check Airtable for changes (15–600s)
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Sync strategy */}
+                  <div style={s.settingRow}>
+                    <label style={s.settingLabel}>Check against</label>
+                    <div style={s.settingInputRow}>
+                      <select
+                        value={syncSettings.syncStrategy}
+                        onChange={(e) => {
+                          const val = e.target.value as 'lastModified' | 'fullDiff';
+                          useAirtableStore.getState().setSyncSettings({ syncStrategy: val });
+                          syncServiceRef.current?.saveSyncSettings({ syncStrategy: val });
+                        }}
+                        style={s.settingSelect}
+                      >
+                        <option value="lastModified">Last modified time (incremental)</option>
+                        <option value="fullDiff">Full field diff (thorough)</option>
+                      </select>
+                      <span style={s.settingHint}>
+                        {syncSettings.syncStrategy === 'lastModified'
+                          ? 'Uses Airtable\'s LAST_MODIFIED_TIME to fetch only records changed since last sync. Fast and lightweight.'
+                          : 'Re-fetches all records and compares field-by-field against EO-DB state. Catches changes that timestamps might miss, but heavier on API quota.'}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Last sync info */}
+                  {lastSyncAt && (
+                    <div style={s.settingRow}>
+                      <label style={s.settingLabel}>Last sync</label>
+                      <div style={s.lastSyncInfo}>
+                        <span style={s.lastSyncTime}>{new Date(lastSyncAt).toLocaleString()}</span>
+                        <span style={s.lastSyncAgo}>
+                          ({Math.round((Date.now() - new Date(lastSyncAt).getTime()) / 1000)}s ago)
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
             )}
           </div>
@@ -1039,6 +1115,74 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       color: t.textMuted,
       paddingLeft: 22,
       lineHeight: 1.4,
+    },
+
+    // ── Sync settings ──
+    syncSettingsSection: {
+      marginTop: 16,
+      padding: '12px 0',
+      borderTop: `1px solid ${t.borderLight}`,
+      display: 'flex',
+      flexDirection: 'column' as const,
+      gap: 12,
+    },
+    syncSettingsTitle: {
+      fontSize: 11,
+      fontWeight: 600,
+      textTransform: 'uppercase' as const,
+      letterSpacing: '0.06em',
+      color: t.textMuted,
+    },
+    settingRow: {
+      display: 'flex',
+      flexDirection: 'column' as const,
+      gap: 4,
+    },
+    settingLabel: {
+      fontSize: 12,
+      fontWeight: 500,
+      color: t.text,
+    },
+    settingInputRow: {
+      display: 'flex',
+      flexDirection: 'column' as const,
+      gap: 3,
+    },
+    settingInput: {
+      width: 80,
+      padding: '4px 8px',
+      fontSize: 12,
+      border: `1px solid ${t.border}`,
+      borderRadius: 4,
+      background: t.bgCard,
+      color: t.text,
+    },
+    settingSelect: {
+      padding: '4px 8px',
+      fontSize: 12,
+      border: `1px solid ${t.border}`,
+      borderRadius: 4,
+      background: t.bgCard,
+      color: t.text,
+      maxWidth: 280,
+    },
+    settingHint: {
+      fontSize: 10,
+      color: t.textMuted,
+      lineHeight: 1.4,
+    },
+    lastSyncInfo: {
+      display: 'flex',
+      gap: 6,
+      alignItems: 'center',
+    },
+    lastSyncTime: {
+      fontSize: 12,
+      color: t.text,
+    },
+    lastSyncAgo: {
+      fontSize: 10,
+      color: t.textMuted,
     },
   };
 }

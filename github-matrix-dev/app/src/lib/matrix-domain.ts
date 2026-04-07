@@ -122,6 +122,17 @@ export function collabEventTypes(prefix?: string) {
   } as const;
 }
 
+/** Airtable sync coordination event types (to-device, ephemeral). */
+export function airtableSyncEventTypes(prefix?: string) {
+  const p = prefix ?? _eventPrefix;
+  return {
+    /** Sync status broadcast after completion (to-device). */
+    signal: `${p}.airtable.signal`,
+    /** Sync lock claim/release (to-device). */
+    lock: `${p}.airtable.lock`,
+  } as const;
+}
+
 export interface MatrixDomainConfig {
   eventPrefix?: string;
   dataRoomAlias?: string;
