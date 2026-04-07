@@ -51,12 +51,12 @@ import { Horizon } from './Horizon';
 import { type TimeScrubberFilter, type DateColumnOption, DEFAULT_FILTER, detectDateColumns } from './time-scrubber-utils';
 import { hasFieldsSubObject, buildFieldNameMap } from './filter-types';
 import { useHashRoute, type View } from '../lib/router';
-import { type AccessRole, type UserTypeDefinition, powerLevelToRole, legacyAccessToRole } from '../permissions/types';
+import { type AccessRole, type UserTypeDefinition, type SpaceConfig, powerLevelToRole, legacyAccessToRole } from '../permissions/types';
 import { UserTypeSwitcher } from './UserTypeSwitcher';
 import { resolvePermissionsFromSharing } from '../permissions/resolve';
 import { RecycleBin, addDeletedSpace, isSpaceDeleted, removeDeletedSpace, getDeletedSpaces } from './RecycleBin';
 import { addArchivedSpace, isSpaceArchived, removeArchivedSpace, getArchivedSpaces } from './ArchivedSpaces';
-import { setSpaceConfig, getSpaceConfig, applyEoPowerLevels, createGovernanceRoom } from '../permissions/room-topology';
+import { setSpaceConfig, getSpaceConfig, applyEoPowerLevels, createGovernanceRoom, EO_SPACE_CONFIG_TYPE } from '../permissions/room-topology';
 import { EO_POWER_LEVEL_CONTENT } from '../permissions/types';
 import { listAllHomeserverUsers } from '../matrix/user-discovery';
 
@@ -235,6 +235,35 @@ async function createSpaceRoom(
   }
 }
 
+/**
+ * Directly scan all joined rooms for a com.eo-db.space.config state event
+ * matching the given spaceTarget. Returns the mainRoomId and full room
+ * topology, or null if no matching room is found.
+ *
+ * This is synchronous (reads from the SDK's in-memory room store) and
+ * serves as a fallback when discoverSpacesFromMatrix() hasn't indexed
+ * the space yet due to timing.
+ */
+function findSpaceRoomByDirectScan(
+  client: ReturnType<typeof createMatrixClient>,
+  spaceTarget: string,
+): { mainRoomId: string; rooms: SpaceConfig['rooms'] } | null {
+  const rooms = (client as any).getRooms?.() ?? [];
+  for (const room of rooms) {
+    const configEvent = room.currentState?.getStateEvents?.(EO_SPACE_CONFIG_TYPE, '');
+    if (!configEvent) continue;
+
+    const config = configEvent.getContent() as SpaceConfig;
+    if (!config?.name || !config?.rooms?.main) continue;
+
+    const target = `space_${config.name.toLowerCase().replace(/\s+/g, '_')}`;
+    if (target === spaceTarget) {
+      return { mainRoomId: config.rooms.main, rooms: config.rooms };
+    }
+  }
+  return null;
+}
+
 /** Normalize any space target to canonical "space_foo" format (strips IDB "space." prefix) */
 function normalizeSpaceTarget(target: string): string {
   if (target.startsWith('space.')) return `space_${target.slice(6)}`;
@@ -282,6 +311,8 @@ interface CachedSpace {
   filenSync: FilenSyncService | null;
   mainRoomId: string | null;
   presence: Presence | null;
+  /** Full room topology from SpaceConfig (when available) */
+  spaceRooms?: { main: string; restricted?: string; governance?: string } | null;
 }
 
 export function Layout({ session, onLogout, localMode }: LayoutProps) {
@@ -875,6 +906,9 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     let mounted = true;
     const cleanupFns: (() => void)[] = [];
 
+    // Holds the room topology discovered during resolution (used to populate cache).
+    let resolvedSpaceRooms: SpaceConfig['rooms'] | null = null;
+
     async function resolveOrCreateRoom(): Promise<string | null> {
       // When Matrix is disabled, skip all room resolution — local-only mode.
       if (!MATRIX_ENABLED) return null;
@@ -882,16 +916,28 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       // 0. Check the space cache first (handles freshly-created spaces
       //    whose state events haven't synced to the SDK yet)
       const cached = spaceCacheRef.current.get(selectedSpace!);
-      if (cached?.mainRoomId) return cached.mainRoomId;
+      if (cached?.mainRoomId) {
+        resolvedSpaceRooms = cached.spaceRooms ?? null;
+        return cached.mainRoomId;
+      }
 
       // 1. Try the space's own mainRoomId from discovery
       const spaceEntry = mergedEntries.find((e) => e.spaceTarget === selectedSpace);
       if (spaceEntry?.mainRoomId) return spaceEntry.mainRoomId;
 
-      // 2. Fall back to the root data room alias
-      if (roomIdRef.current) return roomIdRef.current;
+      // 2. Direct scan: search ALL joined rooms for a space config matching
+      //    this space. Catches premade/existing spaces that discovery hasn't
+      //    indexed yet (e.g., timing issues, initial sync delay).
+      if (matrixClientRef.current) {
+        const scanResult = findSpaceRoomByDirectScan(matrixClientRef.current, selectedSpace!);
+        if (scanResult) {
+          resolvedSpaceRooms = scanResult.rooms;
+          return scanResult.mainRoomId;
+        }
+      }
 
       // 3. Create a new Matrix room for this space if client is ready
+      //    and the direct scan confirmed no room exists.
       if (matrixReady && matrixClientRef.current) {
         const displayName = formatSpaceName(selectedSpace!.replace(/^space_/, ''));
         const newRoomId = await createSpaceRoom(
@@ -1113,7 +1159,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       }
 
       // Cache this space's store + sync manager for fast re-access
-      cache.set(selectedSpace!, { store, syncManager, filenSync, mainRoomId: spaceRoomId, presence: presenceInstance });
+      cache.set(selectedSpace!, { store, syncManager, filenSync, mainRoomId: spaceRoomId, presence: presenceInstance, spaceRooms: resolvedSpaceRooms });
     }
 
     setupSpaceStore();
@@ -1764,7 +1810,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                 </div>
               )
             ) : activeView === 'settings' ? (
-              <SettingsView session={session} matrixClient={matrixClientRef.current} roomId={spaceCacheRef.current.get(selectedSpace!)?.mainRoomId ?? null} onUnarchive={handleUnarchiveSpace} connectionState={connectionState} connectionError={connectionError} matrixReady={matrixReady} onRetry={retrySync} onLogout={handleLogout} />
+              <SettingsView session={session} matrixClient={matrixClientRef.current} roomId={spaceCacheRef.current.get(selectedSpace!)?.mainRoomId ?? null} spaceRooms={spaceCacheRef.current.get(selectedSpace!)?.spaceRooms ?? null} onUnarchive={handleUnarchiveSpace} connectionState={connectionState} connectionError={connectionError} matrixReady={matrixReady} onRetry={retrySync} onLogout={handleLogout} />
             ) : null}
           </ErrorBoundary>}
         </main>
