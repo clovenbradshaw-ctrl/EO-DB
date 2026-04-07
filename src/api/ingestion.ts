@@ -5,10 +5,9 @@
  * All routes are auth-protected (Matrix Bearer token).
  *
  * Upload-before-process: for Airtable syncs, raw records are captured during
- * fetch and archived to Filen as an immutable binary (.eodb) after the sync
- * completes. Since Airtable data comes from an external API (not a user file),
- * the archive captures the raw API responses for auditing. Resumability for
- * Airtable is already handled by the existing cursor + HydrationJob system.
+ * fetch and archived to Filen (via n8n webhook) as an immutable binary (.eodb)
+ * after the sync completes. Resumability for Airtable is already handled by
+ * the existing cursor + HydrationJob system.
  *
  * API key management:
  *   POST   /ingestion/keys          — Store a new API key
@@ -45,7 +44,6 @@ import {
   type SyncCustomization,
 } from '../ingestion/airtable-sync.js';
 import { createEventSink } from '../ingestion/event-sink.js';
-import { tryGetFilenSession } from '../filen/filen-session.js';
 import {
   createImportJob,
   saveImportJob,
@@ -132,7 +130,7 @@ export function registerIngestionRoutes(app: FastifyInstance, db: EoDb, feed: Fe
 
   /**
    * Full hydration sync: pull all data from Airtable into EO-DB.
-   * Archives raw Airtable data to Filen for auditing.
+   * Archives raw Airtable data to Filen (via n8n) for auditing.
    */
   app.post('/ingestion/airtable/hydrate/:label', async (request: AuthenticatedRequest, reply) => {
     const agent = request.matrixUser?.user_id || 'unknown';
@@ -153,58 +151,49 @@ export function registerIngestionRoutes(app: FastifyInstance, db: EoDb, feed: Fe
       : body.base_ids;
 
     try {
-      // Get Filen session for archiving
-      const authHeader = request.headers.authorization as string;
-      const matrixToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
-      const filenSession = matrixToken ? await tryGetFilenSession(matrixToken, agent) : null;
-
       // Discover schema first — this is part of the raw data we archive
       const client = new AirtableClient(keyEntry.api_key);
       const manifest = await discoverSchema(client);
 
       // Archive the raw request + schema to Filen before processing
       let importJobId: string | undefined;
-      let filenUpload = false;
+      let filenUploadOk = false;
 
-      if (filenSession) {
-        try {
-          const rawData = {
-            type: 'airtable-hydration',
-            label,
-            base_ids: baseIds,
-            table_ids: body.table_ids,
-            customization: body.customization,
-            manifest,
-          };
-          const rawString = JSON.stringify(rawData);
-          const contentHash = await computeContentHash(rawString);
-          const job = createImportJob('airtable', agent, contentHash);
-          await saveImportJob(db, job);
+      try {
+        const rawData = {
+          type: 'airtable-hydration',
+          label,
+          base_ids: baseIds,
+          table_ids: body.table_ids,
+          customization: body.customization,
+          manifest,
+        };
+        const rawString = JSON.stringify(rawData);
+        const contentHash = await computeContentHash(rawString);
+        const job = createImportJob('airtable', agent, contentHash);
+        await saveImportJob(db, job);
 
-          const archive: ImportArchive = {
-            version: 1,
-            type: 'import-archive',
-            source: 'airtable',
-            agent,
-            created_at: new Date().toISOString(),
-            content_hash: contentHash,
-            raw_data: rawData,
-          };
-          const binary = packImportArchive(archive);
-          const { uuid, fileKey } = await uploadImportArchive(filenSession, job.job_id, 'airtable', binary);
+        const archive: ImportArchive = {
+          version: 1,
+          type: 'import-archive',
+          source: 'airtable',
+          agent,
+          created_at: new Date().toISOString(),
+          content_hash: contentHash,
+          raw_data: rawData,
+        };
+        const binary = packImportArchive(archive);
+        const { remotePath } = await uploadImportArchive(job.job_id, 'airtable', binary);
 
-          job.filen_file_uuid = uuid;
-          job.filen_file_key = fileKey;
-          job.filen_folder_uuid = filenSession.uploadsFolderUuid;
-          job.status = 'uploaded';
-          await saveImportJob(db, job);
+        job.filen_remote_path = remotePath;
+        job.status = 'uploaded';
+        await saveImportJob(db, job);
 
-          importJobId = job.job_id;
-          filenUpload = true;
-          console.log(`[EO-DB] Airtable hydration archive uploaded to Filen: ${job.job_id} (${binary.byteLength} bytes)`);
-        } catch (e: any) {
-          console.warn(`[EO-DB] Filen archive upload failed for Airtable hydration: ${e.message}`);
-        }
+        importJobId = job.job_id;
+        filenUploadOk = true;
+        console.log(`[EO-DB] Airtable hydration archive uploaded to Filen: ${job.job_id} (${binary.byteLength} bytes)`);
+      } catch (e: any) {
+        console.warn(`[EO-DB] Filen archive upload failed for Airtable hydration: ${e.message}`);
       }
 
       // Process — uses existing hydrationSync with its own HydrationJob + cursor resume
@@ -222,7 +211,7 @@ export function registerIngestionRoutes(app: FastifyInstance, db: EoDb, feed: Fe
         ...result,
         grounded,
         import_job_id: importJobId,
-        filen_upload: filenUpload,
+        filen_upload: filenUploadOk,
       });
     } catch (e: any) {
       return reply.code(502).send({ error: `Airtable sync error: ${e.message}` });
@@ -233,7 +222,7 @@ export function registerIngestionRoutes(app: FastifyInstance, db: EoDb, feed: Fe
 
   /**
    * Incremental update sync: pull only changes since last sync.
-   * Archives raw request metadata to Filen for auditing.
+   * Archives raw request metadata to Filen (via n8n) for auditing.
    */
   app.post('/ingestion/airtable/sync/:label', async (request: AuthenticatedRequest, reply) => {
     const agent = request.matrixUser?.user_id || 'unknown';
@@ -254,52 +243,43 @@ export function registerIngestionRoutes(app: FastifyInstance, db: EoDb, feed: Fe
       : body.base_ids;
 
     try {
-      // Get Filen session for archiving
-      const authHeader = request.headers.authorization as string;
-      const matrixToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
-      const filenSession = matrixToken ? await tryGetFilenSession(matrixToken, agent) : null;
-
       let importJobId: string | undefined;
-      let filenUpload = false;
+      let filenUploadOk = false;
 
-      if (filenSession) {
-        try {
-          const rawData = {
-            type: 'airtable-sync',
-            label,
-            base_ids: baseIds,
-            table_ids: body.table_ids,
-            customization: body.customization,
-          };
-          const rawString = JSON.stringify(rawData);
-          const contentHash = await computeContentHash(rawString);
-          const job = createImportJob('airtable', agent, contentHash);
-          await saveImportJob(db, job);
+      try {
+        const rawData = {
+          type: 'airtable-sync',
+          label,
+          base_ids: baseIds,
+          table_ids: body.table_ids,
+          customization: body.customization,
+        };
+        const rawString = JSON.stringify(rawData);
+        const contentHash = await computeContentHash(rawString);
+        const job = createImportJob('airtable', agent, contentHash);
+        await saveImportJob(db, job);
 
-          const archive: ImportArchive = {
-            version: 1,
-            type: 'import-archive',
-            source: 'airtable',
-            agent,
-            created_at: new Date().toISOString(),
-            content_hash: contentHash,
-            raw_data: rawData,
-          };
-          const binary = packImportArchive(archive);
-          const { uuid, fileKey } = await uploadImportArchive(filenSession, job.job_id, 'airtable', binary);
+        const archive: ImportArchive = {
+          version: 1,
+          type: 'import-archive',
+          source: 'airtable',
+          agent,
+          created_at: new Date().toISOString(),
+          content_hash: contentHash,
+          raw_data: rawData,
+        };
+        const binary = packImportArchive(archive);
+        const { remotePath } = await uploadImportArchive(job.job_id, 'airtable', binary);
 
-          job.filen_file_uuid = uuid;
-          job.filen_file_key = fileKey;
-          job.filen_folder_uuid = filenSession.uploadsFolderUuid;
-          job.status = 'uploaded';
-          await saveImportJob(db, job);
+        job.filen_remote_path = remotePath;
+        job.status = 'uploaded';
+        await saveImportJob(db, job);
 
-          importJobId = job.job_id;
-          filenUpload = true;
-          console.log(`[EO-DB] Airtable sync archive uploaded to Filen: ${job.job_id} (${binary.byteLength} bytes)`);
-        } catch (e: any) {
-          console.warn(`[EO-DB] Filen archive upload failed for Airtable sync: ${e.message}`);
-        }
+        importJobId = job.job_id;
+        filenUploadOk = true;
+        console.log(`[EO-DB] Airtable sync archive uploaded to Filen: ${job.job_id} (${binary.byteLength} bytes)`);
+      } catch (e: any) {
+        console.warn(`[EO-DB] Filen archive upload failed for Airtable sync: ${e.message}`);
       }
 
       const client = new AirtableClient(keyEntry.api_key);
@@ -317,7 +297,7 @@ export function registerIngestionRoutes(app: FastifyInstance, db: EoDb, feed: Fe
         ...result,
         grounded,
         import_job_id: importJobId,
-        filen_upload: filenUpload,
+        filen_upload: filenUploadOk,
       });
     } catch (e: any) {
       return reply.code(502).send({ error: `Airtable sync error: ${e.message}` });
