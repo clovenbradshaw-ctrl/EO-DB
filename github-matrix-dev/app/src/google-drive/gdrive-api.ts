@@ -161,8 +161,27 @@ async function resolveDataFolder(
 // ──────────────────────────────────────────────────────────────
 
 /**
+ * Find an existing file by name inside a folder. Returns file ID or null.
+ */
+async function findFileInFolder(
+  token: string,
+  fileName: string,
+  folderId: string,
+): Promise<string | null> {
+  const q = `name='${fileName}' and '${folderId}' in parents and trashed=false`;
+  const url = `${DRIVE_API}?q=${encodeURIComponent(q)}&fields=files(id)&spaces=drive`;
+  const data = await driveProxy(token, url);
+  const files = data.files || [];
+  return files.length > 0 ? files[0].id : null;
+}
+
+/**
  * Store data on Google Drive.
- * Creates `{content_hash}.json` inside EO-DB/<dataType>/.
+ * Creates or overwrites `{content_hash}.json` inside EO-DB/<dataType>/.
+ *
+ * If a file with the same content_hash name already exists in the folder,
+ * its content is overwritten in-place (PATCH). Otherwise a new file is
+ * created (POST). This prevents duplicate files from accumulating.
  */
 export async function gdriveStore(
   matrixAccessToken: string,
@@ -172,6 +191,7 @@ export async function gdriveStore(
   contentHash: string,
 ): Promise<GDriveStoreResult> {
   const folderId = await resolveDataFolder(matrixAccessToken, dataType);
+  const fileName = `${contentHash}.json`;
 
   const fileContent = JSON.stringify({
     envelope: { ...envelope, content_hash: contentHash },
@@ -180,27 +200,37 @@ export async function gdriveStore(
     stored_at: new Date().toISOString(),
   });
 
-  // Create file with metadata + inline content via Drive API
-  const metadata: Record<string, unknown> = {
-    name: `${contentHash}.json`,
-    parents: [folderId],
-    description: `EO-DB backup | ${dataType} | ${dataId}`,
-  };
+  // Check if a file with this name already exists in the folder
+  const existingId = await findFileInFolder(matrixAccessToken, fileName, folderId);
 
-  // Create the file (metadata only)
-  const created = await driveProxy(matrixAccessToken, DRIVE_API, 'POST', metadata);
+  let fileId: string;
 
-  // Upload content via media endpoint
-  const uploadUrl = `https://www.googleapis.com/upload/drive/v3/files/${created.id}?uploadType=media`;
+  if (existingId) {
+    // Overwrite existing file content
+    fileId = existingId;
+    console.log('[EO-DB] GDrive overwriting existing file:', fileId, contentHash);
+  } else {
+    // Create new file (metadata only)
+    const metadata: Record<string, unknown> = {
+      name: fileName,
+      parents: [folderId],
+      description: `EO-DB backup | ${dataType} | ${dataId}`,
+    };
+    const created = await driveProxy(matrixAccessToken, DRIVE_API, 'POST', metadata);
+    fileId = created.id;
+    console.log('[EO-DB] GDrive file created:', fileId, contentHash);
+  }
+
+  // Upload / overwrite content via media endpoint
+  const uploadUrl = `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`;
   await driveProxy(matrixAccessToken, uploadUrl, 'PATCH', {
     _raw_content: fileContent,
   });
 
-  console.log('[EO-DB] GDrive file created:', created.id, contentHash);
   return {
     ok: true,
     content_hash: contentHash,
-    drive_file_id: created.id,
+    drive_file_id: fileId,
   };
 }
 

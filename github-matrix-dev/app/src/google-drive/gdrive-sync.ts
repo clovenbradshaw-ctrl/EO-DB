@@ -19,7 +19,7 @@ import { readLogSince } from '../db/log';
 import { encryptSnapshot } from '../crypto/snapshot-crypto';
 import { resolveSnapshotKeyId } from '../crypto/segment-keys';
 import { packEodb, type EodbFile } from '../filen/eodb-format';
-import { gdriveStore, computeContentHash } from './gdrive-api';
+import { gdriveStore, gdriveList, computeContentHash } from './gdrive-api';
 import { useGDriveStore } from './gdrive-store';
 
 // ──────────────────────────────────────────────────────────────
@@ -37,12 +37,19 @@ const EO_GDRIVE_HEAD = 'eo.gdrive.head';
 // Sync service
 // ──────────────────────────────────────────────────────────────
 
+/** Consolidate (overwrite the aggregated file) every N events. */
+const CONSOLIDATE_EVERY_N_EVENTS = 256;
+/** Keep at most this many incremental backup files on Drive. */
+const MAX_BACKUP_FILES = 3;
+
 export class GDriveSyncService {
   private timer: ReturnType<typeof setInterval> | null = null;
   private lastSyncedSeq = 0;
   private syncing = false;
   private destroyed = false;
   private lastSignalAt = 0;
+  /** Seq at the last consolidation (for event-count threshold). */
+  private lastConsolidatedSeq = 0;
 
   private store: EoStore;
   private spaceId: string;
@@ -93,7 +100,9 @@ export class GDriveSyncService {
     if (this.timer) return;
 
     const savedSeq: number = (await this.store.get('meta:gdrive_synced_seq')) || 0;
+    const savedConsolidatedSeq: number = (await this.store.get('meta:gdrive_consolidated_seq')) || 0;
     this.lastSyncedSeq = savedSeq;
+    this.lastConsolidatedSeq = savedConsolidatedSeq;
 
     // Run an initial sync immediately
     this.syncCycle().catch(console.warn);
@@ -114,10 +123,10 @@ export class GDriveSyncService {
     }
   }
 
-  /** Force an immediate sync. */
+  /** Force an immediate sync (bypasses the 256-event threshold). */
   async forceSave(): Promise<void> {
     if (this.destroyed) return;
-    await this.syncCycle();
+    await this.syncCycle(true);
   }
 
   /**
@@ -140,8 +149,9 @@ export class GDriveSyncService {
 
   /**
    * Core sync cycle — called every 30 seconds.
+   * @param force — bypass the 256-event threshold (used by forceSave)
    */
-  private async syncCycle(): Promise<void> {
+  private async syncCycle(force = false): Promise<void> {
     if (this.syncing || this.destroyed) return;
     this.syncing = true;
     this.onStatus?.('syncing');
@@ -175,69 +185,32 @@ export class GDriveSyncService {
         }
       }
 
-      // Read all events since last sync
-      const events = await readLogSince(this.store, this.lastSyncedSeq);
-      if (events.length === 0) {
+      // Track that we have pending changes but DON'T write to Drive yet.
+      // Only write when the 256-event consolidation threshold is reached.
+      const dataType = `eodb-${this.spaceId}`;
+      const eventsSinceConsolidation = currentSeq - this.lastConsolidatedSeq;
+
+      if (!force && eventsSinceConsolidation < CONSOLIDATE_EVERY_N_EVENTS) {
+        // Not enough events yet — just update local bookkeeping, skip Drive write
+        this.lastSyncedSeq = currentSeq;
+        await this.store.put('meta:gdrive_synced_seq', currentSeq);
         this.onStatus?.('synced');
+        console.log('[EO-DB] GDrive: %d events since consolidation, threshold %d — skipping Drive write',
+          eventsSinceConsolidation, CONSOLIDATE_EVERY_N_EVENTS);
         this.syncing = false;
         return;
       }
 
-      // Pack and encrypt
-      const backupFile: EodbFile = {
-        version: 1,
-        type: 'backup',
-        space_id: this.spaceId,
-        space_name: this.spaceName,
-        from_seq: this.lastSyncedSeq,
-        to_seq: currentSeq,
-        created_by: this.userId,
-        created_at: new Date().toISOString(),
-        events,
-        prev_snapshots: [],
-      };
-
-      const binary = packEodb(backupFile);
-      const encrypted = await this.encryptBinary(binary);
-
-      // Convert to base64 for JSON transport via n8n
-      const base64Data = btoa(String.fromCharCode(...encrypted));
-
-      // Compute content hash for deterministic file naming
-      const contentHash = await computeContentHash(
-        `${this.spaceId}:backup:${currentSeq}:${Date.now()}`,
-      );
-
-      // Upload via n8n webhook
-      const envelope = {
-        content_hash: contentHash,
-        space_id: this.spaceId,
-        space_name: this.spaceName,
-        type: 'backup',
-        from_seq: this.lastSyncedSeq,
-        to_seq: currentSeq,
-        event_count: events.length,
-        size_bytes: encrypted.byteLength,
-        created_by: this.userId,
-        created_at: new Date().toISOString(),
-        data_base64: base64Data,
-      };
-
-      const dataType = `eodb-${this.spaceId}`;
-
-      const result = await gdriveStore(
-        this.matrixAccessToken,
-        envelope,
-        dataType,
-        `backup-${currentSeq}-${Date.now()}`,
-        contentHash,
-      );
+      // Threshold reached — write consolidated file to Drive (overwrites previous)
+      await this.consolidateBackup(dataType, currentSeq);
+      this.lastConsolidatedSeq = currentSeq;
 
       // Update bookkeeping
       this.lastSyncedSeq = currentSeq;
       await this.store.put('meta:gdrive_synced_seq', currentSeq);
 
       // Signal via Matrix
+      const contentHash = await computeContentHash(`${this.spaceId}:consolidated`);
       const now = Date.now();
       if (this.matrixClient && this.roomId && (now - this.lastSignalAt >= SIGNAL_THROTTLE_MS)) {
         this.lastSignalAt = now;
@@ -247,17 +220,14 @@ export class GDriveSyncService {
             stream: 'gdrive-backup',
             space_id: this.spaceId,
             content_hash: contentHash,
-            drive_file_id: result.drive_file_id,
             seq: currentSeq,
-            event_count: events.length,
+            event_count: eventsSinceConsolidation,
             uploader: this.userId,
             uploaded_at: new Date().toISOString(),
-            size_bytes: encrypted.byteLength,
           });
 
           await this.matrixClient.sendStateEvent(this.roomId, EO_GDRIVE_HEAD as any, {
             content_hash: contentHash,
-            drive_file_id: result.drive_file_id,
             seq: currentSeq,
             updated_at: new Date().toISOString(),
             updated_by: this.userId,
@@ -269,12 +239,111 @@ export class GDriveSyncService {
 
       useGDriveStore.getState().recordSync(this.spaceId);
       this.onStatus?.('synced');
-      console.log(`[EO-DB] Google Drive backup uploaded: seq ${currentSeq}, ${events.length} events, ${encrypted.byteLength} bytes`);
+      console.log(`[EO-DB] Google Drive consolidated backup uploaded: seq ${currentSeq}, ${eventsSinceConsolidation} events since last consolidation`);
     } catch (e: any) {
       console.warn('[EO-DB] Google Drive sync cycle failed:', e);
       this.onStatus?.('error', e.message);
     } finally {
       this.syncing = false;
+    }
+  }
+
+  /**
+   * Create a consolidated backup containing ALL events, overwriting the
+   * single consolidated file on Drive. Then clean up old delta files.
+   * Mirrors Filen's snapshot pattern.
+   */
+  private async consolidateBackup(dataType: string, currentSeq: number): Promise<void> {
+    try {
+      // Read ALL events from the beginning
+      const allEvents = await readLogSince(this.store, 0);
+      if (allEvents.length === 0) return;
+
+      const consolidatedFile: EodbFile = {
+        version: 1,
+        type: 'backup',
+        space_id: this.spaceId,
+        space_name: this.spaceName,
+        from_seq: 0,
+        to_seq: currentSeq,
+        created_by: this.userId,
+        created_at: new Date().toISOString(),
+        events: allEvents,
+        prev_snapshots: [],
+      };
+
+      const binary = packEodb(consolidatedFile);
+      const encrypted = await this.encryptBinary(binary);
+      const base64Data = btoa(String.fromCharCode(...encrypted));
+
+      // Stable hash per space — always overwrites the same file
+      const consolidatedHash = await computeContentHash(
+        `${this.spaceId}:consolidated`,
+      );
+
+      const envelope = {
+        content_hash: consolidatedHash,
+        space_id: this.spaceId,
+        space_name: this.spaceName,
+        type: 'consolidated',
+        from_seq: 0,
+        to_seq: currentSeq,
+        event_count: allEvents.length,
+        size_bytes: encrypted.byteLength,
+        created_by: this.userId,
+        created_at: new Date().toISOString(),
+        data_base64: base64Data,
+      };
+
+      await gdriveStore(
+        this.matrixAccessToken,
+        envelope,
+        dataType,
+        'consolidated',
+        consolidatedHash,
+      );
+
+      await this.store.put('meta:gdrive_consolidated_seq', currentSeq);
+      console.log(`[EO-DB] GDrive consolidated backup: seq 0→${currentSeq}, ${allEvents.length} events, ${encrypted.byteLength} bytes`);
+
+      // Clean up old delta backup files (keep last MAX_BACKUP_FILES)
+      await this.cleanupOldBackups(dataType, consolidatedHash);
+    } catch (e) {
+      console.warn('[EO-DB] GDrive consolidation failed (deltas are safe):', e);
+    }
+  }
+
+  /**
+   * Delete old delta backup files from Drive, keeping only the most recent.
+   * The consolidated file (with its own stable hash) is never deleted.
+   */
+  private async cleanupOldBackups(dataType: string, consolidatedHash: string): Promise<void> {
+    try {
+      const listing = await gdriveList(this.matrixAccessToken, dataType);
+      // Identify delta files (exclude the consolidated file)
+      const deltas = listing.entries
+        .filter(e => e.content_hash !== consolidatedHash)
+        .sort((a, b) => new Date(b.stored_at).getTime() - new Date(a.stored_at).getTime());
+
+      // Keep the last MAX_BACKUP_FILES deltas, trash the rest
+      for (let i = MAX_BACKUP_FILES; i < deltas.length; i++) {
+        try {
+          // Trash via Drive API (move to trash)
+          const trashUrl = `https://www.googleapis.com/drive/v3/files/${deltas[i].data_id}`;
+          await fetch('https://n8n.intelechia.com/webhook/eo-store', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              matrix_token: this.matrixAccessToken,
+              drive_url: trashUrl,
+              drive_method: 'PATCH',
+              drive_body: { trashed: true },
+            }),
+          });
+        } catch { /* non-critical */ }
+      }
+    } catch {
+      // Cleanup failure is non-critical
     }
   }
 }

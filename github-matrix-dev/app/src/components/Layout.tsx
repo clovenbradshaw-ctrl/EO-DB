@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { logout, createMatrixClient, type MatrixSession } from '../matrix/client';
 import { useEoStore } from '../store/eo-store';
 import { createIdb, deleteAllEoDatabases } from '../db/idb';
+import { persistSpaceMeta, listSpaceMeta } from '../db/space-meta';
 import { createStore } from '../db/encrypted-store';
 import { deriveKey } from '../lib/crypto';
 import { SyncManager } from '../matrix/sync-manager';
@@ -397,6 +398,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   const [spaces, setSpaces] = useState<EoState[]>([]);
   const [spaceEntries, setSpaceEntries] = useState<SpaceEntry[]>([]);
   const [publicSpaceEntries, setPublicSpaceEntries] = useState<SpaceEntry[]>([]);
+  const [cachedSpaceMetas, setCachedSpaceMetas] = useState<Map<string, import('../db/space-meta').SpaceMeta>>(new Map());
   const [allStates, setAllStates] = useState<EoState[]>([]);
   const prevAllStatesKeyRef = useRef<string>('');
   const allStatesFetchGenRef = useRef(0);
@@ -889,6 +891,17 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
 
       // Open root IDB to discover spaces from store data
       const idb = await createIdb();
+
+      // Load persisted space metadata (room IDs, Filen UUIDs, etc.)
+      // so sync services can start without Matrix discovery.
+      try {
+        const metas = await listSpaceMeta(idb);
+        if (metas.length > 0) {
+          const map = new Map(metas.map(m => [m.spaceId, m]));
+          setCachedSpaceMetas(map);
+        }
+      } catch { /* best effort */ }
+
       const key = await deriveKey(session.userId, session.deviceId);
       const rootStore = createStore(idb, key);
 
@@ -946,13 +959,16 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   // Build merged entries: Matrix-sourced entries + IDB fallback for spaces not found in Matrix
   const mergedEntries = useMemo<SpaceEntry[]>(() => {
     if (spaceEntries.length > 0) return spaceEntries;
-    // Offline fallback: adapt IDB-sourced spaces to SpaceEntry shape
+    // Offline fallback: adapt IDB-sourced spaces to SpaceEntry shape,
+    // enriched with persisted space metadata (room IDs, etc.)
     return spaces.map((sp) => {
-      const name = sp.value?.name || formatSpaceName(sp.target.split('.').pop() || '');
+      const spaceTarget = normalizeSpaceTarget(sp.target);
+      const meta = cachedSpaceMetas.get(spaceTarget);
+      const name = meta?.spaceName || sp.value?.name || formatSpaceName(sp.target.split('.').pop() || '');
       return {
-        spaceTarget: normalizeSpaceTarget(sp.target),
+        spaceTarget,
         displayName: name,
-        mainRoomId: '',
+        mainRoomId: meta?.mainRoomId || '',
         createdAt: sp.last_ts ? new Date(sp.last_ts).getTime() : 0,
         lastActivity: sp.last_ts ? new Date(sp.last_ts).getTime() : 0,
         ownerUserId: sp.last_agent || '',
@@ -962,7 +978,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         memberCount: (sp.value?._sharing || []).length + 1,
       };
     });
-  }, [spaceEntries, spaces]);
+  }, [spaceEntries, spaces, cachedSpaceMetas]);
 
   // Filter out soft-deleted spaces from the browser entries
   const activeEntries = useMemo(() => mergedEntries.filter((e) => !isSpaceDeleted(e.spaceTarget) && !isSpaceArchived(e.spaceTarget)), [mergedEntries, spaces, spaceEntries]);
@@ -1030,6 +1046,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         resolvedSpaceRooms = cached.spaceRooms ?? null;
         return cached.mainRoomId;
       }
+
 
       // 0b. Auto-join any invited rooms so their full state becomes readable.
       //     Invites received since initial sync may still be pending.
@@ -1102,6 +1119,15 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           resolvedSpaceRooms = retryScan.rooms;
           return retryScan.mainRoomId;
         }
+      }
+
+      // 2c. Fallback: check persisted space metadata from IndexedDB.
+      //     This lets the app reuse a known room ID when Matrix discovery
+      //     fails (slow sync, offline, etc.) — avoids creating duplicate rooms.
+      const savedMeta = cachedSpaceMetas.get(selectedSpace!);
+      if (savedMeta?.mainRoomId) {
+        console.log('[EO-DB] Using cached room ID from space-meta for', selectedSpace);
+        return savedMeta.mainRoomId;
       }
 
       // 3. Room genuinely doesn't exist — create it.
@@ -1411,6 +1437,19 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           console.warn('[EO-DB] Presence start failed for space', selectedSpace, e);
           presenceInstance = null;
         }
+      }
+
+      // Persist space metadata to root IndexedDB so the app can reconnect
+      // to Google Drive and Filen without needing Matrix for space discovery.
+      {
+        const spaceEntry = mergedEntries.find(e => e.spaceTarget === selectedSpace);
+        const filenFolderUuid = useFilenStore.getState().spaceFolders?.[selectedSpace!];
+        persistSpaceMeta({
+          spaceId: selectedSpace!,
+          spaceName: spaceEntry?.displayName || selectedSpace!,
+          mainRoomId: spaceRoomId || '',
+          ...(filenFolderUuid ? { filenFolderUuid } : {}),
+        }).catch(e => console.warn('[EO-DB] Failed to persist space meta:', e));
       }
 
       // Cache this space's store + sync manager for fast re-access
