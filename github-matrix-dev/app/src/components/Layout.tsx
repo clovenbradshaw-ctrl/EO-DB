@@ -795,6 +795,20 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
 
         if (!mounted) { client.stopClient(); return; }
 
+        // Auto-join any rooms where we have a pending invite. Invited rooms
+        // only expose stripped state — custom state events like
+        // com.eo-db.space.config are not readable until the user joins.
+        // Without this, the second user can never discover the space room.
+        for (const room of client.getRooms()) {
+          if (room.getMyMembership?.() === 'invite') {
+            try {
+              await (client as any).joinRoom(room.roomId);
+            } catch (e) {
+              console.warn('[EO-DB] Auto-join invited room failed:', room.roomId, e);
+            }
+          }
+        }
+
         // MatrixRTC (VoIP/calls) is not used by EO-DB. Stop it *after* initial
         // sync — stopping before startClient() is ineffective because the sync
         // loop re-registers its listeners during processSyncResponse.
@@ -1015,6 +1029,20 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       if (cached?.mainRoomId) {
         resolvedSpaceRooms = cached.spaceRooms ?? null;
         return cached.mainRoomId;
+      }
+
+      // 0b. Auto-join any invited rooms so their full state becomes readable.
+      //     Invites received since initial sync may still be pending.
+      if (matrixClientRef.current) {
+        for (const room of matrixClientRef.current.getRooms()) {
+          if (room.getMyMembership?.() === 'invite') {
+            try {
+              await (matrixClientRef.current as any).joinRoom(room.roomId);
+            } catch (e) {
+              console.warn('[EO-DB] Auto-join invited room failed:', room.roomId, e);
+            }
+          }
+        }
       }
 
       // 1. Try the space's own mainRoomId from discovery
@@ -2119,7 +2147,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             ) : activeView === 'settings' ? (
               <SettingsView session={session} matrixClient={matrixClientRef.current} roomId={spaceCacheRef.current.get(selectedSpace!)?.mainRoomId ?? null} spaceRooms={spaceCacheRef.current.get(selectedSpace!)?.spaceRooms ?? null} onUnarchive={handleUnarchiveSpace} connectionState={connectionState} connectionError={connectionError} matrixReady={matrixReady} onRetry={retrySync} onLogout={handleLogout} />
             ) : activeView === 'multiuser' ? (
-              <MultiUserTestView />
+              <MultiUserTestView matrixClient={matrixClientRef.current} roomId={spaceCacheRef.current.get(selectedSpace!)?.mainRoomId ?? null} presence={presence} />
             ) : null}
           </ErrorBoundary>}
         </main>
