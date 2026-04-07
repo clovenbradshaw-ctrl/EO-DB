@@ -148,6 +148,7 @@ export class GDriveSyncService {
 
     try {
       const currentSeq = await this.store.getCurrentSeq();
+      console.log('[EO-DB] GDrive syncCycle: currentSeq=%d, lastSyncedSeq=%d', currentSeq, this.lastSyncedSeq);
       if (currentSeq === 0 || currentSeq === this.lastSyncedSeq) {
         this.onStatus?.('synced');
         this.syncing = false;
