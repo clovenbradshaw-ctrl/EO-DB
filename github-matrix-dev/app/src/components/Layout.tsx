@@ -1201,6 +1201,20 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         if (!mounted) return;
         await init(existing.store);
 
+        // Update mainRoomId if room resolution succeeded on this run
+        // (fixes the case where the first run cached null because Matrix
+        // wasn't ready yet, but a subsequent re-run resolved the room).
+        if (spaceRoomId && !existing.mainRoomId) {
+          existing.mainRoomId = spaceRoomId;
+          existing.spaceRooms = resolvedSpaceRooms;
+          // Also persist the now-known room ID to IndexedDB so future
+          // page loads can use it immediately (Stage 2c).
+          persistSpaceMeta({
+            spaceId: selectedSpace!,
+            mainRoomId: spaceRoomId,
+          }).catch(e => console.warn('[EO-DB] Failed to persist room ID for cached space:', e));
+        }
+
         // Restore cached sync manager
         if (existing.syncManager) {
           useEoStore.getState().setSyncManager(existing.syncManager);
@@ -1476,7 +1490,10 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         persistSpaceMeta({
           spaceId: selectedSpace!,
           spaceName: spaceEntry?.displayName || selectedSpace!,
-          mainRoomId: spaceRoomId || '',
+          // Only persist mainRoomId if we actually resolved one — avoid
+          // overwriting a previously saved room ID with an empty string
+          // when Matrix isn't ready yet on this run.
+          ...(spaceRoomId ? { mainRoomId: spaceRoomId } : {}),
           ...(filenFolderUuid ? { filenFolderUuid } : {}),
         }).catch(e => console.warn('[EO-DB] Failed to persist space meta:', e));
       }
