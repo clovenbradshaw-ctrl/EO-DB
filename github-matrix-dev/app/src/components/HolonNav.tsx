@@ -325,8 +325,8 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
           </div>
         ))}
 
-        {/* Built-in Grid view */}
-        {isExpanded && (() => {
+        {/* Built-in Grid view — only shown in drill-down mode */}
+        {isExpanded && focusedEntity && (() => {
           const sig = sliceStore.getSig(node.fullPath);
           const isGridActive = sig.activeSliceId === null && selectedScope === node.fullPath;
           return (
@@ -347,8 +347,8 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
           );
         })()}
 
-        {/* Saved slices */}
-        {isExpanded && (() => {
+        {/* Saved slices — only shown in drill-down mode */}
+        {isExpanded && focusedEntity && (() => {
           const slices = sliceStore.getSlicesForScope(node.fullPath);
           if (slices.length === 0) return null;
           const sig = sliceStore.getSig(node.fullPath);
