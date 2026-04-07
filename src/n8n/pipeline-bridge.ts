@@ -24,7 +24,7 @@
 import type { IMatrixClient, IRoom } from '../matrix/types.js';
 import type { LocalKeyring } from '../db/crypto-types.js';
 import type { EoEvent } from '../db/types.js';
-import type { ManifestEntry, ManifestDataType, DriveChangeNotification } from './types.js';
+import type { ManifestEntry, ManifestDataType } from './types.js';
 import {
   storeViaN8n,
   storeBinaryViaN8n,
@@ -218,17 +218,4 @@ export class N8nPipelineBridge {
     return listViaN8n(matrixToken, filterType);
   }
 
-  // ─── Drive Change Handling ─────────────────────────────────────────────
-
-  /** Matrix event type emitted by the n8n Drive Watcher workflow. */
-  static readonly DRIVE_CHANGE_EVENT = 'eo.n8n.drive.change';
-
-  /**
-   * Parse a Drive change notification from a Matrix event.
-   * Call this from your Matrix sync handler when you see an
-   * event of type `eo.n8n.drive.change`.
-   */
-  static parseDriveChange(eventContent: Record<string, any>): DriveChangeNotification {
-    return eventContent as unknown as DriveChangeNotification;
-  }
 }

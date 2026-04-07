@@ -1,5 +1,7 @@
+import { useEffect, useState } from 'react';
 import { RecordView } from './RecordView';
 import { formatName } from './scope-picker-utils';
+import { useEoStore } from '../store/eo-store';
 import { useTheme, type Theme } from '../theme';
 import type { LayoutDisplayType } from './detail-layout';
 
@@ -56,7 +58,25 @@ const TYPE_COLORS: Record<string, string> = {
 export function RecordDetailDrawer({ target, onClose, onNavigate, profileFields, isMobile, layoutType }: RecordDetailDrawerProps) {
   const { theme } = useTheme();
   const s = makeStyles(theme);
-  const displayName = formatName(target.split('.').pop() || '');
+  const horizon = useEoStore((s) => s.horizon);
+  const ready = useEoStore((s) => s.ready);
+  const [recordName, setRecordName] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!ready) return;
+    let cancelled = false;
+    horizon(target)
+      .then((result) => {
+        if (cancelled) return;
+        if (result && !Array.isArray(result) && result.figure?.value?.name) {
+          setRecordName(result.figure.value.name);
+        }
+      })
+      .catch(() => { /* header falls back to formatted ID */ });
+    return () => { cancelled = true; };
+  }, [ready, target, horizon]);
+
+  const displayName = recordName || formatName(target.split('.').pop() || '');
   const entityType = getEntityType(target);
   const entityId = getEntityId(target);
   const initials = getInitials(displayName);

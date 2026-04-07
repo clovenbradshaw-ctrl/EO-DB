@@ -9,6 +9,8 @@ import { Presence } from '../matrix/presence';
 import { OnlineUsers } from './OnlineUsers';
 import { FilenSyncService } from '../filen/filen-sync';
 import { useFilenStore } from '../filen/filen-store';
+import { GDriveSyncService } from '../google-drive/gdrive-sync';
+import { useGDriveStore } from '../google-drive/gdrive-store';
 import { useAirtableStore } from '../ingestion/airtable-store';
 import { resolveDataRoom } from '../matrix/event-bridge';
 import { configureMatrixDomain } from '../lib/matrix-domain';
@@ -310,6 +312,7 @@ interface CachedSpace {
   store: ReturnType<typeof createStore>;
   syncManager: SyncManager | null;
   filenSync: FilenSyncService | null;
+  gdriveSync: GDriveSyncService | null;
   mainRoomId: string | null;
   presence: Presence | null;
   /** Full room topology from SpaceConfig (when available) */
@@ -913,6 +916,9 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         if (oldCached?.filenSync) {
           oldCached.filenSync.stop();
         }
+        if (oldCached?.gdriveSync) {
+          oldCached.gdriveSync.stop();
+        }
       }
 
       prevSpaceRef.current = selectedSpace;
@@ -1032,6 +1038,14 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             console.warn('[EO-DB] Filen sync restart failed for cached space', selectedSpace, e),
           );
           useEoStore.getState().setFilenSync(existing.filenSync);
+        }
+
+        // Restart Google Drive sync for cached space
+        if (existing.gdriveSync) {
+          existing.gdriveSync.start().catch(e =>
+            console.warn('[EO-DB] Google Drive sync restart failed for cached space', selectedSpace, e),
+          );
+          useEoStore.getState().setGDriveSync(existing.gdriveSync);
         }
 
         // Start a fresh presence instance for the cached space.
@@ -1221,6 +1235,47 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         }
       }
 
+      // Start Google Drive sync (secondary backup layer via n8n webhook)
+      // Auto-creates the Drive folder for the space if it doesn't exist
+      // (n8n's Google Drive node uses folderId mode "name", which auto-creates).
+      let gdriveSync: GDriveSyncService | null = null;
+
+      if (selectedSpace && session.accessToken && isAminoHomeserver) {
+        try {
+          // Connect to Google Drive via n8n webhook (validates Matrix token)
+          const gdriveState = useGDriveStore.getState();
+          if (!gdriveState.connected) {
+            await gdriveState.connect(session.accessToken);
+            console.log('[EO-DB] Google Drive auto-connected via n8n webhook');
+          }
+
+          // Find the space name
+          const gdriveSpaceEntry = mergedEntries.find(e => {
+            const target = 'canonical' in e ? (e as any).canonical : (e as any).target;
+            return target === selectedSpace;
+          });
+          const gdriveSpaceName = gdriveSpaceEntry ? ((gdriveSpaceEntry as any).name || selectedSpace) : selectedSpace;
+
+          // Set current space in GDrive store
+          useGDriveStore.getState().setCurrentSpace(selectedSpace, gdriveSpaceName);
+
+          gdriveSync = new GDriveSyncService({
+            store,
+            spaceId: selectedSpace,
+            spaceName: gdriveSpaceName,
+            userId: session.userId,
+            matrixAccessToken: session.accessToken,
+            matrixClient: matrixClientRef.current || undefined,
+            roomId: spaceRoomId || undefined,
+          });
+          await gdriveSync.start();
+          useEoStore.getState().setGDriveSync(gdriveSync);
+        } catch (e) {
+          console.warn('[EO-DB] Google Drive sync start failed for space', selectedSpace, e);
+          gdriveSync = null;
+        }
+      }
+
       // Start presence heartbeat for the space room (Matrix to-device pings).
       // Independent of SyncManager/Filen — works in all sync modes.
       let presenceInstance: Presence | null = null;
@@ -1243,7 +1298,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       }
 
       // Cache this space's store + sync manager for fast re-access
-      cache.set(selectedSpace!, { store, syncManager, filenSync, mainRoomId: spaceRoomId, presence: presenceInstance, spaceRooms: resolvedSpaceRooms });
+      cache.set(selectedSpace!, { store, syncManager, filenSync, gdriveSync, mainRoomId: spaceRoomId, presence: presenceInstance, spaceRooms: resolvedSpaceRooms });
     }
 
     setupSpaceStore();
@@ -1269,12 +1324,18 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               console.warn('[EO-DB] Filen save failed:', err);
             }));
       }
+      if (cached.gdriveSync) {
+        savePromises.push(cached.gdriveSync.forceSave().catch((err) => {
+              console.warn('[EO-DB] Google Drive save failed:', err);
+            }));
+      }
     }
     await Promise.all(savePromises);
 
     // Stop all Filen sync and close all cached stores
     for (const [, cached] of cache) {
       if (cached.filenSync) cached.filenSync.stop();
+      if (cached.gdriveSync) cached.gdriveSync.stop();
       cached.store.close();
     }
     cache.clear();
@@ -1309,6 +1370,11 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           if (cached.filenSync) {
             promises.push(cached.filenSync.forceSave().catch((err) => {
               console.warn('[EO-DB] Filen save failed:', err);
+            }));
+          }
+          if (cached.gdriveSync) {
+            promises.push(cached.gdriveSync.forceSave().catch((err) => {
+              console.warn('[EO-DB] Google Drive save failed:', err);
             }));
           }
         }
@@ -1547,6 +1613,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                   store: spaceStore,
                   syncManager: null,
                   filenSync: null,
+                  gdriveSync: null,
                   mainRoomId,
                   presence: null,
                   spaceRooms,
