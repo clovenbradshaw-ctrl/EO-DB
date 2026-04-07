@@ -399,6 +399,10 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   const [syncToastStatus, syncToastSeq, onSyncStatus] = useSyncToast();
   const [matrixReady, setMatrixReady] = useState(false);
   const [presence, setPresence] = useState<Presence | null>(null);
+  // Reactive room ID for the current space — drives SettingsView, MultiUserTestView, etc.
+  // Updated by setupSpaceStore when room resolution completes (including retries).
+  const [spaceRoomId, setSpaceRoomId] = useState<string | null>(null);
+  const [spaceRooms, setSpaceRooms] = useState<CachedSpace['spaceRooms']>(null);
   const [connectionError, setConnectionError] = useState<{
     phase: 'auth' | 'crypto' | 'sync' | 'room';
     message: string;
@@ -999,7 +1003,9 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       setShowRecycleBin(false);
       // Clear connection error from previous space (e.g. stale "resolve failed")
       setConnectionError(null);
-      // Clear presence so MultiUserTestView doesn't show stale peer data
+      // Clear room ID and presence so SettingsView/MultiUserTestView don't show stale data
+      setSpaceRoomId(null);
+      setSpaceRooms(null);
       setPresence(null);
       // Reset builder store so old space's views don't persist
       useBuilderStore.getState().reset();
@@ -1011,13 +1017,21 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   // --- Cached space stores (survive space switches, avoid re-init) ---
   const spaceCacheRef = useRef<Map<string, CachedSpace>>(new Map());
 
+  // Generation counter: increments each time setupSpaceStore starts. Stale
+  // async completions compare their generation to the current value and bail
+  // if a newer run has started, preventing race conditions when the effect
+  // re-fires (e.g. matrixReady, mergedEntries change) mid-flight.
+  const setupGenRef = useRef(0);
+
   // --- Per-space store init (re-runs when selectedSpace changes) ---
   useEffect(() => {
     if (!selectedSpace) return;
     // In local mode, the store is already initialized via initLocal() — skip
     if (localMode) return;
 
+    const generation = ++setupGenRef.current;
     let mounted = true;
+    const isStale = () => !mounted || setupGenRef.current !== generation;
     const cleanupFns: (() => void)[] = [];
 
     // Holds the room topology discovered during resolution (used to populate cache).
@@ -1183,6 +1197,27 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       return null;
     }
 
+    /**
+     * Wrapper: resolve room, then immediately persist + update reactive state.
+     * Every successful resolution feeds the UI (via setSpaceRoomId) and IDB
+     * (via persistSpaceMeta) so future runs never lose a known room ID.
+     */
+    async function resolveRoom(): Promise<string | null> {
+      const roomId = await resolveOrCreateRoom();
+      if (isStale()) return roomId;  // newer run started, don't update state
+
+      if (roomId) {
+        setSpaceRoomId(roomId);
+        setSpaceRooms(resolvedSpaceRooms ?? null);
+        // Persist immediately — don't wait until end of setup
+        persistSpaceMeta({
+          spaceId: selectedSpace!,
+          mainRoomId: roomId,
+        }).catch(e => console.warn('[EO-DB] Failed to persist room ID:', e));
+      }
+      return roomId;
+    }
+
     const onFoldEvent = (event: any) => {
       useEoStore.setState((st) => ({
         recentEvents: [...st.recentEvents.slice(-99), event],
@@ -1194,11 +1229,12 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       const cache = spaceCacheRef.current;
       const existing = cache.get(selectedSpace!);
 
-      const spaceRoomId = await resolveOrCreateRoom();
+      const spaceRoomId = await resolveRoom();
+      if (isStale()) return;
 
       if (existing) {
         // Reuse cached store — no IDB open, no key derivation, no Matrix hydration
-        if (!mounted) return;
+        if (isStale()) return;
         await init(existing.store);
 
         // Update mainRoomId if room resolution succeeded on this run
@@ -1207,12 +1243,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         if (spaceRoomId && !existing.mainRoomId) {
           existing.mainRoomId = spaceRoomId;
           existing.spaceRooms = resolvedSpaceRooms;
-          // Also persist the now-known room ID to IndexedDB so future
-          // page loads can use it immediately (Stage 2c).
-          persistSpaceMeta({
-            spaceId: selectedSpace!,
-            mainRoomId: spaceRoomId,
-          }).catch(e => console.warn('[EO-DB] Failed to persist room ID for cached space:', e));
         }
 
         // Restore cached sync manager
@@ -1253,7 +1283,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       const idb = await createIdb(selectedSpace!);
       const key = await deriveKey(session.userId, session.deviceId);
       const store = createStore(idb, key);
-      if (!mounted) { store.close(); return; }
+      if (isStale()) { store.close(); return; }
 
       await init(store);
 
@@ -1309,7 +1339,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       if (MATRIX_ENABLED && spaceRoomId && matrixClientRef.current && !filenOrgMode && !filenConnected) {
         const maxRetries = 3;
         for (let attempt = 0; attempt < maxRetries; attempt++) {
-          if (!mounted) return;
+          if (isStale()) return;
           try {
             syncManager = new SyncManager(
               matrixClientRef.current,
@@ -1318,7 +1348,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               onFoldEvent,
             );
             await syncManager.initialize();
-            if (!mounted) { syncManager.destroy(); return; }
+            if (isStale()) { syncManager.destroy(); return; }
             useEoStore.getState().setSyncManager(syncManager);
             break; // success
           } catch (e) {
@@ -1468,7 +1498,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         try {
           presenceInstance = new Presence(matrixClientRef.current, spaceRoomId);
           await presenceInstance.start();
-          if (!mounted) {
+          if (isStale()) {
             presenceInstance.stop();
             presenceInstance = null;
           } else {
@@ -1508,6 +1538,9 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       mounted = false;
       cleanupFns.forEach(fn => fn());
     };
+    // Note: spaceRoomId/spaceRooms are intentionally NOT in the dep array —
+    // they are outputs of this effect, not inputs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedSpace, session, init, matrixReady, mergedEntries]);
 
   async function handleLogout() {
@@ -2119,7 +2152,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                 currentUserId={session.userId}
                 onClose={() => setShowMembers(false)}
                 matrixClient={matrixClientRef.current}
-                mainRoomId={spaceCacheRef.current.get(selectedSpace)?.mainRoomId ?? null}
+                mainRoomId={spaceRoomId}
               />
             </div>
           )}
@@ -2230,9 +2263,9 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                 </div>
               )
             ) : activeView === 'settings' ? (
-              <SettingsView session={session} matrixClient={matrixClientRef.current} roomId={spaceCacheRef.current.get(selectedSpace!)?.mainRoomId ?? null} spaceRooms={spaceCacheRef.current.get(selectedSpace!)?.spaceRooms ?? null} onUnarchive={handleUnarchiveSpace} connectionState={connectionState} connectionError={connectionError} matrixReady={matrixReady} onRetry={retrySync} onLogout={handleLogout} />
+              <SettingsView session={session} matrixClient={matrixClientRef.current} roomId={spaceRoomId} spaceRooms={spaceRooms ?? null} onUnarchive={handleUnarchiveSpace} connectionState={connectionState} connectionError={connectionError} matrixReady={matrixReady} onRetry={retrySync} onLogout={handleLogout} />
             ) : activeView === 'multiuser' ? (
-              <MultiUserTestView matrixClient={matrixClientRef.current} roomId={spaceCacheRef.current.get(selectedSpace!)?.mainRoomId ?? null} presence={presence} />
+              <MultiUserTestView matrixClient={matrixClientRef.current} roomId={spaceRoomId} presence={presence} />
             ) : null}
           </ErrorBoundary>}
         </main>
