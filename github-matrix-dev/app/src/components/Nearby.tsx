@@ -1,5 +1,7 @@
+import { useMemo } from 'react';
 import type { NearbyEntry, SimilarityDimensions } from '../db/types';
 import { useTheme, type Theme } from '../theme';
+import { useDisplayNames } from '../hooks/useDisplayNames';
 
 interface NearbyProps {
   entries: NearbyEntry[];
@@ -16,11 +18,15 @@ const DIM_LABELS: Array<{ key: keyof SimilarityDimensions; label: string; color:
 export function Nearby({ entries, onNavigate }: NearbyProps) {
   const { theme } = useTheme();
   const s = makeStyles(theme);
+  const targets = useMemo(() => entries.map(e => e.target), [entries]);
+  const displayNames = useDisplayNames(targets);
 
   return (
     <div style={s.grid}>
       {entries.map((n) => {
-        const label = n.target.split('.').pop() || n.target;
+        const shortId = n.target.split('.').pop() || n.target;
+        const displayName = displayNames.get(n.target);
+        const label = displayName || shortId;
         const pct = Math.round((n.score ?? 0) * 100);
 
         return (
@@ -29,7 +35,7 @@ export function Nearby({ entries, onNavigate }: NearbyProps) {
               <div style={s.name}>{label}</div>
               <div style={s.score}>{pct}%</div>
             </div>
-            <div style={s.targetPath}>{n.target}</div>
+            <div style={s.targetPath}>{displayName ? shortId : n.target}</div>
             {n.dimensions && (
               <div style={s.dims}>
                 {DIM_LABELS.map(({ key, label: dimLabel, color }) => {

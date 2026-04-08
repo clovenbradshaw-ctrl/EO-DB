@@ -3,7 +3,9 @@
  * These records underwent the exact same operator sequence with the same operand shapes,
  * regardless of when the operations occurred.
  */
+import { useMemo } from 'react';
 import { useTheme, type Theme } from '../theme';
+import { useDisplayNames } from '../hooks/useDisplayNames';
 
 interface HashCohortProps {
   targets: string[];
@@ -14,6 +16,7 @@ interface HashCohortProps {
 export function HashCohort({ targets, currentTarget, onNavigate }: HashCohortProps) {
   const { theme } = useTheme();
   const s = makeStyles(theme);
+  const displayNames = useDisplayNames(useMemo(() => targets, [targets]));
 
   // Group by collection prefix for cross-collection echo detection
   const byCollection: Record<string, string[]> = {};
@@ -39,7 +42,9 @@ export function HashCohort({ targets, currentTarget, onNavigate }: HashCohortPro
       )}
       <div style={s.grid}>
         {targets.map((t) => {
-          const label = t.split('.').pop() || t;
+          const shortId = t.split('.').pop() || t;
+          const displayName = displayNames.get(t);
+          const label = displayName || shortId;
           const collection = t.split('.').slice(0, 2).join('.');
           const isCross = collection !== currentCollection;
           return (
@@ -49,7 +54,7 @@ export function HashCohort({ targets, currentTarget, onNavigate }: HashCohortPro
               onClick={() => onNavigate(t)}
             >
               <div style={s.label}>{label}</div>
-              <div style={s.target}>{t}</div>
+              <div style={s.target}>{displayName ? shortId : t}</div>
               {isCross && <div style={s.crossBadge}>echo</div>}
             </div>
           );

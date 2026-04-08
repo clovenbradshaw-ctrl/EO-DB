@@ -1,5 +1,7 @@
+import { useMemo } from 'react';
 import type { GroundEntry } from '../db/types';
 import { useTheme, type Theme } from '../theme';
+import { useDisplayNames } from '../hooks/useDisplayNames';
 
 const ICONS: Record<string, string> = {
   regulatoryHold: '\u26a0',
@@ -15,6 +17,8 @@ interface GroundsProps {
 export function Grounds({ entries }: GroundsProps) {
   const { theme } = useTheme();
   const s = makeStyles(theme);
+  const sources = useMemo(() => entries.map(e => e.source), [entries]);
+  const displayNames = useDisplayNames(sources);
 
   return (
     <div style={s.row}>
@@ -39,7 +43,7 @@ export function Grounds({ entries }: GroundsProps) {
               }}>
                 {String(g.value)}
               </div>
-              <div style={s.from}>{g.source} (distance: {g.distance})</div>
+              <div style={s.from}>{displayNames.get(g.source) || g.source} (distance: {g.distance})</div>
             </div>
           </div>
         );
