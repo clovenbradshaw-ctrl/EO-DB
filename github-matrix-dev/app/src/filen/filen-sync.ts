@@ -672,8 +672,12 @@ export class FilenSyncService {
     const { auth, masterKeys } = useFilenStore.getState();
     if (!auth) throw new Error('Not connected to Filen');
 
+    console.log('[EO-DB] hydrateFromFilen: starting, folder =', spaceFolderUuid);
+
     const items = await filenListFolder(auth.apiKey, spaceFolderUuid, masterKeys);
     const localSeq = await store.getCurrentSeq();
+
+    console.log(`[EO-DB] hydrateFromFilen: listed ${items.length} items, localSeq = ${localSeq}`);
 
     // Find all snapshot and backup files
     const snapshots: Array<FilenItem & { seq: number }> = [];
@@ -701,6 +705,9 @@ export class FilenSyncService {
       console.warn('[EO-DB] hydrateFromFilen: no .eodb files found in folder', spaceFolderUuid);
     } else {
       console.log(`[EO-DB] hydrateFromFilen: found ${snapshots.length} snapshots, ${backups.length} backups`);
+      for (const b of backups) {
+        console.log(`[EO-DB]   backup: ${b.name} seq=${b.seq} key=${b.key ? 'present' : 'MISSING'} region=${b.region} bucket=${b.bucket}`);
+      }
     }
 
     let lastAppliedSeq = localSeq;
@@ -708,44 +715,58 @@ export class FilenSyncService {
     // Apply latest snapshot first (it contains all events from seq 0)
     if (snapshots.length > 0) {
       const latest = snapshots[0];
-      if (latest.key) {
+      if (!latest.key) {
+        console.error('[EO-DB] hydrateFromFilen: snapshot has no file key — cannot download:', latest.name);
+      } else {
         try {
+          console.log(`[EO-DB] hydrateFromFilen: downloading snapshot ${latest.name}...`);
           const raw = await filenDownloadFile(
             auth.apiKey, latest.uuid, latest.key, latest.region, latest.bucket,
           );
+          console.log(`[EO-DB] hydrateFromFilen: downloaded snapshot ${latest.name} (${raw.byteLength} bytes)`);
           const data = keyring ? await decryptSnapshot(raw, keyring) : raw;
           const eodb = unpackEodb(data);
+          console.log(`[EO-DB] hydrateFromFilen: snapshot contains ${eodb.events.length} events`);
           for (const event of eodb.events) {
             if (event.seq <= localSeq) continue;
             const seq = await processEvent(store, event, onEvent);
             lastAppliedSeq = Math.max(lastAppliedSeq, seq);
           }
+          console.log(`[EO-DB] hydrateFromFilen: snapshot applied, lastAppliedSeq = ${lastAppliedSeq}`);
         } catch (e) {
-          console.warn('[EO-DB] Failed to download/apply snapshot:', latest.name, e);
+          console.error('[EO-DB] Failed to download/apply snapshot:', latest.name, e);
         }
       }
     }
 
     // Then apply backup files for anything after the snapshot
     for (const backup of backups) {
-      if (!backup.key) continue;
+      if (!backup.key) {
+        console.error('[EO-DB] hydrateFromFilen: backup has no file key — cannot download:', backup.name);
+        continue;
+      }
       if (backup.seq <= lastAppliedSeq) continue;
       try {
+        console.log(`[EO-DB] hydrateFromFilen: downloading backup ${backup.name}...`);
         const raw = await filenDownloadFile(
           auth.apiKey, backup.uuid, backup.key, backup.region, backup.bucket,
         );
+        console.log(`[EO-DB] hydrateFromFilen: downloaded backup ${backup.name} (${raw.byteLength} bytes)`);
         const data = keyring ? await decryptSnapshot(raw, keyring) : raw;
         const eodb = unpackEodb(data);
+        console.log(`[EO-DB] hydrateFromFilen: backup contains ${eodb.events.length} events (from_seq=${eodb.from_seq} to_seq=${eodb.to_seq})`);
         for (const event of eodb.events) {
           if (event.seq <= lastAppliedSeq) continue;
           const seq = await processEvent(store, event, onEvent);
           lastAppliedSeq = Math.max(lastAppliedSeq, seq);
         }
+        console.log(`[EO-DB] hydrateFromFilen: backup applied, lastAppliedSeq = ${lastAppliedSeq}`);
       } catch (e) {
-        console.warn('[EO-DB] Failed to apply backup file:', backup.name, e);
+        console.error('[EO-DB] Failed to apply backup file:', backup.name, e);
       }
     }
 
+    console.log(`[EO-DB] hydrateFromFilen: complete. Applied up to seq ${lastAppliedSeq} (was ${localSeq})`);
     return lastAppliedSeq;
   }
 }

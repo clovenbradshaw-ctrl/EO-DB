@@ -19,7 +19,10 @@ import { readLogSince } from '../db/log';
 import { encryptSnapshot } from '../crypto/snapshot-crypto';
 import { resolveSnapshotKeyId } from '../crypto/segment-keys';
 import { packEodb, type EodbFile } from '../filen/eodb-format';
-import { gdriveStore, gdriveList, computeContentHash } from './gdrive-api';
+import { gdriveStore, gdriveList, gdriveRetrieve, computeContentHash } from './gdrive-api';
+import { unpackEodb } from '../filen/eodb-format';
+import { decryptSnapshot } from '../crypto/snapshot-crypto';
+import { processEvent } from '../db/fold';
 import { useGDriveStore } from './gdrive-store';
 
 // ──────────────────────────────────────────────────────────────
@@ -60,6 +63,12 @@ export class GDriveSyncService {
   private roomId: string | null;
   private keyring: LocalKeyring;
 
+  /** Callback invoked for each event during hydration/pull (drives UI updates). */
+  onEvent?: (event: any) => void;
+
+  /** Called after a successful safety-net hydration so the UI can re-init. */
+  onHydrated?: () => void;
+
   /** Callback for UI status updates. */
   onStatus?: (status: 'syncing' | 'synced' | 'error', detail?: string) => void;
 
@@ -72,6 +81,8 @@ export class GDriveSyncService {
     matrixClient?: MatrixClient;
     roomId?: string;
     keyring?: LocalKeyring;
+    onEvent?: (event: any) => void;
+    onHydrated?: () => void;
   }) {
     this.store = opts.store;
     this.spaceId = opts.spaceId;
@@ -81,6 +92,8 @@ export class GDriveSyncService {
     this.matrixClient = opts.matrixClient || null;
     this.roomId = opts.roomId || null;
     this.keyring = opts.keyring || { keys: new Map() };
+    this.onEvent = opts.onEvent || undefined;
+    this.onHydrated = opts.onHydrated || undefined;
   }
 
   /** Allow updating keyring after construction. */
@@ -159,7 +172,35 @@ export class GDriveSyncService {
     try {
       const currentSeq = await this.store.getCurrentSeq();
       console.log('[EO-DB] GDrive syncCycle: currentSeq=%d, lastSyncedSeq=%d', currentSeq, this.lastSyncedSeq);
-      if (currentSeq === 0 || currentSeq === this.lastSyncedSeq) {
+
+      // If local store is empty but Google Drive may have data, attempt to pull.
+      // Safety net: initial hydration may have been skipped due to effect re-runs.
+      if (currentSeq === 0) {
+        try {
+          const dataType = `eodb-${this.spaceId}`;
+          const hydratedSeq = await GDriveSyncService.hydrateFromGDrive(
+            this.store, this.matrixAccessToken, dataType, this.onEvent, this.keyring,
+          );
+          if (hydratedSeq > 0) {
+            this.lastSyncedSeq = hydratedSeq;
+            this.lastConsolidatedSeq = hydratedSeq;
+            await this.store.put('meta:gdrive_synced_seq', hydratedSeq);
+            await this.store.put('meta:gdrive_consolidated_seq', hydratedSeq);
+            this.onHydrated?.();
+            this.onStatus?.('synced');
+            console.log(`[EO-DB] GDrive sync cycle: pulled ${hydratedSeq} events from Google Drive (safety-net hydration)`);
+          } else {
+            this.onStatus?.('synced');
+          }
+        } catch (e) {
+          console.warn('[EO-DB] GDrive sync cycle: safety-net hydration failed:', e);
+          this.onStatus?.('error', e instanceof Error ? e.message : String(e));
+        }
+        this.syncing = false;
+        return;
+      }
+
+      if (currentSeq === this.lastSyncedSeq) {
         this.onStatus?.('synced');
         this.syncing = false;
         return;
@@ -331,5 +372,89 @@ export class GDriveSyncService {
     } catch {
       // Cleanup failure is non-critical
     }
+  }
+
+  // ──────────────────────────────────────────────────────────
+  // Hydration (new device / second client)
+  // ──────────────────────────────────────────────────────────
+
+  /**
+   * Hydrate a store from Google Drive by listing and downloading .eodb files.
+   *
+   * Looks for the consolidated backup first, then any delta files.
+   * Downloads via gdriveRetrieve (n8n proxy → Google Drive media endpoint).
+   *
+   * Returns the final seq after hydration.
+   */
+  static async hydrateFromGDrive(
+    store: EoStore,
+    matrixAccessToken: string,
+    dataType: string,
+    onEvent?: (event: any) => void,
+    keyring?: LocalKeyring,
+  ): Promise<number> {
+    console.log('[EO-DB] hydrateFromGDrive: starting, dataType =', dataType);
+
+    const listing = await gdriveList(matrixAccessToken, dataType);
+    const entries = listing.entries;
+
+    console.log(`[EO-DB] hydrateFromGDrive: found ${entries.length} files on Google Drive`);
+    if (entries.length === 0) return 0;
+
+    const localSeq = await store.getCurrentSeq();
+    let lastAppliedSeq = localSeq;
+
+    // Try each file — the consolidated one contains ALL events, so one
+    // successful file is usually enough to fully hydrate the store.
+    // Sort by stored_at descending so we try the newest file first.
+    const sorted = [...entries].sort((a, b) =>
+      new Date(b.stored_at).getTime() - new Date(a.stored_at).getTime(),
+    );
+
+    for (const entry of sorted) {
+      try {
+        console.log(`[EO-DB] hydrateFromGDrive: downloading ${entry.content_hash}.eodb...`);
+        const result = await gdriveRetrieve(matrixAccessToken, entry.content_hash);
+        if (!result.ok || !result.envelope) {
+          console.warn('[EO-DB] hydrateFromGDrive: retrieve failed for', entry.content_hash);
+          continue;
+        }
+
+        let raw: Uint8Array;
+        if (result.envelope instanceof Uint8Array) {
+          raw = result.envelope;
+        } else if (typeof result.envelope === 'string') {
+          // Legacy or unexpected format
+          console.warn('[EO-DB] hydrateFromGDrive: unexpected string response for', entry.content_hash);
+          continue;
+        } else {
+          raw = result.envelope;
+        }
+
+        console.log(`[EO-DB] hydrateFromGDrive: downloaded ${entry.content_hash} (${raw.byteLength} bytes)`);
+
+        // Decrypt if keyring-encrypted
+        const data = keyring ? await decryptSnapshot(raw, keyring) : raw;
+        const eodb = unpackEodb(data);
+
+        console.log(`[EO-DB] hydrateFromGDrive: file contains ${eodb.events.length} events (from_seq=${eodb.from_seq} to_seq=${eodb.to_seq})`);
+
+        for (const event of eodb.events) {
+          if (event.seq <= localSeq) continue;
+          const seq = await processEvent(store, event, onEvent);
+          lastAppliedSeq = Math.max(lastAppliedSeq, seq);
+        }
+
+        console.log(`[EO-DB] hydrateFromGDrive: applied, lastAppliedSeq = ${lastAppliedSeq}`);
+
+        // If we got events from the consolidated file, we're done
+        if (lastAppliedSeq > localSeq) break;
+      } catch (e) {
+        console.error('[EO-DB] hydrateFromGDrive: failed to apply file:', entry.content_hash, e);
+      }
+    }
+
+    console.log(`[EO-DB] hydrateFromGDrive: complete. Applied up to seq ${lastAppliedSeq} (was ${localSeq})`);
+    return lastAppliedSeq;
   }
 }

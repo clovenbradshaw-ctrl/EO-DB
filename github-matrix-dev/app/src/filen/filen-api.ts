@@ -575,13 +575,12 @@ export async function filenDownloadFile(
     index: '0',
   });
 
-  // Try multiple egest servers — some may be down or block CORS for this origin.
-  // Shuffle the list so we don't always hit them in the same order.
+  // Try ALL egest servers (shuffled) — some may be down or block CORS.
   const servers = [...FILEN_EGEST_SERVERS].sort(() => Math.random() - 0.5);
-  const maxAttempts = Math.min(servers.length, 3);
   let lastError: unknown;
 
-  for (let i = 0; i < maxAttempts; i++) {
+  // Pass 1: Try with Authorization header
+  for (let i = 0; i < servers.length; i++) {
     const egestUrl = servers[i];
     try {
       const res = await fetch(`${egestUrl}/v3/download?${params}`, {
@@ -590,22 +589,51 @@ export async function filenDownloadFile(
       });
 
       if (!res.ok) {
-        lastError = new Error(`Download failed: ${res.status} ${res.statusText}`);
+        lastError = new Error(`Download failed: ${res.status} ${res.statusText} (${egestUrl})`);
         continue;
       }
 
       const encrypted = new Uint8Array(await res.arrayBuffer());
+      if (encrypted.byteLength === 0) {
+        lastError = new Error(`Download returned empty response (${egestUrl})`);
+        continue;
+      }
       return decryptFileContent(encrypted, fileKey);
     } catch (e) {
       // TypeError: Failed to fetch — typically CORS or network error
       lastError = e;
-      console.warn(`[EO-DB] Download attempt ${i + 1}/${maxAttempts} failed (${egestUrl}):`, e);
+      console.warn(`[EO-DB] Download attempt ${i + 1}/${servers.length} failed (${egestUrl}):`, e);
+    }
+  }
+
+  // Pass 2: Retry without Authorization header (avoids CORS preflight).
+  // Some egest servers may accept UUID-only downloads for authenticated files.
+  for (let i = 0; i < servers.length; i++) {
+    const egestUrl = servers[i];
+    try {
+      const res = await fetch(`${egestUrl}/v3/download?${params}`, {
+        method: 'GET',
+      });
+
+      if (!res.ok) {
+        lastError = new Error(`Download (no-auth) failed: ${res.status} ${res.statusText} (${egestUrl})`);
+        continue;
+      }
+
+      const encrypted = new Uint8Array(await res.arrayBuffer());
+      if (encrypted.byteLength === 0) {
+        lastError = new Error(`Download (no-auth) returned empty response (${egestUrl})`);
+        continue;
+      }
+      return decryptFileContent(encrypted, fileKey);
+    } catch (e) {
+      lastError = e;
     }
   }
 
   throw lastError instanceof Error
     ? lastError
-    : new Error(`Download failed after ${maxAttempts} attempts: ${lastError}`);
+    : new Error(`Download failed after ${servers.length * 2} attempts: ${lastError}`);
 }
 
 // ──────────────────────────────────────────────────────────────
