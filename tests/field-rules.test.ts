@@ -9,7 +9,7 @@ import {
 } from '../src/ingestion/field-rules.js';
 
 describe('COMPUTED_TYPES', () => {
-  it('contains formula, rollup, lookup, count', () => {
+  it('contains formula, rollup, lookup, count (classified as def for ingestion)', () => {
     expect(COMPUTED_TYPES.has('formula')).toBe(true);
     expect(COMPUTED_TYPES.has('rollup')).toBe(true);
     expect(COMPUTED_TYPES.has('lookup')).toBe(true);
@@ -43,18 +43,17 @@ describe('LINK_TYPES', () => {
 });
 
 describe('SKIP_VALUE_TYPES', () => {
-  it('contains only computed types (not metadata)', () => {
-    for (const t of COMPUTED_TYPES) expect(SKIP_VALUE_TYPES.has(t)).toBe(true);
-    expect(SKIP_VALUE_TYPES.size).toBe(COMPUTED_TYPES.size);
+  it('is empty — computed types are now DEF-ingested', () => {
+    expect(SKIP_VALUE_TYPES.size).toBe(0);
   });
 });
 
 describe('classifyFieldType', () => {
-  it('classifies computed fields as skip', () => {
-    expect(classifyFieldType('formula')).toBe('skip');
-    expect(classifyFieldType('rollup')).toBe('skip');
-    expect(classifyFieldType('lookup')).toBe('skip');
-    expect(classifyFieldType('count')).toBe('skip');
+  it('classifies computed fields as def (Airtable-evaluated, ingested)', () => {
+    expect(classifyFieldType('formula')).toBe('def');
+    expect(classifyFieldType('rollup')).toBe('def');
+    expect(classifyFieldType('lookup')).toBe('def');
+    expect(classifyFieldType('count')).toBe('def');
   });
 
   it('classifies fold-computed metadata as eva', () => {

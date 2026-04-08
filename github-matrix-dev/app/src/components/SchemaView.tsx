@@ -203,6 +203,8 @@ export function SchemaView({ scope }: SchemaViewProps) {
   const [constraintComposer, setConstraintComposer] = useState<{ fieldKey: string; x: number; y: number } | null>(null);
   const [sortKey, setSortKey] = useState<SortKey>('fieldKey');
   const [sortDir, setSortDir] = useState<SortDir>('asc');
+  const [filterText, setFilterText] = useState('');
+  const [filterType, setFilterType] = useState<string>('');
   const [recordCount, setRecordCount] = useState(0);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [collectionDisplayName, setCollectionDisplayName] = useState<string | null>(null);
@@ -321,8 +323,38 @@ export function SchemaView({ scope }: SchemaViewProps) {
     });
   }, [ready, lastSeq, scope, getStateByPrefix]);
 
+  // Collect unique types for the type filter dropdown
+  const availableTypes = useMemo(() => {
+    const types = new Set<string>();
+    for (const fs of fieldSchemas.values()) {
+      const t = fs.typeDef?.value?.type || fs.ingestedType;
+      if (t) types.add(t);
+    }
+    return Array.from(types).sort();
+  }, [fieldSchemas]);
+
   const sortedFields = useMemo(() => {
-    const arr = Array.from(fieldSchemas.values());
+    let arr = Array.from(fieldSchemas.values());
+
+    // Apply text filter (matches name, fieldKey, type)
+    if (filterText) {
+      const q = filterText.toLowerCase();
+      arr = arr.filter(fs => {
+        const name = (fs.name || '').toLowerCase();
+        const key = fs.fieldKey.toLowerCase();
+        const type = (fs.typeDef?.value?.type || fs.ingestedType || '').toLowerCase();
+        return name.includes(q) || key.includes(q) || type.includes(q);
+      });
+    }
+
+    // Apply type filter
+    if (filterType) {
+      arr = arr.filter(fs => {
+        const type = fs.typeDef?.value?.type || fs.ingestedType || '';
+        return type === filterType;
+      });
+    }
+
     arr.sort((a, b) => {
       const va = getSortValue(a, sortKey).toLowerCase();
       const vb = getSortValue(b, sortKey).toLowerCase();
@@ -330,7 +362,7 @@ export function SchemaView({ scope }: SchemaViewProps) {
       return sortDir === 'asc' ? cmp : -cmp;
     });
     return arr;
-  }, [fieldSchemas, sortKey, sortDir]);
+  }, [fieldSchemas, sortKey, sortDir, filterText, filterType]);
 
   async function handleLabelSave(fieldKey: string, newLabel: string) {
     try {
@@ -517,6 +549,58 @@ export function SchemaView({ scope }: SchemaViewProps) {
             Inferred from records
           </span>
         )}
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>
+          <input
+            type="text"
+            placeholder="Filter fields..."
+            value={filterText}
+            onChange={(e) => setFilterText(e.target.value)}
+            style={{
+              padding: '4px 10px',
+              fontSize: 11,
+              border: `1px solid ${theme.border}`,
+              borderRadius: 4,
+              background: theme.bg,
+              color: theme.text,
+              outline: 'none',
+              width: 160,
+            }}
+          />
+          <select
+            value={filterType}
+            onChange={(e) => setFilterType(e.target.value)}
+            style={{
+              padding: '4px 8px',
+              fontSize: 11,
+              border: `1px solid ${theme.border}`,
+              borderRadius: 4,
+              background: theme.bg,
+              color: theme.text,
+              outline: 'none',
+            }}
+          >
+            <option value="">All types</option>
+            {availableTypes.map(t => (
+              <option key={t} value={t}>{t}</option>
+            ))}
+          </select>
+          {(filterText || filterType) && (
+            <button
+              onClick={() => { setFilterText(''); setFilterType(''); }}
+              style={{
+                padding: '3px 8px',
+                fontSize: 10,
+                border: `1px solid ${theme.border}`,
+                borderRadius: 4,
+                background: theme.bgMuted,
+                color: theme.textMuted,
+                cursor: 'pointer',
+              }}
+            >
+              Clear
+            </button>
+          )}
+        </div>
       </div>
 
       <div style={s.tableWrapper}>
