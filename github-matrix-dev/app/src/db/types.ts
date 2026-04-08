@@ -6,10 +6,10 @@ export { ROLE_POWER_LEVELS, ROLE_LABELS, powerLevelToRole } from '../permissions
 export type Operator = 'NUL' | 'SIG' | 'INS' | 'SEG' | 'CON' | 'SYN' | 'DEF' | 'EVA' | 'REC';
 
 // Operators that produce log entries (post-INS threshold)
-export type LoggableOperator = 'NUL' | 'INS' | 'SEG' | 'CON' | 'SYN' | 'DEF' | 'EVA' | 'REC';
+export type LoggableOperator = 'NUL' | 'SIG' | 'INS' | 'SEG' | 'CON' | 'SYN' | 'DEF' | 'EVA' | 'REC';
 
 // Operators that can be submitted externally (by humans or sync bridges)
-export type ExternalOperator = 'INS' | 'SEG' | 'CON' | 'SYN' | 'DEF' | 'EVA' | 'NUL';
+export type ExternalOperator = 'INS' | 'SEG' | 'CON' | 'SYN' | 'DEF' | 'EVA' | 'NUL' | 'SIG';
 
 // An event in the log
 export interface EoEvent {

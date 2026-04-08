@@ -85,6 +85,34 @@ export function FigureFields({ figure, onNavigate, profileFields }: FigureFields
     entries = filtered;
   }
 
+  // Active editing signals from other agents: fieldKey → { agent, draft, since }
+  // Filter out stale entries client-side (tab-close survivors) so badges don't
+  // linger until the next fold write cleans them up.
+  const SIG_TTL_MS = 5 * 60 * 1000;
+  const rawSigs: Record<string, { agent: string; draft: string; since: string }> =
+    (value as any)._sigs ?? {};
+  const now = Date.now();
+  const sigs = Object.fromEntries(
+    Object.entries(rawSigs).filter(([, e]) => now - Date.parse(e.since) < SIG_TTL_MS),
+  );
+
+  function shortAgent(agentId: string): string {
+    // "@alice:matrix.org" → "alice", "user" → "user"
+    const match = agentId.match(/^@?([^:@]+)/);
+    return match ? match[1] : agentId;
+  }
+
+  function dispatchSig(fieldKey: string, opts: { draft: string } | { editing: false }) {
+    dispatch({
+      op: 'SIG' as any,
+      target: figure.target,
+      operand: { fieldKey, ...opts },
+      agent: 'user',
+      ts: new Date().toISOString(),
+      acquired_ts: new Date().toISOString(),
+    }).catch(() => {});
+  }
+
   function handleContextMenu(e: React.MouseEvent, fieldKey: string) {
     e.preventDefault();
     e.stopPropagation();
@@ -102,6 +130,7 @@ export function FigureFields({ figure, onNavigate, profileFields }: FigureFields
             ? JSON.stringify(currentVal, null, 2)
             : String(currentVal ?? '');
           setEditing({ fieldKey, value: strVal });
+          dispatchSig(fieldKey, { draft: strVal });
           setContextMenu(null);
         },
       },
@@ -123,6 +152,7 @@ export function FigureFields({ figure, onNavigate, profileFields }: FigureFields
   async function handleEditSave(fieldKey: string, rawValue: string) {
     let parsed: any = rawValue;
     try { parsed = JSON.parse(rawValue); } catch { /* keep as string */ }
+    setEditing(null);
     try {
       await dispatch({
         op: 'DEF',
@@ -134,7 +164,6 @@ export function FigureFields({ figure, onNavigate, profileFields }: FigureFields
       });
       syncEditToAirtable({ target: figure.target, fieldKey, value: parsed, getStateByPrefix }).catch(console.warn);
     } catch { /* ignore */ }
-    setEditing(null);
   }
 
   async function handleDisplayNameSave(fieldKey: string, newLabel: string) {
@@ -172,6 +201,11 @@ export function FigureFields({ figure, onNavigate, profileFields }: FigureFields
             {value._computed && key === '_computed' && (
               <span style={s.evaBadge}>EVA</span>
             )}
+            {sigs[key] && (
+              <span style={s.sigBadge} title={`${sigs[key].agent} is editing`}>
+                {shortAgent(sigs[key].agent)} editing…
+              </span>
+            )}
           </div>
           <div
             style={{ ...s.value, cursor: editing?.fieldKey === key ? 'auto' : 'text' }}
@@ -182,6 +216,7 @@ export function FigureFields({ figure, onNavigate, profileFields }: FigureFields
                 ? JSON.stringify(currentVal, null, 2)
                 : String(currentVal ?? '');
               setEditing({ fieldKey: key, value: strVal });
+              dispatchSig(key, { draft: strVal });
             }}
           >
             {editing?.fieldKey === key ? (
@@ -210,7 +245,10 @@ export function FigureFields({ figure, onNavigate, profileFields }: FigureFields
                     fontFamily: "'JetBrains Mono', monospace",
                   }}
                   onKeyDown={(e) => {
-                    if (e.key === 'Escape') setEditing(null);
+                    if (e.key === 'Escape') {
+                      dispatchSig(key, { editing: false });
+                      setEditing(null);
+                    }
                   }}
                   onBlur={(e) => handleEditSave(key, e.target.value)}
                 />
@@ -632,6 +670,17 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       borderRadius: 2,
       background: t.tealBg,
       border: `1px solid ${t.tealBorder}`,
+    },
+    sigBadge: {
+      fontFamily: "'JetBrains Mono', monospace",
+      fontSize: 9,
+      color: t.warning,
+      padding: '1px 5px',
+      borderRadius: 2,
+      background: t.warningBg ?? 'rgba(255,152,0,0.1)',
+      border: `1px solid ${t.warningBorder ?? 'rgba(255,152,0,0.3)'}`,
+      marginLeft: 4,
+      animation: 'pulse 1.5s ease-in-out infinite',
     },
   };
 }

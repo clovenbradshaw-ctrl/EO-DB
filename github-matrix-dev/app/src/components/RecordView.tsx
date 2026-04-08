@@ -3,7 +3,7 @@
  * Renders: Figure, Trajectory, Grounds, Nearby, Governance, Signals
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { HorizonResponse, NearbyEntry, SignalEntry, RecCycleInfo, GovernanceEntry } from '../db/types';
 import { useEoStore } from '../store/eo-store';
 import { FigureFields } from './FigureFields';
@@ -43,7 +43,11 @@ interface RecordViewProps {
 export function RecordView({ target, onNavigate, permissions, profileFields }: RecordViewProps) {
   const horizon = useEoStore((s) => s.horizon);
   const ready = useEoStore((s) => s.ready);
+  const lastSeq = useEoStore((s) => s.lastSeq);
   const [data, setData] = useState<HorizonResponse | null>(null);
+  // Tracks the last target that triggered a full section reset, so seq-driven
+  // re-fetches can skip the reset and avoid flashing the loading state.
+  const loadedTargetRef = useRef<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -80,18 +84,26 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
   useEffect(() => {
     if (!ready) return; // store is hydrating — keep loading, retry when ready flips true
     let cancelled = false;
-    setLoading(true);
-    setError(null);
-    // Reset per-section lazy state when target changes.
-    setNearby(undefined); setNearbyLoading(false); setNearbyError(null);
-    setSignals(undefined); setSignalsLoading(false); setSignalsError(null);
-    setGovernance(undefined); setGovernanceLoading(false); setGovernanceError(null);
-    setHashCohort(undefined); setHashLoading(false); setHashError(null);
-    setRecCycle(undefined); setRecCycleLoaded(false); setRecCycleLoading(false); setRecCycleError(null);
-    setHistoryOpen(false);
+
+    // Full reset only when the target changes. When lastSeq bumps for the same target
+    // an incoming event arrived — do a silent re-fetch so the view updates without
+    // flashing a loading state or discarding already-loaded lazy sections.
+    const isTargetChange = loadedTargetRef.current !== target;
+    if (isTargetChange) {
+      loadedTargetRef.current = target;
+      setLoading(true);
+      setError(null);
+      setNearby(undefined); setNearbyLoading(false); setNearbyError(null);
+      setSignals(undefined); setSignalsLoading(false); setSignalsError(null);
+      setGovernance(undefined); setGovernanceLoading(false); setGovernanceError(null);
+      setHashCohort(undefined); setHashLoading(false); setHashError(null);
+      setRecCycle(undefined); setRecCycleLoaded(false); setRecCycleLoading(false); setRecCycleError(null);
+      setHistoryOpen(false);
+    }
 
     // Fast path: figure + ancestry + grounds + trajectory + governance + classification.
     // These run in parallel inside horizonGet's Promise.all.
+    // lastSeq is in the dep array so incoming events (from other machines) trigger a re-fetch.
     horizon(target, { governance: true, classification: true })
       .then((result) => {
         if (cancelled) return;
@@ -107,7 +119,7 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
         setLoading(false);
       });
     return () => { cancelled = true; };
-  }, [ready, target, horizon]);
+  }, [ready, target, horizon, lastSeq]);
 
   // Background fetch for the header twin-count badge. Does not block render.
   // Skip ancestry/grounds/trajectory since we already have them from the main call.
