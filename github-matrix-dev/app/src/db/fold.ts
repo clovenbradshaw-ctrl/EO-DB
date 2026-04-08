@@ -228,6 +228,7 @@ export async function executeOperator(store: EoStore, event: EoEvent): Promise<v
     case 'SYN': return handleSYN(store, event);
     case 'DEF': return handleDEF(store, event);
     case 'EVA': return handleEVA(store, event);
+    case 'SIG': return handleSIG(store, event);
     case 'NUL': return; // pure observation — logged by processEvent, no state mutation
     // REC is not dispatched from outside — it is produced by the fold
     // when it detects a circular dependency after applying a human-initiated event.
@@ -393,6 +394,46 @@ async function handleSYN(store: EoStore, event: EoEvent): Promise<void> {
   }
 }
 
+// --- SIG: Signal (ephemeral editing intent) ---
+// Writes a _sigs entry on the target's value to broadcast that an agent is
+// editing a specific field. Cleared automatically when a DEF arrives for the
+// same field, or explicitly when editing: false is sent.
+async function handleSIG(store: EoStore, event: EoEvent): Promise<void> {
+  const target = await resolveAlias(store, event.target);
+  const existing = await getState(store, target);
+  const operand = event.operand as { fieldKey: string; draft?: string; editing?: boolean };
+
+  type SigEntry = { agent: string; draft: string; since: string };
+  const currentSigs: Record<string, SigEntry> = existing?.value?._sigs ?? {};
+
+  let updatedSigs: Record<string, SigEntry>;
+  if (operand.editing === false) {
+    // Cancel — remove the entry for this field
+    const { [operand.fieldKey]: _removed, ...rest } = currentSigs;
+    updatedSigs = rest;
+  } else {
+    // Start or update draft — upsert
+    updatedSigs = {
+      ...currentSigs,
+      [operand.fieldKey]: {
+        agent: event.agent,
+        draft: operand.draft ?? '',
+        since: event.ts,
+      },
+    };
+  }
+
+  await setState(store, {
+    target,
+    value: {
+      ...(existing?.value ?? {}),
+      _sigs: Object.keys(updatedSigs).length > 0 ? updatedSigs : undefined,
+    },
+    level: existing?.level ?? 1,
+    ...stateFromEvent(event, 'SIG'),
+  });
+}
+
 // --- DEF: Define Value or Register Computation ---
 // Includes Creator ownership check: agents with PL 10-24 can only DEF
 // records they created (identified by _created_by field).
@@ -432,9 +473,23 @@ async function handleDEF(store: EoStore, event: EoEvent): Promise<void> {
 
   const merged = mergeOperand(existing.value, event.operand);
 
+  // Clear any active _sigs for the fields being committed by this DEF.
+  let finalValue = merged;
+  if (merged._sigs && typeof event.operand === 'object' && event.operand !== null) {
+    const savedKeys = Object.keys(event.operand).filter((k) => !k.startsWith('_'));
+    if (savedKeys.length > 0) {
+      const updatedSigs = { ...merged._sigs };
+      for (const k of savedKeys) delete updatedSigs[k];
+      finalValue = {
+        ...merged,
+        _sigs: Object.keys(updatedSigs).length > 0 ? updatedSigs : undefined,
+      };
+    }
+  }
+
   await setState(store, {
     target,
-    value: merged,
+    value: finalValue,
     level: existing.level,
     ...stateFromEvent(event, 'DEF'),
   });

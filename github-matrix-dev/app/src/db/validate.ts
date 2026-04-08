@@ -10,7 +10,7 @@
 
 import type { EoEventInput, ExternalOperator } from './types';
 
-const VALID_EXTERNAL_OPS = new Set<string>(['NUL', 'INS', 'SEG', 'CON', 'SYN', 'DEF', 'EVA']);
+const VALID_EXTERNAL_OPS = new Set<string>(['NUL', 'INS', 'SEG', 'CON', 'SYN', 'DEF', 'EVA', 'SIG']);
 
 export interface ValidationError {
   field: string;
@@ -86,6 +86,18 @@ function validateOperand(op: string, operand: any): ValidationError[] | null {
 
     case 'NUL':
       // NUL is pure observation, operand is optional
+      break;
+
+    case 'SIG':
+      if (!operand || typeof operand !== 'object') {
+        return [{ field: 'operand', message: 'SIG operand must be an object' }];
+      }
+      if (typeof operand.fieldKey !== 'string' || operand.fieldKey.length === 0) {
+        return [{ field: 'operand.fieldKey', message: 'SIG operand.fieldKey must be a non-empty string' }];
+      }
+      if (operand.editing !== false && typeof operand.draft !== 'string') {
+        return [{ field: 'operand.draft', message: 'SIG operand must include draft (string) or editing: false' }];
+      }
       break;
 
     default:
