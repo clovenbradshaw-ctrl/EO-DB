@@ -1369,7 +1369,23 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               await init(existing.store);
             }
           } catch (e) {
-            console.warn('[EO-DB] Cache-path hydration failed for space', selectedSpace, e);
+            console.warn('[EO-DB] Cache-path Filen hydration failed for space', selectedSpace, e);
+          }
+        }
+
+        // Also try Google Drive hydration if still empty
+        const cachedSeqAfterFilen = await existing.store.getCurrentSeq();
+        if (cachedSeqAfterFilen === 0 && session.accessToken && selectedSpace) {
+          try {
+            const dataType = `eodb-${selectedSpace}`;
+            const hydratedSeq = await GDriveSyncService.hydrateFromGDrive(
+              existing.store, session.accessToken, dataType, onFoldEvent,
+            );
+            if (hydratedSeq > 0) {
+              await init(existing.store);
+            }
+          } catch (e) {
+            console.warn('[EO-DB] Cache-path GDrive hydration failed for space', selectedSpace, e);
           }
         }
 
@@ -1610,6 +1626,22 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           // Set current space in GDrive store
           useGDriveStore.getState().setCurrentSpace(selectedSpace, gdriveSpaceName);
 
+          // On fresh device (seq=0), hydrate from Google Drive before starting sync
+          const gdriveCurrentSeq = await store.getCurrentSeq();
+          if (gdriveCurrentSeq === 0) {
+            try {
+              const dataType = `eodb-${selectedSpace}`;
+              const gdriveHydratedSeq = await GDriveSyncService.hydrateFromGDrive(
+                store, session.accessToken, dataType, onFoldEvent,
+              );
+              if (gdriveHydratedSeq > 0) {
+                await init(store);
+              }
+            } catch (e) {
+              console.warn('[EO-DB] Google Drive hydration failed for space', selectedSpace, e);
+            }
+          }
+
           gdriveSync = new GDriveSyncService({
             store,
             spaceId: selectedSpace,
@@ -1618,6 +1650,8 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             matrixAccessToken: session.accessToken,
             matrixClient: matrixClientRef.current || undefined,
             roomId: spaceRoomId || undefined,
+            onEvent: onFoldEvent,
+            onHydrated: () => { init(store); },
           });
           await gdriveSync.start();
           useEoStore.getState().setGDriveSync(gdriveSync);
