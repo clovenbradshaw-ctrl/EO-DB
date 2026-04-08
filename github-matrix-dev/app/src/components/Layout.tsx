@@ -34,6 +34,7 @@ import { SchemaView } from './SchemaView';
 import { SettingsView } from './SettingsView';
 import { SpaceMembers } from './SpaceMembers';
 import { ImportView } from './ImportView';
+import { ApiConnectionsView } from './ApiConnectionsView';
 import { BuilderView } from './builder/BuilderView';
 import { MessagesView } from './MessagesView';
 import { PeopleView } from './PeopleView';
@@ -1819,6 +1820,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     graph: '\u2B21',    // hexagon
     compose: '\u270E',  // pencil
     import: '\u2B07',   // download arrow
+    api: '\uD83D\uDD17', // link icon
     builder: '\u2B1A',  // blocks
     settings: '\u2699', // gear
     messages: '\uD83D\uDCAC', // speech bubble
@@ -2246,6 +2248,16 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                 {view === 'compose' ? '+ Compose' : view.charAt(0).toUpperCase() + view.slice(1)}
               </button>
             ))}
+            <button
+              onClick={() => { navigate({ view: 'api' }); }}
+              style={{
+                ...s.navItem,
+                ...(activeView === 'api' ? s.navItemActive : {}),
+              }}
+            >
+              <span style={s.navIcon}>{NAV_ICONS.api}</span>
+              API Connections
+            </button>
             <div style={s.navGroupLabel}>Collaborate</div>
             <button
               onClick={() => navigate({ view: 'people' })}
@@ -2450,6 +2462,8 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               <SettingsView session={session} matrixClient={matrixClientRef.current} roomId={spaceRoomId} spaceRooms={spaceRooms ?? null} onUnarchive={handleUnarchiveSpace} connectionState={connectionState} connectionError={connectionError} matrixReady={matrixReady} onRetry={retrySync} onLogout={handleLogout} />
             ) : activeView === 'multiuser' ? (
               <MultiUserTestView matrixClient={matrixClientRef.current} roomId={spaceRoomId} presence={presence} />
+            ) : activeView === 'api' ? (
+              <ApiConnectionsView />
             ) : null}
           </ErrorBoundary>}
         </main>
