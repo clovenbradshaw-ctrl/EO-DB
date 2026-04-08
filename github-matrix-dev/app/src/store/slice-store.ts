@@ -72,6 +72,25 @@ function persistOpenScopes(scopes: string[]): void {
 }
 
 // ---------------------------------------------------------------------------
+// localStorage helpers — pinnedScopes persistence
+// ---------------------------------------------------------------------------
+
+const PINNED_SCOPES_KEY = 'eo-pinned-scopes';
+
+function loadPinnedScopes(): string[] {
+  try {
+    const raw = localStorage.getItem(PINNED_SCOPES_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch { return []; }
+}
+
+function persistPinnedScopes(scopes: string[]): void {
+  try {
+    localStorage.setItem(PINNED_SCOPES_KEY, JSON.stringify(scopes));
+  } catch { /* quota exceeded — silently drop */ }
+}
+
+// ---------------------------------------------------------------------------
 // Store
 // ---------------------------------------------------------------------------
 
@@ -133,11 +152,23 @@ interface SliceStoreState {
   /** Ordered list of scopes with open tabs */
   openScopes: string[];
 
-  /** Add a scope to the open tabs list */
+  /** Scopes that are pinned (won't be swapped out when opening a new scope) */
+  pinnedScopes: string[];
+
+  /** Add a scope to the open tabs list (closes unpinned scopes) */
   openScope: (scope: string) => void;
 
   /** Remove a scope from the open tabs list and clean up its sig */
   closeScope: (scope: string) => void;
+
+  /** Pin a scope so it stays open */
+  pinScope: (scope: string) => void;
+
+  /** Unpin a scope so it can be swapped out */
+  unpinScope: (scope: string) => void;
+
+  /** Check if a scope is pinned */
+  isPinned: (scope: string) => boolean;
 
   /** Get the ordered list of open scopes */
   getOpenScopes: () => string[];
@@ -147,6 +178,7 @@ export const useSliceStore = create<SliceStoreState>((set, get) => ({
   sigs: {},
   savedSlices: loadSavedSlices(),
   openScopes: loadOpenScopes(),
+  pinnedScopes: loadPinnedScopes(),
 
   getSig(scope: string): SliceSig {
     const existing = get().sigs[scope];
@@ -301,7 +333,17 @@ export const useSliceStore = create<SliceStoreState>((set, get) => ({
   openScope(scope) {
     const current = get().openScopes;
     if (current.includes(scope)) return;
-    const updated = [...current, scope];
+    const pinned = get().pinnedScopes;
+    // Close any unpinned scopes — only pinned ones survive
+    const kept = current.filter((s) => pinned.includes(s));
+    const updated = [...kept, scope];
+    // Clean up sigs for closed scopes
+    const closed = current.filter((s) => !pinned.includes(s));
+    if (closed.length > 0) {
+      const sigs = { ...get().sigs };
+      for (const s of closed) delete sigs[s];
+      set({ sigs });
+    }
     set({ openScopes: updated });
     persistOpenScopes(updated);
   },
@@ -310,10 +352,35 @@ export const useSliceStore = create<SliceStoreState>((set, get) => ({
     const updated = get().openScopes.filter((s) => s !== scope);
     set({ openScopes: updated });
     persistOpenScopes(updated);
+    // Also unpin if pinned
+    const pinned = get().pinnedScopes;
+    if (pinned.includes(scope)) {
+      const updatedPinned = pinned.filter((s) => s !== scope);
+      set({ pinnedScopes: updatedPinned });
+      persistPinnedScopes(updatedPinned);
+    }
     // Clean up sig from memory (localStorage sig stays for potential re-open)
     const sigs = { ...get().sigs };
     delete sigs[scope];
     set({ sigs });
+  },
+
+  pinScope(scope) {
+    const current = get().pinnedScopes;
+    if (current.includes(scope)) return;
+    const updated = [...current, scope];
+    set({ pinnedScopes: updated });
+    persistPinnedScopes(updated);
+  },
+
+  unpinScope(scope) {
+    const updated = get().pinnedScopes.filter((s) => s !== scope);
+    set({ pinnedScopes: updated });
+    persistPinnedScopes(updated);
+  },
+
+  isPinned(scope) {
+    return get().pinnedScopes.includes(scope);
   },
 
   getOpenScopes() {

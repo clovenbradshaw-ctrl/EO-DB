@@ -336,6 +336,7 @@ export function SliceTabs({ openScopes, activeScope, onSelectScope, onCloseScope
           const scSavedSlices = sliceStore.getSlicesForScope(sc);
           const collectionName = formatName(sc.split('.').pop() || sc);
           const isActive = sc === activeScope;
+          const isPinned = sliceStore.isPinned(sc);
 
           const handleTabClick = (activateFn: () => void) => {
             if (!isActive) onSelectScope(sc);
@@ -343,7 +344,7 @@ export function SliceTabs({ openScopes, activeScope, onSelectScope, onCloseScope
           };
 
           return (
-            <div key={sc} style={{ display: 'inline-flex', alignItems: 'center', gap: 0, ...(idx > 0 ? { borderLeft: `1px solid ${theme.border}`, marginLeft: 4, paddingLeft: 4 } : {}) }}>
+            <div key={sc} style={{ display: 'inline-flex', alignItems: 'center', gap: 0, ...(idx > 0 ? { borderLeft: `1px solid ${theme.border}`, marginLeft: 4, paddingLeft: 4 } : {}), ...(!isPinned ? { fontStyle: 'italic' } : {}) }}>
               {/* Schema tab — first */}
               <button
                 style={isActive && scSig.activeSliceId === '__schema' ? s.tabActive : s.tab}
@@ -411,7 +412,18 @@ export function SliceTabs({ openScopes, activeScope, onSelectScope, onCloseScope
                 );
               })}
 
-              {/* Close button for this collection's tab group */}
+              {/* Pin / Close buttons for this collection's tab group */}
+              <button
+                style={isPinned ? s.pinBtnActive : s.pinBtn}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (isPinned) sliceStore.unpinScope(sc);
+                  else sliceStore.pinScope(sc);
+                }}
+                title={isPinned ? `Unpin ${collectionName}` : `Pin ${collectionName}`}
+              >
+                {isPinned ? '\uD83D\uDCCC' : '\uD83D\uDCCC'}
+              </button>
               {openScopes.length > 1 && (
                 <button
                   style={s.closeBtn}
@@ -693,6 +705,37 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       cursor: 'pointer',
       marginLeft: 2,
       opacity: 0.6,
+    },
+    pinBtn: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      width: 18,
+      height: 18,
+      fontSize: 9,
+      border: 'none',
+      borderRadius: 3,
+      background: 'transparent',
+      color: t.textMuted,
+      cursor: 'pointer',
+      marginLeft: 4,
+      opacity: 0.35,
+      transform: 'rotate(45deg)',
+    },
+    pinBtnActive: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      width: 18,
+      height: 18,
+      fontSize: 9,
+      border: 'none',
+      borderRadius: 3,
+      background: 'transparent',
+      color: t.accent,
+      cursor: 'pointer',
+      marginLeft: 4,
+      opacity: 0.85,
     },
     dirtyDot: {
       display: 'inline-block',
