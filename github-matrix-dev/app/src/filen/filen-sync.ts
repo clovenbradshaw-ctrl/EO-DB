@@ -95,6 +95,12 @@ export class FilenSyncService {
   private roomId: string | null;
   private keyring: LocalKeyring;
 
+  /** Callback invoked for each event during hydration/pull (drives UI updates). */
+  onEvent?: (event: any) => void;
+
+  /** Called after a successful safety-net hydration so the UI can re-init. */
+  onHydrated?: () => void;
+
   /** Callback for UI status updates. */
   onStatus?: (status: 'syncing' | 'synced' | 'error', detail?: string) => void;
 
@@ -107,6 +113,8 @@ export class FilenSyncService {
     matrixClient?: MatrixClient;
     roomId?: string;
     keyring?: LocalKeyring;
+    onEvent?: (event: any) => void;
+    onHydrated?: () => void;
   }) {
     this.store = opts.store;
     this.spaceId = opts.spaceId;
@@ -116,6 +124,8 @@ export class FilenSyncService {
     this.matrixClient = opts.matrixClient || null;
     this.roomId = opts.roomId || null;
     this.keyring = opts.keyring || { keys: new Map() };
+    this.onEvent = opts.onEvent || undefined;
+    this.onHydrated = opts.onHydrated || undefined;
   }
 
   /** Allow updating keyring after construction (e.g., after key heal). */
@@ -322,7 +332,33 @@ export class FilenSyncService {
       if (!auth) { this.syncing = false; return; }
 
       const currentSeq = await this.store.getCurrentSeq();
-      if (currentSeq === 0 || currentSeq === this.lastSyncedSeq) {
+
+      // If local store is empty but Filen may have data, attempt to pull.
+      // This is a safety net: the initial hydration in setupSpaceStore may
+      // have been skipped or failed silently due to effect re-runs / races.
+      if (currentSeq === 0) {
+        try {
+          const hydratedSeq = await FilenSyncService.hydrateFromFilen(
+            this.store, this.spaceFolderUuid, this.onEvent, this.keyring,
+          );
+          if (hydratedSeq > 0) {
+            this.lastSyncedSeq = hydratedSeq;
+            await this.store.put('meta:filen_synced_seq', hydratedSeq);
+            this.onHydrated?.();
+            this.onStatus?.('synced');
+            console.log(`[EO-DB] Sync cycle: pulled ${hydratedSeq} events from Filen (safety-net hydration)`);
+          } else {
+            this.onStatus?.('synced');
+          }
+        } catch (e) {
+          console.warn('[EO-DB] Sync cycle: safety-net hydration failed:', e);
+          this.onStatus?.('error', e instanceof Error ? e.message : String(e));
+        }
+        this.syncing = false;
+        return;
+      }
+
+      if (currentSeq === this.lastSyncedSeq) {
         this.onStatus?.('synced');
         this.syncing = false;
         return;
