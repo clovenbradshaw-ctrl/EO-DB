@@ -339,7 +339,6 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
         <div style={s.headerTop}>
           <div style={s.clientName}>{value.name || formatName(target.split('.').pop() || target)}</div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            {data.classification && <EntityClassBadge classification={data.classification} />}
             {value._type && <TypeBadge type={value._type} />}
             <div style={{ ...s.statusBadge, ...statusStyleMap[statusClass] }}>
               {value.status || 'unknown'}
@@ -482,6 +481,7 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
         <span style={s.metaItem}>
           <span style={s.metaLabel}>seq</span> {data.figure.last_seq}
         </span>
+        {data.classification && <EntityClassBadge classification={data.classification} />}
         {data.graphMetrics && <GraphRoleBadge metrics={data.graphMetrics} />}
         {data.cadence && <CadenceBadge cadence={data.cadence} />}
         {hashCohort && hashCohort.length > 0 && (
