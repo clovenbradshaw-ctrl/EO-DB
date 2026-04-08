@@ -476,6 +476,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   const prevAllStatesKeyRef = useRef<string>('');
   const allStatesFetchGenRef = useRef(0);
   const [timeScrubberFilter, setTimeScrubberFilter] = useState<TimeScrubberFilter>(DEFAULT_FILTER);
+  const [tableRecordTargets, setTableRecordTargets] = useState<string[]>([]);
   const [scopedRecords, setScopedRecords] = useState<EoState[]>([]);
   const prevScopedRecordsKeyRef = useRef<string>('');
   const scopedRecordsFetchGenRef = useRef(0);
@@ -2375,6 +2376,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                         session={{ userId: session.userId }}
                         timeScrubberFilter={timeScrubberFilter}
                         permissions={currentPermissions}
+                        onVisibleRecordTargets={setTableRecordTargets}
                         sliceReadOnly={(() => {
                           if (!activeUserType) return false;
                           const sig = sliceSigs[selectedScope];
@@ -2449,6 +2451,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             onNavigate={(t) => navigate({ record: t })}
             profileFields={selectedScope ? sliceStore.getConfig(selectedScope).profileFields : undefined}
             isMobile={isMobile}
+            tableRecordTargets={tableRecordTargets}
           />
         )}
       </div>
@@ -2461,13 +2464,14 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
  * record page view for the record's collection. If yes, render RecordPageView
  * in a drawer. If no, fall back to the default RecordDetailDrawer.
  */
-function RecordPageOrDrawer({ recordTarget, allStates, onClose, onNavigate, profileFields, isMobile }: {
+function RecordPageOrDrawer({ recordTarget, allStates, onClose, onNavigate, profileFields, isMobile, tableRecordTargets }: {
   recordTarget: string;
   allStates: EoState[];
   onClose: () => void;
   onNavigate: (target: string) => void;
   profileFields?: string[];
   isMobile?: boolean;
+  tableRecordTargets?: string[];
 }) {
   const loadView = useBuilderStore((s) => s.loadView);
   const getState = useEoStore((s) => s.getState);
@@ -2540,6 +2544,7 @@ function RecordPageOrDrawer({ recordTarget, allStates, onClose, onNavigate, prof
       profileFields={profileFields}
       isMobile={isMobile}
       layoutType={layoutType}
+      tableRecordTargets={tableRecordTargets}
     />
   );
 }
