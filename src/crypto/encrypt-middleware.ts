@@ -104,12 +104,7 @@ export async function maybeEncryptForWrite(
     // Scope exists but key not in keyring — try resolveKeyForTarget (prefix match)
     const resolved = resolveKeyForTarget(config.keyring, target);
     if (resolved) {
-      // Find the key_id for this resolved entry
-      for (const [keyId, e] of config.keyring.keys) {
-        if (e === resolved) {
-          return encryptOperand(e.key, keyId, e.version, operand);
-        }
-      }
+      return encryptOperand(resolved.key, resolved.keyId, resolved.version, operand);
     }
     // Encryption scope exists but no usable key found — refuse to leak plaintext
     throw new Error(

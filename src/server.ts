@@ -23,6 +23,7 @@ import { FilenSocketListener } from './filen/listener.js';
 import { FilenPipelineBridge } from './filen/pipeline-bridge.js';
 import { loadN8nConfig, configureN8nWebhook } from './n8n/config.js';
 import { registerN8nRoutes } from './api/n8n-store.js';
+import { registerCrystallizeRoutes } from './api/crystallize.js';
 
 const PORT = parseInt(process.env.EO_PORT || '3000', 10);
 const DATA_DIR = process.env.EO_DATA_DIR || './data';
@@ -98,6 +99,7 @@ async function start(): Promise<void> {
     registerDedupRoutes(protectedApp, db, feed);
     registerChatRoutes(protectedApp, db, chatFeed);
     registerN8nRoutes(protectedApp, db, feed);
+    registerCrystallizeRoutes(protectedApp, db);
   });
 
   // Start the room sync coordinator after routes are registered

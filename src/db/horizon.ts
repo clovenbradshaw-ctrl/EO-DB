@@ -9,7 +9,9 @@ import type {
   NearbyEntry, GovernanceEntry, AncestryEntry,
   GraphMetrics, GraphRole,
   RecResult, RecCycleInfo,
+  CrystallizedInEntry,
   FieldSchemaEntry,
+  DerivedEntity,
 } from './types.js';
 import { groupSchemaStates } from './schema-rules.js';
 import { isEncryptedOperand } from './crypto-types.js';
@@ -84,11 +86,15 @@ export async function horizonGet(
   // REC cycle info: if this target participates in a dependency cycle
   const recCycle = await getRecCycleInfo(db, resolved);
 
+  // Crystallized-in: derived entities this target is a constituent of
+  const crystallizedIn = await getCrystallizedIn(db, resolved);
+
   return {
     target: resolved, figure, ancestry, grounds, nearby, governance, signals,
     hashCohort: hashCohort && hashCohort.length > 0 ? hashCohort : undefined,
     graphMetrics,
     recCycle,
+    crystallizedIn: crystallizedIn.length > 0 ? crystallizedIn : undefined,
   };
 }
 
@@ -592,6 +598,48 @@ async function getRecCycleInfo(db: EoDb, target: string): Promise<RecCycleInfo |
   }
 
   return undefined;
+}
+
+// ─── Pattern Surfacing: Crystallized-In ─────────────────────────
+
+/**
+ * Find all crystallized entities that this target is a constituent of.
+ * Scans the rdep: index for the target and filters for cohort-topology
+ * derived entities. Cheap: one prefix scan on rdep:{target}:, then one
+ * derived: lookup per result.
+ */
+async function getCrystallizedIn(db: EoDb, target: string): Promise<CrystallizedInEntry[]> {
+  const results: CrystallizedInEntry[] = [];
+  const prefix = `rdep:${target}:`;
+
+  for await (const [, buf] of db.iterator({ gte: prefix, lte: `${prefix}\xff` })) {
+    const derivedTarget = decode(buf) as string;
+
+    // Look up the derived entity registration
+    let derived: DerivedEntity | null = null;
+    try {
+      const dBuf = await db.get(`derived:${derivedTarget}`);
+      derived = decode(dBuf) as DerivedEntity;
+    } catch (e: any) {
+      if (e.code === 'LEVEL_NOT_FOUND') continue;
+      throw e;
+    }
+
+    if (!derived || derived.topology !== 'cohort') continue;
+
+    // Get the crystallized entity's state for traits and member count
+    const state = await getState(db, derivedTarget);
+    if (!state) continue;
+
+    results.push({
+      target: derivedTarget,
+      traits: state.value?.traits ?? {},
+      member_count: Array.isArray(state.value?.constituents) ? state.value.constituents.length : 0,
+      inert: derived.inert,
+    });
+  }
+
+  return results;
 }
 
 // ─── Decryption Wrapper ───────────────────────────────────────────

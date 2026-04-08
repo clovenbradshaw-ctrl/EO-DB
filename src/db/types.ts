@@ -45,6 +45,25 @@ export interface DerivedEntity {
   inert: boolean;                 // true if the dependency cycle has dissolved
 }
 
+// Crystallization rule — registered at a scope to watch for emergent structure.
+// When the predicate holds stably across `window` consecutive events, the fold
+// precipitates a new entity (INS2+) from the stable configuration beneath it.
+export interface CrystallizationRule {
+  scope: string;              // prefix to watch (e.g. "firm.cases")
+  predicate: 'cohort_forms';
+  window: number;             // events of stability required before crystallization
+  min_members: number;        // minimum cohort size (default 2)
+  traits: string[];           // field keys to group by
+}
+
+// Stability snapshot for crystallization tracking — persisted in LevelDB
+export interface CrystStabilityState {
+  scope: string;
+  snapshot_hash: string;      // unused for cohort_forms (structural diff is tracked via index)
+  counter: number;            // consecutive events with stable structure
+  last_seq: number;           // seq of last event that touched this scope
+}
+
 // CON graph edge
 export interface GraphEdge {
   source: string;
@@ -100,6 +119,20 @@ export interface HorizonResponse {
   graphMetrics?: GraphMetrics;
   /** REC cycle info — if this target is part of a dependency cycle */
   recCycle?: RecCycleInfo;
+  /** Crystallized entities this target is a constituent of */
+  crystallizedIn?: CrystallizedInEntry[];
+}
+
+/** A crystallized entity that this target participates in. */
+export interface CrystallizedInEntry {
+  /** Target path of the crystallized entity */
+  target: string;
+  /** Shared traits that define the cohort */
+  traits: Record<string, any>;
+  /** How many members in the cohort */
+  member_count: number;
+  /** Whether the crystallized entity is currently inert */
+  inert: boolean;
 }
 
 // An ancestor in the ontology chain — each level is a mini-Horizon
