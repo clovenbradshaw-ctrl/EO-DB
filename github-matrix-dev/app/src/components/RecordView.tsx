@@ -17,6 +17,7 @@ import { Governance } from './Governance';
 import { Signals } from './Signals';
 import { HashCohort } from './HashCohort';
 import { RecCycleMap } from './RecCycleMap';
+import { EntityClassBadge } from './EntityClassBadge';
 import { CadenceBadge } from './CadenceBadge';
 import { GraphRoleBadge } from './GraphRoleBadge';
 import { TypeBadge } from './TypeSelector';
@@ -89,10 +90,9 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
     setRecCycle(undefined); setRecCycleLoaded(false); setRecCycleLoading(false); setRecCycleError(null);
     setHistoryOpen(false);
 
-    // Fast path: figure + ancestry + grounds + trajectory + governance.
-    // Governance is included here so it runs in parallel inside horizonGet's
-    // Promise.all, instead of triggering a separate horizon call.
-    horizon(target, { governance: true })
+    // Fast path: figure + ancestry + grounds + trajectory + governance + classification.
+    // These run in parallel inside horizonGet's Promise.all.
+    horizon(target, { governance: true, classification: true })
       .then((result) => {
         if (cancelled) return;
         if (result && !Array.isArray(result)) {
@@ -339,6 +339,7 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
         <div style={s.headerTop}>
           <div style={s.clientName}>{value.name || formatName(target.split('.').pop() || target)}</div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            {data.classification && <EntityClassBadge classification={data.classification} />}
             {value._type && <TypeBadge type={value._type} />}
             <div style={{ ...s.statusBadge, ...statusStyleMap[statusClass] }}>
               {value.status || 'unknown'}
@@ -418,10 +419,10 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
         </Section>
       )}
 
-      {/* Similar Records — lazy: O(N) edge lookups */}
+      {/* Similar Records — multi-dimensional similarity */}
       <LazySection
         title="Similar Records"
-        subtitle="nearby in the key-space"
+        subtitle="by hash, trajectory, state & connections"
         color={theme.teal}
         loaded={nearby !== undefined}
         loading={nearbyLoading}
