@@ -398,12 +398,34 @@ async function handleSYN(store: EoStore, event: EoEvent): Promise<void> {
 // Writes a _sigs entry on the target's value to broadcast that an agent is
 // editing a specific field. Cleared automatically when a DEF arrives for the
 // same field, or explicitly when editing: false is sent.
+// Stale entries (older than SIG_TTL_MS relative to the current event) are pruned
+// on every SIG and DEF write so dead-tab signals don't accumulate.
+
+/** SIGs older than this are treated as abandoned (tab closed mid-edit). */
+const SIG_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+type SigEntry = { agent: string; draft: string; since: string };
+
+/** Remove entries whose `since` timestamp is older than SIG_TTL_MS relative to referenceTs. */
+function pruneStaleSignals(
+  sigs: Record<string, SigEntry>,
+  referenceTs: string,
+): Record<string, SigEntry> {
+  const refTime = Date.parse(referenceTs);
+  const result: Record<string, SigEntry> = {};
+  for (const [key, entry] of Object.entries(sigs)) {
+    if (refTime - Date.parse(entry.since) < SIG_TTL_MS) {
+      result[key] = entry;
+    }
+  }
+  return result;
+}
+
 async function handleSIG(store: EoStore, event: EoEvent): Promise<void> {
   const target = await resolveAlias(store, event.target);
   const existing = await getState(store, target);
   const operand = event.operand as { fieldKey: string; draft?: string; editing?: boolean };
 
-  type SigEntry = { agent: string; draft: string; since: string };
   const currentSigs: Record<string, SigEntry> = existing?.value?._sigs ?? {};
 
   let updatedSigs: Record<string, SigEntry>;
@@ -422,6 +444,9 @@ async function handleSIG(store: EoStore, event: EoEvent): Promise<void> {
       },
     };
   }
+
+  // Prune stale entries left over from abandoned edits (e.g. tab close).
+  updatedSigs = pruneStaleSignals(updatedSigs, event.ts);
 
   await setState(store, {
     target,
@@ -473,18 +498,21 @@ async function handleDEF(store: EoStore, event: EoEvent): Promise<void> {
 
   const merged = mergeOperand(existing.value, event.operand);
 
-  // Clear any active _sigs for the fields being committed by this DEF.
+  // Clear _sigs for saved fields, then prune any stale entries from dead tabs.
   let finalValue = merged;
-  if (merged._sigs && typeof event.operand === 'object' && event.operand !== null) {
-    const savedKeys = Object.keys(event.operand).filter((k) => !k.startsWith('_'));
-    if (savedKeys.length > 0) {
-      const updatedSigs = { ...merged._sigs };
+  if (merged._sigs) {
+    let updatedSigs: Record<string, SigEntry> = { ...merged._sigs };
+    // Remove entries for the fields explicitly committed by this DEF.
+    if (typeof event.operand === 'object' && event.operand !== null) {
+      const savedKeys = Object.keys(event.operand).filter((k) => !k.startsWith('_'));
       for (const k of savedKeys) delete updatedSigs[k];
-      finalValue = {
-        ...merged,
-        _sigs: Object.keys(updatedSigs).length > 0 ? updatedSigs : undefined,
-      };
     }
+    // Prune entries abandoned by tab-close (older than SIG_TTL_MS).
+    updatedSigs = pruneStaleSignals(updatedSigs, event.ts);
+    finalValue = {
+      ...merged,
+      _sigs: Object.keys(updatedSigs).length > 0 ? updatedSigs : undefined,
+    };
   }
 
   await setState(store, {

@@ -85,8 +85,15 @@ export function FigureFields({ figure, onNavigate, profileFields }: FigureFields
   }
 
   // Active editing signals from other agents: fieldKey → { agent, draft, since }
-  const sigs: Record<string, { agent: string; draft: string; since: string }> =
+  // Filter out stale entries client-side (tab-close survivors) so badges don't
+  // linger until the next fold write cleans them up.
+  const SIG_TTL_MS = 5 * 60 * 1000;
+  const rawSigs: Record<string, { agent: string; draft: string; since: string }> =
     (value as any)._sigs ?? {};
+  const now = Date.now();
+  const sigs = Object.fromEntries(
+    Object.entries(rawSigs).filter(([, e]) => now - Date.parse(e.since) < SIG_TTL_MS),
+  );
 
   function shortAgent(agentId: string): string {
     // "@alice:matrix.org" → "alice", "user" → "user"
