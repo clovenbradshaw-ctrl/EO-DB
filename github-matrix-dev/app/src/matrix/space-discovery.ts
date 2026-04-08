@@ -81,8 +81,11 @@ export function discoverSpacesFromMatrix(client: MatrixClient): SpaceEntry[] {
 
     const spaceTarget = `space_${config.name.toLowerCase().replace(/\s+/g, '_')}`;
 
-    // Skip if we already found this space (deduplicate)
-    if (spaceMap.has(spaceTarget)) continue;
+    // Deduplicate: when multiple rooms claim the same space, keep the one
+    // with the lexicographically smallest mainRoomId so ALL clients converge
+    // on the same room regardless of getRooms() iteration order.
+    const existing = spaceMap.get(spaceTarget);
+    if (existing && existing.mainRoomId <= config.rooms.main) continue;
 
     // Creation time from m.room.create
     const createEvent = state.getStateEvents('m.room.create', '');

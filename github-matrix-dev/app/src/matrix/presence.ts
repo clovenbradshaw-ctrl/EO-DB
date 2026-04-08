@@ -12,6 +12,7 @@
 
 import type { MatrixClient, MatrixEvent } from 'matrix-js-sdk';
 import { presenceEventTypes } from '../lib/matrix-domain';
+import { EO_SPACE_CONFIG_TYPE } from './event-bridge';
 
 const PING_TYPE = presenceEventTypes().ping;
 
@@ -50,6 +51,9 @@ export class Presence {
   private client: MatrixClient;
   private roomId: string;
 
+  /** All room IDs belonging to the same space (handles duplicate rooms). */
+  private spaceRoomIds: Set<string>;
+
   /** userId -> deviceId -> lastSeen (ms) */
   private seen = new Map<string, Map<string, number>>();
   private subscribers = new Set<(users: PresenceUser[]) => void>();
@@ -68,6 +72,30 @@ export class Presence {
   constructor(client: MatrixClient, roomId: string) {
     this.client = client;
     this.roomId = roomId;
+    this.spaceRoomIds = Presence.findSpaceRoomIds(client, roomId);
+  }
+
+  /** Collect all room IDs belonging to the same space as roomId. */
+  private static findSpaceRoomIds(client: MatrixClient, roomId: string): Set<string> {
+    const set = new Set<string>([roomId]);
+    const myRoom = client.getRoom(roomId);
+    if (!myRoom) return set;
+    const myConfig = myRoom.currentState?.getStateEvents?.(EO_SPACE_CONFIG_TYPE, '');
+    if (!myConfig) return set;
+    const myName = (myConfig.getContent() as any)?.name;
+    if (!myName) return set;
+
+    for (const room of client.getRooms()) {
+      const config = room.currentState?.getStateEvents?.(EO_SPACE_CONFIG_TYPE, '');
+      if (!config) continue;
+      const name = (config.getContent() as any)?.name;
+      if (name === myName) {
+        set.add(room.roomId);
+        const rooms = (config.getContent() as any)?.rooms;
+        if (rooms?.main) set.add(rooms.main);
+      }
+    }
+    return set;
   }
 
   /** Begin broadcasting heartbeats and listening for peers. */
@@ -193,8 +221,8 @@ export class Presence {
   private handleToDeviceEvent(event: MatrixEvent): void {
     if (event.getType() !== PING_TYPE) return;
     const content = event.getContent() as { room_id?: string; device?: string };
-    // Scope to this room only.
-    if (content.room_id && content.room_id !== this.roomId) return;
+    // Scope to this space (accept from any room belonging to the same space).
+    if (content.room_id && !this.spaceRoomIds.has(content.room_id)) return;
 
     const sender = event.getSender();
     if (!sender) return;
