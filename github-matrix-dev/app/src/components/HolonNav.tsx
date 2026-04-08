@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo, useRef } from 'react';
+import { useEffect, useState, useMemo, useRef, useCallback } from 'react';
 import type { EoState } from '../db/types';
 import { useEoStore } from '../store/eo-store';
 import type { FilterDefinition } from './filter-types';
@@ -10,6 +10,39 @@ import { useSliceStore } from '../store/slice-store';
 import { Modal } from './Modal';
 import { usePanelPosition } from '../hooks/usePanelPosition';
 import { SLICE_TYPE_META, createDefaultConfig, type SliceType, type SavedSlice } from './slice-types';
+
+// ---------------------------------------------------------------------------
+// Nav Folders — client-side grouping of top-level tables
+// ---------------------------------------------------------------------------
+
+interface NavFolder {
+  id: string;
+  name: string;
+  order: number;          // sort position among folders
+  tablePaths: string[];   // fullPaths of tables assigned to this folder
+}
+
+interface NavFolderState {
+  folders: NavFolder[];
+}
+
+function folderStorageKey(prefix: string): string {
+  return `eo-nav-folders:${prefix}`;
+}
+
+function loadFolders(prefix: string): NavFolderState {
+  try {
+    const raw = localStorage.getItem(folderStorageKey(prefix));
+    if (raw) return JSON.parse(raw);
+  } catch { /* ignore */ }
+  return { folders: [] };
+}
+
+function saveFolders(prefix: string, state: NavFolderState) {
+  try {
+    localStorage.setItem(folderStorageKey(prefix), JSON.stringify(state));
+  } catch { /* quota */ }
+}
 
 function navCacheKey(prefix: string): string {
   return `eo-nav-cache:${prefix}`;
@@ -45,6 +78,80 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
   /** When set, only this top-level entity type is shown (drill-down mode) */
   const [focusedEntity, setFocusedEntity] = useState<string | null>(null);
   const sliceStore = useSliceStore();
+
+  // --- Folder state ---
+  const [folderState, setFolderState] = useState<NavFolderState>(() => loadFolders(statePrefix));
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
+  const [renamingFolder, setRenamingFolder] = useState<{ id: string; currentName: string } | null>(null);
+  const [folderContextMenu, setFolderContextMenu] = useState<{ x: number; y: number; folderId: string } | null>(null);
+  const [moveToFolderMenu, setMoveToFolderMenu] = useState<{ x: number; y: number; tablePath: string } | null>(null);
+  const [creatingFolder, setCreatingFolder] = useState(false);
+  const [newFolderName, setNewFolderName] = useState('');
+
+  const updateFolders = useCallback((updater: (prev: NavFolderState) => NavFolderState) => {
+    setFolderState((prev) => {
+      const next = updater(prev);
+      saveFolders(statePrefix, next);
+      return next;
+    });
+  }, [statePrefix]);
+
+  // Reset folders when space changes
+  useEffect(() => {
+    setFolderState(loadFolders(statePrefix));
+    setExpandedFolders(new Set());
+    setCreatingFolder(false);
+  }, [statePrefix]);
+
+  function createFolder(name: string) {
+    if (!name.trim()) return;
+    const maxOrder = folderState.folders.reduce((m, f) => Math.max(m, f.order), 0);
+    updateFolders((prev) => ({
+      folders: [...prev.folders, {
+        id: crypto.randomUUID().replace(/-/g, '').slice(0, 12),
+        name: name.trim(),
+        order: maxOrder + 1,
+        tablePaths: [],
+      }],
+    }));
+    setCreatingFolder(false);
+    setNewFolderName('');
+  }
+
+  function renameFolder(id: string, name: string) {
+    updateFolders((prev) => ({
+      folders: prev.folders.map(f => f.id === id ? { ...f, name: name.trim() || f.name } : f),
+    }));
+    setRenamingFolder(null);
+  }
+
+  function deleteFolder(id: string) {
+    updateFolders((prev) => ({
+      folders: prev.folders.filter(f => f.id !== id),
+    }));
+  }
+
+  function moveTableToFolder(tablePath: string, folderId: string | null) {
+    updateFolders((prev) => ({
+      folders: prev.folders.map(f => {
+        // Remove from any folder it's currently in
+        const without = f.tablePaths.filter(p => p !== tablePath);
+        // Add to target folder
+        if (f.id === folderId) return { ...f, tablePaths: [...without, tablePath] };
+        return { ...f, tablePaths: without };
+      }),
+    }));
+    setMoveToFolderMenu(null);
+  }
+
+  function toggleFolderExpand(id: string) {
+    setExpandedFolders((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
 
   // --- Create-slice inline form state ---
   const [showCreateSlice, setShowCreateSlice] = useState(false);
@@ -211,6 +318,9 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
   function getContextMenuItems(target: string): ContextMenuItem[] {
     const state = allStates.find((s) => s.target === target);
     const currentName = state?.value?.name || '';
+    // Check if this is a top-level node (can be moved to folders)
+    const isTopLevel = tree.some(n => n.fullPath === target);
+    const currentFolderId = folderState.folders.find(f => f.tablePaths.includes(target))?.id ?? null;
     return [
       {
         label: currentName ? `Rename (${currentName})` : 'Set display name...',
@@ -223,10 +333,48 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
         label: state?.value?._type ? `Change type (${state.value._type})` : 'Set page type...',
         onClick: () => openTypeSelector(target, contextMenu!.x, contextMenu!.y),
       },
-      { label: '', onClick: () => {}, separator: true },
+      ...(isTopLevel ? [
+        { label: '', onClick: () => { /* noop */ }, separator: true } as ContextMenuItem,
+        {
+          label: 'Move to folder\u2026',
+          onClick: () => {
+            setMoveToFolderMenu({ x: contextMenu!.x, y: contextMenu!.y, tablePath: target });
+            setContextMenu(null);
+          },
+        } as ContextMenuItem,
+        ...(currentFolderId ? [{
+          label: 'Remove from folder',
+          onClick: () => {
+            moveTableToFolder(target, null);
+            setContextMenu(null);
+          },
+        } as ContextMenuItem] : []),
+      ] : []),
+      { label: '', onClick: () => { /* noop */ }, separator: true },
       {
         label: 'Copy target path',
         onClick: () => navigator.clipboard.writeText(target),
+      },
+    ];
+  }
+
+  function getFolderContextMenuItems(folderId: string): ContextMenuItem[] {
+    const folder = folderState.folders.find(f => f.id === folderId);
+    if (!folder) return [];
+    return [
+      {
+        label: 'Rename folder',
+        onClick: () => {
+          setRenamingFolder({ id: folderId, currentName: folder.name });
+          setFolderContextMenu(null);
+        },
+      },
+      {
+        label: 'Delete folder',
+        onClick: () => {
+          deleteFolder(folderId);
+          setFolderContextMenu(null);
+        },
       },
     ];
   }
@@ -384,6 +532,51 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
   // Find the focused top-level node
   const focusedNode = focusedEntity ? tree.find(n => n.fullPath === focusedEntity) : null;
 
+  // Partition top-level nodes into folders vs ungrouped
+  const sortedFolders = useMemo(() =>
+    [...folderState.folders].sort((a, b) => a.order - b.order),
+    [folderState.folders],
+  );
+
+  const allFolderedPaths = useMemo(() => {
+    const set = new Set<string>();
+    for (const f of folderState.folders) {
+      for (const p of f.tablePaths) set.add(p);
+    }
+    return set;
+  }, [folderState.folders]);
+
+  const ungroupedNodes = useMemo(() =>
+    tree.filter(n => !allFolderedPaths.has(n.fullPath)),
+    [tree, allFolderedPaths],
+  );
+
+  function renderFolderHeader(folder: NavFolder) {
+    const isFolderExpanded = expandedFolders.has(folder.id);
+    const memberNodes = tree.filter(n => folder.tablePaths.includes(n.fullPath));
+    return (
+      <div key={`folder:${folder.id}`}>
+        <div
+          style={s.folderHeader}
+          onClick={() => toggleFolderExpand(folder.id)}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            setFolderContextMenu({ x: e.clientX, y: e.clientY, folderId: folder.id });
+          }}
+        >
+          <span style={s.chevron}>
+            {isFolderExpanded ? '\u25BE' : '\u25B8'}
+          </span>
+          <span style={s.folderIcon}>{'\uD83D\uDCC1'}</span>
+          <span style={s.folderName}>{folder.name}</span>
+          <span style={s.count}>{memberNodes.length}</span>
+        </div>
+        {isFolderExpanded && memberNodes.map(node => renderNode(node, 1, undefined, true))}
+      </div>
+    );
+  }
+
   return (
     <div style={s.container}>
       <div style={s.scroll}>
@@ -491,7 +684,51 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
             )}
           </>
         ) : (
-          tree.map(node => renderNode(node, 0, undefined, true))
+          <>
+            {/* Folders */}
+            {sortedFolders.map(folder => renderFolderHeader(folder))}
+
+            {/* + New folder inline form / button */}
+            {!creatingFolder ? (
+              <div
+                style={s.newFolderBtn}
+                onClick={() => setCreatingFolder(true)}
+              >
+                <span style={{ fontSize: 11, opacity: 0.7 }}>+</span>
+                <span>New folder</span>
+              </div>
+            ) : (
+              <div style={s.newFolderForm}>
+                <input
+                  autoFocus
+                  value={newFolderName}
+                  onChange={(e) => setNewFolderName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') createFolder(newFolderName);
+                    if (e.key === 'Escape') { setCreatingFolder(false); setNewFolderName(''); }
+                  }}
+                  placeholder="Folder name..."
+                  style={s.createSliceInput}
+                />
+                <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+                  <button style={s.createSliceCancelBtn} onClick={() => { setCreatingFolder(false); setNewFolderName(''); }}>Cancel</button>
+                  <button
+                    style={!newFolderName.trim() ? s.createSliceSubmitBtnDisabled : s.createSliceSubmitBtn}
+                    onClick={() => createFolder(newFolderName)}
+                    disabled={!newFolderName.trim()}
+                  >Create</button>
+                </div>
+              </div>
+            )}
+
+            {/* Divider between folders and ungrouped tables */}
+            {sortedFolders.length > 0 && ungroupedNodes.length > 0 && (
+              <div style={s.folderDivider} />
+            )}
+
+            {/* Ungrouped tables */}
+            {ungroupedNodes.map(node => renderNode(node, 0, undefined, true))}
+          </>
         )}
       </div>
 
@@ -503,6 +740,72 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
           items={getContextMenuItems(contextMenu.target)}
           onClose={() => setContextMenu(null)}
         />
+      )}
+
+      {/* Folder context menu */}
+      {folderContextMenu && (
+        <ContextMenu
+          x={folderContextMenu.x}
+          y={folderContextMenu.y}
+          items={getFolderContextMenuItems(folderContextMenu.folderId)}
+          onClose={() => setFolderContextMenu(null)}
+        />
+      )}
+
+      {/* Move to folder picker */}
+      {moveToFolderMenu && (
+        <>
+          <div
+            style={{ position: 'fixed', inset: 0, zIndex: 9998 }}
+            onClick={() => setMoveToFolderMenu(null)}
+          />
+          <div style={{
+            position: 'fixed',
+            left: moveToFolderMenu.x,
+            top: moveToFolderMenu.y,
+            zIndex: 9999,
+            background: theme.bgCard,
+            border: `1px solid ${theme.border}`,
+            borderRadius: 8,
+            boxShadow: `0 8px 30px ${theme.shadow}`,
+            padding: '4px 0',
+            minWidth: 160,
+          }}>
+            {sortedFolders.length === 0 ? (
+              <div style={{ padding: '8px 12px', fontSize: 11, color: theme.textMuted }}>
+                No folders yet. Create one first.
+              </div>
+            ) : (
+              sortedFolders.map(folder => {
+                const isCurrentFolder = folder.tablePaths.includes(moveToFolderMenu.tablePath);
+                return (
+                  <div
+                    key={folder.id}
+                    style={{
+                      padding: '6px 12px',
+                      fontSize: 12,
+                      cursor: isCurrentFolder ? 'default' : 'pointer',
+                      color: isCurrentFolder ? theme.textMuted : theme.text,
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 6,
+                      background: 'transparent',
+                    }}
+                    onMouseEnter={(e) => { if (!isCurrentFolder) (e.currentTarget.style.background = theme.bgHover); }}
+                    onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
+                    onClick={() => {
+                      if (!isCurrentFolder) moveTableToFolder(moveToFolderMenu.tablePath, folder.id);
+                    }}
+                  >
+                    <span style={{ fontSize: 12 }}>{'\uD83D\uDCC1'}</span>
+                    <span>{folder.name}</span>
+                    {isCurrentFolder && <span style={{ fontSize: 10, marginLeft: 'auto', opacity: 0.5 }}>{'\u2713'}</span>}
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </>
       )}
 
       {/* Type selector popover */}
@@ -593,6 +896,67 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
               </div>
             </form>
           </>
+        )}
+      </Modal>
+
+      {/* Rename folder dialog */}
+      <Modal
+        open={!!renamingFolder}
+        onClose={() => setRenamingFolder(null)}
+        title="Rename folder"
+        width={320}
+      >
+        {renamingFolder && (
+          <form onSubmit={(e) => {
+            e.preventDefault();
+            const input = (e.target as HTMLFormElement).elements.namedItem('folderName') as HTMLInputElement;
+            renameFolder(renamingFolder.id, input.value.trim());
+          }}>
+            <input
+              name="folderName"
+              autoFocus
+              defaultValue={renamingFolder.currentName}
+              placeholder="Folder name..."
+              style={{
+                width: '100%',
+                padding: '6px 8px',
+                fontSize: 13,
+                border: `1px solid ${theme.border}`,
+                borderRadius: 4,
+                background: theme.bg,
+                color: theme.text,
+                outline: 'none',
+                boxSizing: 'border-box',
+              }}
+            />
+            <div style={{ display: 'flex', gap: 8, marginTop: 8, justifyContent: 'flex-end' }}>
+              <button
+                type="button"
+                onClick={() => setRenamingFolder(null)}
+                style={{
+                  padding: '4px 12px',
+                  fontSize: 12,
+                  border: `1px solid ${theme.border}`,
+                  borderRadius: 4,
+                  background: 'transparent',
+                  color: theme.text,
+                  cursor: 'pointer',
+                }}
+              >Cancel</button>
+              <button
+                type="submit"
+                style={{
+                  padding: '4px 12px',
+                  fontSize: 12,
+                  border: 'none',
+                  borderRadius: 4,
+                  background: theme.accent,
+                  color: '#fff',
+                  cursor: 'pointer',
+                }}
+              >Save</button>
+            </div>
+          </form>
         )}
       </Modal>
     </div>
@@ -807,6 +1171,52 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       color: t.textMuted,
       cursor: 'not-allowed',
       opacity: 0.6,
+    },
+    // --- Folder styles ---
+    folderHeader: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 5,
+      padding: '6px 16px 6px 12px',
+      cursor: 'pointer',
+      fontSize: 11,
+      fontWeight: 600,
+      color: t.textSecondary,
+      textTransform: 'uppercase' as const,
+      letterSpacing: '0.3px',
+      transition: 'background 0.1s',
+    } as React.CSSProperties,
+    folderIcon: {
+      fontSize: 12,
+      flexShrink: 0,
+    },
+    folderName: {
+      flex: 1,
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+      whiteSpace: 'nowrap' as const,
+    },
+    folderDivider: {
+      height: 1,
+      background: t.borderLight,
+      margin: '6px 16px',
+    },
+    newFolderBtn: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 5,
+      padding: '5px 16px 5px 12px',
+      cursor: 'pointer',
+      fontSize: 11,
+      color: t.textMuted,
+      transition: 'color 0.1s',
+    } as React.CSSProperties,
+    newFolderForm: {
+      margin: '4px 12px',
+      padding: 8,
+      background: t.bgCard,
+      border: `1px solid ${t.border}`,
+      borderRadius: 6,
     },
   };
 }
