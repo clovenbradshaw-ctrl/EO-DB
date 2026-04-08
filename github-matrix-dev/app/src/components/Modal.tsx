@@ -109,6 +109,7 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
     title: {
       fontSize: 13,
       fontWeight: 600,
+      fontFamily: "'Outfit', sans-serif",
       color: t.textHeading,
     },
     closeBtn: {
