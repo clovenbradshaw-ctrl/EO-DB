@@ -392,9 +392,10 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
     sectionHeader: {
       fontSize: 11,
       fontWeight: 600,
+      fontFamily: "'JetBrains Mono', monospace",
       color: t.textMuted,
       textTransform: 'uppercase' as const,
-      letterSpacing: 0.5,
+      letterSpacing: '0.5px',
     },
     layoutCards: {
       display: 'flex',
@@ -423,15 +424,16 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       justifyContent: 'center',
     },
     layoutLabel: {
-      fontSize: 11,
+      fontSize: 12,
       fontWeight: 500,
+      fontFamily: "'Outfit', sans-serif",
       color: t.text,
     },
     fieldList: {
       display: 'flex',
       flexDirection: 'column' as const,
       gap: 2,
-      maxHeight: 200,
+      maxHeight: 240,
       overflowY: 'auto' as const,
     },
     fieldRow: {
@@ -441,6 +443,7 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       padding: '3px 4px',
       borderRadius: 4,
       fontSize: 12,
+      fontFamily: "'Outfit', sans-serif",
     },
     fieldLabel: {
       flex: 1,
@@ -453,10 +456,10 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
     arrowBtn: {
       background: 'none',
       border: 'none',
-      fontSize: 8,
+      fontSize: 10,
       color: t.textMuted,
       cursor: 'pointer',
-      padding: '2px 4px',
+      padding: '2px 6px',
       borderRadius: 3,
       lineHeight: 1,
     },
@@ -465,6 +468,7 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
     },
     loadingText: {
       fontSize: 11,
+      fontFamily: "'Outfit', sans-serif",
       color: t.textMuted,
       padding: '4px 0',
     },
@@ -488,8 +492,9 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
     connExpandBtn: {
       background: 'none',
       border: 'none',
-      fontSize: 12,
+      fontSize: 13,
       fontWeight: 500,
+      fontFamily: "'Outfit', sans-serif",
       color: t.text,
       cursor: 'pointer',
       padding: 0,
@@ -500,7 +505,7 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
     toggleBtn: {
       background: 'none',
       border: 'none',
-      fontSize: 14,
+      fontSize: 16,
       cursor: 'pointer',
       padding: '0 4px',
       lineHeight: 1,
@@ -514,9 +519,10 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
     connSubHeader: {
       fontSize: 10,
       fontWeight: 600,
+      fontFamily: "'JetBrains Mono', monospace",
       color: t.textMuted,
       textTransform: 'uppercase' as const,
-      letterSpacing: 0.5,
+      letterSpacing: '0.5px',
       marginBottom: 4,
     },
     connRow: {
@@ -526,6 +532,7 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       padding: '3px 4px',
       borderRadius: 4,
       fontSize: 12,
+      fontFamily: "'Outfit', sans-serif",
       color: t.text,
       cursor: 'pointer',
     },
