@@ -372,6 +372,10 @@ const CONSTRAINT_MAP: Record<string, Array<{ optionKey: string; constraintName: 
   duration:            [{ optionKey: 'durationFormat', constraintName: 'format' }],
   date:                [{ optionKey: 'dateFormat', constraintName: 'dateFormat' }, { optionKey: 'timeFormat', constraintName: 'timeFormat' }],
   dateTime:            [{ optionKey: 'dateFormat', constraintName: 'dateFormat' }, { optionKey: 'timeFormat', constraintName: 'timeFormat' }],
+  formula:             [{ optionKey: 'formula', constraintName: 'formula' }, { optionKey: 'referencedFieldIds', constraintName: 'referencedFieldIds' }],
+  rollup:              [{ optionKey: 'fieldIdInLinkedTable', constraintName: 'sourceField' }, { optionKey: 'recordLinkFieldId', constraintName: 'linkField' }, { optionKey: 'referencedFieldIds', constraintName: 'referencedFieldIds' }],
+  lookup:              [{ optionKey: 'fieldIdInLinkedTable', constraintName: 'sourceField' }, { optionKey: 'recordLinkFieldId', constraintName: 'linkField' }],
+  count:               [{ optionKey: 'recordLinkFieldId', constraintName: 'linkField' }],
 };
 
 async function emitFieldConstraints(

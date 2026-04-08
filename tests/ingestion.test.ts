@@ -240,16 +240,18 @@ describe('target naming', () => {
 // ─── Field rules tests ─────────────────────────────────────────────────────
 
 describe('classifyFieldType', () => {
-  it('skips computed fields', () => {
+  it('classifies computed fields as def (Airtable-evaluated, ingested)', () => {
     for (const type of ['formula', 'rollup', 'lookup', 'count']) {
-      expect(classifyFieldType(type)).toBe('skip');
+      expect(classifyFieldType(type)).toBe('def');
     }
   });
 
-  it('skips metadata fields', () => {
-    for (const type of ['createdTime', 'lastModifiedTime', 'createdBy', 'lastModifiedBy', 'autoNumber']) {
-      expect(classifyFieldType(type)).toBe('skip');
-    }
+  it('classifies fold-computed metadata as eva, ingestable metadata as def', () => {
+    expect(classifyFieldType('lastModifiedTime')).toBe('eva');
+    expect(classifyFieldType('lastModifiedBy')).toBe('eva');
+    expect(classifyFieldType('createdTime')).toBe('def');
+    expect(classifyFieldType('createdBy')).toBe('def');
+    expect(classifyFieldType('autoNumber')).toBe('def');
   });
 
   it('classifies link fields as con', () => {
@@ -373,15 +375,15 @@ describe('extractStorableFields', () => {
     expect(result).toEqual({ fldName: 'Alice', fldEmail: 'a@b.com' });
   });
 
-  it('skips computed and metadata fields', () => {
+  it('includes computed fields (formula, rollup) and skips eva metadata', () => {
     const result = extractStorableFields(
       { fldName: 'Alice', fldFormula: '=1+1', fldRollup: 42, fldModified: '2025-01-01' },
       fieldMeta,
       EMPTY_EXCLUSIONS,
     );
-    expect(result).toEqual({ fldName: 'Alice' });
-    expect(result).not.toHaveProperty('fldFormula');
-    expect(result).not.toHaveProperty('fldRollup');
+    expect(result).toEqual({ fldName: 'Alice', fldFormula: '=1+1', fldRollup: 42 });
+    expect(result).toHaveProperty('fldFormula');
+    expect(result).toHaveProperty('fldRollup');
     expect(result).not.toHaveProperty('fldModified');
   });
 
@@ -660,8 +662,8 @@ describe('Ingestion API routes', () => {
     expect(aliceState).not.toBeNull();
     expect(aliceState!.value.fields.fldName).toBe('Alice');
     expect(aliceState!.value.fields.fldEmail).toBe('alice@test.com');
-    // Formula field should NOT be stored — it's a computed Horizon output
-    expect(aliceState!.value.fields.fldFormula).toBeUndefined();
+    // Formula field IS stored — Airtable evaluates it, we ingest the value
+    expect(aliceState!.value.fields.fldFormula).toBeDefined();
 
     // Verify explicit INS event exists in the log before DEF
     const aliceLog = await readLogForTarget(db, 'at.appTEST1.tblTEST1.recA');
