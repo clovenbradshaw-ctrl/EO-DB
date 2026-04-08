@@ -15,6 +15,20 @@ function relativeTime(iso: string | null): string {
   return `${Math.floor(diff / 86_400_000)}d ago`;
 }
 
+// ─── Sync interval options ────────────────────────────────────────────────────
+
+const INTERVAL_OPTIONS: { label: string; ms: number }[] = [
+  { label: '30 seconds', ms: 30_000 },
+  { label: '1 minute',   ms: 60_000 },
+  { label: '5 minutes',  ms: 300_000 },
+  { label: '15 minutes', ms: 900_000 },
+  { label: '1 hour',     ms: 3_600_000 },
+];
+
+function intervalLabel(ms: number): string {
+  return INTERVAL_OPTIONS.find((o) => o.ms === ms)?.label ?? `${Math.round(ms / 1000)}s`;
+}
+
 // ─── Wizard state ─────────────────────────────────────────────────────────────
 
 type WizardStep = 1 | 2 | 3;
@@ -34,6 +48,7 @@ interface WizardState {
   // Step 2
   fieldMappings: Record<string, string>;  // remoteFieldId → internalName
   writeBackEnabled: boolean;
+  minSyncIntervalMs: number;
   // Per-step feedback
   stepLoading: boolean;
   stepError: string | null;
@@ -52,6 +67,7 @@ const WIZARD_INIT: WizardState = {
   discoveredFields: [],
   fieldMappings: {},
   writeBackEnabled: true,
+  minSyncIntervalMs: 60_000,
   stepLoading: false,
   stepError: null,
   stepSuccess: null,
@@ -104,6 +120,7 @@ export function ApiConnectionsView() {
       baseId: creds.baseId,
       tableId: creds.tableId,
       fieldMappings: { ...config.fieldMappings },
+      minSyncIntervalMs: config.minSyncIntervalMs ?? 60_000,
     });
   }
 
@@ -166,6 +183,7 @@ export function ApiConnectionsView() {
         label: wiz.label.trim() || `${creds.baseId}/${creds.tableId}`,
         credentials: creds,
         fieldMappings: wiz.fieldMappings,
+        minSyncIntervalMs: wiz.minSyncIntervalMs,
         _fieldTypes: fieldTypes,
       } as Parameters<typeof saveConnection>[0] & { _fieldTypes: Record<string, string> });
       closeWizard();
@@ -469,6 +487,21 @@ function Step2({ wiz, wizSet }: { wiz: WizardState; wizSet: (p: Partial<WizardSt
           {' '}Write back on edit (enables CRUD — changes sync to Airtable)
         </label>
       </div>
+
+      <div style={s.fieldGroup}>
+        <label style={s.label}>Min sync interval</label>
+        <select
+          style={s.input}
+          value={wiz.minSyncIntervalMs}
+          onChange={(e) => wizSet({ minSyncIntervalMs: Number(e.target.value) })}
+          aria-label="Minimum sync interval"
+        >
+          {INTERVAL_OPTIONS.map((o) => (
+            <option key={o.ms} value={o.ms}>{o.label}</option>
+          ))}
+        </select>
+        <div style={s.hint}>How often "Sync Now" can be triggered. Applies to all clients.</div>
+      </div>
     </div>
   );
 }
@@ -494,6 +527,7 @@ function Step3({ wiz }: { wiz: WizardState }) {
         <ReviewRow label="Table" value={wiz.tableId} />
         <ReviewRow label="Fields mapped" value={`${mappedCount} / ${totalCount}`} />
         <ReviewRow label="Write-back" value={wiz.writeBackEnabled ? 'Enabled' : 'Disabled'} />
+        <ReviewRow label="Min sync interval" value={intervalLabel(wiz.minSyncIntervalMs)} />
         <ReviewRow
           label="Sync signal"
           value={hasLastModified ? '⟳ lastModifiedTime field detected' : 'createdTime (fallback)'}
@@ -605,16 +639,34 @@ function ApiDataView({
     recordsCache,
     recordsLoading,
     errors,
+    lastSyncAttemptAt,
     fetchRecords,
     fetchRecordsFull,
     updateRecord,
     deleteRecord,
     clearError,
+    getSyncCooldownMs,
   } = useApiConnectionStore();
 
   const cache = recordsCache[config.connectionId];
   const loading = recordsLoading[config.connectionId] ?? false;
   const error = errors[config.connectionId] ?? '';
+
+  // Cooldown countdown — recomputed every second while active
+  const [cooldownMs, setCooldownMs] = useState(() => getSyncCooldownMs(config.connectionId));
+  useEffect(() => {
+    // Recompute whenever a sync attempt is recorded
+    setCooldownMs(getSyncCooldownMs(config.connectionId));
+  }, [lastSyncAttemptAt, config.connectionId, getSyncCooldownMs]);
+  useEffect(() => {
+    if (cooldownMs <= 0) return;
+    const id = setInterval(() => {
+      const remaining = getSyncCooldownMs(config.connectionId);
+      setCooldownMs(remaining);
+      if (remaining <= 0) clearInterval(id);
+    }, 1000);
+    return () => clearInterval(id);
+  }, [cooldownMs > 0, config.connectionId, getSyncCooldownMs]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState<Record<string, unknown>>({});
@@ -709,14 +761,18 @@ function ApiDataView({
             {cache ? `${records.length} records · ${relativeTime(cache.loadedAt)}` : ''}
           </span>
           <button
-            style={loading ? s.btnDisabled : s.btnSecondary}
-            disabled={loading}
+            style={loading || cooldownMs > 0 ? s.btnDisabled : s.btnSecondary}
+            disabled={loading || cooldownMs > 0}
             onClick={() => {
               clearError(config.connectionId);
               fetchRecordsFull(config.connectionId);
             }}
           >
-            {loading ? 'Syncing…' : 'Sync Now'}
+            {loading
+              ? 'Syncing…'
+              : cooldownMs > 0
+                ? `Sync in ${Math.ceil(cooldownMs / 1000)}s`
+                : 'Sync Now'}
           </button>
         </div>
       </div>

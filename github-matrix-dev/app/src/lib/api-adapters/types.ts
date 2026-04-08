@@ -69,13 +69,15 @@ export type FieldMapping = Record<string, string>;
 // ─── Connection config (persisted as DEF event operand) ──────────────────────
 
 export interface ApiConnectionConfig {
-  connectionId: string;       // UUID — used as the DEF target suffix
-  label: string;              // user-chosen display name
+  connectionId: string;         // UUID — used as the DEF target suffix
+  label: string;                // user-chosen display name
   credentials: ApiCredentials;
   fieldMappings: FieldMapping;
-  createdAt: string;          // ISO timestamp
+  createdAt: string;            // ISO timestamp
   lastSyncAt: string | null;
-  syncCursor: string | null;  // opaque; each adapter interprets it
+  syncCursor: string | null;    // opaque; each adapter interprets it
+  /** Minimum milliseconds between syncs. Default: 60_000 (1 minute). */
+  minSyncIntervalMs: number;
 }
 
 // ─── Adapter interface ────────────────────────────────────────────────────────

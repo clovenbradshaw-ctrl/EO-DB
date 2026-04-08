@@ -38,6 +38,15 @@ interface ApiConnectionState {
   recordsCache: Record<string, RecordsCache>;
   recordsLoading: Record<string, boolean>;
   errors: Record<string, string>;
+  /** In-memory timestamp (ms) of the most recent sync attempt per connectionId. */
+  lastSyncAttemptAt: Record<string, number>;
+
+  /**
+   * Returns the remaining cooldown ms for a connection (0 = ready to sync).
+   * Reads from lastSyncAttemptAt (in-memory) and lastSyncAt (persisted),
+   * capped by minSyncIntervalMs.
+   */
+  getSyncCooldownMs: (connectionId: string) => number;
 
   loadConnections: () => Promise<void>;
 
@@ -52,8 +61,9 @@ interface ApiConnectionState {
    * Returns the connectionId.
    */
   saveConnection: (
-    partial: Omit<ApiConnectionConfig, 'createdAt' | 'lastSyncAt' | 'syncCursor'> & {
+    partial: Omit<ApiConnectionConfig, 'createdAt' | 'lastSyncAt' | 'syncCursor' | 'minSyncIntervalMs'> & {
       connectionId?: string;
+      minSyncIntervalMs?: number;
     },
   ) => Promise<string>;
 
@@ -182,6 +192,16 @@ export const useApiConnectionStore = create<ApiConnectionState>((set, get) => ({
   recordsCache: {},
   recordsLoading: {},
   errors: {},
+  lastSyncAttemptAt: {},
+
+  getSyncCooldownMs(connectionId: string): number {
+    const config = get().connections[connectionId];
+    const minMs = config?.minSyncIntervalMs ?? 60_000;
+    const attemptTs = get().lastSyncAttemptAt[connectionId] ?? 0;
+    const syncAtTs = config?.lastSyncAt ? new Date(config.lastSyncAt).getTime() : 0;
+    const lastTs = Math.max(attemptTs, syncAtTs);
+    return Math.max(0, lastTs + minMs - Date.now());
+  },
 
   async loadConnections() {
     set({ connectionsLoading: true });
@@ -224,6 +244,7 @@ export const useApiConnectionStore = create<ApiConnectionState>((set, get) => ({
       label: partial.label,
       credentials: partial.credentials,
       fieldMappings: partial.fieldMappings,
+      minSyncIntervalMs: partial.minSyncIntervalMs ?? existing?.minSyncIntervalMs ?? 60_000,
       createdAt: existing?.createdAt ?? new Date().toISOString(),
       lastSyncAt: existing?.lastSyncAt ?? null,
       syncCursor: existing?.syncCursor ?? null,
@@ -262,7 +283,9 @@ export const useApiConnectionStore = create<ApiConnectionState>((set, get) => ({
       delete recordsCache[connectionId];
       const errors = { ...state.errors };
       delete errors[connectionId];
-      return { connections, recordsCache, errors };
+      const lastSyncAttemptAt = { ...state.lastSyncAttemptAt };
+      delete lastSyncAttemptAt[connectionId];
+      return { connections, recordsCache, errors, lastSyncAttemptAt };
     });
   },
 
@@ -278,6 +301,28 @@ export const useApiConnectionStore = create<ApiConnectionState>((set, get) => ({
   async _fetchRecordsInternal(connectionId: string, fullRefresh: boolean) {
     const config = get().connections[connectionId];
     if (!config) return;
+
+    // Hard rate limit — check before touching loading state
+    const cooldownMs = get().getSyncCooldownMs(connectionId);
+    if (cooldownMs > 0) {
+      if (fullRefresh) {
+        // User-initiated: surface the wait time
+        const secs = Math.ceil(cooldownMs / 1000);
+        set((state) => ({
+          errors: {
+            ...state.errors,
+            [connectionId]: `Sync rate limited — try again in ${secs}s`,
+          },
+        }));
+      }
+      // Auto-fetch (fullRefresh=false): silently skip
+      return;
+    }
+
+    // Record the attempt timestamp before any async work
+    set((state) => ({
+      lastSyncAttemptAt: { ...state.lastSyncAttemptAt, [connectionId]: Date.now() },
+    }));
 
     set((state) => ({
       recordsLoading: { ...state.recordsLoading, [connectionId]: true },
