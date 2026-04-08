@@ -78,7 +78,7 @@ function makeFold(overrides: Partial<EoStateFold> = {}): EoStateFold {
     trajectoryFingerprint: {
       sequence: 'INS.DEF',
       fingerprint: 'abcdef1234567890',
-      opCounts: { NUL: 0, INS: 1, SEG: 0, CON: 0, SYN: 0, DEF: 3, EVA: 0, REC: 0 },
+      opCounts: { NUL: 0, SIG: 0, INS: 1, SEG: 0, CON: 0, SYN: 0, DEF: 3, EVA: 0, REC: 0 },
     },
     cadence: { classification: 'steady', lastEventTs: '2025-01-01T00:05:00Z', eventCount: 4, description: 'Steady' },
     eventCount: 4,
