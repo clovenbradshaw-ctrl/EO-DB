@@ -1350,6 +1350,29 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           existing.spaceRooms = resolvedSpaceRooms;
         }
 
+        // If the cached store is still empty (seq=0) and Filen is connected,
+        // attempt hydration now. This handles the case where the first effect
+        // run cached the store but hadn't finished hydrating before the effect
+        // re-ran (e.g., matrixReady / mergedEntries changed mid-hydration).
+        const cachedSeq = await existing.store.getCurrentSeq();
+        const filenNow = useFilenStore.getState();
+        if (cachedSeq === 0 && filenNow.connected && selectedSpace) {
+          try {
+            const spaceEntry = mergedEntries.find(e => {
+              const target = 'canonical' in e ? (e as any).canonical : (e as any).target;
+              return target === selectedSpace;
+            });
+            const spaceName = spaceEntry ? ((spaceEntry as any).name || selectedSpace) : selectedSpace;
+            const spaceFolderUuid = await filenNow.ensureSpaceFolder(selectedSpace, spaceName);
+            const hydratedSeq = await FilenSyncService.hydrateFromFilen(existing.store, spaceFolderUuid, onFoldEvent);
+            if (hydratedSeq > 0) {
+              await init(existing.store);
+            }
+          } catch (e) {
+            console.warn('[EO-DB] Cache-path hydration failed for space', selectedSpace, e);
+          }
+        }
+
         // Restore cached sync manager
         if (existing.syncManager) {
           useEoStore.getState().setSyncManager(existing.syncManager);
@@ -1389,6 +1412,12 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       const key = await deriveKey(session.userId, session.deviceId);
       const store = createStore(idb, key);
       if (isStale()) { store.close(); return; }
+
+      // Cache the store immediately so that re-runs of this effect (triggered
+      // by matrixReady / mergedEntries changes) reuse the SAME store instead
+      // of creating a new one. This prevents a race where a second run skips
+      // hydration because the first run partially wrote to IDB (seq > 0).
+      cache.set(selectedSpace!, { store, syncManager: null, filenSync: null, gdriveSync: null, mainRoomId: spaceRoomId, presence: null, spaceRooms: resolvedSpaceRooms });
 
       await init(store);
 
@@ -1508,6 +1537,8 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             userId: session.userId,
             matrixClient: matrixClientRef.current || undefined,
             roomId: spaceRoomId || undefined,
+            onEvent: onFoldEvent,
+            onHydrated: () => { init(store); },
           });
           await filenSync.start();
           useEoStore.getState().setFilenSync(filenSync);
@@ -1633,7 +1664,8 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         }).catch(e => console.warn('[EO-DB] Failed to persist space meta:', e));
       }
 
-      // Cache this space's store + sync manager for fast re-access
+      // Update the cached entry with sync services (store was cached earlier
+      // to prevent race conditions; now enrich with fully-initialized services).
       cache.set(selectedSpace!, { store, syncManager, filenSync, gdriveSync, mainRoomId: spaceRoomId, presence: presenceInstance, spaceRooms: resolvedSpaceRooms });
     }
 
