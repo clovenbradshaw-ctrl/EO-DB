@@ -16,15 +16,16 @@
  * (one target, old state → new state). The cohort index is maintained as a
  * side effect of each event, not recomputed from scratch.
  *
- * Cohort identity is keyed by scope + trait signature (e.g. "attorney:sarah|type:regulatory"),
- * NOT by its members. If a cohort grows or shrinks, the same derived entity is updated.
- * New cohort forming = new entity. Existing cohort gaining a member = DEF on same entity.
+ * Cohort identity is keyed by scope + trait signature hash,
+ * NOT by its members. If a cohort grows or shrinks, the same derived entity
+ * is updated. New cohort forming = new entity. Existing cohort gaining a
+ * member = DEF on same entity. Cohort shrinking below min_members = inert.
  *
  * Storage keys:
  *   cryst-rule:{scope}                     — the crystallization rule
  *   cryst-snap:{scope}                     — stability state (counter)
- *   cryst-trait:{scope}:{target}           — current trait key for a target in this scope
- *   cryst-cohort:{scope}:{traitKey}        — serialized member list for a cohort
+ *   cryst-trait:{scope}:{target}           — current trait key hash for a target
+ *   cryst-cohort:{scope}:{traitKeyHash}    — { members: string[], traits: Record<string,any> }
  *   derived:{target}                       — DerivedEntity registration (shared with REC)
  *   rdep:{constituent}:{derived}           — reverse dep index (shared with REC)
  */
@@ -38,6 +39,14 @@ import type {
   EoEvent, EoState, CrystallizationRule, CrystStabilityState, DerivedEntity,
 } from './types.js';
 import type { Feed } from './feed.js';
+
+// ─── Cohort index entry ──────────────────────────────────────────────
+// Stored as the value of cryst-cohort:{scope}:{traitKeyHash}.
+// Contains the actual traits object so we never need to reverse-parse a key.
+interface CohortEntry {
+  members: string[];
+  traits: Record<string, any>;
+}
 
 // ─── Rule Registration ───────────────────────────────────────────────
 
@@ -71,7 +80,6 @@ export async function removeCrystallizationRule(
   } catch (e: any) {
     if (e.code !== 'LEVEL_NOT_FOUND') throw e;
   }
-  // Clean up all index entries for this scope
   const prefixes = [`cryst-trait:${scope}:`, `cryst-cohort:${scope}:`];
   for (const pfx of prefixes) {
     for await (const [key] of db.iterator({ gte: pfx, lte: `${pfx}\xff` })) {
@@ -81,10 +89,8 @@ export async function removeCrystallizationRule(
 }
 
 /**
- * Find the crystallization rule for the scope that is the direct parent
- * of the changed target. A target "firm.cases.rec001" matches a rule
- * at "firm.cases" (its parent). We only check the direct parent scope
- * because targets must be direct children of the scope.
+ * Find the crystallization rule for the direct parent scope of the target.
+ * firm.cases.rec001 → check firm.cases.
  */
 async function getRuleForTarget(
   db: EoDb,
@@ -92,8 +98,6 @@ async function getRuleForTarget(
 ): Promise<CrystallizationRule | null> {
   const parts = target.split('.');
   if (parts.length < 2) return null;
-
-  // The scope is the parent prefix: firm.cases for firm.cases.rec001
   const scope = parts.slice(0, parts.length - 1).join('.');
   return getCrystallizationRule(db, scope);
 }
@@ -114,9 +118,20 @@ async function setStabilityState(db: EoDb, state: CrystStabilityState): Promise<
   await db.put(`cryst-snap:${state.scope}`, encode(state));
 }
 
+// ─── Trait Key Hashing ───────────────────────────────────────────────
+// Traits are hashed to a short hex string for use as a LevelDB key segment.
+// The actual trait values are stored in the CohortEntry, never parsed back
+// from the key. This avoids delimiter-in-value bugs entirely.
+
+function hashTraits(traits: Record<string, any>): string {
+  const keys = Object.keys(traits).sort();
+  const parts = keys.map(k => `${k}\0${JSON.stringify(traits[k])}`);
+  return createHash('sha256').update(parts.join('\0')).digest('hex').slice(0, 16);
+}
+
 // ─── Incremental Cohort Index ────────────────────────────────────────
 
-async function getTargetTraitKey(db: EoDb, scope: string, target: string): Promise<string | null> {
+async function getTargetTraitHash(db: EoDb, scope: string, target: string): Promise<string | null> {
   try {
     const buf = await db.get(`cryst-trait:${scope}:${target}`);
     return decode(buf) as string;
@@ -126,22 +141,46 @@ async function getTargetTraitKey(db: EoDb, scope: string, target: string): Promi
   }
 }
 
-async function getCohortMembers(db: EoDb, scope: string, traitKey: string): Promise<string[]> {
+async function getCohortEntry(db: EoDb, scope: string, traitHash: string): Promise<CohortEntry | null> {
   try {
-    const buf = await db.get(`cryst-cohort:${scope}:${traitKey}`);
-    return decode(buf) as string[];
+    const buf = await db.get(`cryst-cohort:${scope}:${traitHash}`);
+    return decode(buf) as CohortEntry;
   } catch (e: any) {
-    if (e.code === 'LEVEL_NOT_FOUND') return [];
+    if (e.code === 'LEVEL_NOT_FOUND') return null;
     throw e;
   }
+}
+
+async function putCohortEntry(db: EoDb, scope: string, traitHash: string, entry: CohortEntry): Promise<void> {
+  await db.put(`cryst-cohort:${scope}:${traitHash}`, encode(entry));
+}
+
+async function delCohortEntry(db: EoDb, scope: string, traitHash: string): Promise<void> {
+  try { await db.del(`cryst-cohort:${scope}:${traitHash}`); } catch {}
+}
+
+/**
+ * Extract trait values from a state. Returns null if any trait key is missing.
+ */
+function extractTraits(state: EoState, traitKeys: string[]): Record<string, any> | null {
+  if (!state.value || typeof state.value !== 'object') return null;
+  if (state.value._alias || state.value._deleted) return null;
+
+  const traits: Record<string, any> = {};
+  for (const key of traitKeys) {
+    const val = state.value[key];
+    if (val === undefined || val === null) return null;
+    traits[key] = val;
+  }
+  return traits;
 }
 
 /**
  * Update a target's cohort membership. Returns whether the cohort structure changed.
  *
- * This is the incremental core. One target changed — we look up its old trait key,
- * compute the new one from the current state, and if they differ we move it
- * between cohorts. Two index writes, no scan.
+ * One target changed → look up old trait hash, compute new trait hash.
+ * If same → no structural change. If different → move between cohorts.
+ * Two index writes, no scan.
  */
 async function updateCohortMembership(
   db: EoDb,
@@ -150,72 +189,67 @@ async function updateCohortMembership(
   state: EoState | null,
   rule: CrystallizationRule,
 ): Promise<boolean> {
-  const oldTraitKey = await getTargetTraitKey(db, scope, target);
-  const newTraitKey = state ? computeTraitKey(state, rule.traits) : null;
+  const oldTraitHash = await getTargetTraitHash(db, scope, target);
 
-  if (oldTraitKey === newTraitKey) return false;
+  let newTraitHash: string | null = null;
+  let newTraits: Record<string, any> | null = null;
+  if (state) {
+    newTraits = extractTraits(state, rule.traits);
+    newTraitHash = newTraits ? hashTraits(newTraits) : null;
+  }
+
+  if (oldTraitHash === newTraitHash) return false;
 
   // Remove from old cohort
-  if (oldTraitKey !== null) {
-    const oldMembers = await getCohortMembers(db, scope, oldTraitKey);
-    const filtered = oldMembers.filter(m => m !== target);
-    if (filtered.length === 0) {
-      try { await db.del(`cryst-cohort:${scope}:${oldTraitKey}`); } catch {}
-    } else {
-      await db.put(`cryst-cohort:${scope}:${oldTraitKey}`, encode(filtered));
+  if (oldTraitHash !== null) {
+    const entry = await getCohortEntry(db, scope, oldTraitHash);
+    if (entry) {
+      entry.members = entry.members.filter(m => m !== target);
+      if (entry.members.length === 0) {
+        await delCohortEntry(db, scope, oldTraitHash);
+      } else {
+        await putCohortEntry(db, scope, oldTraitHash, entry);
+      }
     }
     try { await db.del(`cryst-trait:${scope}:${target}`); } catch {}
   }
 
   // Add to new cohort
-  if (newTraitKey !== null) {
-    const newMembers = await getCohortMembers(db, scope, newTraitKey);
-    if (!newMembers.includes(target)) {
-      newMembers.push(target);
-      newMembers.sort();
+  if (newTraitHash !== null && newTraits !== null) {
+    const entry = await getCohortEntry(db, scope, newTraitHash);
+    if (entry) {
+      if (!entry.members.includes(target)) {
+        entry.members.push(target);
+        entry.members.sort();
+      }
+      await putCohortEntry(db, scope, newTraitHash, entry);
+    } else {
+      await putCohortEntry(db, scope, newTraitHash, {
+        members: [target],
+        traits: newTraits,
+      });
     }
-    await db.put(`cryst-cohort:${scope}:${newTraitKey}`, encode(newMembers));
-    await db.put(`cryst-trait:${scope}:${target}`, encode(newTraitKey));
+    await db.put(`cryst-trait:${scope}:${target}`, encode(newTraitHash));
   }
 
   return true;
 }
 
 /**
- * Compute the trait key for a state, or null if the state lacks required traits.
- */
-function computeTraitKey(state: EoState, traitKeys: string[]): string | null {
-  if (!state.value || typeof state.value !== 'object') return null;
-  if (state.value._alias || state.value._deleted) return null;
-
-  const parts: string[] = [];
-  for (const key of traitKeys) {
-    const val = state.value[key];
-    if (val === undefined || val === null) return null;
-    parts.push(`${key}:${JSON.stringify(val)}`);
-  }
-  parts.sort();
-  return parts.join('|');
-}
-
-/**
- * Read all qualifying cohorts from the index.
+ * Read all cohorts from the index, partitioned by qualifying (≥ min) and sub-threshold.
  * Only runs when the stability window is hit — not on every event.
  */
-async function getQualifyingCohorts(
+async function getAllCohorts(
   db: EoDb,
   scope: string,
-  minMembers: number,
-): Promise<Array<{ traitKey: string; members: string[] }>> {
-  const cohorts: Array<{ traitKey: string; members: string[] }> = [];
+): Promise<Array<{ traitHash: string; entry: CohortEntry }>> {
+  const cohorts: Array<{ traitHash: string; entry: CohortEntry }> = [];
   const prefix = `cryst-cohort:${scope}:`;
 
   for await (const [key, buf] of db.iterator({ gte: prefix, lte: `${prefix}\xff` })) {
-    const members = decode(buf) as string[];
-    if (members.length >= minMembers) {
-      const traitKey = key.slice(prefix.length);
-      cohorts.push({ traitKey, members });
-    }
+    const entry = decode(buf) as CohortEntry;
+    const traitHash = key.slice(prefix.length);
+    cohorts.push({ traitHash, entry });
   }
 
   return cohorts;
@@ -225,19 +259,16 @@ async function getQualifyingCohorts(
 
 /**
  * Deterministic target for a crystallized cohort.
- *
- * Identity is scope + trait signature — NOT the members.
- * The cohort "attorney:sarah|type:regulatory" under "firm.cases" is always
- * the same entity regardless of how many cases match. If a new case joins
- * the cohort, the entity is updated (DEF), not duplicated.
+ * Identity is scope + trait hash — NOT the members.
  */
-function crystallizedEntityTarget(scope: string, traitKey: string): string {
-  const identity = `${scope}|${traitKey}`;
+function crystallizedEntityTarget(scope: string, traitHash: string): string {
+  // Use scope + traitHash directly — traitHash is already a sha256 prefix
+  const identity = `${scope}|${traitHash}`;
   const hash = createHash('sha256').update(identity).digest('hex').slice(0, 12);
   return `system.cryst.${hash}`;
 }
 
-// ─── Reverse Dependency Index (shared pattern with fold.ts) ──────────
+// ─── Reverse Dependency Index ────────────────────────────────────────
 
 async function addReverseDep(db: EoDb, constituent: string, derivedTarget: string): Promise<void> {
   await db.put(`rdep:${constituent}:${derivedTarget}`, encode(derivedTarget));
@@ -250,12 +281,8 @@ async function removeReverseDep(db: EoDb, constituent: string, derivedTarget: st
 // ─── Main Entry Point ────────────────────────────────────────────────
 
 /**
- * Detect whether any crystallization rule fires for the changed target.
- * Called by the fold after every event, at the same level as detectAndEmitREC.
- *
- * INCREMENTAL: looks up the changed target's old and new trait keys,
- * updates two index entries if they differ, and bumps a counter.
- * Only reads the cohort index when the counter hits the window.
+ * Called by the fold after every event. Incremental — O(1) on most events,
+ * O(cohorts) when the stability window is hit.
  */
 export async function detectAndEmitCrystallization(
   db: EoDb,
@@ -267,20 +294,8 @@ export async function detectAndEmitCrystallization(
   if (!rule) return;
 
   const currentState = await getState(db, changedTarget);
-  await processCohortRule(db, rule, changedTarget, currentState, triggeringEvent, feed);
-}
 
-// ─── Cohort Forms (incremental) ──────────────────────────────────────
-
-async function processCohortRule(
-  db: EoDb,
-  rule: CrystallizationRule,
-  changedTarget: string,
-  currentState: EoState | null,
-  triggeringEvent: EoEvent,
-  feed?: Feed,
-): Promise<void> {
-  // Incrementally update cohort membership for the changed target
+  // Update the cohort index for this one target
   const structureChanged = await updateCohortMembership(
     db, rule.scope, changedTarget, currentState, rule,
   );
@@ -288,24 +303,30 @@ async function processCohortRule(
   const stability = await getStabilityState(db, rule.scope);
 
   if (structureChanged) {
-    // Cohort structure shifted — reset counter
+    // Cohort structure shifted — reset counter, check for zombies
     await setStabilityState(db, {
       scope: rule.scope,
       snapshot_hash: '',
       counter: 0,
       last_seq: triggeringEvent.seq,
     });
+
+    // A member moved between cohorts. The old cohort may have shrunk below
+    // min_members. If it had a crystallized entity, mark it inert.
+    await retireSubThresholdEntities(db, rule);
   } else {
     // Structure held — increment counter
     const newCounter = (stability?.counter ?? 0) + 1;
 
     if (newCounter >= rule.window) {
       // Window reached — crystallize qualifying cohorts
-      const cohorts = await getQualifyingCohorts(db, rule.scope, rule.min_members);
-      for (const cohort of cohorts) {
-        await crystallizeCohort(db, rule, cohort.traitKey, cohort.members, triggeringEvent, feed);
+      const cohorts = await getAllCohorts(db, rule.scope);
+      for (const { traitHash, entry } of cohorts) {
+        if (entry.members.length >= rule.min_members) {
+          await crystallizeCohort(db, rule, traitHash, entry, triggeringEvent, feed);
+        }
       }
-      // Reset counter — the birth of new entities changes the landscape
+      // Reset counter
       await setStabilityState(db, {
         scope: rule.scope,
         snapshot_hash: '',
@@ -323,32 +344,63 @@ async function processCohortRule(
   }
 }
 
-async function crystallizeCohort(
+// ─── Zombie Retirement ───────────────────────────────────────────────
+
+/**
+ * When a cohort shrinks below min_members, mark its crystallized entity inert.
+ * Scans the cohort index (cheap — proportional to distinct cohorts, not records)
+ * and checks each sub-threshold cohort for an existing crystallized entity.
+ */
+async function retireSubThresholdEntities(
   db: EoDb,
   rule: CrystallizationRule,
-  traitKey: string,
-  members: string[],
-  triggeringEvent: EoEvent,
-  feed?: Feed,
 ): Promise<void> {
-  // Identity is scope + trait signature, NOT members
-  const derivedTargetId = crystallizedEntityTarget(rule.scope, traitKey);
+  const cohorts = await getAllCohorts(db, rule.scope);
 
-  // Parse trait values from the key for the operand
-  const traits: Record<string, any> = {};
-  for (const part of traitKey.split('|')) {
-    const colonIdx = part.indexOf(':');
-    if (colonIdx > 0) {
-      const k = part.slice(0, colonIdx);
-      try { traits[k] = JSON.parse(part.slice(colonIdx + 1)); } catch {
-        traits[k] = part.slice(colonIdx + 1);
+  for (const { traitHash, entry } of cohorts) {
+    if (entry.members.length >= rule.min_members) continue;
+
+    const derivedTargetId = crystallizedEntityTarget(rule.scope, traitHash);
+    let derived: DerivedEntity | null = null;
+    try {
+      const buf = await db.get(`derived:${derivedTargetId}`);
+      derived = decode(buf) as DerivedEntity;
+    } catch (e: any) {
+      if (e.code === 'LEVEL_NOT_FOUND') continue;
+      throw e;
+    }
+
+    if (derived && !derived.inert) {
+      derived.inert = true;
+      await db.put(`derived:${derivedTargetId}`, encode(derived));
+
+      // Mark the state as inert too so Horizon can reflect it
+      const existing = await getState(db, derivedTargetId);
+      if (existing) {
+        await setState(db, {
+          ...existing,
+          value: { ...existing.value, _inert: true },
+        });
       }
     }
   }
+}
+
+// ─── Crystallize a Cohort ────────────────────────────────────────────
+
+async function crystallizeCohort(
+  db: EoDb,
+  rule: CrystallizationRule,
+  traitHash: string,
+  entry: CohortEntry,
+  triggeringEvent: EoEvent,
+  feed?: Feed,
+): Promise<void> {
+  const derivedTargetId = crystallizedEntityTarget(rule.scope, traitHash);
 
   const derivedOperand = {
-    constituents: members,
-    traits,
+    constituents: entry.members,
+    traits: entry.traits,
     scope: rule.scope,
     topology: 'cohort',
   };
@@ -357,14 +409,15 @@ async function crystallizeCohort(
   const now = new Date().toISOString();
 
   if (existing) {
-    // Cohort already crystallized — update with current members if they changed
+    // Already crystallized — update if members changed, revive if inert
     const existingConstituents: string[] = existing.value?.constituents ?? [];
-    if (existingConstituents.length === members.length &&
-        existingConstituents.every((c: string, i: number) => c === members[i])) {
-      return; // Same members — nothing to update
-    }
+    const wasInert = existing.value?._inert === true;
+    const membersMatch =
+      existingConstituents.length === entry.members.length &&
+      existingConstituents.every((c: string, i: number) => c === entry.members[i]);
 
-    // Members changed — update the entity and fix reverse deps
+    if (membersMatch && !wasInert) return;
+
     const updateSeq = await nextSeq(db);
     const updateEvent: EoEvent = {
       seq: updateSeq,
@@ -389,23 +442,23 @@ async function crystallizeCohort(
       last_acquired_ts: now,
     });
 
-    // Update reverse deps: remove old, add new
+    // Diff reverse deps
     for (const old of existingConstituents) {
-      if (!members.includes(old)) {
+      if (!entry.members.includes(old)) {
         await removeReverseDep(db, old, derivedTargetId);
       }
     }
-    for (const member of members) {
+    for (const member of entry.members) {
       if (!existingConstituents.includes(member)) {
         await addReverseDep(db, member, derivedTargetId);
       }
     }
 
-    // Update derived entity registration
+    // Revive if was inert
     const derived: DerivedEntity = {
       target: derivedTargetId,
       level: existing.level,
-      constituents: members,
+      constituents: entry.members,
       topology: 'cohort',
       inert: false,
     };
@@ -415,7 +468,7 @@ async function crystallizeCohort(
   } else {
     // New crystallization — INS at the next level
     let maxLevel = 1;
-    for (const member of members) {
+    for (const member of entry.members) {
       const state = await getState(db, member);
       if (state && state.level > maxLevel) maxLevel = state.level;
     }
@@ -449,13 +502,13 @@ async function crystallizeCohort(
     const derived: DerivedEntity = {
       target: derivedTargetId,
       level: derivedLevel,
-      constituents: members,
+      constituents: entry.members,
       topology: 'cohort',
       inert: false,
     };
     await db.put(`derived:${derivedTargetId}`, encode(derived));
 
-    for (const member of members) {
+    for (const member of entry.members) {
       await addReverseDep(db, member, derivedTargetId);
     }
 
