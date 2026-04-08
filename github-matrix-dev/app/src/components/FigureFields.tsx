@@ -7,6 +7,7 @@ import { useTheme, type Theme } from '../theme';
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 import { useIdResolver, isEntityId, isEntityIdArray, type IdResolver } from '../hooks/useIdResolver';
 import { syncEditToAirtable } from '../ingestion/airtable-writeback';
+import { getAirtableTypeIcon, getAirtableTypeColor } from './field-type-icons';
 
 interface FigureFieldsProps {
   figure: EoState;
@@ -313,6 +314,28 @@ export function FigureFields({ figure, onNavigate, profileFields }: FigureFields
   );
 }
 
+/** Detect an array of Airtable field-definition objects: [{id, name, type, ...}] */
+function isAirtableFieldArray(val: unknown): val is Array<{ id: string; name: string; type: string }> {
+  if (!Array.isArray(val) || val.length === 0) return false;
+  const first = val[0];
+  return (
+    typeof first === 'object' &&
+    first !== null &&
+    'id' in first &&
+    'name' in first &&
+    'type' in first
+  );
+}
+
+/** Detect an array where every element is a non-null, non-string object */
+function isObjectArray(val: unknown): val is Record<string, unknown>[] {
+  return (
+    Array.isArray(val) &&
+    val.length > 0 &&
+    val.every((v) => typeof v === 'object' && v !== null)
+  );
+}
+
 function renderFieldValue(
   val: any,
   onNavigate: (t: string) => void,
@@ -398,6 +421,88 @@ function renderFieldValue(
             </div>
           );
         })}
+      </div>
+    );
+  }
+
+  // Airtable field-definition array: [{id, name, type, description?, ...}]
+  if (isAirtableFieldArray(val)) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
+        {val.map((field) => {
+          const icon = getAirtableTypeIcon(field.type);
+          const color = getAirtableTypeColor(field.type);
+          const desc = (field as Record<string, unknown>).description as string | undefined;
+          return (
+            <div
+              key={field.id}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                padding: '5px 0',
+                borderBottom: `1px solid ${t.borderLight}`,
+              }}
+            >
+              <span
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  width: 24,
+                  height: 20,
+                  borderRadius: 4,
+                  fontSize: 9,
+                  fontFamily: "'JetBrains Mono', monospace",
+                  background: t.bgMuted,
+                  color,
+                  flexShrink: 0,
+                  letterSpacing: '-0.5px',
+                }}
+              >
+                {icon}
+              </span>
+              <span style={{ fontSize: 13, color: t.text, flex: 1, minWidth: 0 }}>
+                {field.name}
+                {desc && (
+                  <span style={{ fontSize: 11, color: t.textMuted, marginLeft: 8 }}>{desc}</span>
+                )}
+              </span>
+              <span
+                style={{
+                  fontSize: 10,
+                  color: t.textMuted,
+                  fontFamily: "'JetBrains Mono', monospace",
+                  flexShrink: 0,
+                }}
+              >
+                {field.type}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+
+  // Generic object array — render each item as an expandable key-value block
+  if (isObjectArray(val)) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        {val.map((item, i) => (
+          <div
+            key={i}
+            style={{
+              padding: '4px 8px',
+              borderRadius: 4,
+              background: t.bgMuted,
+              border: `1px solid ${t.borderLight}`,
+              fontSize: 12,
+            }}
+          >
+            {renderFieldValue(item, onNavigate, t, resolver)}
+          </div>
+        ))}
       </div>
     );
   }

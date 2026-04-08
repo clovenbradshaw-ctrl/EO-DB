@@ -2223,6 +2223,8 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                 onSelectScope={(scope) => { navigate({ view: 'records', scope, record: null }); }}
                 onSelectSegment={(_scope, _seg) => { navigate({ view: 'records', scope: _scope }); }}
                 userId={session.userId}
+                selectedRecord={selectedRecord}
+                onSelectRecord={(rec) => navigate({ record: rec })}
               />
             </>
           )}
@@ -2362,8 +2364,17 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                       userTypeDefinitions={spaceUserTypeDefinitions}
                       canManageSlices={currentPermissions?.can_build_slices}
                     />
+                    <ScopeBreadcrumb
+                      scope={selectedScope}
+                      allStates={allStates}
+                      theme={theme}
+                      onNavigate={(sc) => navigate({ view: 'records', scope: sc, record: null })}
+                    />
                     {activeSliceType === 'schema' ? (
-                      <SchemaView scope={selectedScope} />
+                      <SchemaView
+                        scope={selectedScope}
+                        onFieldSelect={(fieldKey) => navigate({ record: `${selectedScope}._schema.${fieldKey}` })}
+                      />
                     ) : activeSliceType === 'graph' ? (
                       <GraphView allStates={allStates} />
                     ) : activeSliceType === 'grid' ? (
@@ -2541,6 +2552,84 @@ function RecordPageOrDrawer({ recordTarget, allStates, onClose, onNavigate, prof
       isMobile={isMobile}
       layoutType={layoutType}
     />
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ScopeBreadcrumb — clickable path navigation above grid/schema
+// ---------------------------------------------------------------------------
+
+interface ScopeBreadcrumbProps {
+  scope: string;
+  allStates: EoState[];
+  theme: Theme;
+  onNavigate: (scope: string) => void;
+}
+
+function ScopeBreadcrumb({ scope, allStates, theme, onNavigate }: ScopeBreadcrumbProps) {
+  const parts = scope.split('.');
+  // Cap at last 3 segments for narrow layouts
+  const showEllipsis = parts.length > 3;
+  const visibleParts = showEllipsis ? parts.slice(-3) : parts;
+  const startIndex = showEllipsis ? parts.length - 3 : 0;
+
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 2,
+        padding: '4px 12px',
+        borderBottom: `1px solid ${theme.borderLight}`,
+        fontSize: 11,
+        color: theme.textMuted,
+        flexWrap: 'nowrap' as const,
+        overflow: 'hidden',
+        minHeight: 26,
+        flexShrink: 0,
+        background: theme.bgCard,
+      }}
+    >
+      {showEllipsis && (
+        <>
+          <span style={{ color: theme.textMuted, opacity: 0.5 }}>&hellip;</span>
+          <span style={{ color: theme.borderLight, margin: '0 2px' }}>/</span>
+        </>
+      )}
+      {visibleParts.map((seg, i) => {
+        const actualIndex = startIndex + i;
+        const fullPath = parts.slice(0, actualIndex + 1).join('.');
+        const isLast = actualIndex === parts.length - 1;
+        const stateForSeg = allStates.find((st) => st.target === fullPath);
+        const label = (stateForSeg?.value?.name as string | undefined) || formatName(seg);
+
+        return (
+          <span key={fullPath} style={{ display: 'flex', alignItems: 'center', gap: 2, minWidth: 0 }}>
+            {i > 0 && (
+              <span style={{ color: theme.borderLight, flexShrink: 0, margin: '0 1px' }}>/</span>
+            )}
+            <span
+              onClick={isLast ? undefined : () => onNavigate(fullPath)}
+              style={{
+                fontWeight: isLast ? 600 : 400,
+                color: isLast ? theme.text : theme.accent,
+                cursor: isLast ? 'default' : 'pointer',
+                padding: '1px 3px',
+                borderRadius: 3,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap' as const,
+                maxWidth: 160,
+                flexShrink: 1,
+              }}
+              title={label}
+            >
+              {label}
+            </span>
+          </span>
+        );
+      })}
+    </div>
   );
 }
 

@@ -8,6 +8,7 @@ import { useTheme, type Theme } from '../theme';
 import { formatName } from './scope-picker-utils';
 import { deriveColumns, buildFieldNameMap } from './filter-types';
 import type { EoEvent, EoState } from '../db/types';
+import { getAirtableTypeIcon, getAirtableTypeColor } from './field-type-icons';
 
 // ─── Operator colors (matches LogView) ──────────────────────────────────
 
@@ -184,9 +185,10 @@ function SchemaFieldHistory({ scope, fieldKey }: { scope: string; fieldKey: stri
 
 interface SchemaViewProps {
   scope: string;
+  onFieldSelect?: (fieldKey: string) => void;
 }
 
-export function SchemaView({ scope }: SchemaViewProps) {
+export function SchemaView({ scope, onFieldSelect }: SchemaViewProps) {
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
   const getState = useEoStore((s) => s.getState);
   const dispatch = useEoStore((s) => s.dispatch);
@@ -648,10 +650,35 @@ export function SchemaView({ scope }: SchemaViewProps) {
                         ...s.row,
                         ...(isExpanded ? { background: theme.bgMuted } : {}),
                       }}
-                      onClick={() => setExpandedField(isExpanded ? null : fs.fieldKey)}
+                      onClick={() => {
+                        setExpandedField(isExpanded ? null : fs.fieldKey);
+                        if (onFieldSelect) onFieldSelect(fs.fieldKey);
+                      }}
                     >
                       <div style={s.cell}>
                         <span style={s.expandIcon}>{isExpanded ? '\u25BE' : '\u25B8'}</span>
+                        {/* Type-icon chip — file-navigator style */}
+                        <span
+                          style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            width: 24,
+                            height: 20,
+                            borderRadius: 4,
+                            fontSize: 9,
+                            fontFamily: "'JetBrains Mono', monospace",
+                            background: theme.bgMuted,
+                            color: getAirtableTypeColor(typeDisplay),
+                            flexShrink: 0,
+                            marginRight: 4,
+                            letterSpacing: '-0.5px',
+                            border: `1px solid ${theme.borderLight}`,
+                          }}
+                          title={typeDisplay}
+                        >
+                          {getAirtableTypeIcon(typeDisplay)}
+                        </span>
                         {editingLabel?.fieldKey === fs.fieldKey ? (
                           <form
                             style={{ flex: 1 }}
