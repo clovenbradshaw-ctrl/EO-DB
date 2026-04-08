@@ -280,16 +280,27 @@ async function removeReverseDep(db: EoDb, constituent: string, derivedTarget: st
 
 // ─── Main Entry Point ────────────────────────────────────────────────
 
+/** Maximum crystallization recursion depth. Safety net — in practice each
+ *  level's counter resets on structural change so recursion terminates
+ *  naturally after one step per level. */
+const MAX_DEPTH = 8;
+
 /**
  * Called by the fold after every event. Incremental — O(1) on most events,
  * O(cohorts) when the stability window is hit.
+ *
+ * `depth` tracks recursion: when crystallizing an entity triggers further
+ * crystallization at the next level, depth increments. Capped at MAX_DEPTH.
  */
 export async function detectAndEmitCrystallization(
   db: EoDb,
   changedTarget: string,
   triggeringEvent: EoEvent,
   feed?: Feed,
+  depth: number = 0,
 ): Promise<void> {
+  if (depth >= MAX_DEPTH) return;
+
   const rule = await getRuleForTarget(db, changedTarget);
   if (!rule) return;
 
@@ -323,7 +334,7 @@ export async function detectAndEmitCrystallization(
       const cohorts = await getAllCohorts(db, rule.scope);
       for (const { traitHash, entry } of cohorts) {
         if (entry.members.length >= rule.min_members) {
-          await crystallizeCohort(db, rule, traitHash, entry, triggeringEvent, feed);
+          await crystallizeCohort(db, rule, traitHash, entry, triggeringEvent, feed, depth);
         }
       }
       // Reset counter
@@ -395,6 +406,7 @@ async function crystallizeCohort(
   entry: CohortEntry,
   triggeringEvent: EoEvent,
   feed?: Feed,
+  depth: number = 0,
 ): Promise<void> {
   const derivedTargetId = crystallizedEntityTarget(rule.scope, traitHash);
 
@@ -465,6 +477,9 @@ async function crystallizeCohort(
     await db.put(`derived:${derivedTargetId}`, encode(derived));
 
     if (feed) feed.notify(updateEvent);
+
+    // Recurse: the updated entity may participate in higher-level crystallization
+    await detectAndEmitCrystallization(db, derivedTargetId, triggeringEvent, feed, depth + 1);
   } else {
     // New crystallization — INS at the next level
     let maxLevel = 1;
@@ -513,5 +528,11 @@ async function crystallizeCohort(
     }
 
     if (feed) feed.notify(insEvent);
+
+    // Recurse: the newborn entity may participate in higher-level crystallization.
+    // This is safe: the new entity joining a scope is a structural change,
+    // which resets that scope's counter to 0. Crystallization can't fire
+    // again until `window` more events pass with no structural changes.
+    await detectAndEmitCrystallization(db, derivedTargetId, triggeringEvent, feed, depth + 1);
   }
 }

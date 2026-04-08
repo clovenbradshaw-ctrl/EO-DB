@@ -119,6 +119,20 @@ export interface HorizonResponse {
   graphMetrics?: GraphMetrics;
   /** REC cycle info — if this target is part of a dependency cycle */
   recCycle?: RecCycleInfo;
+  /** Crystallized entities this target is a constituent of */
+  crystallizedIn?: CrystallizedInEntry[];
+}
+
+/** A crystallized entity that this target participates in. */
+export interface CrystallizedInEntry {
+  /** Target path of the crystallized entity */
+  target: string;
+  /** Shared traits that define the cohort */
+  traits: Record<string, any>;
+  /** How many members in the cohort */
+  member_count: number;
+  /** Whether the crystallized entity is currently inert */
+  inert: boolean;
 }
 
 // An ancestor in the ontology chain — each level is a mini-Horizon
