@@ -120,22 +120,26 @@ export function addToKeyring(
  * This is the "waterfall" — a key at "app.tblClients" covers
  * "app.tblClients.rec123.fldSSN" unless a more specific key exists.
  */
+export interface ResolvedKey extends KeyringEntry {
+  keyId: string;
+}
+
 export function resolveKeyForTarget(
   keyring: LocalKeyring,
   target: string,
-): KeyringEntry | null {
+): ResolvedKey | null {
   // Build candidate scopes: exact target + all ancestor prefixes
   const parts = target.split('.');
-  let bestMatch: KeyringEntry | null = null;
+  let bestMatch: ResolvedKey | null = null;
   let bestDepth = -1;
 
-  for (const [, entry] of keyring.keys) {
+  for (const [keyId, entry] of keyring.keys) {
     // Check if this key's scope is a prefix of (or equal to) the target
     if (target === entry.scope || target.startsWith(entry.scope + '.')) {
       const depth = entry.scope.split('.').length;
       if (depth > bestDepth) {
         bestDepth = depth;
-        bestMatch = entry;
+        bestMatch = { ...entry, keyId };
       }
     }
   }
