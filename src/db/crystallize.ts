@@ -6,19 +6,23 @@
  * The crystallized entity is a real target in the keyspace — it can receive
  * CON edges, DEFs, EVA formulas, and participate in further crystallization.
  *
- * Two predicates:
+ * Predicate:
  *   - cohort_forms: targets under a scope share trait values and the grouping
  *     persists across `window` consecutive events touching the scope.
- *   - hash_stable: the set of {target → transformation hash} under a scope
- *     is unchanged for `window` consecutive events.
+ *     "Stable" means the trait groupings don't change — not that nothing happens.
+ *     Events keep flowing, but the cohort structure holds.
  *
  * INCREMENTAL: no full-scope scans at fold time. The fold knows what changed
  * (one target, old state → new state). The cohort index is maintained as a
  * side effect of each event, not recomputed from scratch.
  *
+ * Cohort identity is keyed by scope + trait signature (e.g. "attorney:sarah|type:regulatory"),
+ * NOT by its members. If a cohort grows or shrinks, the same derived entity is updated.
+ * New cohort forming = new entity. Existing cohort gaining a member = DEF on same entity.
+ *
  * Storage keys:
  *   cryst-rule:{scope}                     — the crystallization rule
- *   cryst-snap:{scope}                     — stability state (counter + snapshot hash)
+ *   cryst-snap:{scope}                     — stability state (counter)
  *   cryst-trait:{scope}:{target}           — current trait key for a target in this scope
  *   cryst-cohort:{scope}:{traitKey}        — serialized member list for a cohort
  *   derived:{target}                       — DerivedEntity registration (shared with REC)
@@ -67,45 +71,31 @@ export async function removeCrystallizationRule(
   } catch (e: any) {
     if (e.code !== 'LEVEL_NOT_FOUND') throw e;
   }
-  // Clean up cohort index entries for this scope
-  for await (const [key] of db.iterator({
-    gte: `cryst-trait:${scope}:`,
-    lte: `cryst-trait:${scope}:\xff`,
-  })) {
-    try { await db.del(key); } catch {}
-  }
-  for await (const [key] of db.iterator({
-    gte: `cryst-cohort:${scope}:`,
-    lte: `cryst-cohort:${scope}:\xff`,
-  })) {
-    try { await db.del(key); } catch {}
+  // Clean up all index entries for this scope
+  const prefixes = [`cryst-trait:${scope}:`, `cryst-cohort:${scope}:`];
+  for (const pfx of prefixes) {
+    for await (const [key] of db.iterator({ gte: pfx, lte: `${pfx}\xff` })) {
+      try { await db.del(key); } catch {}
+    }
   }
 }
 
 /**
- * Find all crystallization rules whose scope is a prefix of the changed target.
- * Only checks scopes that are proper ancestors — the target must be a
- * direct child of the scope (record-level) for the rule to apply.
+ * Find the crystallization rule for the scope that is the direct parent
+ * of the changed target. A target "firm.cases.rec001" matches a rule
+ * at "firm.cases" (its parent). We only check the direct parent scope
+ * because targets must be direct children of the scope.
  */
-async function getRulesForTarget(
+async function getRuleForTarget(
   db: EoDb,
   target: string,
-): Promise<{ rule: CrystallizationRule; targetInScope: boolean }[]> {
+): Promise<CrystallizationRule | null> {
   const parts = target.split('.');
-  const results: { rule: CrystallizationRule; targetInScope: boolean }[] = [];
+  if (parts.length < 2) return null;
 
-  // Walk up the prefix chain. A rule at depth D applies to targets at depth D+1.
-  for (let depth = parts.length - 1; depth >= 1; depth--) {
-    const scope = parts.slice(0, depth).join('.');
-    const rule = await getCrystallizationRule(db, scope);
-    if (rule) {
-      // Target is a direct child of scope if it's exactly one level deeper
-      const targetInScope = parts.length === depth + 1;
-      results.push({ rule, targetInScope });
-    }
-  }
-
-  return results;
+  // The scope is the parent prefix: firm.cases for firm.cases.rec001
+  const scope = parts.slice(0, parts.length - 1).join('.');
+  return getCrystallizationRule(db, scope);
 }
 
 // ─── Stability Tracking ──────────────────────────────────────────────
@@ -126,9 +116,6 @@ async function setStabilityState(db: EoDb, state: CrystStabilityState): Promise<
 
 // ─── Incremental Cohort Index ────────────────────────────────────────
 
-/**
- * Get the current trait key for a target in a scope.
- */
 async function getTargetTraitKey(db: EoDb, scope: string, target: string): Promise<string | null> {
   try {
     const buf = await db.get(`cryst-trait:${scope}:${target}`);
@@ -139,9 +126,6 @@ async function getTargetTraitKey(db: EoDb, scope: string, target: string): Promi
   }
 }
 
-/**
- * Get the current members of a cohort.
- */
 async function getCohortMembers(db: EoDb, scope: string, traitKey: string): Promise<string[]> {
   try {
     const buf = await db.get(`cryst-cohort:${scope}:${traitKey}`);
@@ -155,8 +139,9 @@ async function getCohortMembers(db: EoDb, scope: string, traitKey: string): Prom
 /**
  * Update a target's cohort membership. Returns whether the cohort structure changed.
  *
- * This is the incremental core. One target changed — we update two index entries
- * (old cohort, new cohort) and one trait mapping. No scan.
+ * This is the incremental core. One target changed — we look up its old trait key,
+ * compute the new one from the current state, and if they differ we move it
+ * between cohorts. Two index writes, no scan.
  */
 async function updateCohortMembership(
   db: EoDb,
@@ -168,7 +153,6 @@ async function updateCohortMembership(
   const oldTraitKey = await getTargetTraitKey(db, scope, target);
   const newTraitKey = state ? computeTraitKey(state, rule.traits) : null;
 
-  // No change in trait assignment
   if (oldTraitKey === newTraitKey) return false;
 
   // Remove from old cohort
@@ -194,7 +178,7 @@ async function updateCohortMembership(
     await db.put(`cryst-trait:${scope}:${target}`, encode(newTraitKey));
   }
 
-  return true; // Structure changed
+  return true;
 }
 
 /**
@@ -215,7 +199,8 @@ function computeTraitKey(state: EoState, traitKeys: string[]): string | null {
 }
 
 /**
- * Read all qualifying cohorts from the index (no full-scope scan).
+ * Read all qualifying cohorts from the index.
+ * Only runs when the stability window is hit — not on every event.
  */
 async function getQualifyingCohorts(
   db: EoDb,
@@ -238,14 +223,16 @@ async function getQualifyingCohorts(
 
 // ─── Crystallized Entity Target ──────────────────────────────────────
 
-function crystallizedEntityTarget(scope: string, traitKey: string, members: string[]): string {
-  const identity = `${scope}|${traitKey}|${members.join(',')}`;
-  const hash = createHash('sha256').update(identity).digest('hex').slice(0, 12);
-  return `system.cryst.${hash}`;
-}
-
-function hashStableEntityTarget(scope: string, snapshotHash: string): string {
-  const identity = `stable|${scope}|${snapshotHash}`;
+/**
+ * Deterministic target for a crystallized cohort.
+ *
+ * Identity is scope + trait signature — NOT the members.
+ * The cohort "attorney:sarah|type:regulatory" under "firm.cases" is always
+ * the same entity regardless of how many cases match. If a new case joins
+ * the cohort, the entity is updated (DEF), not duplicated.
+ */
+function crystallizedEntityTarget(scope: string, traitKey: string): string {
+  const identity = `${scope}|${traitKey}`;
   const hash = createHash('sha256').update(identity).digest('hex').slice(0, 12);
   return `system.cryst.${hash}`;
 }
@@ -253,8 +240,11 @@ function hashStableEntityTarget(scope: string, snapshotHash: string): string {
 // ─── Reverse Dependency Index (shared pattern with fold.ts) ──────────
 
 async function addReverseDep(db: EoDb, constituent: string, derivedTarget: string): Promise<void> {
-  const key = `rdep:${constituent}:${derivedTarget}`;
-  await db.put(key, encode(derivedTarget));
+  await db.put(`rdep:${constituent}:${derivedTarget}`, encode(derivedTarget));
+}
+
+async function removeReverseDep(db: EoDb, constituent: string, derivedTarget: string): Promise<void> {
+  try { await db.del(`rdep:${constituent}:${derivedTarget}`); } catch {}
 }
 
 // ─── Main Entry Point ────────────────────────────────────────────────
@@ -263,9 +253,9 @@ async function addReverseDep(db: EoDb, constituent: string, derivedTarget: strin
  * Detect whether any crystallization rule fires for the changed target.
  * Called by the fold after every event, at the same level as detectAndEmitREC.
  *
- * INCREMENTAL: does not scan the scope. Looks up the changed target's old
- * and new trait keys, updates two index entries, and bumps a counter.
- * Only does a (cheap) index scan when the counter hits the window threshold.
+ * INCREMENTAL: looks up the changed target's old and new trait keys,
+ * updates two index entries if they differ, and bumps a counter.
+ * Only reads the cohort index when the counter hits the window.
  */
 export async function detectAndEmitCrystallization(
   db: EoDb,
@@ -273,19 +263,11 @@ export async function detectAndEmitCrystallization(
   triggeringEvent: EoEvent,
   feed?: Feed,
 ): Promise<void> {
-  const matches = await getRulesForTarget(db, changedTarget);
-  if (matches.length === 0) return;
+  const rule = await getRuleForTarget(db, changedTarget);
+  if (!rule) return;
 
-  // Get the current state of the changed target (just written by the fold)
   const currentState = await getState(db, changedTarget);
-
-  for (const { rule, targetInScope } of matches) {
-    if (rule.predicate === 'cohort_forms') {
-      await processCohortRule(db, rule, changedTarget, currentState, targetInScope, triggeringEvent, feed);
-    } else if (rule.predicate === 'hash_stable') {
-      await processHashStableRule(db, rule, changedTarget, currentState, targetInScope, triggeringEvent, feed);
-    }
-  }
+  await processCohortRule(db, rule, changedTarget, currentState, triggeringEvent, feed);
 }
 
 // ─── Cohort Forms (incremental) ──────────────────────────────────────
@@ -295,26 +277,21 @@ async function processCohortRule(
   rule: CrystallizationRule,
   changedTarget: string,
   currentState: EoState | null,
-  targetInScope: boolean,
   triggeringEvent: EoEvent,
   feed?: Feed,
 ): Promise<void> {
-  // Only update index for direct children of the scope
-  if (!targetInScope) return;
-
   // Incrementally update cohort membership for the changed target
   const structureChanged = await updateCohortMembership(
     db, rule.scope, changedTarget, currentState, rule,
   );
 
-  // Update stability counter
   const stability = await getStabilityState(db, rule.scope);
 
   if (structureChanged) {
-    // Structure changed — reset counter
+    // Cohort structure shifted — reset counter
     await setStabilityState(db, {
       scope: rule.scope,
-      snapshot_hash: '', // irrelevant for cohort_forms — we track via structureChanged
+      snapshot_hash: '',
       counter: 0,
       last_seq: triggeringEvent.seq,
     });
@@ -328,7 +305,7 @@ async function processCohortRule(
       for (const cohort of cohorts) {
         await crystallizeCohort(db, rule, cohort.traitKey, cohort.members, triggeringEvent, feed);
       }
-      // Reset counter — birth of new entities changes the landscape
+      // Reset counter — the birth of new entities changes the landscape
       await setStabilityState(db, {
         scope: rule.scope,
         snapshot_hash: '',
@@ -354,17 +331,10 @@ async function crystallizeCohort(
   triggeringEvent: EoEvent,
   feed?: Feed,
 ): Promise<void> {
-  const derivedTargetId = crystallizedEntityTarget(rule.scope, traitKey, members);
+  // Identity is scope + trait signature, NOT members
+  const derivedTargetId = crystallizedEntityTarget(rule.scope, traitKey);
 
-  // Determine level: one above the highest constituent
-  let maxLevel = 1;
-  for (const member of members) {
-    const state = await getState(db, member);
-    if (state && state.level > maxLevel) maxLevel = state.level;
-  }
-  const derivedLevel = maxLevel + 1;
-
-  // Parse trait values back from the key for the operand
+  // Parse trait values from the key for the operand
   const traits: Record<string, any> = {};
   for (const part of traitKey.split('|')) {
     const colonIdx = part.indexOf(':');
@@ -381,21 +351,20 @@ async function crystallizeCohort(
     traits,
     scope: rule.scope,
     topology: 'cohort',
-    predicate: rule.predicate,
   };
 
   const existing = await getState(db, derivedTargetId);
   const now = new Date().toISOString();
 
   if (existing) {
-    // Cohort already crystallized — only update if members changed
-    const existingConstituents = existing.value?.constituents;
-    if (Array.isArray(existingConstituents) &&
-        existingConstituents.length === members.length &&
+    // Cohort already crystallized — update with current members if they changed
+    const existingConstituents: string[] = existing.value?.constituents ?? [];
+    if (existingConstituents.length === members.length &&
         existingConstituents.every((c: string, i: number) => c === members[i])) {
-      return;
+      return; // Same members — nothing to update
     }
 
+    // Members changed — update the entity and fix reverse deps
     const updateSeq = await nextSeq(db);
     const updateEvent: EoEvent = {
       seq: updateSeq,
@@ -419,9 +388,39 @@ async function crystallizeCohort(
       last_ts: now,
       last_acquired_ts: now,
     });
+
+    // Update reverse deps: remove old, add new
+    for (const old of existingConstituents) {
+      if (!members.includes(old)) {
+        await removeReverseDep(db, old, derivedTargetId);
+      }
+    }
+    for (const member of members) {
+      if (!existingConstituents.includes(member)) {
+        await addReverseDep(db, member, derivedTargetId);
+      }
+    }
+
+    // Update derived entity registration
+    const derived: DerivedEntity = {
+      target: derivedTargetId,
+      level: existing.level,
+      constituents: members,
+      topology: 'cohort',
+      inert: false,
+    };
+    await db.put(`derived:${derivedTargetId}`, encode(derived));
+
     if (feed) feed.notify(updateEvent);
   } else {
     // New crystallization — INS at the next level
+    let maxLevel = 1;
+    for (const member of members) {
+      const state = await getState(db, member);
+      if (state && state.level > maxLevel) maxLevel = state.level;
+    }
+    const derivedLevel = maxLevel + 1;
+
     const insSeq = await nextSeq(db);
     const insEvent: EoEvent = {
       seq: insSeq,
@@ -462,154 +461,4 @@ async function crystallizeCohort(
 
     if (feed) feed.notify(insEvent);
   }
-}
-
-// ─── Hash Stable (incremental) ───────────────────────────────────────
-
-async function processHashStableRule(
-  db: EoDb,
-  rule: CrystallizationRule,
-  changedTarget: string,
-  currentState: EoState | null,
-  targetInScope: boolean,
-  triggeringEvent: EoEvent,
-  feed?: Feed,
-): Promise<void> {
-  if (!targetInScope) return;
-
-  // The fold just wrote a new state for changedTarget.
-  // If the hash changed, the scope's configuration shifted. If not, it's stable.
-  // We store the previous hash per-target to compare without scanning.
-  const prevHashKey = `cryst-prevhash:${rule.scope}:${changedTarget}`;
-  let prevHash: string | null = null;
-  try {
-    const buf = await db.get(prevHashKey);
-    prevHash = decode(buf) as string;
-  } catch (e: any) {
-    if (e.code !== 'LEVEL_NOT_FOUND') throw e;
-  }
-
-  const newHash = currentState?.hash ?? null;
-
-  // Update stored hash
-  if (newHash !== null) {
-    await db.put(prevHashKey, encode(newHash));
-  } else {
-    try { await db.del(prevHashKey); } catch {}
-  }
-
-  const hashChanged = prevHash !== newHash;
-  const stability = await getStabilityState(db, rule.scope);
-
-  if (hashChanged) {
-    await setStabilityState(db, {
-      scope: rule.scope,
-      snapshot_hash: newHash ?? '',
-      counter: 0,
-      last_seq: triggeringEvent.seq,
-    });
-  } else {
-    const newCounter = (stability?.counter ?? 0) + 1;
-
-    if (newCounter >= rule.window) {
-      await crystallizeStableScope(db, rule, triggeringEvent, feed);
-      await setStabilityState(db, {
-        scope: rule.scope,
-        snapshot_hash: newHash ?? '',
-        counter: 0,
-        last_seq: triggeringEvent.seq,
-      });
-    } else {
-      await setStabilityState(db, {
-        scope: rule.scope,
-        snapshot_hash: newHash ?? '',
-        counter: newCounter,
-        last_seq: triggeringEvent.seq,
-      });
-    }
-  }
-}
-
-/**
- * When hash_stable fires, collect current members from the per-target hash index.
- * This is the only scan — and it only runs when the window threshold is hit,
- * not on every event.
- */
-async function crystallizeStableScope(
-  db: EoDb,
-  rule: CrystallizationRule,
-  triggeringEvent: EoEvent,
-  feed?: Feed,
-): Promise<void> {
-  // Collect all targets we're tracking hashes for in this scope
-  const members: string[] = [];
-  const prefix = `cryst-prevhash:${rule.scope}:`;
-  for await (const [key] of db.iterator({ gte: prefix, lte: `${prefix}\xff` })) {
-    members.push(key.slice(prefix.length));
-  }
-  members.sort();
-
-  if (members.length < rule.min_members) return;
-
-  // Build a composite hash of all member hashes for deterministic identity
-  const compositeHash = createHash('sha256').update(members.join('|')).digest('hex').slice(0, 16);
-  const derivedTargetId = hashStableEntityTarget(rule.scope, compositeHash);
-
-  const existing = await getState(db, derivedTargetId);
-  if (existing) return;
-
-  let maxLevel = 1;
-  for (const member of members) {
-    const state = await getState(db, member);
-    if (state && state.level > maxLevel) maxLevel = state.level;
-  }
-  const derivedLevel = maxLevel + 1;
-
-  const derivedOperand = {
-    constituents: members,
-    scope: rule.scope,
-    topology: 'stable',
-    predicate: rule.predicate,
-  };
-
-  const now = new Date().toISOString();
-  const insSeq = await nextSeq(db);
-  const insEvent: EoEvent = {
-    seq: insSeq,
-    op: 'INS',
-    target: derivedTargetId,
-    operand: derivedOperand,
-    agent: 'system:crystallize',
-    level: derivedLevel,
-    ts: now,
-    acquired_ts: now,
-    triggered_by: triggeringEvent.seq,
-  };
-  await appendToLog(db, insEvent);
-  await setState(db, {
-    target: derivedTargetId,
-    value: derivedOperand,
-    hash: seedHash(insEvent),
-    level: derivedLevel,
-    last_seq: insSeq,
-    last_op: 'INS',
-    last_agent: 'system:crystallize',
-    last_ts: now,
-    last_acquired_ts: now,
-  });
-
-  const derived: DerivedEntity = {
-    target: derivedTargetId,
-    level: derivedLevel,
-    constituents: members,
-    topology: 'stable',
-    inert: false,
-  };
-  await db.put(`derived:${derivedTargetId}`, encode(derived));
-
-  for (const member of members) {
-    await addReverseDep(db, member, derivedTargetId);
-  }
-
-  if (feed) feed.notify(insEvent);
 }

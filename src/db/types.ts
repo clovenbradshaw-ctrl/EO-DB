@@ -50,17 +50,17 @@ export interface DerivedEntity {
 // precipitates a new entity (INS2+) from the stable configuration beneath it.
 export interface CrystallizationRule {
   scope: string;              // prefix to watch (e.g. "firm.cases")
-  predicate: 'cohort_forms' | 'hash_stable';
+  predicate: 'cohort_forms';
   window: number;             // events of stability required before crystallization
-  min_members: number;        // minimum cohort size (default 2) — for cohort_forms
-  traits: string[];           // field keys to group by — for cohort_forms
+  min_members: number;        // minimum cohort size (default 2)
+  traits: string[];           // field keys to group by
 }
 
 // Stability snapshot for crystallization tracking — persisted in LevelDB
 export interface CrystStabilityState {
   scope: string;
-  snapshot_hash: string;      // hash of the current cohort/hash structure
-  counter: number;            // consecutive events with same structure
+  snapshot_hash: string;      // unused for cohort_forms (structural diff is tracked via index)
+  counter: number;            // consecutive events with stable structure
   last_seq: number;           // seq of last event that touched this scope
 }
 

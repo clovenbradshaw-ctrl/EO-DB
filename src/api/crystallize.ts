@@ -12,38 +12,28 @@ export function registerCrystallizeRoutes(app: FastifyInstance, db: EoDb): void 
   app.put('/crystallize/:scope', async (request: AuthenticatedRequest, reply) => {
     const { scope } = request.params as { scope: string };
     const body = request.body as {
-      predicate?: string;
       window?: number;
       min_members?: number;
       traits?: string[];
     };
 
-    const predicate = body.predicate;
-    if (predicate !== 'cohort_forms' && predicate !== 'hash_stable') {
-      return reply.code(400).send({
-        error: 'predicate must be "cohort_forms" or "hash_stable"',
-      });
+    if (!body.traits || body.traits.length === 0) {
+      return reply.code(400).send({ error: 'traits array is required' });
     }
 
     if (!body.window || body.window < 1) {
       return reply.code(400).send({ error: 'window must be >= 1' });
     }
 
-    if (predicate === 'cohort_forms' && (!body.traits || body.traits.length === 0)) {
-      return reply.code(400).send({
-        error: 'traits array is required for cohort_forms predicate',
-      });
-    }
-
     await registerCrystallizationRule(db, {
       scope,
-      predicate,
+      predicate: 'cohort_forms',
       window: body.window,
       min_members: body.min_members ?? 2,
-      traits: body.traits ?? [],
+      traits: body.traits,
     });
 
-    return reply.send({ ok: true, scope, predicate, window: body.window });
+    return reply.send({ ok: true, scope, window: body.window });
   });
 
   // GET /crystallize/:scope — get a crystallization rule
