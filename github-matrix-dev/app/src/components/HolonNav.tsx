@@ -84,7 +84,6 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const [renamingFolder, setRenamingFolder] = useState<{ id: string; currentName: string } | null>(null);
   const [folderContextMenu, setFolderContextMenu] = useState<{ x: number; y: number; folderId: string } | null>(null);
-  const [moveToFolderMenu, setMoveToFolderMenu] = useState<{ x: number; y: number; tablePath: string } | null>(null);
   const [creatingFolder, setCreatingFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
 
@@ -141,7 +140,6 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
         return { ...f, tablePaths: without };
       }),
     }));
-    setMoveToFolderMenu(null);
   }
 
   function toggleFolderExpand(id: string) {
@@ -321,6 +319,31 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
     // Check if this is a top-level node (can be moved to folders)
     const isTopLevel = tree.some(n => n.fullPath === target);
     const currentFolderId = folderState.folders.find(f => f.tablePaths.includes(target))?.id ?? null;
+
+    const folderItems: ContextMenuItem[] = [];
+    if (isTopLevel && sortedFolders.length > 0) {
+      folderItems.push({ label: '', onClick: () => { /* noop */ }, separator: true } as ContextMenuItem);
+      for (const folder of sortedFolders) {
+        const isInThisFolder = folder.id === currentFolderId;
+        folderItems.push({
+          label: `${isInThisFolder ? '\u2713 ' : '\u2003'}${'\uD83D\uDCC1'} ${folder.name}`,
+          onClick: () => {
+            if (!isInThisFolder) moveTableToFolder(target, folder.id);
+            setContextMenu(null);
+          },
+        });
+      }
+      if (currentFolderId) {
+        folderItems.push({
+          label: '\u2003Remove from folder',
+          onClick: () => {
+            moveTableToFolder(target, null);
+            setContextMenu(null);
+          },
+        });
+      }
+    }
+
     return [
       {
         label: currentName ? `Rename (${currentName})` : 'Set display name...',
@@ -333,23 +356,7 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
         label: state?.value?._type ? `Change type (${state.value._type})` : 'Set page type...',
         onClick: () => openTypeSelector(target, contextMenu!.x, contextMenu!.y),
       },
-      ...(isTopLevel ? [
-        { label: '', onClick: () => { /* noop */ }, separator: true } as ContextMenuItem,
-        {
-          label: 'Move to folder\u2026',
-          onClick: () => {
-            setMoveToFolderMenu({ x: contextMenu!.x, y: contextMenu!.y, tablePath: target });
-            setContextMenu(null);
-          },
-        } as ContextMenuItem,
-        ...(currentFolderId ? [{
-          label: 'Remove from folder',
-          onClick: () => {
-            moveTableToFolder(target, null);
-            setContextMenu(null);
-          },
-        } as ContextMenuItem] : []),
-      ] : []),
+      ...folderItems,
       { label: '', onClick: () => { /* noop */ }, separator: true },
       {
         label: 'Copy target path',
@@ -750,62 +757,6 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
           items={getFolderContextMenuItems(folderContextMenu.folderId)}
           onClose={() => setFolderContextMenu(null)}
         />
-      )}
-
-      {/* Move to folder picker */}
-      {moveToFolderMenu && (
-        <>
-          <div
-            style={{ position: 'fixed', inset: 0, zIndex: 9998 }}
-            onClick={() => setMoveToFolderMenu(null)}
-          />
-          <div style={{
-            position: 'fixed',
-            left: moveToFolderMenu.x,
-            top: moveToFolderMenu.y,
-            zIndex: 9999,
-            background: theme.bgCard,
-            border: `1px solid ${theme.border}`,
-            borderRadius: 8,
-            boxShadow: `0 8px 30px ${theme.shadow}`,
-            padding: '4px 0',
-            minWidth: 160,
-          }}>
-            {sortedFolders.length === 0 ? (
-              <div style={{ padding: '8px 12px', fontSize: 11, color: theme.textMuted }}>
-                No folders yet. Create one first.
-              </div>
-            ) : (
-              sortedFolders.map(folder => {
-                const isCurrentFolder = folder.tablePaths.includes(moveToFolderMenu.tablePath);
-                return (
-                  <div
-                    key={folder.id}
-                    style={{
-                      padding: '6px 12px',
-                      fontSize: 12,
-                      cursor: isCurrentFolder ? 'default' : 'pointer',
-                      color: isCurrentFolder ? theme.textMuted : theme.text,
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 6,
-                      background: 'transparent',
-                    }}
-                    onMouseEnter={(e) => { if (!isCurrentFolder) (e.currentTarget.style.background = theme.bgHover); }}
-                    onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
-                    onClick={() => {
-                      if (!isCurrentFolder) moveTableToFolder(moveToFolderMenu.tablePath, folder.id);
-                    }}
-                  >
-                    <span style={{ fontSize: 12 }}>{'\uD83D\uDCC1'}</span>
-                    <span>{folder.name}</span>
-                    {isCurrentFolder && <span style={{ fontSize: 10, marginLeft: 'auto', opacity: 0.5 }}>{'\u2713'}</span>}
-                  </div>
-                );
-              })
-            )}
-          </div>
-        </>
       )}
 
       {/* Type selector popover */}
