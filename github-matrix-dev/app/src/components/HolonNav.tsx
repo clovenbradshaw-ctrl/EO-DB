@@ -56,9 +56,13 @@ interface HolonNavProps {
   statePrefix?: string;
   /** Matrix user ID — needed for creating slices. */
   userId?: string;
+  /** Currently selected record target — highlights the matching leaf node. */
+  selectedRecord?: string | null;
+  /** Called when the user clicks an inline record leaf. */
+  onSelectRecord?: (target: string) => void;
 }
 
-export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, statePrefix = '', userId }: HolonNavProps) {
+export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, statePrefix = '', userId, selectedRecord, onSelectRecord }: HolonNavProps) {
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
   const getState = useEoStore((s) => s.getState);
   const dispatch = useEoStore((s) => s.dispatch);
@@ -78,6 +82,11 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
   /** When set, only this top-level entity type is shown (drill-down mode) */
   const [focusedEntity, setFocusedEntity] = useState<string | null>(null);
   const sliceStore = useSliceStore();
+
+  // --- Inline record expansion state ---
+  const [expandedRecords, setExpandedRecords] = useState<Set<string>>(new Set());
+  const [recordsCache, setRecordsCache] = useState<Map<string, EoState[]>>(new Map());
+  const [recordsLoading, setRecordsLoading] = useState<Set<string>>(new Set());
 
   // --- Folder state ---
   const [folderState, setFolderState] = useState<NavFolderState>(() => loadFolders(statePrefix));
@@ -184,6 +193,9 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
     setExpanded(new Set());
     setFocusedEntity(null);
     setShowCreateSlice(false);
+    setExpandedRecords(new Set());
+    setRecordsCache(new Map());
+    setRecordsLoading(new Set());
     try {
       const raw = localStorage.getItem(navCacheKey(statePrefix));
       if (raw) setAllStates(JSON.parse(raw));
@@ -398,6 +410,37 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
     return formatName(node.segment);
   }
 
+  async function toggleRecordExpansion(tablePath: string) {
+    const next = new Set(expandedRecords);
+    if (next.has(tablePath)) {
+      next.delete(tablePath);
+      setExpandedRecords(next);
+      return;
+    }
+    next.add(tablePath);
+    setExpandedRecords(next);
+    if (recordsCache.has(tablePath)) return;
+
+    setRecordsLoading((prev) => new Set(prev).add(tablePath));
+    const tableDepth = tablePath.split('.').length;
+    const states = await getStateByPrefix(tablePath + '.');
+    const records = states
+      .filter((st) => {
+        const parts = st.target.split('.');
+        if (parts.length !== tableDepth + 1) return false;
+        const seg = parts[tableDepth];
+        return !seg.startsWith('_') && st.value != null;
+      })
+      .sort((a, b) => a.target.localeCompare(b.target))
+      .slice(0, 50);
+    setRecordsCache((prev) => new Map(prev).set(tablePath, records));
+    setRecordsLoading((prev) => {
+      const n = new Set(prev);
+      n.delete(tablePath);
+      return n;
+    });
+  }
+
   function renderNode(node: TreeNode, depth: number, parentDisplayField?: string, isTopLevel?: boolean) {
     const isActive = selectedScope === node.fullPath;
     const isExpanded = expanded.has(node.fullPath);
@@ -526,6 +569,85 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
               <span style={s.segName}>{slice.name}</span>
             </div>
           ));
+        })()}
+
+        {/* Inline record expansion — only for leaf tables that have records */}
+        {isExpanded && node.children.length === 0 && node.childCount > 0 && (() => {
+          const isRecordsExpanded = expandedRecords.has(node.fullPath);
+          const isLoadingRec = recordsLoading.has(node.fullPath);
+          const records = recordsCache.get(node.fullPath) ?? [];
+          const parentDisplayField = node.state?.value?._displayField as string | undefined;
+          return (
+            <>
+              {/* Toggle row */}
+              <div
+                style={{
+                  ...s.segItem,
+                  paddingLeft: 28 + depth * 16,
+                  color: isRecordsExpanded ? theme.accent : theme.textMuted,
+                  userSelect: 'none' as const,
+                }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void toggleRecordExpansion(node.fullPath);
+                }}
+              >
+                <span style={{ fontSize: 9, opacity: 0.7, marginRight: 4 }}>
+                  {isRecordsExpanded ? '\u25BE' : '\u25B8'}
+                </span>
+                <span style={s.segName}>
+                  {isLoadingRec
+                    ? 'Loading\u2026'
+                    : isRecordsExpanded
+                      ? 'Records'
+                      : `${node.childCount} record${node.childCount === 1 ? '' : 's'}`}
+                </span>
+              </div>
+
+              {/* Record leaf rows */}
+              {isRecordsExpanded && records.map((rec) => {
+                const recId = rec.target.split('.').pop() ?? rec.target;
+                const displayName: string =
+                  (parentDisplayField && rec.value?.[parentDisplayField] != null
+                    ? String(rec.value[parentDisplayField])
+                    : null) ??
+                  (rec.value?.name != null ? String(rec.value.name) : null) ??
+                  formatName(recId);
+                const isActiveRec = selectedRecord === rec.target;
+                return (
+                  <div
+                    key={rec.target}
+                    style={{
+                      ...s.segItem,
+                      paddingLeft: 44 + depth * 16,
+                      ...(isActiveRec ? { color: theme.accent, fontWeight: 600 } : {}),
+                    }}
+                    onClick={() => onSelectRecord?.(rec.target)}
+                  >
+                    <span style={{ fontSize: 10, opacity: 0.5, marginRight: 4, fontFamily: "'JetBrains Mono', monospace" }}>\u25A4</span>
+                    <span style={{ ...s.segName, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>
+                      {displayName}
+                    </span>
+                  </div>
+                );
+              })}
+
+              {/* "View all" if capped */}
+              {isRecordsExpanded && node.childCount > 50 && (
+                <div
+                  style={{
+                    ...s.segItem,
+                    paddingLeft: 44 + depth * 16,
+                    color: theme.accent,
+                    fontStyle: 'italic' as const,
+                  }}
+                  onClick={() => onSelectScope(node.fullPath)}
+                >
+                  <span style={s.segName}>View all {node.childCount} \u2192</span>
+                </div>
+              )}
+            </>
+          );
         })()}
 
         {/* Children — pass this node's _displayField so children can resolve names */}
