@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { RecordView } from './RecordView';
 import { formatName } from './scope-picker-utils';
 import { useEoStore } from '../store/eo-store';
@@ -12,6 +12,8 @@ interface RecordDetailDrawerProps {
   profileFields?: string[];
   isMobile?: boolean;
   layoutType?: LayoutDisplayType;
+  /** Ordered list of record targets from the current table view, for prev/next pager. */
+  tableRecordTargets?: string[];
 }
 
 /** Extract initials from a display name (e.g. "Priya Chandrasekaran" -> "PC") */
@@ -55,7 +57,7 @@ const TYPE_COLORS: Record<string, string> = {
   note: '#7c5cbf',
 };
 
-export function RecordDetailDrawer({ target, onClose, onNavigate, profileFields, isMobile, layoutType }: RecordDetailDrawerProps) {
+export function RecordDetailDrawer({ target, onClose, onNavigate, profileFields, isMobile, layoutType, tableRecordTargets }: RecordDetailDrawerProps) {
   const { theme } = useTheme();
   const s = makeStyles(theme);
   const horizon = useEoStore((s) => s.horizon);
@@ -63,6 +65,75 @@ export function RecordDetailDrawer({ target, onClose, onNavigate, profileFields,
   const ready = useEoStore((s) => s.ready);
   const [recordName, setRecordName] = useState<string | null>(null);
 
+  // ── Breadcrumb history (drill-down trail within the drawer) ──────────────
+  const [history, setHistory] = useState<string[]>([target]);
+  const [historyIndex, setHistoryIndex] = useState(0);
+  const internalNavRef = useRef(false);
+
+  // When the external target changes, either we initiated it (internalNavRef)
+  // or the user picked a different record from the table — reset history.
+  useEffect(() => {
+    if (internalNavRef.current) {
+      internalNavRef.current = false;
+      return;
+    }
+    setHistory([target]);
+    setHistoryIndex(0);
+    setRecordName(null);
+  }, [target]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleNavigate = (t: string) => {
+    internalNavRef.current = true;
+    setHistory((prev) => [...prev.slice(0, historyIndex + 1), t]);
+    setHistoryIndex((i) => i + 1);
+    onNavigate(t);
+  };
+
+  const handleBack = () => {
+    if (historyIndex === 0) return;
+    const newIndex = historyIndex - 1;
+    internalNavRef.current = true;
+    setHistoryIndex(newIndex);
+    onNavigate(history[newIndex]);
+  };
+
+  const handleForward = () => {
+    if (historyIndex >= history.length - 1) return;
+    const newIndex = historyIndex + 1;
+    internalNavRef.current = true;
+    setHistoryIndex(newIndex);
+    onNavigate(history[newIndex]);
+  };
+
+  // ── Table record pager (prev/next within the table list) ─────────────────
+  const tableIndex = tableRecordTargets ? tableRecordTargets.indexOf(target) : -1;
+  const tableTotal = tableRecordTargets?.length ?? 0;
+  const showPager = tableIndex !== -1 && tableTotal > 1;
+
+  const handlePrevRecord = () => {
+    if (!tableRecordTargets || tableIndex <= 0) return;
+    onNavigate(tableRecordTargets[tableIndex - 1]);
+  };
+
+  const handleNextRecord = () => {
+    if (!tableRecordTargets || tableIndex >= tableTotal - 1) return;
+    onNavigate(tableRecordTargets[tableIndex + 1]);
+  };
+
+  // J/K keyboard shortcuts for table record paging (skip if focus is in a text input)
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName;
+      const isEditable = tag === 'INPUT' || tag === 'TEXTAREA' || (e.target as HTMLElement)?.isContentEditable;
+      if (isEditable || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.key === 'j' || e.key === 'J') { e.preventDefault(); handleNextRecord(); }
+      if (e.key === 'k' || e.key === 'K') { e.preventDefault(); handlePrevRecord(); }
+    };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }); // re-bind on every render so closures see latest tableIndex
+
+  // ── Display name resolution ──────────────────────────────────────────────
   useEffect(() => {
     if (!ready) return;
     let cancelled = false;
@@ -100,6 +171,8 @@ export function RecordDetailDrawer({ target, onClose, onNavigate, profileFields,
   const initials = getInitials(displayName);
   const typeColor = TYPE_COLORS[entityType] || '#7a756d';
   const isFullModal = !isMobile && layoutType === 'modal';
+  const canBack = historyIndex > 0;
+  const canForward = historyIndex < history.length - 1;
 
   const panelStyle: React.CSSProperties = isFullModal
     ? {
@@ -159,10 +232,80 @@ export function RecordDetailDrawer({ target, onClose, onNavigate, profileFields,
               </div>
             </div>
           </div>
+          {/* Table record pager — top-right, visible when browsing a table list */}
+          {showPager && !isMobile && (
+            <div style={s.pager}>
+              <button
+                onClick={handlePrevRecord}
+                disabled={tableIndex <= 0}
+                style={{ ...s.pagerBtn, opacity: tableIndex <= 0 ? 0.3 : 1 }}
+                title="Previous record (K)"
+              >
+                &#8593;
+              </button>
+              <span style={s.pagerLabel}>{tableIndex + 1} / {tableTotal}</span>
+              <button
+                onClick={handleNextRecord}
+                disabled={tableIndex >= tableTotal - 1}
+                style={{ ...s.pagerBtn, opacity: tableIndex >= tableTotal - 1 ? 0.3 : 1 }}
+                title="Next record (J)"
+              >
+                &#8595;
+              </button>
+            </div>
+          )}
           {!isMobile && <button onClick={onClose} style={s.closeBtn}>&times;</button>}
         </div>
+
+        {/* Breadcrumb bar — drill-down trail, shown only after navigating within the drawer */}
+        {history.length > 1 && (
+          <div style={s.breadcrumbBar}>
+            <button
+              onClick={handleBack}
+              disabled={!canBack}
+              style={{ ...s.navBtn, opacity: canBack ? 1 : 0.3 }}
+              title="Go back"
+            >
+              &#8592;
+            </button>
+            <div style={s.breadcrumbs}>
+              {history.map((h, i) => {
+                const label = formatName(getEntityId(h));
+                const isCurrent = i === historyIndex;
+                return (
+                  <span key={i} style={s.breadcrumbItem}>
+                    {i > 0 && <span style={s.breadcrumbSep}>/</span>}
+                    <button
+                      onClick={() => {
+                        if (isCurrent) return;
+                        internalNavRef.current = true;
+                        setHistoryIndex(i);
+                        onNavigate(h);
+                      }}
+                      style={{
+                        ...s.breadcrumbBtn,
+                        ...(isCurrent ? s.breadcrumbBtnActive : {}),
+                      }}
+                    >
+                      {label}
+                    </button>
+                  </span>
+                );
+              })}
+            </div>
+            <button
+              onClick={handleForward}
+              disabled={!canForward}
+              style={{ ...s.navBtn, opacity: canForward ? 1 : 0.3 }}
+              title="Go forward"
+            >
+              &#8594;
+            </button>
+          </div>
+        )}
+
         <div style={s.body}>
-          <RecordView target={target} onNavigate={onNavigate} profileFields={profileFields} />
+          <RecordView target={target} onNavigate={handleNavigate} profileFields={profileFields} />
         </div>
       </div>
     </>
@@ -191,6 +334,7 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       borderBottom: `1px solid ${t.border}`,
       background: t.bgCard,
       flexShrink: 0,
+      gap: 12,
     },
     headerContent: {
       display: 'flex',
@@ -246,6 +390,36 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       fontSize: 11,
       color: t.textMuted,
     },
+    // Table record pager (top-right of header)
+    pager: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 2,
+      flexShrink: 0,
+    },
+    pagerBtn: {
+      background: 'none',
+      border: `1px solid ${t.border}`,
+      borderRadius: 4,
+      width: 26,
+      height: 26,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      fontSize: 12,
+      color: t.textSecondary,
+      cursor: 'pointer',
+      lineHeight: 1,
+      padding: 0,
+    },
+    pagerLabel: {
+      fontSize: 11,
+      color: t.textMuted,
+      fontVariantNumeric: 'tabular-nums',
+      minWidth: 36,
+      textAlign: 'center' as const,
+      userSelect: 'none' as const,
+    },
     backBtn: {
       background: 'none',
       border: 'none',
@@ -262,6 +436,64 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       color: t.textSecondary,
       cursor: 'pointer',
       padding: '0 4px',
+      lineHeight: 1,
+      flexShrink: 0,
+    },
+    // Breadcrumb bar (below header, drill-down trail)
+    breadcrumbBar: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 4,
+      padding: '6px 16px',
+      borderBottom: `1px solid ${t.border}`,
+      background: t.bg,
+      flexShrink: 0,
+    },
+    breadcrumbs: {
+      display: 'flex',
+      alignItems: 'center',
+      flex: 1,
+      minWidth: 0,
+      overflow: 'hidden',
+    },
+    breadcrumbItem: {
+      display: 'inline-flex',
+      alignItems: 'center',
+    },
+    breadcrumbSep: {
+      color: t.textMuted,
+      fontSize: 11,
+      margin: '0 3px',
+      userSelect: 'none' as const,
+    },
+    breadcrumbBtn: {
+      background: 'none',
+      border: 'none',
+      padding: '1px 4px',
+      fontSize: 11,
+      color: t.textSecondary,
+      cursor: 'pointer',
+      borderRadius: 4,
+      fontFamily: "'JetBrains Mono', monospace",
+      whiteSpace: 'nowrap' as const,
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+      maxWidth: 120,
+    },
+    breadcrumbBtnActive: {
+      color: t.textHeading,
+      fontWeight: 600,
+      cursor: 'default',
+    },
+    navBtn: {
+      background: 'none',
+      border: 'none',
+      fontSize: 14,
+      color: t.textSecondary,
+      cursor: 'pointer',
+      padding: '2px 6px',
+      borderRadius: 4,
+      flexShrink: 0,
       lineHeight: 1,
     },
     body: {

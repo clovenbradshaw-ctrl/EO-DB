@@ -50,6 +50,8 @@ interface TableViewProps {
   permissions?: ResolvedPermissions | null;
   /** When true, the current slice is read-only for this user's type */
   sliceReadOnly?: boolean;
+  /** Called whenever the visible (filtered+sorted) record list changes. */
+  onVisibleRecordTargets?: (targets: string[]) => void;
 }
 
 function formatRelativeTime(ts: string): string {
@@ -454,7 +456,7 @@ function renderCell(value: any, key: string, onNavigate: (t: string) => void, t:
   return <span>{String(value)}</span>;
 }
 
-export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, activeRecord, session, timeScrubberFilter, permissions, sliceReadOnly }: TableViewProps) {
+export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, activeRecord, session, timeScrubberFilter, permissions, sliceReadOnly, onVisibleRecordTargets }: TableViewProps) {
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
   const getState = useEoStore((s) => s.getState);
   const dispatch = useEoStore((s) => s.dispatch);
@@ -782,6 +784,11 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     }
     return result;
   }, [records, debouncedFilterText, useFieldsSub, advancedFilters, filterConjunction, timeScrubberFilter, sorts, displayField]);
+
+  // Report the visible ordered record targets to the parent whenever the list changes.
+  useEffect(() => {
+    onVisibleRecordTargets?.(filtered.map((r) => r.target));
+  }, [filtered, onVisibleRecordTargets]);
 
   function handleColumnContextMenu(e: React.MouseEvent, col: ColumnDef) {
     e.preventDefault();
