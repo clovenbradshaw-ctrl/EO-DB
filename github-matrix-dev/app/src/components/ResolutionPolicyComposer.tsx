@@ -35,6 +35,7 @@ interface StanceDef {
   name: string;
   cell: string;        // e.g. "Diff × Ground"
   description: string;
+  example: string;     // concrete usage example
   output: string;       // output tag text
   outputColor: string;  // tag color
   row: 'diff' | 'relate' | 'gen';
@@ -49,18 +50,21 @@ const STANCES: StanceDef[] = [
   {
     key: 'clearing', name: 'Clearing', cell: 'Diff × Ground',
     description: 'Neither value wins. Conflict voids the field entirely.',
+    example: '"status": ["active", "archived"] → null',
     output: '→ null', outputColor: '#7a756d',
     row: 'diff', col: 'ground',
   },
   {
     key: 'dissecting', name: 'Dissecting', cell: 'Diff × Figure',
     description: 'One value selected by explicit rule. All picker strategies live here.',
+    example: '"price": [9.99, 12.99] → pick latest write → 12.99',
     output: '→ one value by rule', outputColor: '#9A3412',
     row: 'diff', col: 'figure', hasSubTypes: true,
   },
   {
     key: 'unraveling', name: 'Unraveling', cell: 'Diff × Pattern',
     description: 'No value returned. The pattern of disagreement is the output — who conflicts, how often.',
+    example: '"region": EU vs US → {sources: 2, diverged_at: "2024-03"}',
     output: '→ conflict structure', outputColor: '#6B21A8',
     row: 'diff', col: 'pattern', gpu: true,
   },
@@ -68,18 +72,21 @@ const STANCES: StanceDef[] = [
   {
     key: 'tending', name: 'Tending', cell: 'Relate × Ground',
     description: 'Return last uncontested value. Hold pre-conflict ground while conflict sits in the log.',
+    example: '"email" was "a@b.com" before fork → returns "a@b.com"',
     output: '→ pre-conflict value', outputColor: '#166534',
     row: 'relate', col: 'ground',
   },
   {
     key: 'binding', name: 'Binding', cell: 'Relate × Figure',
     description: 'All values returned with full provenance. The conflict itself is the datum — no scalar.',
+    example: '"name" → {A: "Jon", B: "John", sources: […]}',
     output: '→ structured conflict', outputColor: '#1E40AF',
     row: 'relate', col: 'figure',
   },
   {
     key: 'tracing', name: 'Tracing', cell: 'Relate × Pattern',
     description: 'Follow the historical resolution pattern. Precedent on this path determines the output.',
+    example: '"priority" → resolved same way as last 5 conflicts on this path',
     output: '→ precedent-based', outputColor: '#115E59',
     row: 'relate', col: 'pattern', gpu: true,
   },
@@ -87,18 +94,21 @@ const STANCES: StanceDef[] = [
   {
     key: 'cultivating', name: 'Cultivating', cell: 'Gen × Ground',
     description: 'No value returned. A review workflow is triggered — creates conditions for resolution.',
+    example: '"owner" conflict → queued for human arbitration',
     output: '→ workflow triggered', outputColor: '#92400E',
     row: 'gen', col: 'ground',
   },
   {
     key: 'making', name: 'Making', cell: 'Gen × Figure',
     description: 'New value computed from conflicting values — average, merge, consensus. Not in either source.',
+    example: '"score": [88, 92] → AVERAGE(88, 92) = 90',
     output: '→ new computed value', outputColor: '#3730A3',
     row: 'gen', col: 'figure', hasFormula: true,
   },
   {
     key: 'composing', name: 'Composing', cell: 'Gen × Pattern',
     description: 'New policy written for this conflict class. Future conflicts of this class auto-resolve.',
+    example: 'recurring "currency" conflict → writes: prefer reporting currency',
     output: '→ new policy written', outputColor: '#9D174D',
     row: 'gen', col: 'pattern', gpu: true,
   },
@@ -107,12 +117,12 @@ const STANCES: StanceDef[] = [
 // Dissecting sub-types — two kinds of selection criteria.
 const DISSECTING_SUBTYPES = [
   // Provenance-based (pick by who/when):
-  { value: 'latest', label: 'Latest', group: 'provenance' },
-  { value: 'first', label: 'First', group: 'provenance' },
-  { value: 'priority', label: 'Priority', group: 'provenance' },
+  { value: 'latest', label: 'Latest', group: 'provenance', description: 'Pick the most recently written value.', example: '"updated_at": [T+2, T+5] → pick T+5' },
+  { value: 'first', label: 'First', group: 'provenance', description: 'Pick the value that arrived first.', example: '"created_by": [SrcA@T+1, SrcB@T+3] → pick SrcA' },
+  { value: 'priority', label: 'Priority', group: 'provenance', description: 'Pick from the highest-priority source.', example: '"tier": CRM=2, ERP=1 → pick CRM value' },
   // Quality-based (pick by data fitness):
-  { value: 'type_validity', label: 'Type validity', group: 'quality' },
-  { value: 'referential_integrity', label: 'Referential integrity', group: 'quality' },
+  { value: 'type_validity', label: 'Type validity', group: 'quality', description: 'Pick the value that matches the declared field type.', example: '"count": ["five", 5] → pick 5 (integer)' },
+  { value: 'referential_integrity', label: 'Referential integrity', group: 'quality', description: 'Pick the value whose foreign key exists in the target table.', example: '"dept_id": [42, 999] → 42 exists in depts table → pick 42' },
 ] as const;
 
 const ROW_LABELS: Record<string, { label: string; subtitle: string }> = {
@@ -296,6 +306,7 @@ export function ResolutionPolicyComposer({
                     {stance.name}
                   </div>
                   <div style={s.cellDesc}>{stance.description}</div>
+                  <div style={s.cellExample}>{stance.example}</div>
                   <div style={s.cellOutputRow}>
                     <span style={{
                       ...s.outputTag,
@@ -352,6 +363,15 @@ export function ResolutionPolicyComposer({
               </button>
             ))}
           </div>
+          {(() => {
+            const active = DISSECTING_SUBTYPES.find(st => st.value === dissectingSubType);
+            return active ? (
+              <div style={s.subTypeHint}>
+                <span style={s.subTypeHintDesc}>{active.description}</span>
+                <span style={s.subTypeHintExample}>{active.example}</span>
+              </div>
+            ) : null;
+          })()}
         </div>
       )}
 
@@ -520,6 +540,13 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       lineHeight: 1.35,
       flex: 1,
     },
+    cellExample: {
+      fontSize: 10,
+      color: t.textMuted,
+      fontFamily: "'JetBrains Mono', monospace",
+      lineHeight: 1.3,
+      opacity: 0.8,
+    },
     cellOutputRow: {
       display: 'flex',
       alignItems: 'center',
@@ -583,6 +610,23 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       color: t.text,
       background: 'transparent',
       transition: 'background 0.1s',
+    },
+    subTypeHint: {
+      marginTop: 6,
+      paddingTop: 6,
+      borderTop: `1px solid ${t.borderLight}`,
+      display: 'flex',
+      flexDirection: 'column' as const,
+      gap: 2,
+    },
+    subTypeHintDesc: {
+      fontSize: 11,
+      color: t.textSecondary,
+    },
+    subTypeHintExample: {
+      fontSize: 10,
+      color: t.textMuted,
+      fontFamily: "'JetBrains Mono', monospace",
     },
     formulaInput: {
       width: '100%',
