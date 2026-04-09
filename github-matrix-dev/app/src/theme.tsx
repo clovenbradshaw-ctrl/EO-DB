@@ -284,6 +284,59 @@ export function useTheme() {
 }
 
 /**
+ * Parse a hex color string to extract its HSL hue (0–360).
+ * Returns null if the string is not a valid 6-digit hex color.
+ */
+function hexToHue(hex: string): number | null {
+  const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+  if (!result) return null;
+  const r = parseInt(result[1], 16) / 255;
+  const g = parseInt(result[2], 16) / 255;
+  const b = parseInt(result[3], 16) / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  if (max === min) return 0;
+  const d = max - min;
+  let h = 0;
+  switch (max) {
+    case r: h = ((g - b) / d + (g < b ? 6 : 0)) / 6; break;
+    case g: h = ((b - r) / d + 2) / 6; break;
+    case b: h = ((r - g) / d + 4) / 6; break;
+  }
+  return Math.round(h * 360);
+}
+
+/**
+ * Generate subtle role-specific background color overrides.
+ * Uses the role's defined hex color to tint the app background,
+ * giving a clear but unobtrusive "you are in role X" signal.
+ * Slightly stronger saturation than spaceBackgroundTint so it reads
+ * over the space tint when both are active.
+ */
+export function roleBackgroundTint(
+  roleColor: string | undefined | null,
+  mode: 'light' | 'dark',
+): { bg: string; bgCard: string; bgMuted: string; border: string } | null {
+  if (!roleColor) return null;
+  const hue = hexToHue(roleColor);
+  if (hue === null) return null;
+  if (mode === 'light') {
+    return {
+      bg: `hsl(${hue}, 15%, 97%)`,
+      bgCard: `hsl(${hue}, 12%, 99%)`,
+      bgMuted: `hsl(${hue}, 12%, 95%)`,
+      border: `hsl(${hue}, 20%, 90%)`,
+    };
+  }
+  return {
+    bg: `hsl(${hue}, 12%, 7%)`,
+    bgCard: `hsl(${hue}, 10%, 9%)`,
+    bgMuted: `hsl(${hue}, 10%, 12%)`,
+    border: `hsl(${hue}, 20%, 18%)`,
+  };
+}
+
+/**
  * Generate subtle space-specific background color overrides.
  * Each space gets a unique but very subtle tint derived from its name,
  * so users can visually distinguish which space they're in.

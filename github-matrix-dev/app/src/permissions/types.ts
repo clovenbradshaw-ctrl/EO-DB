@@ -185,6 +185,14 @@ export interface UserTypeDefinition {
   description?: string;
   /** Headline metrics shown when this type is active */
   headline_metrics?: HeadlineMetric[];
+  /**
+   * If set, only these nav views are shown when this type is active.
+   * Absence (undefined) means no restriction — all views are visible.
+   * 'records' is always accessible regardless of this list.
+   * This is a UI-layer restriction only; cryptographic access control
+   * is enforced via Matrix room membership (restricted room).
+   */
+  visible_views?: string[];
 }
 
 /** A single headline metric card displayed above the table. */
