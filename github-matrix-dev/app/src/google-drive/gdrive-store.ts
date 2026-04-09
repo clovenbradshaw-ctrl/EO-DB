@@ -26,6 +26,10 @@ export interface GDriveStoreState {
   lastSyncAt: Record<string, string>;
   /** Cached file listings per data_type. */
   cachedEntries: Record<string, GDriveListEntry[]>;
+  /** Active hydration slot (1–5 ring, 0 = not yet set). */
+  hydrationSlot: number;
+  /** True when GDrive is unreachable — app continues with local OPFS data. */
+  gdriveOffline: boolean;
 
   /** Connect to Google Drive via the n8n webhook (validates Matrix token). */
   connect: (matrixAccessToken: string) => Promise<void>;
@@ -37,6 +41,10 @@ export interface GDriveStoreState {
   recordSync: (spaceId: string) => void;
   /** Refresh cached file list for a data_type. */
   refreshEntries: (dataType: string) => Promise<GDriveListEntry[]>;
+  /** Update hydration slot after a bake. */
+  setHydrationSlot: (slot: number) => void;
+  /** Mark GDrive as offline or back online. */
+  setGDriveOffline: (offline: boolean) => void;
 }
 
 export const useGDriveStore = create<GDriveStoreState>((set, get) => ({
@@ -48,6 +56,8 @@ export const useGDriveStore = create<GDriveStoreState>((set, get) => ({
   spaceDisplayNames: {},
   lastSyncAt: {},
   cachedEntries: {},
+  hydrationSlot: 0,
+  gdriveOffline: false,
 
   async connect(matrixAccessToken: string) {
     set({ connecting: true, error: null });
@@ -96,5 +106,13 @@ export const useGDriveStore = create<GDriveStoreState>((set, get) => ({
     const entries = result.entries || [];
     set({ cachedEntries: { ...get().cachedEntries, [dataType]: entries } });
     return entries;
+  },
+
+  setHydrationSlot(slot: number) {
+    set({ hydrationSlot: slot });
+  },
+
+  setGDriveOffline(offline: boolean) {
+    set({ gdriveOffline: offline });
   },
 }));

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import type { MatrixClient } from 'matrix-js-sdk';
 import { useEoStore } from '../store/eo-store';
 import { useTheme, type Theme } from '../theme';
@@ -56,6 +56,10 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
   const serverConnected = useEoServerStore((s) => s.connected);
   const setServerUrl = useEoServerStore((s) => s.setServerUrl);
   const [serverUrlInput, setServerUrlInput] = useState(serverUrl || '');
+  const gdriveMatrixToken = useGDriveStore((s) => s.matrixAccessToken);
+  const gdriveOffline = useGDriveStore((s) => s.gdriveOffline);
+  const [gdriveTestStatus, setGdriveTestStatus] = useState<string | null>(null);
+  const [gdriveTestLoading, setGdriveTestLoading] = useState(false);
 
   function handleSaveServerUrl() {
     const trimmed = serverUrlInput.trim();
@@ -66,6 +70,34 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
       window.location.reload();
     }
   }
+
+  const handleTestGDrive = useCallback(async () => {
+    const token = gdriveMatrixToken || session.accessToken;
+    if (!token) { setGdriveTestStatus('✗ No Matrix token available'); return; }
+    setGdriveTestLoading(true);
+    setGdriveTestStatus(null);
+    try {
+      const res = await fetch('https://n8n.intelechia.com/webhook/eo-store', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          matrix_token: token,
+          drive_url: 'https://www.googleapis.com/drive/v3/files?pageSize=1',
+          drive_method: 'GET',
+        }),
+      });
+      if (res.ok) {
+        setGdriveTestStatus('✓ Connected');
+      } else {
+        const text = await res.text().catch(() => String(res.status));
+        setGdriveTestStatus(`✗ Failed: ${text.slice(0, 120)}`);
+      }
+    } catch (e: any) {
+      setGdriveTestStatus(`✗ Failed: ${e.message}`);
+    } finally {
+      setGdriveTestLoading(false);
+    }
+  }, [gdriveMatrixToken, session.accessToken]);
 
 
 
@@ -137,10 +169,10 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
         </Section>
 
         {/* Local Storage */}
-        <Section title="Local Storage (IndexedDB)" theme={theme}>
+        <Section title="Local Storage (OPFS)" theme={theme}>
           <Field label="Events" value={String(eventCount ?? '—')} theme={theme} />
           <Field label="Current Seq" value={String(lastSeq)} theme={theme} />
-          <Field label="Architecture" value="Browser-native (no server)" theme={theme} />
+          <Field label="Architecture" value="OPFS + in-memory (browser-native)" theme={theme} />
         </Section>
 
         {/* Connection & Sync Status */}
@@ -206,13 +238,13 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
                 : '—'
               }
             />
-            {/* Sync Manager (Matrix timeline sync) */}
+            {/* Peer Sync (PeerSync + WebRTC) */}
             <StatusRow
               theme={theme}
-              label="Matrix Sync"
+              label="Peer Sync"
               status={syncManager ? 'ok' : matrixReady && roomId ? 'pending' : 'off'}
               detail={
-                syncManager ? 'Timeline sync active'
+                syncManager ? 'Peer sync active (Matrix to-device + WebRTC)'
                 : matrixReady && roomId ? 'Initializing...'
                 : 'Not started'
               }
@@ -341,11 +373,42 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
         )}
 
         {/* Google Drive Cloud Storage */}
-        {(gdriveSync || gdriveConnected) && (
-          <Section title="Google Drive Storage" theme={theme}>
-            <GDriveStorageWidget />
-          </Section>
-        )}
+        <Section title="Google Drive Storage" theme={theme}>
+          <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 10 }}>
+            {gdriveOffline && (
+              <div style={{
+                padding: '6px 10px',
+                background: `${theme.warning || '#f59e0b'}15`,
+                border: `1px solid ${theme.warning || '#f59e0b'}40`,
+                borderRadius: 4,
+                fontFamily: "'JetBrains Mono', monospace",
+                fontSize: 10,
+                color: theme.warning || '#f59e0b',
+              }}>
+                GDrive offline — working locally
+              </div>
+            )}
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <button
+                style={{ ...s.actionBtn }}
+                onClick={handleTestGDrive}
+                disabled={gdriveTestLoading}
+              >
+                {gdriveTestLoading ? 'Testing…' : 'Test Connection'}
+              </button>
+              {gdriveTestStatus && (
+                <span style={{
+                  fontFamily: "'JetBrains Mono', monospace",
+                  fontSize: 10,
+                  color: gdriveTestStatus.startsWith('✓') ? theme.success : theme.danger,
+                }}>
+                  {gdriveTestStatus}
+                </span>
+              )}
+            </div>
+            {(gdriveSync || gdriveConnected) && <GDriveStorageWidget />}
+          </div>
+        </Section>
 
         {/* Airtable Importer */}
         <Section title="Airtable Importer" theme={theme}>

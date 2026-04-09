@@ -89,6 +89,12 @@ export class GDriveSyncService {
   /** Guard: only one bake attempt at a time. */
   private baking = false;
 
+  /** Ops queued while GDrive is unreachable; drained on next successful upload. */
+  private pendingOps: EoEvent[] = [];
+
+  /** Whether GDrive is currently unreachable. */
+  private gdriveOffline = false;
+
   private store: EoStore;
   private spaceId: string;
   private spaceName: string;
@@ -159,9 +165,16 @@ export class GDriveSyncService {
         console.log(`[EO-DB] GDrive startup hydration: reached seq ${hydratedSeq}`);
       }
       this.onStatus?.('synced');
+      // GDrive is reachable
+      if (this.gdriveOffline) {
+        this.gdriveOffline = false;
+        useGDriveStore.getState().setGDriveOffline(false);
+      }
     } catch (e) {
-      console.warn('[EO-DB] GDrive startup hydration failed:', e);
+      console.warn('[EO-DB] GDrive startup hydration failed — continuing in local mode:', e);
       this.onStatus?.('error', e instanceof Error ? e.message : String(e));
+      this.gdriveOffline = true;
+      useGDriveStore.getState().setGDriveOffline(true);
     }
 
     // Start the 15-second fallback poll timer.
@@ -185,6 +198,7 @@ export class GDriveSyncService {
    * Save a single operation to Google Drive immediately.
    * Call this right after committing an event to the local store.
    * Fire-and-forget (errors are logged, not thrown).
+   * When GDrive is unreachable, the op is queued and replayed on reconnection.
    */
   async saveOp(event: EoEvent): Promise<void> {
     if (this.destroyed) return;
@@ -210,12 +224,42 @@ export class GDriveSyncService {
       await this.store.put('meta:gdrive_saved_op_count', this.savedOpCount);
       console.log(`[EO-DB] GDrive op saved: ${fileName} (${this.savedOpCount}/${OPS_PER_BAKE})`);
 
+      // Successfully uploaded — if we were offline, we're back online now
+      if (this.gdriveOffline) {
+        this.gdriveOffline = false;
+        useGDriveStore.getState().setGDriveOffline(false);
+        // Drain any queued ops
+        this.drainPendingOps().catch(console.warn);
+      }
+
       if (this.savedOpCount >= OPS_PER_BAKE && !this.baking) {
         // Raise hand — fire and forget
         this.raiseBakeHand().catch(console.warn);
       }
     } catch (e) {
-      console.warn('[EO-DB] GDrive saveOp failed (op will be captured in next bake):', e);
+      console.warn('[EO-DB] GDrive saveOp failed — queuing op for retry:', e);
+      // Queue the event for retry when GDrive becomes reachable
+      this.pendingOps.push(event);
+      if (!this.gdriveOffline) {
+        this.gdriveOffline = true;
+        useGDriveStore.getState().setGDriveOffline(true);
+      }
+    }
+  }
+
+  /** Drain the pending ops queue by uploading each one in order. */
+  private async drainPendingOps(): Promise<void> {
+    if (this.pendingOps.length === 0) return;
+    const queue = this.pendingOps.splice(0);
+    console.log(`[EO-DB] GDrive draining ${queue.length} queued ops`);
+    for (const event of queue) {
+      try {
+        await this.saveOp(event);
+      } catch {
+        // Re-queue failed ops at the front so order is preserved
+        this.pendingOps.unshift(event);
+        break;
+      }
     }
   }
 

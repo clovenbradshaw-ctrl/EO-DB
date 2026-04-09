@@ -76,6 +76,7 @@ export class EoServerClient {
         operand: event.operand,
         ts: event.ts,
         client_event_id: event.client_event_id,
+        matrix_token: this.accessToken,
       }),
     }).catch((e) => {
       console.warn('[EO-DB] Server push failed:', e);
