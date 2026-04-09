@@ -1,15 +1,12 @@
 /**
  * Airtable sync store — Zustand store for browser-side Airtable integration.
  *
- * The Airtable API key is delivered via the same n8n webhook used for Filen
- * credentials. It is held in-memory only — never persisted to IndexedDB,
- * localStorage, or Matrix room state.
- *
- * Mirrors the pattern established by `filen/filen-store.ts`.
+ * The Airtable API key is delivered via the n8n credentials webhook (validated
+ * via Matrix access token). It is held in-memory only — never persisted to
+ * IndexedDB, localStorage, or Matrix room state.
  */
 
 import { create } from 'zustand';
-import { fetchFilenSessionFromWebhook } from '../filen/filen-api';
 import { AirtableClient } from './airtable-client';
 import type { HydrationManifest, HydrationResult, UpdateSyncResult } from './airtable-sync';
 
@@ -71,7 +68,7 @@ export interface AirtableSyncState {
   // ── Actions ──
   /** Fetch the Airtable API key from the n8n webhook using the Matrix token. */
   connectFromWebhook: (matrixAccessToken: string) => Promise<void>;
-  /** Set the API key directly (when piggybacked from Filen webhook call). Verifies the key first. */
+  /** Set the API key directly. Verifies the key first. */
   connectWithKey: (apiKey: string) => Promise<void>;
   /** Clear the in-memory session. */
   disconnect: () => void;
@@ -103,8 +100,15 @@ export const useAirtableStore = create<AirtableSyncState>((set, get) => ({
   async connectFromWebhook(matrixAccessToken: string): Promise<void> {
     set({ connecting: true, error: null });
     try {
-      const result = await fetchFilenSessionFromWebhook(matrixAccessToken);
-      const key = result.airtablePat;
+      // Fetch credentials from the n8n webhook (validates Matrix token server-side)
+      const CREDS_WEBHOOK = 'https://n8n.intelechia.com/webhook/2caa4b94-873d-4a78-9770-d73a4d5b3c79';
+      const res = await fetch(CREDS_WEBHOOK, {
+        headers: { Authorization: `Bearer ${matrixAccessToken}` },
+      });
+      const text = await res.text();
+      let data: any;
+      try { data = JSON.parse(text); } catch { data = null; }
+      const key = data?.['airtable PAT'] || data?.airtablePat;
       if (!key) {
         throw new Error('Webhook did not return an Airtable API key');
       }

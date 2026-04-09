@@ -8,8 +8,6 @@ import { deriveKey } from '../lib/crypto';
 import { SyncManager } from '../matrix/sync-manager';
 import { Presence } from '../matrix/presence';
 import { OnlineUsers } from './OnlineUsers';
-import { FilenSyncService } from '../filen/filen-sync';
-import { useFilenStore } from '../filen/filen-store';
 import { GDriveSyncService } from '../google-drive/gdrive-sync';
 import { useGDriveStore } from '../google-drive/gdrive-store';
 import { useAirtableStore } from '../ingestion/airtable-store';
@@ -66,8 +64,7 @@ import { EO_POWER_LEVEL_CONTENT } from '../permissions/types';
 import { listAllHomeserverUsers } from '../matrix/user-discovery';
 import { withRetry } from '../matrix/connection-resilience';
 
-/** Set to false to disable all Matrix activity (sync, room creation, discovery).
- *  When false, the app uses Filen as the sole sync layer. */
+/** Set to false to disable all Matrix activity (sync, room creation, discovery). */
 const MATRIX_ENABLED = true;
 
 /**
@@ -431,7 +428,6 @@ function describeMatrixError(err: any): { phase: 'auth' | 'crypto' | 'sync' | 'r
 interface CachedSpace {
   store: ReturnType<typeof createStore>;
   syncManager: SyncManager | null;
-  filenSync: FilenSyncService | null;
   gdriveSync: GDriveSyncService | null;
   mainRoomId: string | null;
   presence: Presence | null;
@@ -487,7 +483,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   const getState = useEoStore((s) => s.getState);
   const _browserOnline = useConnectionState(); // triggers re-render on network change
   const syncManager = useEoStore((s) => s.syncManager);
-  const filenSync = useEoStore((s) => s.filenSync);
   const [syncToastStatus, syncToastSeq, onSyncStatus] = useSyncToast();
   const [matrixReady, setMatrixReady] = useState(false);
   const [presence, setPresence] = useState<Presence | null>(null);
@@ -518,14 +513,11 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     setMatrixReady(false);
     setRetryCount(c => c + 1);
   }, []);
-  // Show actual sync status. Filen is the primary data store when connected —
-  // Matrix SyncManager is intentionally skipped in that case (see setupSpaceStore),
-  // so treat an active Filen sync as "online" too.
   const connectionState: ConnectionState = !navigator.onLine
     ? 'offline'
     : (!MATRIX_ENABLED || localMode)
       ? 'local'
-      : (syncManager || filenSync)
+      : syncManager
         ? 'online'
         : connectionError
           ? 'error'
@@ -972,7 +964,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       // Open root IDB to discover spaces from store data
       const idb = await createIdb();
 
-      // Load persisted space metadata (room IDs, Filen UUIDs, etc.)
+      // Load persisted space metadata (room IDs, etc.)
       // so sync services can start without Matrix discovery.
       try {
         const metas = await listSpaceMeta(idb);
@@ -1075,12 +1067,8 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         oldSyncManager.destroy();
       }
 
-      // Stop old Filen sync
       if (prevSpaceRef.current) {
         const oldCached = spaceCacheRef.current.get(prevSpaceRef.current);
-        if (oldCached?.filenSync) {
-          oldCached.filenSync.stop();
-        }
         if (oldCached?.gdriveSync) {
           oldCached.gdriveSync.stop();
         }
@@ -1353,32 +1341,9 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           existing.spaceRooms = resolvedSpaceRooms;
         }
 
-        // If the cached store is still empty (seq=0) and Filen is connected,
-        // attempt hydration now. This handles the case where the first effect
-        // run cached the store but hadn't finished hydrating before the effect
-        // re-ran (e.g., matrixReady / mergedEntries changed mid-hydration).
+        // Try Google Drive hydration if store is empty
         const cachedSeq = await existing.store.getCurrentSeq();
-        const filenNow = useFilenStore.getState();
-        if (cachedSeq === 0 && filenNow.connected && selectedSpace) {
-          try {
-            const spaceEntry = mergedEntries.find(e => {
-              const target = 'canonical' in e ? (e as any).canonical : (e as any).target;
-              return target === selectedSpace;
-            });
-            const spaceName = spaceEntry ? ((spaceEntry as any).name || selectedSpace) : selectedSpace;
-            const spaceFolderUuid = await filenNow.ensureSpaceFolder(selectedSpace, spaceName);
-            const hydratedSeq = await FilenSyncService.hydrateFromFilen(existing.store, spaceFolderUuid, onFoldEvent);
-            if (hydratedSeq > 0) {
-              await init(existing.store);
-            }
-          } catch (e) {
-            console.warn('[EO-DB] Cache-path Filen hydration failed for space', selectedSpace, e);
-          }
-        }
-
-        // Also try Google Drive hydration if still empty
-        const cachedSeqAfterFilen = await existing.store.getCurrentSeq();
-        if (cachedSeqAfterFilen === 0 && session.accessToken && selectedSpace) {
+        if (cachedSeq === 0 && session.accessToken && selectedSpace) {
           try {
             const dataType = `eodb-${selectedSpace}`;
             const hydratedSeq = await GDriveSyncService.hydrateFromGDrive(
@@ -1395,14 +1360,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         // Restore cached sync manager
         if (existing.syncManager) {
           useEoStore.getState().setSyncManager(existing.syncManager);
-        }
-
-        // Restart Filen sync for cached space
-        if (existing.filenSync) {
-          existing.filenSync.start().catch(e =>
-            console.warn('[EO-DB] Filen sync restart failed for cached space', selectedSpace, e),
-          );
-          useEoStore.getState().setFilenSync(existing.filenSync);
         }
 
         // Restart Google Drive sync for cached space
@@ -1436,51 +1393,13 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       // by matrixReady / mergedEntries changes) reuse the SAME store instead
       // of creating a new one. This prevents a race where a second run skips
       // hydration because the first run partially wrote to IDB (seq > 0).
-      cache.set(selectedSpace!, { store, syncManager: null, filenSync: null, gdriveSync: null, mainRoomId: spaceRoomId, presence: null, spaceRooms: resolvedSpaceRooms });
+      cache.set(selectedSpace!, { store, syncManager: null, gdriveSync: null, mainRoomId: spaceRoomId, presence: null, spaceRooms: resolvedSpaceRooms });
 
       await init(store);
 
-      // Detect Filen org-mode via n8n webhook BEFORE starting sync layers.
-      // The webhook validates the Matrix access token and returns the shared
-      // Filen credentials, so clients no longer read Filen config from Matrix
-      // room state. When org-mode is active, Filen is the primary data store
-      // and we skip Matrix SyncManager (which would send data via timeline events).
-      let filenOrgMode = false;
-      const filenState = useFilenStore.getState();
-      if (!filenState.connected && session.accessToken) {
-        try {
-          await useFilenStore.getState().connectOrgFromWebhook(session.accessToken);
-          filenOrgMode = true;
-          console.log('[EO-DB] Org-mode Filen auto-connected via n8n webhook');
-
-          // Piggyback: if the webhook returned an Airtable API key, verify and connect the Airtable store too
-          const webhookAtKey = useFilenStore.getState().webhookAirtableKey;
-          if (webhookAtKey && !useAirtableStore.getState().connected) {
-            try {
-              await useAirtableStore.getState().connectWithKey(webhookAtKey);
-              console.log('[EO-DB] Airtable auto-connected via n8n webhook (key verified)');
-            } catch (e) {
-              console.warn('[EO-DB] Airtable API key from webhook failed verification:', e);
-            }
-          }
-        } catch (e) {
-          console.warn('[EO-DB] Org-mode Filen auto-connect via webhook failed:', e);
-        }
-      }
-
-      // Also check if Filen is already in org-mode (from a previous space switch)
-      if (useFilenStore.getState().isOrgMode) filenOrgMode = true;
-
-      // Start Matrix sync ONLY if Filen is NOT connected (in any mode).
-      // When Filen is the data store, Matrix is signals only — no SyncManager
-      // needed (it would try to hydrate from Matrix media, causing 404 errors).
       let syncManager: SyncManager | null = null;
-      const filenConnected = useFilenStore.getState().connected;
 
       // If Matrix is required but we couldn't get a room, surface the error.
-      // Show this regardless of Filen state — Matrix rooms are still needed
-      // for governance, permissions, and multi-user collaboration even when
-      // Filen handles primary data sync.
       if (MATRIX_ENABLED && !spaceRoomId && matrixClientRef.current) {
         console.warn('[EO-DB] No room for space', selectedSpace, '— cannot start sync.');
         setConnectionError({
@@ -1489,7 +1408,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         });
       }
 
-      if (MATRIX_ENABLED && spaceRoomId && matrixClientRef.current && !filenOrgMode && !filenConnected) {
+      if (MATRIX_ENABLED && spaceRoomId && matrixClientRef.current) {
         const maxRetries = 3;
         for (let attempt = 0; attempt < maxRetries; attempt++) {
           if (isStale()) return;
@@ -1519,93 +1438,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         }
       }
 
-      // Start Filen sync (primary data store layer)
-      let filenSync: FilenSyncService | null = null;
-
-      // Now start Filen sync if connected (either org-mode or personal)
-      const filenStateNow = useFilenStore.getState();
-      if (filenStateNow.connected && selectedSpace) {
-        try {
-          // Find the space name from the merged entries
-          const spaceEntry = mergedEntries.find(e => {
-            const target = 'canonical' in e ? (e as any).canonical : (e as any).target;
-            return target === selectedSpace;
-          });
-          const spaceName = spaceEntry ? ((spaceEntry as any).name || selectedSpace) : selectedSpace;
-
-          const spaceFolderUuid = await filenStateNow.ensureSpaceFolder(selectedSpace, spaceName);
-
-          // On fresh device (seq=0), hydrate from Filen before starting sync timer
-          const currentSeq = await store.getCurrentSeq();
-          if (currentSeq === 0) {
-            try {
-              const hydratedSeq = await FilenSyncService.hydrateFromFilen(store, spaceFolderUuid, onFoldEvent);
-              if (hydratedSeq > 0) {
-                await init(store);
-              }
-            } catch (e) {
-              console.warn('[EO-DB] Filen hydration failed for space', selectedSpace, e);
-            }
-          }
-
-          filenSync = new FilenSyncService({
-            store,
-            spaceId: selectedSpace,
-            spaceName,
-            spaceFolderUuid,
-            userId: session.userId,
-            matrixClient: matrixClientRef.current || undefined,
-            roomId: spaceRoomId || undefined,
-            onEvent: onFoldEvent,
-            onHydrated: () => { init(store); },
-          });
-          await filenSync.start();
-          useEoStore.getState().setFilenSync(filenSync);
-        } catch (e) {
-          console.warn('[EO-DB] Filen sync start failed for space', selectedSpace, e);
-          filenSync = null;
-        }
-      }
-
-      // ── Retroactive storage provisioning ──
-      // For existing spaces created before storage tracking, record Filen folder
-      // paths in the space config. Skip for freshly created spaces (onCreate
-      // already published storage) — detected by checking if getSpaceConfig
-      // returns a config that's missing the storage field. getSpaceConfig reads
-      // from the SDK's in-memory room state, so it only returns data for rooms
-      // that have completed sync (not brand-new rooms whose state hasn't arrived).
-      if (MATRIX_ENABLED && spaceRoomId && matrixClientRef.current && resolvedSpaceRooms && filenSync) {
-        try {
-          const room = (matrixClientRef.current as any).getRoom?.(spaceRoomId);
-          // Only proceed if the room is actually available in the SDK store.
-          // Freshly created rooms may not have synced state events yet.
-          if (room) {
-            const existingConfig = getSpaceConfig(matrixClientRef.current as any, spaceRoomId);
-            if (existingConfig && !existingConfig.storage?.filen) {
-              const filenFolderUuid = useFilenStore.getState().spaceFolders?.[selectedSpace!];
-              if (filenFolderUuid) {
-                const spaceName = existingConfig.name || selectedSpace!;
-                const updatedConfig = {
-                  ...existingConfig,
-                  storage: {
-                    ...existingConfig.storage,
-                    filen: { folderUuid: filenFolderUuid, path: `/EO-DB/${spaceName}` },
-                  },
-                };
-                await setSpaceConfig(matrixClientRef.current as any, spaceRoomId, updatedConfig);
-                if (resolvedSpaceRooms.governance) {
-                  await setSpaceConfig(matrixClientRef.current as any, resolvedSpaceRooms.governance, updatedConfig).catch(() => {});
-                }
-                console.info('[EO-DB] Retroactively added Filen storage path to space config for', selectedSpace);
-              }
-            }
-          }
-        } catch (e) {
-          console.warn('[EO-DB] Retroactive storage provisioning failed:', e);
-        }
-      }
-
-      // Start Google Drive sync (secondary backup layer via n8n webhook)
+      // Start Google Drive sync (backup layer via n8n webhook)
       // Auto-creates the Drive folder for the space if it doesn't exist
       // (n8n's Google Drive node uses folderId mode "name", which auto-creates).
       let gdriveSync: GDriveSyncService | null = null;
@@ -1665,7 +1498,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       }
 
       // Start presence heartbeat for the space room (Matrix to-device pings).
-      // Independent of SyncManager/Filen — works in all sync modes.
+      // Independent of SyncManager — works in all sync modes.
       let presenceInstance: Presence | null = null;
       if (MATRIX_ENABLED && spaceRoomId && matrixClientRef.current) {
         try {
@@ -1686,10 +1519,9 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       }
 
       // Persist space metadata to root IndexedDB so the app can reconnect
-      // to Google Drive and Filen without needing Matrix for space discovery.
+      // to Google Drive without needing Matrix for space discovery.
       {
         const spaceEntry = mergedEntries.find(e => e.spaceTarget === selectedSpace);
-        const filenFolderUuid = useFilenStore.getState().spaceFolders?.[selectedSpace!];
         persistSpaceMeta({
           spaceId: selectedSpace!,
           spaceName: spaceEntry?.displayName || selectedSpace!,
@@ -1697,13 +1529,12 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           // overwriting a previously saved room ID with an empty string
           // when Matrix isn't ready yet on this run.
           ...(spaceRoomId ? { mainRoomId: spaceRoomId } : {}),
-          ...(filenFolderUuid ? { filenFolderUuid } : {}),
         }).catch(e => console.warn('[EO-DB] Failed to persist space meta:', e));
       }
 
       // Update the cached entry with sync services (store was cached earlier
       // to prevent race conditions; now enrich with fully-initialized services).
-      cache.set(selectedSpace!, { store, syncManager, filenSync, gdriveSync, mainRoomId: spaceRoomId, presence: presenceInstance, spaceRooms: resolvedSpaceRooms });
+      cache.set(selectedSpace!, { store, syncManager, gdriveSync, mainRoomId: spaceRoomId, presence: presenceInstance, spaceRooms: resolvedSpaceRooms });
     }
 
     setupSpaceStore();
@@ -1727,11 +1558,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               console.warn('[EO-DB] Snapshot save failed:', err);
             }));
       }
-      if (cached.filenSync) {
-        savePromises.push(cached.filenSync.forceSave().catch((err) => {
-              console.warn('[EO-DB] Filen save failed:', err);
-            }));
-      }
       if (cached.gdriveSync) {
         savePromises.push(cached.gdriveSync.forceSave().catch((err) => {
               console.warn('[EO-DB] Google Drive save failed:', err);
@@ -1740,9 +1566,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     }
     await Promise.all(savePromises);
 
-    // Stop all Filen sync and close all cached stores
     for (const [, cached] of cache) {
-      if (cached.filenSync) cached.filenSync.stop();
       if (cached.gdriveSync) cached.gdriveSync.stop();
       cached.store.close();
     }
@@ -1776,11 +1600,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           if (cached.syncManager) {
             promises.push(cached.syncManager.saveSnapshot().catch((err) => {
               console.warn('[EO-DB] Snapshot save failed:', err);
-            }));
-          }
-          if (cached.filenSync) {
-            promises.push(cached.filenSync.forceSave().catch((err) => {
-              console.warn('[EO-DB] Filen save failed:', err);
             }));
           }
           if (cached.gdriveSync) {
@@ -1973,48 +1792,13 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                   ...(governanceRoomId ? { governance: governanceRoomId } : {}),
                 };
 
-                // ── Step 2: Create Filen folder (if connected) ──
-                // Non-fatal: rooms are the hard requirement; Filen can be retried in setupSpaceStore.
-                let filenStorage: { folderUuid: string; path: string } | undefined;
-                const filenState = useFilenStore.getState();
-                if (filenState.connected) {
-                  try {
-                    const folderUuid = await filenState.ensureSpaceFolder(spaceTarget, name);
-                    filenStorage = { folderUuid, path: `/EO-DB/${name}` };
-                  } catch (e) {
-                    console.warn('[EO-DB] Filen folder creation failed during space creation (will retry later):', e);
-                  }
-                }
-
-                // ── Step 3: Update space config with storage paths ──
-                const storageConfig: SpaceConfig['storage'] = {};
-                if (filenStorage) storageConfig.filen = filenStorage;
-                if (Object.keys(storageConfig).length > 0) {
-                  try {
-                    const updatedConfig: any = {
-                      name,
-                      rooms: spaceRooms,
-                      field_assignments: [],
-                      space_settings: {},
-                      storage: storageConfig,
-                      discoverability: opts?.discoverability ?? 'public',
-                    };
-                    await setSpaceConfig(client, mainRoomId, updatedConfig);
-                    if (governanceRoomId) {
-                      await setSpaceConfig(client, governanceRoomId, updatedConfig).catch(() => {});
-                    }
-                  } catch (e) {
-                    console.warn('[EO-DB] Failed to update space config with storage paths:', e);
-                  }
-                }
-
-                // ── Step 4: Refresh discovery ──
+                // ── Step 2: Refresh discovery ──
                 try {
                   const entries = discoverSpacesFromMatrix(client);
                   if (entries.length > 0) setSpaceEntries(entries);
                 } catch { /* best effort */ }
 
-                // ── Step 5: Create local IDB store ──
+                // ── Step 3: Create local IDB store ──
                 const idb = await createIdb(spaceTarget);
                 const key = await deriveKey(session.userId, session.deviceId);
                 const spaceStore = createStore(idb, key);
@@ -2024,7 +1808,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                 spaceCacheRef.current.set(spaceTarget, {
                   store: spaceStore,
                   syncManager: null,
-                  filenSync: null,
                   gdriveSync: null,
                   mainRoomId,
                   presence: null,

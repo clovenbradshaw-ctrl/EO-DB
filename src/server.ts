@@ -18,9 +18,6 @@ import { ChatFeed } from './chat/feed.js';
 import { configureMatrixDomain } from './config/matrix-domain.js';
 import { RoomSyncCoordinator } from './ingestion/room-sync-coordinator.js';
 import { MatrixConnectionMonitor } from './matrix/connection-resilience.js';
-import { loadFilenConfig, configureFilenListener } from './filen/config.js';
-import { FilenSocketListener } from './filen/listener.js';
-import { FilenPipelineBridge } from './filen/pipeline-bridge.js';
 import { loadN8nConfig, configureN8nWebhook } from './n8n/config.js';
 import { registerN8nRoutes } from './api/n8n-store.js';
 import { registerCrystallizeRoutes } from './api/crystallize.js';
@@ -112,30 +109,10 @@ async function start(): Promise<void> {
     app.log.info(`n8n webhook configured → ${n8nConfig.baseUrl}${n8nConfig.webhookPath}`);
   }
 
-  // Filen socket listener — optional, enabled when FILEN_FOLDER_UUID is set
-  let filenListener: FilenSocketListener | undefined;
-  const filenConfig = loadFilenConfig();
-  if (filenConfig) {
-    configureFilenListener(filenConfig);
-    filenListener = new FilenSocketListener(filenConfig);
-    const bridge = new FilenPipelineBridge(db, feed);
-    filenListener.onFileChange(event => {
-      bridge.handleEvent(event).catch(err => {
-        app.log.error(`Filen pipeline error: ${err.message}`);
-      });
-    });
-    filenListener.onConnectionChange(state => {
-      app.log.info(`Filen connection: ${state.status} (${state.reason})`);
-    });
-    await filenListener.start();
-    app.log.info(`Filen listener active for folder ${filenConfig.folderUuid}`);
-  }
-
   // Graceful shutdown
   const shutdown = async () => {
     app.log.info('Shutting down...');
     connectionMonitor?.stop();
-    await filenListener?.stop();
     coordinator.stop();
     await app.close();
     await db.close();

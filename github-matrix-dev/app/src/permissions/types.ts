@@ -74,7 +74,6 @@ export interface SpaceConfig {
   space_settings: SpaceSettings;
   /** Cloud storage paths provisioned when the space was created. */
   storage?: {
-    filen?: { folderUuid: string; path: string };
     gdrive?: { folderId: string; path: string };
   };
   /** Canonical Matrix room alias for deterministic room lookup.

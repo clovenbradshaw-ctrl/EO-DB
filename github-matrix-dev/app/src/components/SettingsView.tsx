@@ -6,7 +6,6 @@ import type { MatrixSession } from '../matrix/client';
 import { RoomDataViewer } from './RoomDataViewer';
 import { MatrixRoomsViewer } from './MatrixRoomsViewer';
 import { UserRoomsBySpaces } from './UserRoomsBySpaces';
-import { FilenStorageWidget } from './FilenStorageWidget';
 import { GDriveStorageWidget } from './GDriveStorageWidget';
 import { OP_COLORS, TRIAD_LABELS } from './LogView';
 import { ArchivedSpacesSection } from './ArchivedSpaces';
@@ -22,7 +21,7 @@ interface SettingsViewProps {
   onUnarchive?: (target: string) => void;
   /** Current connection status for the header badge */
   connectionState?: 'online' | 'offline' | 'syncing' | 'local' | 'error';
-  /** Structured error from Matrix/Filen init */
+  /** Structured error from Matrix init */
   connectionError?: { phase: string; message: string } | null;
   /** Whether the Matrix SDK initial sync completed */
   matrixReady?: boolean;
@@ -38,7 +37,6 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
   const recentEvents = useEoStore((s) => s.recentEvents);
   const store = useEoStore((s) => s.store);
   const syncManager = useEoStore((s) => s.syncManager);
-  const filenSync = useEoStore((s) => s.filenSync);
   const gdriveSync = useEoStore((s) => s.gdriveSync);
   const gdriveConnected = useGDriveStore((s) => s.connected);
   const manualSnapshot = useEoStore((s) => s.manualSnapshot);
@@ -196,20 +194,12 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
             <StatusRow
               theme={theme}
               label="Matrix Sync"
-              status={syncManager ? 'ok' : filenSync ? 'off' : matrixReady && roomId ? 'pending' : 'off'}
+              status={syncManager ? 'ok' : matrixReady && roomId ? 'pending' : 'off'}
               detail={
                 syncManager ? 'Timeline sync active'
-                : filenSync ? 'Skipped (Filen is primary data store)'
                 : matrixReady && roomId ? 'Initializing...'
                 : 'Not started'
               }
-            />
-            {/* Filen */}
-            <StatusRow
-              theme={theme}
-              label="Filen Storage"
-              status={filenSync ? 'ok' : 'off'}
-              detail={filenSync ? 'Backup sync active' : 'Not connected'}
             />
             {/* Google Drive */}
             <StatusRow
@@ -289,13 +279,6 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
         {onUnarchive && (
           <Section title="Archived Spaces" theme={theme}>
             <ArchivedSpacesSection onUnarchive={onUnarchive} />
-          </Section>
-        )}
-
-        {/* Cloud Storage (shared Filen credentials fetched from n8n webhook) */}
-        {(filenSync || (matrixClient && roomId)) && (
-          <Section title="Filen Cloud Storage" theme={theme}>
-            <FilenStorageWidget />
           </Section>
         )}
 
