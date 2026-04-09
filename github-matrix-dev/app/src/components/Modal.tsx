@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useTheme, type Theme } from '../theme';
 
@@ -28,6 +28,7 @@ export function Modal({
   zIndex = 9999,
 }: ModalProps) {
   const { theme } = useTheme();
+  const [expanded, setExpanded] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -59,15 +60,31 @@ export function Modal({
       <div
         role="dialog"
         aria-modal="true"
-        style={{ ...s.dialog, width, maxWidth, zIndex }}
+        style={{
+          ...s.dialog,
+          width: expanded ? '95vw' : width,
+          maxWidth: expanded ? '95vw' : maxWidth,
+          maxHeight: expanded ? '95vh' : '90vh',
+          zIndex,
+        }}
         onClick={(e) => e.stopPropagation()}
       >
         {title && (
           <div style={s.header}>
             <span style={s.title}>{title}</span>
-            <button style={s.closeBtn} onClick={onClose} aria-label="Close">
-              &times;
-            </button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              <button
+                style={s.expandBtn}
+                onClick={() => setExpanded(e => !e)}
+                aria-label={expanded ? 'Collapse' : 'Expand'}
+                title={expanded ? 'Collapse' : 'Expand to full width'}
+              >
+                {expanded ? '⊡' : '⊞'}
+              </button>
+              <button style={s.closeBtn} onClick={onClose} aria-label="Close">
+                &times;
+              </button>
+            </div>
           </div>
         )}
         <div style={s.body}>{children}</div>
@@ -111,6 +128,15 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       fontWeight: 600,
       fontFamily: "'Outfit', sans-serif",
       color: t.textHeading,
+    },
+    expandBtn: {
+      background: 'none',
+      border: 'none',
+      fontSize: 14,
+      color: t.textMuted,
+      cursor: 'pointer',
+      padding: 0,
+      lineHeight: 1,
     },
     closeBtn: {
       background: 'none',
