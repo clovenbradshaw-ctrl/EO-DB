@@ -474,7 +474,7 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
         loading={observationsLoading}
         error={observationsError}
         onLoad={loadObservations}
-        emptyMessage="Nothing unusual detected"
+        emptyMessage="Nothing flagged — no oscillation, temporal gaps, or stale reviews found"
       >
         {observations && observations.length > 0 && (
           <Noticed observations={observations} onNavigate={onNavigate} />
@@ -504,7 +504,7 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
         loading={hashLoading}
         error={hashError}
         onLoad={loadHashCohort}
-        emptyMessage="No structural twins"
+        emptyMessage="No records with an identical transformation sequence in this collection"
       >
         {hashCohort && hashCohort.length > 0 && (
           <HashCohort targets={hashCohort} currentTarget={target} onNavigate={onNavigate} />
@@ -520,7 +520,7 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
         loading={recCycleLoading}
         error={recCycleError}
         onLoad={loadRecCycle}
-        emptyMessage="No dependency cycle"
+        emptyMessage="No EVA formula registered — dependency cycle analysis not applicable"
       >
         {recCycle && <RecCycleMap cycle={recCycle} onNavigate={onNavigate} />}
       </LazySection>

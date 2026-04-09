@@ -113,9 +113,11 @@ function SimilarCard({
             fontSize: 13,
             fontWeight: 600,
             color: theme.textHeading,
-            whiteSpace: 'nowrap',
+            display: '-webkit-box',
+            WebkitLineClamp: 2,
+            WebkitBoxOrient: 'vertical' as any,
             overflow: 'hidden',
-            textOverflow: 'ellipsis',
+            lineHeight: 1.35,
           }}>
             {label}
           </div>

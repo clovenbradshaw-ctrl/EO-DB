@@ -13,13 +13,18 @@ export function Signals({ entries }: SignalsProps) {
     return <div style={s.none}>No notable patterns detected across this population</div>;
   }
 
+  // Separate the population-count summary from field signals
+  const countEntry = entries.find(e => e.measure === 'count');
+  const fieldEntries = entries.filter(e => e.measure !== 'count');
+
   return (
     <div style={s.row}>
-      {entries.map((sig, i) => {
+      {fieldEntries.map((sig, i) => {
         const hasZScore = sig.value && typeof sig.value === 'object' && 'z_score' in sig.value;
+        const isOutlier = sig.value?.isOutlier === true;
         return (
-          <div key={i} style={s.card}>
-            <div style={s.ephemeral}>SIG</div>
+          <div key={i} style={{ ...s.card, borderColor: isOutlier ? theme.warningBorder : theme.borderLight }}>
+            {isOutlier && <div style={s.ephemeral}>SIG</div>}
             <div style={s.desc}>{sig.description}</div>
             {hasZScore && (
               <div style={s.viz}>
@@ -27,6 +32,8 @@ export function Signals({ entries }: SignalsProps) {
                   <div style={{
                     ...s.barFill,
                     width: `${Math.min(95, Math.abs(sig.value.z_score) * 25 + 30)}%`,
+                    background: isOutlier ? theme.barFill : theme.textMuted,
+                    opacity: isOutlier ? 1 : 0.45,
                   }} />
                 </div>
               </div>
@@ -43,6 +50,11 @@ export function Signals({ entries }: SignalsProps) {
           </div>
         );
       })}
+      {countEntry && (
+        <div style={s.countRow}>
+          <span style={s.countLabel}>{countEntry.description}</span>
+        </div>
+      )}
     </div>
   );
 }
@@ -85,5 +97,15 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
     },
     stats: { display: 'flex', gap: 16, fontSize: 11 },
     stat: { color: t.textSecondary },
+    countRow: {
+      padding: '6px 2px',
+      borderTop: `1px solid ${t.borderDivider}`,
+      marginTop: 2,
+    },
+    countLabel: {
+      fontSize: 11,
+      color: t.textMuted,
+      fontFamily: "'JetBrains Mono', monospace",
+    },
   };
 }
