@@ -176,6 +176,23 @@ function parseKeyedCollections(obj: Record<string, any>, targetPrefix?: string):
     }
   }
 
+  // Schema-type DEF events: tell the UI that detected link fields have type 'link'
+  // Emitted once per (sourceCollection, sourceField) pair; first target wins.
+  const schemaTypeSeen = new Set<string>();
+  for (const decl of defs) {
+    const schemaKey = `${decl.sourceCollection}.${decl.sourceField}`;
+    if (schemaTypeSeen.has(schemaKey)) continue;
+    schemaTypeSeen.add(schemaKey);
+    rows.push({
+      op: 'DEF',
+      target: `${prefix}.${decl.sourceCollection}._schema.${decl.sourceField}.type`,
+      operand: {
+        type: 'link',
+        linkedTable: `${prefix}.${decl.targetCollection}`,
+      },
+    });
+  }
+
   // DEF events for scalar (non-reference) fields — emitted after CON so that
   // last_op is DEF and the UI displays actual field values, not just edges
   for (const [collectionName, records] of Object.entries(collections)) {
