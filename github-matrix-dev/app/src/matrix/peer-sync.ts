@@ -242,6 +242,10 @@ export class PeerSync {
     const content = event.getContent();
     const sender = event.getSender()!;
 
+    // Ignore messages that belong to a different space's room.
+    // room_id may be absent in legacy messages — accept those for backward compat.
+    if (content.room_id && content.room_id !== this.roomId) return;
+
     switch (type) {
       case SYNC_HELLO:
         await this.handleHello(sender, content.my_device, content.my_seq, content.my_fingerprint, content.rtc_capable);
@@ -290,6 +294,7 @@ export class PeerSync {
         my_seq: mySeq,
         my_fingerprint: myFingerprint,
         my_device: this.client.getDeviceId(),
+        room_id: this.roomId,
         has_events_you_need: hasEventsTheyNeed,
         needs_events_from_you: needsEventsFromThem,
         fingerprint_match: fingerprintMatch,
@@ -342,6 +347,7 @@ export class PeerSync {
       peerUserId, peerDeviceId, {
         need_from: needFrom,
         from_device: this.client.getDeviceId(),
+        room_id: this.roomId,
       },
     ));
   }
@@ -366,6 +372,7 @@ export class PeerSync {
       await this.client.sendToDevice(SYNC_EVENTS, toDeviceContent(
         peerUserId, peerDeviceId, {
           ...payload,
+          room_id: this.roomId,
           batch_index: Math.floor(i / BATCH_SIZE),
           total_batches: Math.ceil(events.length / BATCH_SIZE),
         },
@@ -434,6 +441,7 @@ export class PeerSync {
           SYNC_EVENTS,
           toDeviceContent(member.userId, '*', {
             ...payload,
+            room_id: this.roomId,
             batch_index: 0,
             total_batches: 1,
           }),
@@ -451,7 +459,7 @@ export class PeerSync {
       try {
         await this.client.sendToDevice(
           SYNC_GDRIVE,
-          toDeviceContent(member.userId, '*', { seq }),
+          toDeviceContent(member.userId, '*', { seq, room_id: this.roomId }),
         );
       } catch { /* best-effort */ }
     }
