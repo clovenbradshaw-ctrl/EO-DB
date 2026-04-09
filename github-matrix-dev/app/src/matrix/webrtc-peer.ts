@@ -170,6 +170,8 @@ export class WebRTCPeer {
   private pingTimers = new Map<string, ReturnType<typeof setInterval>>();
   /** Incoming transfer state for resumability. */
   private incomingTransfers = new Map<string, TransferState>();
+  /** Buffered ICE candidates waiting for remote description, keyed by peer key. */
+  private pendingCandidates = new Map<string, RTCIceCandidateInit[]>();
   /** Matrix to-device event handler. */
   private toDeviceHandler?: (event: MatrixEvent) => void;
   /** Whether this peer has been destroyed. */
@@ -450,6 +452,7 @@ export class WebRTCPeer {
 
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
+    await this.drainPendingCandidates(peerKey, pc);
 
     await this.client.sendToDevice(RTC_ANSWER, toDeviceContent(
       sender, peerDeviceId, {
@@ -470,16 +473,24 @@ export class WebRTCPeer {
       type: content.type,
       sdp: content.sdp,
     }));
+    await this.drainPendingCandidates(peerKey, pc);
   }
 
   private async handleIce(sender: string, content: Record<string, any>): Promise<void> {
     // Find the connection for this sender (try all known device IDs)
     for (const [key, pc] of this.connections) {
       if (key.startsWith(`${sender}:`)) {
-        try {
-          await pc.addIceCandidate(new RTCIceCandidate(content.candidate));
-        } catch (err) {
-          console.warn('[EO-DB] Failed to add ICE candidate:', err);
+        if (!pc.remoteDescription) {
+          // Remote description not yet set — buffer until handleOffer/handleAnswer drains it
+          const pending = this.pendingCandidates.get(key) ?? [];
+          pending.push(content.candidate);
+          this.pendingCandidates.set(key, pending);
+        } else {
+          try {
+            await pc.addIceCandidate(new RTCIceCandidate(content.candidate));
+          } catch (err) {
+            console.warn('[EO-DB] Failed to add ICE candidate:', err);
+          }
         }
         return;
       }
@@ -636,6 +647,19 @@ export class WebRTCPeer {
     this.incomingTransfers.delete(msg.transfer_id);
   }
 
+  private async drainPendingCandidates(peerKey: string, pc: RTCPeerConnection): Promise<void> {
+    const pending = this.pendingCandidates.get(peerKey);
+    if (!pending?.length) return;
+    this.pendingCandidates.delete(peerKey);
+    for (const candidate of pending) {
+      try {
+        await pc.addIceCandidate(new RTCIceCandidate(candidate));
+      } catch (err) {
+        console.warn('[EO-DB] Failed to add buffered ICE candidate:', err);
+      }
+    }
+  }
+
   // ────────────────────────────────────────────────────────────
   // Teardown
   // ────────────────────────────────────────────────────────────
@@ -656,6 +680,7 @@ export class WebRTCPeer {
       clearInterval(timer);
       this.pingTimers.delete(peerKey);
     }
+    this.pendingCandidates.delete(peerKey);
   }
 
   /**
