@@ -48,6 +48,7 @@ import {
   gdriveRetrieveRange,
   gdriveRetrieve,
   deriveSpaceFileGuid,
+  setActiveSpaceRoomId,
 } from './gdrive-api';
 import type { GDriveListEntry } from './gdrive-api';
 import { processEvent } from '../db/fold';
@@ -142,6 +143,8 @@ export class GDriveSyncService {
   private sessionId: string;
   private matrixAccessToken: string;
   private keyring: LocalKeyring;
+  /** Matrix main room ID for this space — sent to n8n for membership verification. */
+  private spaceRoomId: string | undefined;
   /** Field sensitivity map from the folded manifest — drives 3-tier event routing. */
   private manifestFields: Record<string, FieldShadowConfig> = {};
 
@@ -162,6 +165,8 @@ export class GDriveSyncService {
     userId: string;
     sessionId?: string;
     matrixAccessToken: string;
+    /** Matrix main room ID — forwarded to n8n so membership is verified per-space. */
+    spaceRoomId?: string;
     keyring?: LocalKeyring;
     onEvent?: (event: any) => void;
     onHydrated?: () => void;
@@ -172,9 +177,15 @@ export class GDriveSyncService {
     this.userId = opts.userId;
     this.sessionId = opts.sessionId ?? Math.random().toString(36).slice(2, 10);
     this.matrixAccessToken = opts.matrixAccessToken;
+    this.spaceRoomId = opts.spaceRoomId;
     this.keyring = opts.keyring || { keys: new Map() };
     this.onEvent = opts.onEvent;
     this.onHydrated = opts.onHydrated;
+  }
+
+  /** Update the space room ID (e.g., if room resolution completes after construction). */
+  setSpaceRoomId(roomId: string): void {
+    this.spaceRoomId = roomId;
   }
 
   setKeyring(keyring: LocalKeyring): void {
@@ -238,10 +249,24 @@ export class GDriveSyncService {
     return decryptSnapshot(binary, this.keyring).catch(() => binary);
   }
 
+  /**
+   * Register this space's room ID as the active room for n8n membership checks.
+   * Must be called before any Drive API operation so the proxy can verify that
+   * the authenticated user is a member of THIS space's room.
+   *
+   * This is a module-level global so it will be overwritten by whichever space
+   * makes a Drive call most recently — acceptable because calls complete quickly
+   * and the data folder is independently namespaced by spaceId regardless.
+   */
+  private activateSpaceRoom(): void {
+    setActiveSpaceRoomId(this.spaceRoomId);
+  }
+
   // ── Lifecycle ──────────────────────────────────────────────
 
   async start(): Promise<void> {
     if (this.timer) return;
+    this.activateSpaceRoom();
 
     // Derive stable GUIDs from spaceId so all space members use the same filenames.
     const [logGuid, recentGuid, manifestGuid, rLogGuid, rRecentGuid, aLogGuid, aRecentGuid] =
@@ -325,6 +350,7 @@ export class GDriveSyncService {
   }
 
   triggerImmediateCheck(): void {
+    this.activateSpaceRoom();
     if (!this.syncing && !this.destroyed) {
       this.syncCycle().catch(console.warn);
     }
@@ -332,6 +358,7 @@ export class GDriveSyncService {
 
   async forceSave(): Promise<void> {
     if (this.destroyed) return;
+    this.activateSpaceRoom();
     await this.fullPushToGDrive();
   }
 
@@ -344,6 +371,7 @@ export class GDriveSyncService {
    */
   async saveOp(event: EoEvent): Promise<void> {
     if (this.destroyed) return;
+    this.activateSpaceRoom();
     this.opsBuffer.push(event);
     await this.flushBuffer();
     if (this.opsBuffer.length >= OPS_PER_BAKE && !this.baking) {
@@ -357,6 +385,7 @@ export class GDriveSyncService {
    */
   async saveBulkOps(events: EoEvent[]): Promise<void> {
     if (this.destroyed || events.length === 0) return;
+    this.activateSpaceRoom();
     for (const e of events) this.opsBuffer.push(e);
     await this.flushBuffer();
     if (this.opsBuffer.length >= OPS_PER_BAKE && !this.baking) {
@@ -862,6 +891,7 @@ export class GDriveSyncService {
 
   private async syncCycle(): Promise<void> {
     if (this.syncing || this.destroyed) return;
+    this.activateSpaceRoom();
     this.syncing = true;
     this.onStatus?.('syncing');
     try {

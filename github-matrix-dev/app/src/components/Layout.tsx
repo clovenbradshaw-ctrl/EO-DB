@@ -1356,10 +1356,13 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         recentEvents: [...st.recentEvents.slice(-99), event],
         lastSeq: event.seq,
       }));
-      // Save each op to GDrive immediately (fire-and-forget)
-      useEoStore.getState().gdriveSync?.saveOp(event).catch(e =>
-        console.warn('[EO-DB] saveOp failed:', e),
-      );
+      // NOTE: do NOT call gdriveSync.saveOp() here.
+      // This callback fires for ALL folded events: Drive pulls, peer events,
+      // server events, and local dispatches.  Calling saveOp() here would
+      // cross-contaminate spaces — when Space A's background timer pulls new
+      // events, this callback runs while Zustand may already point at Space B,
+      // so saveOp() would write Space A events into Space B's Drive folder.
+      // Local dispatches are saved by dispatch()/batchImport() in eo-store.ts.
     };
 
     async function setupSpaceStore() {
@@ -1417,6 +1420,8 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
 
         // Restart Google Drive sync for cached space
         if (existing.gdriveSync) {
+          // Refresh the room ID in case it was resolved after initial construction.
+          if (spaceRoomId) existing.gdriveSync.setSpaceRoomId(spaceRoomId);
           // setGDriveSync BEFORE start() so dispatches during hydration are saved
           useEoStore.getState().setGDriveSync(existing.gdriveSync);
           existing.gdriveSync.start().catch(e =>
@@ -1548,6 +1553,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             userId: session.userId,
             sessionId: getSessionId(),
             matrixAccessToken: session.accessToken,
+            spaceRoomId: spaceRoomId ?? undefined,
             onEvent: onFoldEvent,
             onHydrated: () => { init(workerClient); },
           });
