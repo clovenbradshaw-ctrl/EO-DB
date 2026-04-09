@@ -157,7 +157,7 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
   }
 
   if (showRoomData) {
-    return <RoomDataViewer onBack={() => setShowRoomData(false)} />;
+    return <RoomDataViewer onBack={() => setShowRoomData(false)} matrixClient={matrixClient} roomId={roomId} />;
   }
 
   return (
