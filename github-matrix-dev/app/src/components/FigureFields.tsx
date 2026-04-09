@@ -231,7 +231,25 @@ export function FigureFields({ figure, onNavigate, profileFields, recordTs, allE
     <div style={s.grid}>
       {entries.map(([key, val]) => {
         const fts = fieldTypeMap.get(key);
-        const isLinkField = fts?.type === 'link';
+
+        // Parse JSON-stringified arrays before pattern detection (e.g. '["ATT-005"]')
+        let parsedVal: unknown = val;
+        if (typeof val === 'string' && val.startsWith('[') && val.endsWith(']')) {
+          try { const p = JSON.parse(val); if (Array.isArray(p)) parsedVal = p; } catch { /* keep */ }
+        }
+
+        // Treat entity-ID array values as link fields even without an explicit schema definition
+        const valIsIdArray = isEntityIdArray(parsedVal);
+        const isLinkField = fts?.type === 'link' || valIsIdArray;
+
+        // Infer linked table from resolver when no explicit schema definition exists
+        const effectiveLinkedTable = fts?.linkedTable ?? (() => {
+          if (!valIsIdArray || !Array.isArray(parsedVal) || parsedVal.length === 0) return undefined;
+          const resolved = resolver.resolve(parsedVal[0]);
+          if (!resolved) return undefined;
+          return resolved.target.split('.').slice(0, -1).join('.');
+        })();
+
         // Time-travel: was this field's value different from current?
         const isHistoric = !!recordTs;
         const currentVal = (value as Record<string, unknown>)[key];
@@ -329,7 +347,7 @@ export function FigureFields({ figure, onNavigate, profileFields, recordTs, allE
                     </span>
                   )}
                   {/* Link field: show + Add button and picker */}
-                  {isLinkField && fts?.linkedTable && (
+                  {isLinkField && effectiveLinkedTable && (
                     <div style={{ marginTop: 4, position: 'relative' as const, display: 'inline-block' }}>
                       <button
                         onClick={() => setOpenLinkPicker(openLinkPicker === key ? null : key)}
@@ -348,8 +366,8 @@ export function FigureFields({ figure, onNavigate, profileFields, recordTs, allE
                       {openLinkPicker === key && (
                         <LinkFieldPicker
                           fieldKey={key}
-                          linkedTable={fts.linkedTable}
-                          currentIds={Array.isArray(val) ? val : []}
+                          linkedTable={effectiveLinkedTable}
+                          currentIds={Array.isArray(parsedVal) ? parsedVal as string[] : []}
                           onClose={() => setOpenLinkPicker(null)}
                           onChange={async (updatedIds) => {
                             await dispatch({
