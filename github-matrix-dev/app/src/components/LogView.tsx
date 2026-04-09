@@ -1,7 +1,7 @@
 import { useState, useMemo, Fragment } from 'react';
 import { useEoStore } from '../store/eo-store';
 import { useTheme } from '../theme';
-import type { EoEvent, LoggableOperator } from '../db/types';
+import type { EoEvent, LoggableOperator, NulState } from '../db/types';
 
 // --- Operator colors — three triads ---
 export const OP_COLORS: Record<string, { bg: string; text: string; border: string; fill: string }> = {
@@ -123,6 +123,29 @@ function OpBadge({ op, size = 'normal' }: { op: string; size?: 'normal' | 'small
       letterSpacing: '0.02em',
     }}>
       {op}
+    </span>
+  );
+}
+
+// --- NulStateBadge (F1.2) ---
+const NUL_STATE_COLORS: Record<NulState, { bg: string; text: string }> = {
+  'never-set': { bg: '#6b7280', text: '#fff' },
+  'unknown':   { bg: '#d97706', text: '#fff' },
+  'cleared':   { bg: '#3b82f6', text: '#fff' },
+};
+
+function NulStateBadge({ nulState }: { nulState: NulState }) {
+  const c = NUL_STATE_COLORS[nulState];
+  return (
+    <span style={{
+      display: 'inline-block',
+      background: c.bg, color: c.text,
+      borderRadius: 3, fontSize: 9, fontWeight: 600,
+      padding: '1px 5px', lineHeight: 1.4,
+      fontFamily: "'JetBrains Mono', monospace",
+      letterSpacing: '0.02em',
+    }}>
+      {nulState}
     </span>
   );
 }
@@ -563,6 +586,9 @@ function EventRow({ event, isSelected, onSelect }: {
           }}>{event.seq}</span>
           <OpBadge op={event.op} />
           <LevelBadge level={level} />
+          {event.op === 'NUL' && event.nul_state && (
+            <NulStateBadge nulState={event.nul_state} />
+          )}
           <span style={{
             fontFamily: "'JetBrains Mono', monospace", fontSize: 11.5,
             color: t.accent, overflow: 'hidden' as const,
