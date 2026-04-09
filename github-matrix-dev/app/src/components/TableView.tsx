@@ -1642,9 +1642,26 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                               : { whiteSpace: 'normal', wordBreak: 'break-word' as const }),
                             ...(isEditableCol && !isEditingThis ? { cursor: 'text' } : {}),
                           }}
+                          title={
+                            isEditableCol && !isEditingThis ? 'Double-click to edit' :
+                            col.key === '_record' ? 'Click to open record · double-click to open' :
+                            undefined
+                          }
+                          onClick={isEditableCol ? (e) => e.stopPropagation() : undefined}
                           onDoubleClick={isEditableCol ? (e) => {
                             e.stopPropagation();
                             handleCellDoubleClick(rec, col.key);
+                          } : col.key === '_record' ? (e) => {
+                            e.stopPropagation();
+                            onSelectRecord(rec.target);
+                          } : undefined}
+                          onMouseEnter={col.key === '_record' ? (e) => {
+                            const icon = (e.currentTarget as HTMLElement).querySelector('[data-open-icon]') as HTMLElement | null;
+                            if (icon) icon.style.opacity = '1';
+                          } : undefined}
+                          onMouseLeave={col.key === '_record' ? (e) => {
+                            const icon = (e.currentTarget as HTMLElement).querySelector('[data-open-icon]') as HTMLElement | null;
+                            if (icon) icon.style.opacity = '0';
                           } : undefined}
                         >
                           {isEditingThis
@@ -1700,6 +1717,17 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                                   return resolveRecordName(rec) || formatName(rec.target.split('.').pop() || '');
                                 })()}</span>
                                 {rec.value?._type && <TypeBadge type={rec.value._type} />}
+                                <span
+                                  data-open-icon=""
+                                  style={{
+                                    opacity: 0,
+                                    fontSize: 9,
+                                    color: theme.textMuted,
+                                    transition: 'opacity 0.12s',
+                                    userSelect: 'none' as const,
+                                    lineHeight: 1,
+                                  }}
+                                >↗</span>
                               </span>
                             : col.key === '_last_updated'
                             ? <span style={{
