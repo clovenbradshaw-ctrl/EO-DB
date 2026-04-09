@@ -5,6 +5,7 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 import { restoreSession, type MatrixSession } from './matrix/client';
 import { useEoStore } from './store/eo-store';
 import { ThemeProvider, useTheme } from './theme';
+import { initGoogleOAuth, handleOAuthCallback } from './google-drive/gdrive-oauth';
 
 /** Synthetic session used for local-only mode (no Matrix server). */
 const LOCAL_SESSION: MatrixSession = {
@@ -30,6 +31,20 @@ function AppMain() {
   const pendingRedirect = useRef(window.location.hash || '');
 
   useEffect(() => {
+    // Initialise Google OAuth module
+    const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID ?? '';
+    const redirectUri = window.location.origin + window.location.pathname;
+    initGoogleOAuth(clientId, redirectUri);
+
+    // Handle OAuth2 PKCE callback — exchanges ?code= for tokens
+    if (window.location.search.includes('code=')) {
+      handleOAuthCallback().catch(e =>
+        console.warn('[EO-DB] Google OAuth callback failed:', e),
+      );
+      // handleOAuthCallback clears the query string and closes the popup or
+      // restores the pending route. We still continue with normal app startup.
+    }
+
     const saved = restoreSession();
     if (saved) {
       setSession(saved);
