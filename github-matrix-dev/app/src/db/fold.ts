@@ -1188,12 +1188,31 @@ async function getReverseDeps(store: EoStore, constituent: string): Promise<stri
   return deps;
 }
 
+const MAX_CASCADE_DEPTH = 20;
+
 async function cascadeUpward(
   store: EoStore,
   changedTarget: string,
   triggeringEvent: EoEvent,
   onEvent?: (event: EoEvent) => void,
+  depth: number = 0,
 ): Promise<void> {
+  if (depth >= MAX_CASCADE_DEPTH) {
+    // Record cascade limit hit as a NUL event so it appears in the log.
+    const now = new Date().toISOString();
+    const limitEvent: EoEvent = {
+      seq: await store.nextSeq(),
+      op: 'NUL',
+      target: changedTarget,
+      operand: { nul_state: 'cascade_limit', triggered_by: triggeringEvent.seq },
+      agent: 'system:cascade-guard',
+      ts: now,
+      acquired_ts: now,
+    };
+    await appendToLog(store, limitEvent);
+    if (onEvent) onEvent(limitEvent);
+    return;
+  }
   const dependentTargets = await getReverseDeps(store, changedTarget);
   for (const derivedTarget of dependentTargets) {
     const derived = await store.get(`derived:${derivedTarget}`) as DerivedEntity | null;
@@ -1242,7 +1261,7 @@ async function cascadeUpward(
     }
 
     if (onEvent) onEvent(reEvalEvent);
-    await cascadeUpward(store, derivedTarget, triggeringEvent, onEvent);
+    await cascadeUpward(store, derivedTarget, triggeringEvent, onEvent, depth + 1);
   }
 }
 

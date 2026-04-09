@@ -605,6 +605,12 @@ function buildFoldEntry(target: string): FoldEntry {
           await saveCheckpoint(position, opfsDir);
           eventsSinceCheckpoint = 0;
         }
+        // Re-evaluate all fold-mode EVA formulas so the computed cache is current.
+        // The checkpoint snapshot may predate the last formula evaluation, leaving
+        // _computed fields stale until the next event touches a dependency.
+        for (const [, reg] of position.evaRegistrations) {
+          if (reg.mode === 'fold') evaluateFormula(reg);
+        }
         post({ id: -1, type: 'ready' });
         break;
       }
