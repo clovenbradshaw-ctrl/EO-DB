@@ -464,7 +464,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     return normalizeSpaceTarget(saved);
   });
   const [spaceOpen, setSpaceOpen] = useState(false);
-  const [showMembers, setShowMembers] = useState(false);
   const [showRecycleBin, setShowRecycleBin] = useState(false);
   const isMobile = useIsMobile();
   const isTablet = useIsTablet();
@@ -1690,6 +1689,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     settings: '\u2699', // gear
     messages: '\uD83D\uDCAC', // speech bubble
     people: '\u2689', // people icon
+    members: '\u2736', // star/members icon
     multiuser: '\u2194', // left-right arrow
   };
 
@@ -1921,7 +1921,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               }}
               onDelete={handleDeleteSpace}
               onArchive={handleArchiveSpace}
-              onOpenRecycleBin={() => { setShowRecycleBin(true); setSpaceOpen(false); setShowMembers(false); }}
+              onOpenRecycleBin={() => { setShowRecycleBin(true); setSpaceOpen(false); }}
               deletedCount={deletedSpaceCount}
               archivedCount={archivedSpaceCount}
               publicEntries={publicSpaceEntries.filter((e) =>
@@ -1942,14 +1942,14 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           {/* Members button — hidden on mobile */}
           {selectedSpace && !isMobile && (
             <button
-              onClick={() => setShowMembers(!showMembers)}
+              onClick={() => navigate({ view: 'members' })}
               style={{
                 ...s.headerButton,
-                ...(showMembers ? { background: theme.accent, color: '#fff' } : {}),
+                ...(activeView === 'members' ? { background: theme.accent, color: '#fff' } : {}),
               }}
-              title="Space members"
+              title="Space members &amp; roles"
             >
-              {'\u2B24'} {/* circle for avatar hint */}
+              {'\u2736'} {/* star icon */}
               <span style={{ fontSize: 11 }}>Members</span>
             </button>
           )}
@@ -2142,7 +2142,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               };
             }
             // Configurable views (excludes records/multiuser which are special-cased)
-            const CONFIGURABLE_VIEWS: View[] = ['compose', 'import', 'api', 'people', 'messages', 'log', 'builder', 'settings'];
+            const CONFIGURABLE_VIEWS: View[] = ['compose', 'import', 'api', 'people', 'messages', 'members', 'log', 'builder', 'settings'];
             const hiddenCount = activeTypeDef?.visible_views
               ? CONFIGURABLE_VIEWS.filter(v => !activeTypeDef.visible_views!.includes(v)).length
               : 0;
@@ -2185,6 +2185,15 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               >
                 <span style={s.navIcon}>{NAV_ICONS.messages}</span>
                 Messages
+              </button>
+            )}
+            {isNavViewVisible('members') && (
+              <button
+                onClick={() => navigate({ view: 'members' })}
+                style={navItemStyle('members')}
+              >
+                <span style={s.navIcon}>{NAV_ICONS.members}</span>
+                Members &amp; Roles
               </button>
             )}
             <div style={s.navGroupLabel}>System</div>
@@ -2258,19 +2267,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               {pastDateLabel}
             </div>
           )}
-          {/* Space members panel */}
-          {showMembers && selectedSpace && (
-            <div style={{ padding: '20px 28px', maxWidth: 480 }}>
-              <SpaceMembers
-                spaceTarget={selectedSpace}
-                currentUserId={session.userId}
-                onClose={() => setShowMembers(false)}
-                matrixClient={matrixClientRef.current}
-                mainRoomId={spaceRoomId}
-              />
-            </div>
-          )}
-
           {showRecycleBin && (
             <RecycleBin
               onRestore={handleRestoreSpace}
@@ -2383,6 +2379,24 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                   <div style={s.emptyIcon}>{'\u2689'}</div>
                   <div style={s.emptyText}>Matrix client not ready</div>
                   <div style={s.emptySub}>People discovery requires an active Matrix connection.</div>
+                </div>
+              )
+            ) : activeView === 'members' ? (
+              selectedSpace ? (
+                <div style={{ padding: '20px 28px', maxWidth: 560 }}>
+                  <SpaceMembers
+                    spaceTarget={selectedSpace}
+                    currentUserId={session.userId}
+                    onClose={() => navigate({ view: 'records' })}
+                    matrixClient={matrixClientRef.current}
+                    mainRoomId={spaceRoomId}
+                  />
+                </div>
+              ) : (
+                <div style={s.empty}>
+                  <div style={s.emptyIcon}>{'\u2736'}</div>
+                  <div style={s.emptyText}>No space selected</div>
+                  <div style={s.emptySub}>Select a space to manage its members and roles.</div>
                 </div>
               )
             ) : activeView === 'settings' ? (
