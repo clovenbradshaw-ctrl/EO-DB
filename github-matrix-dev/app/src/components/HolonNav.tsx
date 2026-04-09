@@ -190,9 +190,6 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
     setExpanded(new Set());
     setFocusedEntity(null);
     setShowCreateSlice(false);
-    setExpandedRecords(new Set());
-    setRecordsCache(new Map());
-    setRecordsLoading(new Set());
     try {
       const raw = localStorage.getItem(navCacheKey(statePrefix));
       if (raw) setAllStates(JSON.parse(raw));
