@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
-import type { EoState, EdgeAttrDef } from '../db/types';
+import type { EoState, EdgeAttrDef, EoEvent } from '../db/types';
+import { reconstructAt } from './RecordTimeline';
 import { useEoStore } from '../store/eo-store';
 import { buildFieldNameMapFromSchema, buildFieldNameMap } from './filter-types';
 import { formatName } from './scope-picker-utils';
@@ -22,15 +23,26 @@ interface FigureFieldsProps {
   figure: EoState;
   onNavigate: (target: string) => void;
   profileFields?: string[];
+  /** When set, display fields as of this epoch-ms timestamp (time travel mode). */
+  recordTs?: number | null;
+  /** Full event log for this record, used to reconstruct historical values. */
+  allEvents?: EoEvent[];
 }
 
-export function FigureFields({ figure, onNavigate, profileFields }: FigureFieldsProps) {
+export function FigureFields({ figure, onNavigate, profileFields, recordTs, allEvents }: FigureFieldsProps) {
   const dispatch = useEoStore((s) => s.dispatch);
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
   const getState = useEoStore((s) => s.getState);
   const { theme } = useTheme();
   const s = makeStyles(theme);
   const value = figure.value;
+
+  // Reconstruct field values at the selected timestamp when in time-travel mode
+  const historicValue = useMemo<Record<string, unknown>>(() => {
+    if (!recordTs || !allEvents || allEvents.length === 0) return value as Record<string, unknown>;
+    return reconstructAt(value as Record<string, unknown>, allEvents, recordTs);
+  }, [recordTs, allEvents, value]);
+
   const scopeRoot = figure.target.split('.')[0];
   const resolver = useIdResolver(scopeRoot);
 
@@ -89,7 +101,9 @@ export function FigureFields({ figure, onNavigate, profileFields }: FigureFields
     return <div style={s.mono}>{JSON.stringify(value)}</div>;
   }
 
-  let entries = Object.entries(value).filter(([k]) => !k.startsWith('_') && k !== 'linked' && k !== 'edge_type');
+  // In time-travel mode, show entries from historicValue (reconstructed at recordTs)
+  const displayValue = recordTs ? historicValue : (value as Record<string, unknown>);
+  let entries = Object.entries(displayValue).filter(([k]) => !k.startsWith('_') && k !== 'linked' && k !== 'edge_type');
 
   // Flatten the "fields" sub-object: promote each sub-key to a top-level entry
   const fieldsObj = entries.find(([k]) => k === 'fields');
@@ -218,10 +232,15 @@ export function FigureFields({ figure, onNavigate, profileFields }: FigureFields
       {entries.map(([key, val]) => {
         const fts = fieldTypeMap.get(key);
         const isLinkField = fts?.type === 'link';
+        // Time-travel: was this field's value different from current?
+        const isHistoric = !!recordTs;
+        const currentVal = (value as Record<string, unknown>)[key];
+        const valueChanged = isHistoric && JSON.stringify(val) !== JSON.stringify(currentVal);
+        const notYetRecorded = isHistoric && val === undefined;
         return (
           <div
             key={key}
-            style={s.cell}
+            style={{ ...s.cell, ...(notYetRecorded ? { opacity: 0.3 } : {}) }}
             onContextMenu={(e) => handleContextMenu(e, key)}
           >
             <div style={s.label}>
@@ -286,7 +305,29 @@ export function FigureFields({ figure, onNavigate, profileFields }: FigureFields
                 </form>
               ) : (
                 <>
-                  {renderFieldValue(val, onNavigate, theme, resolver)}
+                  {notYetRecorded ? (
+                    <span style={{
+                      fontFamily: "'JetBrains Mono', monospace",
+                      fontSize: 11,
+                      color: theme.textMuted,
+                      fontStyle: 'italic' as const,
+                    }}>not yet recorded</span>
+                  ) : (
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                      {renderFieldValue(val, onNavigate, theme, resolver)}
+                      {valueChanged && (
+                        <span style={{
+                          fontFamily: "'JetBrains Mono', monospace",
+                          fontSize: 9,
+                          color: theme.textMuted,
+                          border: `1px solid ${theme.border}`,
+                          padding: '1px 5px',
+                          borderRadius: 3,
+                          flexShrink: 0,
+                        }}>was</span>
+                      )}
+                    </span>
+                  )}
                   {/* Link field: show + Add button and picker */}
                   {isLinkField && fts?.linkedTable && (
                     <div style={{ marginTop: 4, position: 'relative' as const, display: 'inline-block' }}>

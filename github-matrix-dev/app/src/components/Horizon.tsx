@@ -268,11 +268,11 @@ function styles(t: Theme): Record<string, React.CSSProperties> {
       display: 'flex',
       alignItems: 'center',
       gap: 6,
-      padding: '4px 16px',
+      padding: '2px 16px',
       borderBottom: `0.5px solid ${t.border}`,
       background: t.bgCard,
       flexShrink: 0,
-      minHeight: 28,
+      minHeight: 22,
       userSelect: 'none',
     } as React.CSSProperties,
 
