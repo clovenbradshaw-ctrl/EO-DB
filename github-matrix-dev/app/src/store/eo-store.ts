@@ -1,22 +1,29 @@
 import { create } from 'zustand';
 import type { EoStore } from '../db/encrypted-store';
-import { createLocalStore } from '../db/encrypted-store';
-import { createIdb } from '../db/idb';
-import type { EoEvent, EoEventInput, EoState, HorizonResponse } from '../db/types';
-import { processEvent, processEventsBulk } from '../db/fold';
+import { createMemoryStore } from '../db/memory-store';
+import { replayFromLog, processEvent, processEventsBulk } from '../db/fold';
 import { horizonGet, type HorizonOpts } from '../db/horizon';
 import { getState, getStateByPrefix, getStateByPrefixPage, type StatePage } from '../db/state';
 import { readLogSince } from '../db/log';
-import { backfillFoldCaches } from '../db/fold-cache';
+import {
+  createFoldWorkerClient,
+  initFoldWorker,
+  appendRaw,
+  scanLog,
+  type FoldWorkerClient,
+} from '../db/lazy-fold';
+import type { EoEvent, EoEventInput, EoState, HorizonResponse } from '../db/types';
 import type { SyncManager } from '../matrix/sync-manager';
 import type { GDriveSyncService } from '../google-drive/gdrive-sync';
 import type { ResolvedPermissions } from '../permissions/types';
 import { eventHash } from '../db/hash';
 
 interface EoDbState {
-  /** The encrypted store instance (set after login + key derivation) */
+  /** The in-memory store (set after space init) */
   store: EoStore | null;
-  /** The sync manager for sending events to Matrix (currently disabled) */
+  /** The fold worker client for OPFS persistence */
+  workerClient: FoldWorkerClient | null;
+  /** The sync manager for sending events to Matrix */
   syncManager: SyncManager | null;
   /** The Google Drive sync service for backup */
   gdriveSync: GDriveSyncService | null;
@@ -31,66 +38,40 @@ interface EoDbState {
   /** Currently active user type (selected via header switcher) */
   activeUserType: string | null;
 
-  /** Initialize the store with an encrypted store instance */
-  init: (store: EoStore) => Promise<void>;
+  /**
+   * Initialize the store from a fold worker client.
+   * Creates a fresh MemoryStore, replays the OPFS log into it, then
+   * enables OPFS persistence for future writes.
+   */
+  init: (workerClient: FoldWorkerClient) => Promise<void>;
 
-  /** Initialize a local-only (unencrypted) store — no Matrix session needed */
+  /**
+   * Initialize a local-only store backed by a fold worker for the
+   * given space name (default "local"). No Matrix session needed.
+   */
   initLocal: (dbName?: string) => Promise<void>;
 
-  /** Set the sync manager after it's initialized */
   setSyncManager: (syncManager: SyncManager) => void;
-
-  /** Set the Google Drive sync service */
   setGDriveSync: (gdriveSync: GDriveSyncService) => void;
-
-  /** Set resolved permissions for the current space */
   setPermissions: (permissions: ResolvedPermissions | null) => void;
-
-  /** Set the active user type (persisted to localStorage) */
   setActiveUserType: (typeId: string | null) => void;
 
-  /** Process an event through the fold */
   dispatch: (event: EoEventInput) => Promise<number>;
-
-  /** Import a batch of events — fold locally */
   batchImport: (events: EoEventInput[], onProgress?: (current: number, total: number) => void) => Promise<number>;
-
-  /** Read the Horizon for a target */
   horizon: (target: string, opts?: HorizonOpts) => Promise<HorizonResponse | HorizonResponse[] | null>;
-
-  /** Get projected state for a target */
   getState: (target: string) => Promise<EoState | null>;
-
-  /** Get all states under a prefix */
   getStateByPrefix: (prefix: string) => Promise<EoState[]>;
-
-  /**
-   * Cursor-paginated variant — returns a page of rows plus a cursor for the
-   * next page. Prefer this over `getStateByPrefix` for list views that may
-   * grow large.
-   */
   getStateByPrefixPage: (prefix: string, limit: number, afterTarget?: string) => Promise<StatePage>;
-
-  /** Take a manual snapshot via Google Drive */
   manualSnapshot: () => Promise<{ mxc: string; seq: number }>;
-
-  /** Tear down the store (logout) */
   teardown: () => void;
 
-  /**
-   * Optional hook called after every successful local dispatch.
-   * Used by the EO server store to push events to the backend for
-   * real-time broadcast to other connected users.
-   * The event passed to the hook is fully-populated (has client_event_id).
-   */
   onDispatch: ((event: EoEventInput) => void) | null;
-
-  /** Register or clear the post-dispatch hook. */
   setOnDispatch: (fn: ((event: EoEventInput) => void) | null) => void;
 }
 
 export const useEoStore = create<EoDbState>((set, get) => ({
   store: null,
+  workerClient: null,
   syncManager: null,
   gdriveSync: null,
   recentEvents: [],
@@ -100,68 +81,62 @@ export const useEoStore = create<EoDbState>((set, get) => ({
   activeUserType: null,
   onDispatch: null,
 
-  async init(store: EoStore) {
-    // Set the store immediately so the UI can start reading from it.
-    // Always clear stale recentEvents and lastSeq when switching stores
-    // to prevent old space data from flashing in the UI. Keep ready=true
-    // if we already were ready (cached store re-init) to avoid a loading
-    // flash — the new store's data will be hydrated below.
+  async init(workerClient: FoldWorkerClient) {
     const wasReady = get().ready;
-    const prevStore = get().store;
-    const isSameStore = prevStore === store;
-    if (wasReady && isSameStore) {
-      set({ store });
-    } else if (wasReady) {
-      // Different store (space switch) — clear stale events immediately
-      set({ store, recentEvents: [], lastSeq: 0 });
-    } else {
-      set({ store, ready: false, recentEvents: [], lastSeq: 0 });
+    const prevClient = get().workerClient;
+    const isSameWorker = prevClient === workerClient;
+
+    if (wasReady && isSameWorker) {
+      // Re-init of same worker — nothing to replay.
+      set({ workerClient });
+      return;
     }
 
-    const lastSeq = await store.getCurrentSeq();
+    // Different worker (space switch) — build a fresh memory store.
+    if (wasReady) {
+      set({ store: null, workerClient, recentEvents: [], lastSeq: 0, ready: false });
+    } else {
+      set({ store: null, workerClient, ready: false, recentEvents: [], lastSeq: 0 });
+    }
 
-    // Hydrate recentEvents from the persistent log so Log/Graph views
-    // display existing data immediately (not just newly-arrived events).
+    // Create a fresh in-memory store (no persistence hook yet).
+    const memStore = createMemoryStore();
+
+    // Replay the entire OPFS log into the memory store.
+    try {
+      const events = await scanLog(workerClient, 0);
+      if (events.length > 0) {
+        await replayFromLog(memStore, events);
+      }
+    } catch (e) {
+      console.warn('[EO-DB] OPFS log replay failed:', e);
+    }
+
+    // From here on, every log: write also persists to OPFS.
+    memStore.enablePersistence((event) => {
+      appendRaw(workerClient, event).catch((e) =>
+        console.warn('[EO-DB] appendRaw failed:', e),
+      );
+    });
+
+    const lastSeq = await memStore.getCurrentSeq();
+
+    // Hydrate recentEvents from the in-memory log.
     let hydrated: EoEvent[] = [];
     try {
-      const all = await readLogSince(store, 0);
+      const all = await readLogSince(memStore, 0);
       hydrated = all.slice(-100);
     } catch {
-      // Log read may fail on a brand-new store — that's fine
+      // Brand-new store — nothing to hydrate.
     }
 
-    // One-time backfill of the incremental fold cache for stores created
-    // before it existed. No-op on brand-new stores and on already-backfilled ones.
-    try {
-      await backfillFoldCaches(store);
-    } catch (e) {
-      console.warn('[EO-DB] fold cache backfill failed:', e);
-    }
-
-    set({ store, lastSeq, ready: true, recentEvents: hydrated });
+    set({ store: memStore, workerClient, lastSeq, ready: true, recentEvents: hydrated });
   },
 
   async initLocal(dbName = 'local') {
-    set({ ready: false, recentEvents: [], lastSeq: 0 });
-    const idb = await createIdb(dbName);
-    const store = createLocalStore(idb);
-    const lastSeq = await store.getCurrentSeq();
-
-    let hydrated: EoEvent[] = [];
-    try {
-      const all = await readLogSince(store, 0);
-      hydrated = all.slice(-100);
-    } catch {
-      // Brand-new store — nothing to hydrate
-    }
-
-    try {
-      await backfillFoldCaches(store);
-    } catch (e) {
-      console.warn('[EO-DB] fold cache backfill failed:', e);
-    }
-
-    set({ store, lastSeq, ready: true, recentEvents: hydrated });
+    const workerClient = createFoldWorkerClient();
+    await initFoldWorker(workerClient, dbName);
+    await get().init(workerClient);
   },
 
   setOnDispatch(fn: ((event: EoEventInput) => void) | null) {
@@ -195,15 +170,13 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     const { store, syncManager } = get();
     if (!store) throw new Error('Store not initialized');
 
-    // If Matrix sync is active, route through SyncManager (folds locally + sends to room)
+    // If Matrix sync is active, route through SyncManager.
     if (syncManager) {
       const seq = await syncManager.processLocalEvent(event);
       return seq;
     }
 
-    // Pre-populate client_event_id so the server can deduplicate the echo.
-    // processEvent would do this internally, but we need the same ID to send
-    // to the server BEFORE the fold completes (fire-and-forget).
+    // Pre-populate client_event_id for server deduplication.
     const now = new Date().toISOString();
     let populatedEvent: EoEventInput = event;
     if (!populatedEvent.client_event_id) {
@@ -217,7 +190,7 @@ export const useEoStore = create<EoDbState>((set, get) => ({
       populatedEvent = { ...populatedEvent, client_event_id: id };
     }
 
-    // Fold locally — Google Drive sync picks up new events on its 30s timer
+    // Fold into the MemoryStore (persistence hook writes each log: entry to OPFS).
     const seq = await processEvent(store, populatedEvent, (fullEvent) => {
       set((state) => ({
         recentEvents: [...state.recentEvents.slice(-99), fullEvent],
@@ -225,9 +198,7 @@ export const useEoStore = create<EoDbState>((set, get) => ({
       }));
     });
 
-    // Push to server for real-time broadcast to other connected users
     get().onDispatch?.(populatedEvent);
-
     return seq;
   },
 
@@ -235,15 +206,13 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     const { store } = get();
     if (!store) throw new Error('Store not initialized');
 
-    let lastSeq = 0;
-    lastSeq = await processEventsBulk(store, events, onProgress, (fullEvent) => {
+    const lastSeq = await processEventsBulk(store, events, onProgress, (fullEvent) => {
       set((state) => ({
         recentEvents: [...state.recentEvents.slice(-99), fullEvent],
         lastSeq: fullEvent.seq,
       }));
     });
 
-    // Upload to Google Drive immediately after import (don't wait for 30s timer)
     const { gdriveSync } = get();
     if (gdriveSync) {
       gdriveSync.forceSave().catch((e) =>
@@ -289,8 +258,20 @@ export const useEoStore = create<EoDbState>((set, get) => ({
   },
 
   teardown() {
-    const { store } = get();
+    const { store, workerClient } = get();
     if (store) store.close();
-    set({ store: null, syncManager: null, gdriveSync: null, ready: false, recentEvents: [], lastSeq: 0, resolvedPermissions: null, activeUserType: null, onDispatch: null });
+    if (workerClient) workerClient.worker.terminate();
+    set({
+      store: null,
+      workerClient: null,
+      syncManager: null,
+      gdriveSync: null,
+      ready: false,
+      recentEvents: [],
+      lastSeq: 0,
+      resolvedPermissions: null,
+      activeUserType: null,
+      onDispatch: null,
+    });
   },
 }));

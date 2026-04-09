@@ -1,10 +1,8 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { logout, createMatrixClient, type MatrixSession } from '../matrix/client';
 import { useEoStore } from '../store/eo-store';
-import { createIdb, deleteAllEoDatabases } from '../db/idb';
-import { persistSpaceMeta, listSpaceMeta } from '../db/space-meta';
-import { createStore } from '../db/encrypted-store';
-import { deriveKey } from '../lib/crypto';
+import { persistSpaceMeta, listSpaceMeta, clearAllSpaceMetas, saveSpaceMeta, removeSpaceMeta } from '../db/space-meta';
+import { createFoldWorkerClient, initFoldWorker, type FoldWorkerClient } from '../db/lazy-fold';
 import { SyncManager } from '../matrix/sync-manager';
 import { Presence } from '../matrix/presence';
 import { OnlineUsers } from './OnlineUsers';
@@ -72,10 +70,10 @@ const MATRIX_ENABLED = true;
 /**
  * Clear Matrix SDK crypto IndexedDB stores (Rust crypto, Olm sessions).
  *
- * These databases are NOT prefixed with "eo-db" and are therefore missed by
- * deleteAllEoDatabases(). A stale crypto store causes device-ID mismatches
- * when the user logs out and back in, because the new session gets a fresh
- * device ID but the old crypto store still references the previous one.
+ * These databases are NOT cleared by the OPFS/localStorage cleanup on logout.
+ * A stale crypto store causes device-ID mismatches when the user logs out and
+ * back in, because the new session gets a fresh device ID but the old crypto
+ * store still references the previous one.
  */
 async function clearMatrixCryptoStore(): Promise<void> {
   const dbs = await indexedDB.databases();
@@ -428,7 +426,7 @@ function describeMatrixError(err: any): { phase: 'auth' | 'crypto' | 'sync' | 'r
 }
 
 interface CachedSpace {
-  store: ReturnType<typeof createStore>;
+  workerClient: FoldWorkerClient;
   syncManager: SyncManager | null;
   gdriveSync: GDriveSyncService | null;
   mainRoomId: string | null;
@@ -671,20 +669,19 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     }
   }, [route.space]);
 
-  // Permanently delete a space's local IndexedDB data
+  // Permanently delete a space's local OPFS data
   async function handlePermanentDelete(target: string) {
     const cached = spaceCacheRef.current.get(target);
     if (cached) {
-      cached.store.close();
+      cached.workerClient.worker.terminate();
       spaceCacheRef.current.delete(target);
     }
-    const dbName = `eo-db::${target}`;
-    await new Promise<void>((resolve) => {
-      const req = indexedDB.deleteDatabase(dbName);
-      req.onsuccess = () => resolve();
-      req.onerror = () => resolve();
-      req.onblocked = () => resolve();
-    });
+    // Delete the space's OPFS subdirectory
+    try {
+      const root = await navigator.storage.getDirectory();
+      await root.removeEntry(`space.${target}`, { recursive: true });
+    } catch { /* best effort */ }
+    removeSpaceMeta(target);
   }
 
   const { theme, toggleTheme } = useTheme();
@@ -826,8 +823,8 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           }
         } catch (e) {
           // Device-ID mismatch — stale crypto store from a previous session.
-          // deleteAllEoDatabases() only removes eo-db* databases; the Matrix
-          // Rust crypto store survives logout. Clear it and retry once.
+          // The OPFS/localStorage cleanup on logout does not touch the Matrix
+          // Rust crypto store. Clear it and retry once.
           if (e instanceof Error && e.message.includes("doesn't match")) {
             console.warn('[EO-DB] Stale crypto store (device mismatch) — clearing and retrying.');
             await clearMatrixCryptoStore();
@@ -980,51 +977,36 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         } catch { /* ignore bad cache */ }
       }
 
-      // Open root IDB to discover spaces from store data
-      const idb = await createIdb();
-
-      // Load persisted space metadata (room IDs, etc.)
+      // Load persisted space metadata (room IDs, etc.) from localStorage
       // so sync services can start without Matrix discovery.
       try {
-        const metas = await listSpaceMeta(idb);
+        const metas = listSpaceMeta();
         if (metas.length > 0) {
           const map = new Map(metas.map(m => [m.spaceId, m]));
           setCachedSpaceMetas(map);
+
+          // Convert localStorage space metas to EoState shape for the UI.
+          const now = new Date().toISOString();
+          const spaceRoots = metas.map((m) => ({
+            target: m.spaceId,
+            value: { name: m.spaceName },
+            level: 1,
+            last_seq: 0,
+            last_op: 'INS' as const,
+            last_agent: session.userId,
+            last_ts: now,
+            last_acquired_ts: now,
+          }));
+
+          if (!mounted) return;
+
+          if (spaceRoots.length > 0) {
+            setSpaces(spaceRoots);
+            localStorage.setItem('eo-spaces', JSON.stringify(spaceRoots));
+            if (selectedSpace === null) selectSpace(spaceRoots[0].target);
+          }
         }
       } catch { /* best effort */ }
-
-      const key = await deriveKey(session.userId, session.deviceId);
-      const rootStore = createStore(idb, key);
-
-      // If root store is empty, try hydrating from Matrix snapshot
-      const rootSeq = await rootStore.getCurrentSeq();
-      if (rootSeq === 0 && matrixReady && matrixClientRef.current && roomIdRef.current) {
-        try {
-          const { findLatestSnapshot, restoreFromDeltaChain } = await import('../matrix/snapshot');
-          const snap = await findLatestSnapshot(matrixClientRef.current, roomIdRef.current);
-          if (snap) {
-            await restoreFromDeltaChain(matrixClientRef.current, rootStore, snap.mxc);
-          }
-        } catch { /* best effort */ }
-      }
-
-      // Query for space roots
-      const { getStateByPrefix: getPrefix } = await import('../db/state');
-      const states = await getPrefix(rootStore, 'space.');
-      const spaceRoots = states.filter((st) => {
-        const parts = st.target.split('.');
-        return parts.length === 2 && !st.value?._alias;
-      });
-
-      if (!mounted) { rootStore.close(); return; }
-
-      if (spaceRoots.length > 0) {
-        setSpaces(spaceRoots);
-        localStorage.setItem('eo-spaces', JSON.stringify(spaceRoots));
-        if (selectedSpace === null) selectSpace(spaceRoots[0].target);
-      }
-
-      rootStore.close();
     }
 
     discoverSpaces();
@@ -1348,9 +1330,9 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       if (isStale()) return;
 
       if (existing) {
-        // Reuse cached store — no IDB open, no key derivation, no Matrix hydration
+        // Reuse cached worker — no OPFS re-open, no replay
         if (isStale()) return;
-        await init(existing.store);
+        await init(existing.workerClient);
 
         // Update mainRoomId if room resolution succeeded on this run
         // (fixes the case where the first run cached null because Matrix
@@ -1361,15 +1343,16 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         }
 
         // Try Google Drive hydration if store is empty
-        const cachedSeq = await existing.store.getCurrentSeq();
+        const currentStore = useEoStore.getState().store;
+        const cachedSeq = currentStore ? await currentStore.getCurrentSeq() : 0;
         if (cachedSeq === 0 && session.accessToken && selectedSpace) {
           try {
             const dataType = `eodb-${selectedSpace}`;
             const hydratedSeq = await GDriveSyncService.hydrateFromGDrive(
-              existing.store, session.accessToken, dataType, onFoldEvent,
+              currentStore!, session.accessToken, dataType, onFoldEvent,
             );
             if (hydratedSeq > 0) {
-              await init(existing.store);
+              await init(existing.workerClient);
             }
           } catch (e) {
             console.warn('[EO-DB] Cache-path GDrive hydration failed for space', selectedSpace, e);
@@ -1402,19 +1385,16 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         return;
       }
 
-      // Open space-scoped IDB with stable key (userId + deviceId, no accessToken)
-      const idb = await createIdb(selectedSpace!);
-      const key = await deriveKey(session.userId, session.deviceId);
-      const store = createStore(idb, key);
-      if (isStale()) { store.close(); return; }
+      // Open space-scoped OPFS fold worker
+      const workerClient = createFoldWorkerClient();
+      await initFoldWorker(workerClient, selectedSpace!);
+      if (isStale()) { workerClient.worker.terminate(); return; }
 
-      // Cache the store immediately so that re-runs of this effect (triggered
-      // by matrixReady / mergedEntries changes) reuse the SAME store instead
-      // of creating a new one. This prevents a race where a second run skips
-      // hydration because the first run partially wrote to IDB (seq > 0).
-      cache.set(selectedSpace!, { store, syncManager: null, gdriveSync: null, mainRoomId: spaceRoomId, presence: null, spaceRooms: resolvedSpaceRooms });
+      // Cache the worker immediately so that re-runs of this effect reuse
+      // the SAME worker instead of creating a new one.
+      cache.set(selectedSpace!, { workerClient, syncManager: null, gdriveSync: null, mainRoomId: spaceRoomId, presence: null, spaceRooms: resolvedSpaceRooms });
 
-      await init(store);
+      await init(workerClient);
 
       // ── EO-DB server real-time sync ──────────────────────────────────────────
       // If the user has configured a server URL, open a WebSocket to receive
@@ -1423,7 +1403,8 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       {
         const { serverUrl, connect: connectServer, disconnect: disconnectServer } = useEoServerStore.getState();
         if (serverUrl && session.accessToken) {
-          const currentSeq = await store.getCurrentSeq();
+          const storeNow = useEoStore.getState().store;
+          const currentSeq = storeNow ? await storeNow.getCurrentSeq() : 0;
 
           const handleServerEvent = async (event: any) => {
             const s = useEoStore.getState().store;
@@ -1460,7 +1441,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             syncManager = new SyncManager(
               matrixClientRef.current,
               spaceRoomId,
-              store,
+              useEoStore.getState().store!,
               onFoldEvent,
             );
             await syncManager.initialize();
@@ -1507,15 +1488,16 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           useGDriveStore.getState().setCurrentSpace(selectedSpace, gdriveSpaceName);
 
           // On fresh device (seq=0), hydrate from Google Drive before starting sync
-          const gdriveCurrentSeq = await store.getCurrentSeq();
+          const activeStore = useEoStore.getState().store!;
+          const gdriveCurrentSeq = activeStore ? await activeStore.getCurrentSeq() : 0;
           if (gdriveCurrentSeq === 0) {
             try {
               const dataType = `eodb-${selectedSpace}`;
               const gdriveHydratedSeq = await GDriveSyncService.hydrateFromGDrive(
-                store, session.accessToken, dataType, onFoldEvent,
+                activeStore, session.accessToken, dataType, onFoldEvent,
               );
               if (gdriveHydratedSeq > 0) {
-                await init(store);
+                await init(workerClient);
               }
             } catch (e) {
               console.warn('[EO-DB] Google Drive hydration failed for space', selectedSpace, e);
@@ -1523,7 +1505,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           }
 
           gdriveSync = new GDriveSyncService({
-            store,
+            store: useEoStore.getState().store!,
             spaceId: selectedSpace,
             spaceName: gdriveSpaceName,
             userId: session.userId,
@@ -1531,7 +1513,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             matrixClient: matrixClientRef.current || undefined,
             roomId: spaceRoomId || undefined,
             onEvent: onFoldEvent,
-            onHydrated: () => { init(store); },
+            onHydrated: () => { init(workerClient); },
           });
           await gdriveSync.start();
           useEoStore.getState().setGDriveSync(gdriveSync);
@@ -1576,9 +1558,9 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         }).catch(e => console.warn('[EO-DB] Failed to persist space meta:', e));
       }
 
-      // Update the cached entry with sync services (store was cached earlier
+      // Update the cached entry with sync services (worker was cached earlier
       // to prevent race conditions; now enrich with fully-initialized services).
-      cache.set(selectedSpace!, { store, syncManager, gdriveSync, mainRoomId: spaceRoomId, presence: presenceInstance, spaceRooms: resolvedSpaceRooms });
+      cache.set(selectedSpace!, { workerClient, syncManager, gdriveSync, mainRoomId: spaceRoomId, presence: presenceInstance, spaceRooms: resolvedSpaceRooms });
     }
 
     setupSpaceStore();
@@ -1612,16 +1594,25 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
 
     for (const [, cached] of cache) {
       if (cached.gdriveSync) cached.gdriveSync.stop();
-      cached.store.close();
+      cached.workerClient.worker.terminate();
     }
     cache.clear();
 
     teardown();
     logout();
 
-    // Delete all eo-db IndexedDB databases so stale content doesn't
-    // persist across sign-out / account switches.
-    await deleteAllEoDatabases();
+    // Clear all OPFS space directories so stale content doesn't persist
+    // across sign-out / account switches.
+    try {
+      const root = await navigator.storage.getDirectory();
+      for await (const [name] of (root as any).entries()) {
+        if (typeof name === 'string' && name.startsWith('space.')) {
+          await root.removeEntry(name, { recursive: true }).catch(() => {});
+        }
+      }
+    } catch { /* best effort */ }
+    // Clear persisted space metadata from localStorage.
+    clearAllSpaceMetas();
     // Also clear Matrix crypto stores — they use a different prefix and
     // would otherwise cause device-ID mismatches on the next login.
     await clearMatrixCryptoStore();
@@ -1842,15 +1833,14 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                   if (entries.length > 0) setSpaceEntries(entries);
                 } catch { /* best effort */ }
 
-                // ── Step 3: Create local IDB store ──
-                const idb = await createIdb(spaceTarget);
-                const key = await deriveKey(session.userId, session.deviceId);
-                const spaceStore = createStore(idb, key);
-                await init(spaceStore);
+                // ── Step 3: Create OPFS fold worker for the new space ──
+                const newSpaceWorker = createFoldWorkerClient();
+                await initFoldWorker(newSpaceWorker, spaceTarget);
+                await init(newSpaceWorker);
 
                 // Cache with full topology so Settings and sync resolve correctly
                 spaceCacheRef.current.set(spaceTarget, {
-                  store: spaceStore,
+                  workerClient: newSpaceWorker,
                   syncManager: null,
                   gdriveSync: null,
                   mainRoomId,
@@ -1883,22 +1873,12 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                   last_acquired_ts: now,
                 } as EoState]);
 
-                // Register in root IDB so it survives page reload without Matrix
-                const rootIdb = await createIdb();
-                const rootKey = await deriveKey(session.userId, session.deviceId);
-                const rootSt = createStore(rootIdb, rootKey);
-                const { setState: setRootState } = await import('../db/state');
-                await setRootState(rootSt, {
-                  target: idbTarget,
-                  value: { name },
-                  level: 1,
-                  last_seq: 1,
-                  last_op: 'INS',
-                  last_agent: session.userId,
-                  last_ts: now,
-                  last_acquired_ts: now,
-                } as EoState);
-                rootSt.close();
+                // Register space metadata in localStorage so it survives page reload without Matrix
+                saveSpaceMeta({
+                  spaceId: idbTarget,
+                  spaceName: name,
+                  mainRoomId: mainRoomId || '',
+                });
 
                 selectSpace(spaceTarget);
                 setSpaceOpen(false);
