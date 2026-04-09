@@ -64,6 +64,7 @@ export function RecordDetailDrawer({ target, onClose, onNavigate, profileFields,
   const getState = useEoStore((s) => s.getState);
   const ready = useEoStore((s) => s.ready);
   const [recordName, setRecordName] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState(false);
 
   // ── Breadcrumb history (drill-down trail within the drawer) ──────────────
   const [history, setHistory] = useState<string[]>([target]);
@@ -80,6 +81,7 @@ export function RecordDetailDrawer({ target, onClose, onNavigate, profileFields,
     setHistory([target]);
     setHistoryIndex(0);
     setRecordName(null);
+    setExpanded(false);
   }, [target]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleNavigate = (t: string) => {
@@ -171,6 +173,7 @@ export function RecordDetailDrawer({ target, onClose, onNavigate, profileFields,
   const initials = getInitials(displayName);
   const typeColor = TYPE_COLORS[entityType] || '#7a756d';
   const isFullModal = !isMobile && layoutType === 'modal';
+  const isExpandedDrawer = expanded && !isMobile && !isFullModal;
   const canBack = historyIndex > 0;
   const canForward = historyIndex < history.length - 1;
 
@@ -190,6 +193,18 @@ export function RecordDetailDrawer({ target, onClose, onNavigate, profileFields,
         boxShadow: `0 8px 30px ${theme.shadow}`,
         zIndex: 1001,
       }
+    : isExpandedDrawer
+    ? {
+        ...s.panel,
+        position: 'fixed' as const,
+        inset: 0,
+        width: '100vw',
+        maxWidth: '100vw',
+        height: '100vh',
+        borderLeft: 'none',
+        borderRadius: 0,
+        zIndex: 1001,
+      }
     : {
         ...s.panel,
         ...(isMobile ? {
@@ -201,7 +216,7 @@ export function RecordDetailDrawer({ target, onClose, onNavigate, profileFields,
 
   return (
     <>
-      {isFullModal && (
+      {(isFullModal || isExpandedDrawer) && (
         <div
           style={{
             position: 'fixed',
@@ -209,7 +224,7 @@ export function RecordDetailDrawer({ target, onClose, onNavigate, profileFields,
             background: 'rgba(0,0,0,0.4)',
             zIndex: 1000,
           }}
-          onClick={onClose}
+          onClick={isExpandedDrawer ? () => setExpanded(false) : onClose}
         />
       )}
       <div style={panelStyle}>
@@ -253,6 +268,16 @@ export function RecordDetailDrawer({ target, onClose, onNavigate, profileFields,
                 &#8595;
               </button>
             </div>
+          )}
+          {!isMobile && !isFullModal && (
+            <button
+              onClick={() => setExpanded(e => !e)}
+              style={s.expandBtn}
+              title={expanded ? 'Collapse' : 'Expand to full screen'}
+              aria-label={expanded ? 'Collapse' : 'Expand'}
+            >
+              {expanded ? '\u229F' : '\u229E'}
+            </button>
           )}
           {!isMobile && <button onClick={onClose} style={s.closeBtn}>&times;</button>}
         </div>
@@ -428,6 +453,16 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       color: t.accent,
       cursor: 'pointer',
       padding: '4px 8px',
+    },
+    expandBtn: {
+      background: 'none',
+      border: 'none',
+      fontSize: 16,
+      color: t.textSecondary,
+      cursor: 'pointer',
+      padding: '0 4px',
+      lineHeight: 1,
+      flexShrink: 0,
     },
     closeBtn: {
       background: 'none',
