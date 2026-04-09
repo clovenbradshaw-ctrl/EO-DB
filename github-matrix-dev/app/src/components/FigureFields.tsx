@@ -1,6 +1,40 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useCallback, Fragment } from 'react';
 import type { EoState, EdgeAttrDef, EoEvent } from '../db/types';
 import { reconstructAt } from './RecordTimeline';
+
+// ---------------------------------------------------------------------------
+// Per-field history helpers
+// ---------------------------------------------------------------------------
+
+interface FieldRevision {
+  value: unknown;
+  agent: string;
+  dateStr: string;
+  note: string | null;
+}
+
+function agentShort(agent: string): string {
+  if (agent === 'system' || agent === 'system:eva') return 'system';
+  const m = agent.match(/^@?([^:@]+)/);
+  return m ? m[1] : agent;
+}
+
+function buildFieldRevisions(fieldKey: string, events: EoEvent[]): FieldRevision[] {
+  const sorted = [...events].sort((a, b) => new Date(a.ts).getTime() - new Date(b.ts).getTime());
+  const result: FieldRevision[] = [];
+  for (const evt of sorted) {
+    if (evt.op !== 'INS' && evt.op !== 'DEF') continue;
+    const op = evt.operand as Record<string, unknown> | null;
+    if (!op || !(fieldKey in op)) continue;
+    result.push({
+      value: op[fieldKey],
+      agent: agentShort(evt.agent),
+      dateStr: new Date(evt.ts).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+      note: (evt.meta as any)?.note || (evt.meta as any)?.reason || null,
+    });
+  }
+  return result;
+}
 import { useEoStore } from '../store/eo-store';
 import { buildFieldNameMapFromSchema, buildFieldNameMap } from './filter-types';
 import { formatName } from './scope-picker-utils';
@@ -43,11 +77,39 @@ export function FigureFields({ figure, onNavigate, profileFields, recordTs, allE
     return reconstructAt(value as Record<string, unknown>, allEvents, recordTs);
   }, [recordTs, allEvents, value]);
 
+  // Build per-field revision lists from the event log
+  const perFieldRevisions = useMemo<Record<string, FieldRevision[]>>(() => {
+    if (!allEvents || allEvents.length === 0) return {};
+    const map: Record<string, FieldRevision[]> = {};
+    // Get all field keys present in the current value
+    const keys = Object.keys(value ?? {}).filter(k => !k.startsWith('_') && k !== 'linked' && k !== 'edge_type');
+    for (const k of keys) {
+      const revs = buildFieldRevisions(k, allEvents);
+      if (revs.length > 0) map[k] = revs;
+    }
+    return map;
+  }, [allEvents, value]);
+
+  const handleOpenField = useCallback((key: string) => {
+    if (openField === key) {
+      setOpenField(null);
+    } else {
+      const revs = perFieldRevisions[key];
+      setOpenField(key);
+      setHistoryIdx(revs ? revs.length - 1 : 0);
+    }
+  }, [openField, perFieldRevisions]);
+
   const scopeRoot = figure.target.split('.')[0];
   const resolver = useIdResolver(scopeRoot);
 
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; fieldKey: string } | null>(null);
   const [editing, setEditing] = useState<{ fieldKey: string; value: string } | null>(null);
+
+  // Per-field history expand state
+  const [openField, setOpenField] = useState<string | null>(null);
+  const [historyIdx, setHistoryIdx] = useState(0);
+  const [histAnimating, setHistAnimating] = useState(false);
   const [displayNameEdit, setDisplayNameEdit] = useState<{ fieldKey: string; currentLabel: string } | null>(null);
 
   // Fetch schema-level field name map and type info for the parent table scope
@@ -237,13 +299,23 @@ export function FigureFields({ figure, onNavigate, profileFields, recordTs, allE
         const currentVal = (value as Record<string, unknown>)[key];
         const valueChanged = isHistoric && JSON.stringify(val) !== JSON.stringify(currentVal);
         const notYetRecorded = isHistoric && val === undefined;
+        // Per-field history
+        const revisions = perFieldRevisions[key];
+        const hasHistory = !isHistoric && revisions && revisions.length > 1;
+        const isFieldOpen = openField === key && !isHistoric;
+        const rev = isFieldOpen && revisions ? revisions[historyIdx] : null;
+        const revIsCurrent = isFieldOpen && revisions ? historyIdx === revisions.length - 1 : true;
         return (
+          <Fragment key={key}>
           <div
-            key={key}
             style={{ ...s.cell, ...(notYetRecorded ? { opacity: 0.3 } : {}) }}
             onContextMenu={(e) => handleContextMenu(e, key)}
           >
-            <div style={s.label}>
+            <div
+              style={{ ...s.label, ...(hasHistory ? { cursor: 'pointer' } : {}) }}
+              title={hasHistory ? 'Click to view field history' : undefined}
+              onClick={() => hasHistory && handleOpenField(key)}
+            >
               {fieldLabels[key] || schemaFieldNames.get(key) || (key.startsWith('fld') ? formatName(key) : key)}
               {(fieldLabels[key] || schemaFieldNames.has(key) || key.startsWith('fld')) && (
                 <span style={s.fieldKeyHint}>{key}</span>
@@ -255,6 +327,9 @@ export function FigureFields({ figure, onNavigate, profileFields, recordTs, allE
                 <span style={s.sigBadge} title={`${sigs[key].agent} is editing`}>
                   {shortAgent(sigs[key].agent)} editing…
                 </span>
+              )}
+              {hasHistory && (
+                <span style={s.revBadge}>×{revisions!.length}</span>
               )}
             </div>
             <div
@@ -369,6 +444,89 @@ export function FigureFields({ figure, onNavigate, profileFields, recordTs, allE
               )}
             </div>
           </div>
+
+          {/* Per-field history panel */}
+          {isFieldOpen && revisions && (
+            <div style={s.fieldHistoryPanel}>
+              {/* Large value display */}
+              <div style={s.fhValueRow}>
+                <span style={{
+                  ...s.fhValue,
+                  opacity: histAnimating ? 0.1 : 1,
+                  color: revIsCurrent ? theme.text : theme.textMuted,
+                  transition: 'opacity 0.15s, color 0.15s',
+                }}>
+                  {rev ? String(rev.value ?? '') : ''}
+                </span>
+                <span style={s.fhBadge}>{revIsCurrent ? 'current' : 'past'}</span>
+              </div>
+
+              {/* Slider */}
+              <input
+                type="range"
+                min={0}
+                max={revisions.length - 1}
+                value={historyIdx}
+                style={s.fhSlider}
+                onChange={(e) => {
+                  const idx = Number(e.target.value);
+                  if (idx !== historyIdx) {
+                    setHistAnimating(true);
+                    setTimeout(() => setHistAnimating(false), 150);
+                    setHistoryIdx(idx);
+                  }
+                }}
+              />
+
+              {/* Date tick labels */}
+              <div style={s.fhTicks}>
+                {revisions.map((r, i) => (
+                  <span key={i} style={{
+                    ...s.fhTick,
+                    color: i === historyIdx ? theme.textSecondary : theme.textMuted,
+                    opacity: i === historyIdx ? 1 : 0.5,
+                  }}>
+                    {r.dateStr}
+                  </span>
+                ))}
+              </div>
+
+              {/* Provenance */}
+              {rev && (
+                <div style={{ ...s.fhProv, opacity: histAnimating ? 0.1 : 1, transition: 'opacity 0.15s' }}>
+                  <div style={s.fhProvItem}>
+                    <div style={s.fhProvKey}>CHANGED BY</div>
+                    <div style={s.fhProvVal}>{rev.agent}</div>
+                  </div>
+                  <div style={s.fhProvItem}>
+                    <div style={s.fhProvKey}>DATE</div>
+                    <div style={s.fhProvVal}>{rev.dateStr}</div>
+                  </div>
+                  {rev.note && (
+                    <div style={s.fhProvItem}>
+                      <div style={s.fhProvKey}>NOTE</div>
+                      <div style={{ ...s.fhProvVal, fontStyle: 'italic' as const, opacity: 0.8 }}>
+                        &ldquo;{rev.note}&rdquo;
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Footer */}
+              <div style={s.fhFooter}>
+                {historyIdx + 1} of {revisions.length}
+                {' · '}
+                <span
+                  style={{ cursor: 'pointer', textDecoration: 'underline', textDecorationStyle: 'dotted' as const }}
+                  onClick={() => setOpenField(null)}
+                >
+                  collapse
+                </span>
+              </div>
+            </div>
+          )}
+          </Fragment>
         );
       })}
 
@@ -831,6 +989,94 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       border: `1px solid ${t.warningBorder ?? 'rgba(255,152,0,0.3)'}`,
       marginLeft: 4,
       animation: 'pulse 1.5s ease-in-out infinite',
+    },
+    // Revision count badge on field label
+    revBadge: {
+      marginLeft: 'auto' as const,
+      fontFamily: "'JetBrains Mono', monospace",
+      fontSize: 9,
+      color: t.textMuted,
+      background: t.bgMuted,
+      padding: '1px 5px',
+      borderRadius: 3,
+    },
+    // Per-field history expanded panel
+    fieldHistoryPanel: {
+      marginLeft: 136,    // aligns with value column (label minWidth 120 + gap 16)
+      marginBottom: 12,
+      paddingLeft: 12,
+      borderLeft: `1px solid ${t.border}`,
+    },
+    fhValueRow: {
+      display: 'flex',
+      alignItems: 'baseline',
+      gap: 8,
+      marginBottom: 8,
+    },
+    fhValue: {
+      fontFamily: "'JetBrains Mono', monospace",
+      fontSize: 14,
+      fontWeight: 500,
+    },
+    fhBadge: {
+      fontFamily: "'JetBrains Mono', monospace",
+      fontSize: 9,
+      color: t.textMuted,
+      border: `1px solid ${t.border}`,
+      padding: '1px 5px',
+      borderRadius: 3,
+    },
+    fhSlider: {
+      width: '100%',
+      maxWidth: 320,
+      cursor: 'pointer',
+      accentColor: t.accent,
+      height: 2,
+      marginBottom: 2,
+    },
+    fhTicks: {
+      display: 'flex',
+      justifyContent: 'space-between',
+      maxWidth: 320,
+      marginBottom: 10,
+    },
+    fhTick: {
+      fontFamily: "'JetBrains Mono', monospace",
+      fontSize: 9,
+      textAlign: 'center' as const,
+      flex: 1,
+      transition: 'color 0.1s',
+    },
+    fhProv: {
+      display: 'inline-flex',
+      gap: 16,
+      flexWrap: 'wrap' as const,
+      background: t.bgMuted,
+      border: `1px solid ${t.border}`,
+      borderRadius: 6,
+      padding: '7px 12px',
+      marginBottom: 8,
+    },
+    fhProvItem: {
+      display: 'flex',
+      flexDirection: 'column' as const,
+      gap: 2,
+    },
+    fhProvKey: {
+      fontFamily: "'JetBrains Mono', monospace",
+      fontSize: 9,
+      letterSpacing: '0.07em',
+      color: t.textMuted,
+    },
+    fhProvVal: {
+      fontFamily: "'JetBrains Mono', monospace",
+      fontSize: 11,
+      color: t.textSecondary,
+    },
+    fhFooter: {
+      fontFamily: "'JetBrains Mono', monospace",
+      fontSize: 9,
+      color: t.textMuted,
     },
   };
 }
