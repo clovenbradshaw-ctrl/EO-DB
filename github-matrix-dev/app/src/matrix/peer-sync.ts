@@ -140,15 +140,6 @@ export class PeerSync {
   }
 
   /**
-   * Alias for stop() — satisfies the SyncManager interface so PeerSync can be
-   * stored in the syncManager Zustand slot without triggering "destroy is not
-   * a function" when switching spaces.
-   */
-  destroy(): void {
-    this.stop();
-  }
-
-  /**
    * Compute the store fingerprint for comparison with peers.
    */
   private async computeFingerprint(): Promise<string> {
