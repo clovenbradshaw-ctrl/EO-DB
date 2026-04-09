@@ -486,6 +486,76 @@ export async function gdriveReadJson(
 }
 
 /**
+ * Download a named file from EO-DB/<dataType>/ by file name.
+ * Returns null if the file does not exist.
+ */
+export async function gdriveRetrieveNamed(
+  matrixAccessToken: string,
+  dataType: string,
+  fileName: string,
+): Promise<{ ok: boolean; data: Uint8Array; fileId?: string } | null> {
+  const folderId = await resolveDataFolder(matrixAccessToken, dataType).catch(() => null);
+  if (!folderId) return null;
+  const fileId = await findFileInFolder(matrixAccessToken, fileName, folderId);
+  if (!fileId) return null;
+
+  const downloadUrl = `${DRIVE_API}/${fileId}?alt=media`;
+  const content = await driveProxy(matrixAccessToken, downloadUrl);
+  const b64 = content._raw_content_base64 || content;
+  const data = typeof b64 === 'string' ? base64ToUint8(b64) : (b64 as Uint8Array);
+  return { ok: true, data, fileId };
+}
+
+/**
+ * Download a byte range from a named binary file in EO-DB/<dataType>/.
+ * Requires the n8n proxy to forward the Range header (updated workflow).
+ * Returns null if the file does not exist.
+ * Returns partial binary data and the Content-Range response header.
+ */
+export async function gdriveRetrieveRange(
+  matrixAccessToken: string,
+  dataType: string,
+  fileName: string,
+  fromByte: number,
+  toByte?: number,
+): Promise<{ ok: boolean; data: Uint8Array; contentRange?: string } | null> {
+  const folderId = await resolveDataFolder(matrixAccessToken, dataType).catch(() => null);
+  if (!folderId) return null;
+  const fileId = await findFileInFolder(matrixAccessToken, fileName, folderId);
+  if (!fileId) return null;
+
+  const rangeHeader = toByte !== undefined
+    ? `bytes=${fromByte}-${toByte}`
+    : `bytes=${fromByte}-`;
+
+  const downloadUrl = `${DRIVE_API}/${fileId}?alt=media`;
+  const res = await fetch(EO_STORE_WEBHOOK, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Range': rangeHeader,
+    },
+    body: JSON.stringify({
+      matrix_token: matrixAccessToken,
+      drive_url: downloadUrl,
+      drive_method: 'GET',
+    }),
+  });
+
+  if (!res.ok && res.status !== 206) {
+    console.warn('[EO-DB] GDrive range request failed:', res.status);
+    return null;
+  }
+
+  const buffer = await res.arrayBuffer();
+  return {
+    ok: true,
+    data: new Uint8Array(buffer),
+    contentRange: res.headers.get('Content-Range') ?? undefined,
+  };
+}
+
+/**
  * Compute SHA-256 content hash for deterministic filenames.
  */
 export async function computeContentHash(data: string): Promise<string> {

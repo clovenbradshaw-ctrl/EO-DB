@@ -440,6 +440,16 @@ interface CachedSpace {
   spaceRooms?: { main: string; restricted?: string; governance?: string } | null;
 }
 
+/** Stable per-tab session ID — used by GDriveSyncService for bake intent files. */
+function getSessionId(): string {
+  let id = sessionStorage.getItem('eo-gdrive-session');
+  if (!id) {
+    id = Math.random().toString(36).slice(2, 10);
+    sessionStorage.setItem('eo-gdrive-session', id);
+  }
+  return id;
+}
+
 export function Layout({ session, onLogout, localMode }: LayoutProps) {
   const init = useEoStore((s) => s.init);
   const teardown = useEoStore((s) => s.teardown);
@@ -1405,10 +1415,11 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
 
         // Restart Google Drive sync for cached space
         if (existing.gdriveSync) {
+          // setGDriveSync BEFORE start() so dispatches during hydration are saved
+          useEoStore.getState().setGDriveSync(existing.gdriveSync);
           existing.gdriveSync.start().catch(e =>
             console.warn('[EO-DB] Google Drive sync restart failed for cached space', selectedSpace, e),
           );
-          useEoStore.getState().setGDriveSync(existing.gdriveSync);
         }
 
         // Start a fresh presence instance for the cached space.
@@ -1514,18 +1525,35 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           // Set current space in GDrive store
           useGDriveStore.getState().setCurrentSpace(selectedSpace, gdriveSpaceName);
 
-          // GDriveSyncService.start() handles initial hydration immediately
+          // GDriveSyncService.start() handles initial hydration immediately.
+          // setGDriveSync BEFORE start() so dispatches during hydration are saved.
           gdriveSync = new GDriveSyncService({
             store: useEoStore.getState().store!,
             spaceId: selectedSpace,
             spaceName: gdriveSpaceName,
             userId: session.userId,
+            sessionId: getSessionId(),
             matrixAccessToken: session.accessToken,
             onEvent: onFoldEvent,
             onHydrated: () => { init(workerClient); },
           });
-          await gdriveSync.start();
           useEoStore.getState().setGDriveSync(gdriveSync);
+
+          // Wire GDrive ↔ PeerSync notifications:
+          // After a GDrive write confirms, broadcast to peers so they pull immediately
+          // instead of waiting up to 15s. Peers respond by calling triggerImmediateCheck().
+          if (peerSync) {
+            const ps = peerSync;
+            const gs = gdriveSync;
+            gs.onOpSaved = (seq: number) => {
+              ps.broadcastGDriveUpdate(seq).catch(() => {});
+            };
+            ps.onGDriveUpdate = () => {
+              gs.triggerImmediateCheck();
+            };
+          }
+
+          await gdriveSync.start();
         } catch (e) {
           console.warn('[EO-DB] Google Drive sync start failed for space', selectedSpace, e);
           gdriveSync = null;
