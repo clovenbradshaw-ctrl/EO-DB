@@ -1,7 +1,8 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import { useEoStore } from '../store/eo-store';
-import { useTheme } from '../theme';
+import { useTheme, type Theme } from '../theme';
 import type { ExternalOperator } from '../db/types';
+import { buildTree, formatName, type TreeNode } from './scope-picker-utils';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -44,7 +45,90 @@ interface KeyedSummary {
 
 type ImportStatus = 'idle' | 'parsed' | 'importing' | 'done' | 'error';
 
+type DuplicateTableStrategy = 'merge' | 'skip';
+type DuplicateRecordStrategy = 'update' | 'skip' | 'replace';
+type DuplicateFieldStrategy = 'overwrite' | 'keep';
+
 const VALID_OPS = new Set(['INS', 'DEF', 'CON', 'SEG', 'SYN', 'EVA']);
+
+// ---------------------------------------------------------------------------
+// HolonTreePicker — compact inline tree for selecting an import destination
+// ---------------------------------------------------------------------------
+
+function HolonTreePicker({
+  nodes,
+  selected,
+  onSelect,
+  t,
+}: {
+  nodes: TreeNode[];
+  selected: string;
+  onSelect: (path: string) => void;
+  t: Theme;
+}) {
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+
+  const toggle = (path: string) => {
+    setExpanded(prev => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path); else next.add(path);
+      return next;
+    });
+  };
+
+  const renderNode = (node: TreeNode, depth: number): React.ReactNode => {
+    const isSelected = selected === node.fullPath;
+    const hasChildren = node.children.length > 0;
+    const isExpanded = expanded.has(node.fullPath);
+    const displayName = formatName(node.segment);
+
+    return (
+      <div key={node.fullPath}>
+        <div
+          onClick={() => { if (hasChildren) toggle(node.fullPath); onSelect(node.fullPath); }}
+          style={{
+            display: 'flex', alignItems: 'center', gap: 4,
+            padding: `3px 8px 3px ${8 + depth * 14}px`,
+            cursor: 'pointer', borderRadius: 3,
+            background: isSelected ? `${t.accent}22` : 'transparent',
+            color: isSelected ? t.accent : t.text,
+            fontSize: 12,
+          }}
+        >
+          <span style={{ fontSize: 9, opacity: 0.5, minWidth: 8 }}>
+            {hasChildren ? (isExpanded ? '▼' : '▶') : '·'}
+          </span>
+          <span style={{ fontFamily: "'JetBrains Mono', monospace" }}>{displayName}</span>
+          {displayName !== node.segment && (
+            <span style={{ opacity: 0.35, fontSize: 10, fontFamily: "'JetBrains Mono', monospace" }}>
+              {node.segment}
+            </span>
+          )}
+          {node.childCount > 0 && (
+            <span style={{ marginLeft: 'auto', fontSize: 10, color: t.textMuted, opacity: 0.5 }}>
+              {node.childCount}
+            </span>
+          )}
+        </div>
+        {hasChildren && isExpanded && node.children.map(c => renderNode(c, depth + 1))}
+      </div>
+    );
+  };
+
+  if (nodes.length === 0) {
+    return (
+      <div style={{ padding: '10px 12px', color: t.textMuted, fontSize: 12, fontStyle: 'italic' }}>
+        No existing collections — the import will create a new one.
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ maxHeight: 180, overflowY: 'auto' }}>
+      {nodes.map(n => renderNode(n, 0))}
+    </div>
+  );
+}
 
 // ---------------------------------------------------------------------------
 // CSV Parser — handles quoted fields, newlines inside quotes, etc.
@@ -390,6 +474,57 @@ function parseCsv(text: string, forceTsv: boolean): { rows: ParsedRow[]; mode: I
 }
 
 // ---------------------------------------------------------------------------
+// DupRow — a single duplicate-strategy row (label + pills)
+// ---------------------------------------------------------------------------
+
+function DupRow({
+  label,
+  hint,
+  options,
+  value,
+  onChange,
+  t,
+}: {
+  label: string;
+  hint: string;
+  options: { value: string; label: string; desc: string }[];
+  value: string;
+  onChange: (v: string) => void;
+  t: Theme;
+}) {
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 5 }}>
+        <span style={{ fontSize: 12, fontWeight: 600, color: t.text, minWidth: 48 }}>{label}</span>
+        <span style={{ fontSize: 11, color: t.textMuted }}>{hint}</span>
+      </div>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+        {options.map(opt => {
+          const active = value === opt.value;
+          return (
+            <button
+              key={opt.value}
+              onClick={() => onChange(opt.value)}
+              title={opt.desc}
+              style={{
+                padding: '3px 10px', fontSize: 11, borderRadius: 3, cursor: 'pointer',
+                border: `1px solid ${active ? t.accent : t.border}`,
+                background: active ? `${t.accent}18` : t.bg,
+                color: active ? t.accent : t.textSecondary,
+                fontWeight: active ? 600 : 400,
+                transition: 'all 0.1s',
+              }}
+            >
+              {opt.label}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
@@ -401,6 +536,8 @@ export function ImportView({ onImportComplete }: ImportViewProps) {
   const { theme: t } = useTheme();
   const dispatch = useEoStore((s) => s.dispatch);
   const batchImport = useEoStore((s) => s.batchImport);
+  const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
+  const ready = useEoStore((s) => s.ready);
 
   const [status, setStatus] = useState<ImportStatus>('idle');
   const [rows, setRows] = useState<ParsedRow[]>([]);
@@ -415,6 +552,21 @@ export function ImportView({ onImportComplete }: ImportViewProps) {
   const [creationDate, setCreationDate] = useState('');
   const [dragging, setDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Holon tree for destination picker
+  const [treeNodes, setTreeNodes] = useState<TreeNode[]>([]);
+
+  // Duplicate handling strategies
+  const [dupTable, setDupTable] = useState<DuplicateTableStrategy>('merge');
+  const [dupRecord, setDupRecord] = useState<DuplicateRecordStrategy>('update');
+  const [dupField, setDupField] = useState<DuplicateFieldStrategy>('overwrite');
+
+  useEffect(() => {
+    if (!ready) return;
+    getStateByPrefix('').then((states) => {
+      setTreeNodes(buildTree(states, ''));
+    });
+  }, [ready, getStateByPrefix]);
 
   const handleFile = useCallback((file: File) => {
     const ext = file.name.split('.').pop()?.toLowerCase();
@@ -475,6 +627,9 @@ export function ImportView({ onImportComplete }: ImportViewProps) {
     setCreationDate('');
     setMessage(null);
     setProgress({ current: 0, total: 0, errors: 0 });
+    setDupTable('merge');
+    setDupRecord('update');
+    setDupField('overwrite');
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
@@ -485,7 +640,7 @@ export function ImportView({ onImportComplete }: ImportViewProps) {
 
     // Prepare all events upfront
     const prefix = targetPrefix.trim().replace(/\.+$/, '');
-    const events = rows.map((row) => ({
+    const rawEvents = rows.map((row) => ({
       op: row.op as ExternalOperator,
       target: row._keyed
         ? `${prefix}.${row.target}`
@@ -504,16 +659,72 @@ export function ImportView({ onImportComplete }: ImportViewProps) {
       meta: row.meta,
     }));
 
+    // Apply duplicate strategies (only when meaningful)
+    let events = rawEvents;
+    const needsDupCheck = dupTable !== 'merge' || dupRecord !== 'update' || dupField !== 'keep';
+    if (needsDupCheck && prefix) {
+      const existingStates = await getStateByPrefix(prefix);
+      const existingTargets = new Set(existingStates.map(s => s.target));
+      const existingValueMap = new Map(existingStates.map(s => [s.target, s.value]));
+
+      // Determine which collection-level paths exist (one level below prefix)
+      const prefixDepth = prefix.split('.').length;
+      const existingCollections = new Set<string>();
+      for (const s of existingStates) {
+        const depth = s.target.split('.').length;
+        if (depth === prefixDepth + 1) existingCollections.add(s.target);
+      }
+
+      const finalEvents: typeof rawEvents = [];
+      for (let evt of rawEvents) {
+        if (evt.op !== 'INS') { finalEvents.push(evt); continue; }
+
+        // Table-level: skip entire collection if it already exists
+        if (dupTable === 'skip') {
+          const targetParts = evt.target.split('.');
+          const collectionPath = targetParts.slice(0, prefixDepth + 1).join('.');
+          if (existingCollections.has(collectionPath)) continue;
+        }
+
+        // Record-level: handle existing record at this exact target
+        if (existingTargets.has(evt.target)) {
+          if (dupRecord === 'skip') continue;
+          if (dupRecord === 'replace') {
+            // Nullify the existing record first, then re-insert
+            finalEvents.push({ ...evt, op: 'NUL' as ExternalOperator, operand: {} });
+          }
+          // 'update': fall through and apply the INS on top (existing behaviour)
+        }
+
+        // Field-level: keep existing field values, only import new ones
+        if (dupField === 'keep' && existingTargets.has(evt.target)) {
+          const existing = existingValueMap.get(evt.target);
+          if (existing && typeof existing === 'object') {
+            const trimmed: Record<string, unknown> = {};
+            for (const [k, v] of Object.entries(evt.operand as Record<string, unknown>)) {
+              if (!(k in (existing as object))) trimmed[k] = v;
+            }
+            if (Object.keys(trimmed).length === 0) continue; // nothing new to add
+            evt = { ...evt, operand: trimmed };
+          }
+        }
+
+        finalEvents.push(evt);
+      }
+      events = finalEvents;
+    }
+
     try {
       // Batch import: fold locally for progress, send as single Matrix message
       await batchImport(events, (current, total) => {
         setProgress({ current, total, errors: 0 });
       });
 
+      const skipped = rawEvents.length - events.filter(e => e.op !== 'NUL').length;
       setStatus('done');
       setMessage({
         type: 'success',
-        text: `Successfully imported ${rows.length} event${rows.length !== 1 ? 's' : ''}`,
+        text: `Successfully imported ${events.filter(e => e.op !== 'NUL').length} event${events.length !== 1 ? 's' : ''}${skipped > 0 ? ` (${skipped} skipped as duplicates)` : ''}`,
       });
     } catch (e: any) {
       setStatus('error');
@@ -594,27 +805,32 @@ export function ImportView({ onImportComplete }: ImportViewProps) {
         </div>
       )}
 
-      {/* Target prefix for generic/keyed imports */}
+      {/* Destination — where in the holon tree to import to */}
       {(mode === 'generic' || mode === 'keyed') && status === 'parsed' && (
-        <div style={{ marginTop: 16 }}>
-          <label style={{ fontSize: 11, fontWeight: 600, color: t.textSecondary, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
-            Target Prefix
-          </label>
+        <div style={{ marginTop: 20 }}>
+          <div style={{ fontSize: 11, fontWeight: 600, color: t.textSecondary, textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 6 }}>
+            Import Destination
+          </div>
+          {/* Tree picker */}
+          <div style={{ border: `1px solid ${t.border}`, borderRadius: 6, background: t.bgMuted, marginBottom: 6 }}>
+            <HolonTreePicker nodes={treeNodes} selected={targetPrefix} onSelect={setTargetPrefix} t={t} />
+          </div>
+          {/* Manual path override */}
           <input
             value={targetPrefix}
             onChange={(e) => setTargetPrefix(e.target.value)}
             placeholder={mode === 'keyed' ? 'e.g. import' : 'e.g. import.my_data'}
             style={{
-              display: 'block', width: '100%', marginTop: 4, padding: '8px 10px',
+              display: 'block', width: '100%', padding: '7px 10px',
               border: `1px solid ${t.border}`, borderRadius: 4, background: t.bg,
-              color: t.text, fontSize: 13, fontFamily: "'JetBrains Mono', monospace",
+              color: t.text, fontSize: 12, fontFamily: "'JetBrains Mono', monospace",
               boxSizing: 'border-box',
             }}
           />
           <div style={{ fontSize: 11, color: t.textMuted, marginTop: 4 }}>
             {mode === 'keyed'
-              ? `Entities land at ${targetPrefix || '...'}.{table}.{id}`
-              : `Each row becomes an INS event at ${targetPrefix || '...'}.rec_*`}
+              ? `Entities land at ${targetPrefix || '…'}.{table}.{id}`
+              : `Each row becomes an INS event at ${targetPrefix || '…'}.rec_*`}
           </div>
         </div>
       )}
@@ -694,6 +910,54 @@ export function ImportView({ onImportComplete }: ImportViewProps) {
           <div style={{ fontSize: 11, color: t.textMuted, marginTop: 4 }}>
             Sets the creation date (ts) for all imported records. Leave blank to use each row's
             own timestamp or current time. The ingestion timestamp is always tracked separately.
+          </div>
+        </div>
+      )}
+
+      {/* Duplicate handling */}
+      {status === 'parsed' && (
+        <div style={{ marginTop: 20 }}>
+          <div style={{ fontSize: 11, fontWeight: 600, color: t.textSecondary, textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 10 }}>
+            Duplicate Handling
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, border: `1px solid ${t.border}`, borderRadius: 6, padding: '12px 14px', background: t.bgMuted }}>
+            {/* Table level */}
+            <DupRow
+              label="Table"
+              hint="When a collection already exists at the destination"
+              options={[
+                { value: 'merge', label: 'Merge', desc: 'Add records to the existing collection' },
+                { value: 'skip',  label: 'Skip',  desc: 'Omit all records in existing collections' },
+              ]}
+              value={dupTable}
+              onChange={(v) => setDupTable(v as DuplicateTableStrategy)}
+              t={t}
+            />
+            {/* Record level */}
+            <DupRow
+              label="Record"
+              hint="When a record with the same ID already exists"
+              options={[
+                { value: 'update',  label: 'Update',  desc: 'Apply new fields on top (additive)' },
+                { value: 'skip',    label: 'Skip',    desc: 'Leave existing record unchanged' },
+                { value: 'replace', label: 'Replace', desc: 'Nullify then re-insert the record' },
+              ]}
+              value={dupRecord}
+              onChange={(v) => setDupRecord(v as DuplicateRecordStrategy)}
+              t={t}
+            />
+            {/* Field level */}
+            <DupRow
+              label="Field"
+              hint="When a field value already exists on the record"
+              options={[
+                { value: 'overwrite', label: 'Overwrite', desc: 'Replace with the imported value' },
+                { value: 'keep',      label: 'Keep',      desc: 'Preserve existing value, import only new fields' },
+              ]}
+              value={dupField}
+              onChange={(v) => setDupField(v as DuplicateFieldStrategy)}
+              t={t}
+            />
           </div>
         </div>
       )}
