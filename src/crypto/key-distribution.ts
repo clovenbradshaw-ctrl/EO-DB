@@ -1,21 +1,19 @@
 /**
- * Key distribution — P2P segment key sharing via Matrix rooms.
+ * Key distribution — P2P segment key sharing via Matrix to-device messages.
  *
- * Design:
- * - Keys are announced to a dedicated "key room" as room state events
- * - Everyone in the room gets all keys (default access = room membership)
- * - New devices heal their keyring by paginating room history
- * - Peers can request missing keys via to-device messages (gap filling)
+ * Design (simplified from key-room model to role-scoped model):
+ * - Four fixed key scopes per space: viewer / editor / restricted / admin
+ * - Keys delivered directly to users via to-device messages at grant time
+ * - New devices heal their keyring by requesting missing keys from peers
+ * - handleHealRequest checks the requester's role in manifest.eodb before
+ *   sending any key — prevents viewers from obtaining restricted-tier keys
+ *   by exploiting the heal mechanism
  *
  * Matrix event types (namespace derived from EO_EVENT_PREFIX, default "com.eo-db"):
  *   {prefix}.key.announce       — room state: segment key metadata + material
  *   {prefix}.key.heal.request   — to-device: request missing keys
  *   {prefix}.key.heal.response  — to-device: batch of keys
- *
- * Key room vs data room:
- *   The data room carries EO events (encrypted operands).
- *   The key room carries the keys to decrypt them.
- *   Separate rooms = separate membership = granular access.
+ *   {prefix}.key.deliver        — to-device: direct key grant at permission time
  */
 
 import type { SegmentKey, LocalKeyring, KeyringEntry } from '../db/crypto-types.js';

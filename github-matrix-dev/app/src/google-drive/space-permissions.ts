@@ -1,488 +1,388 @@
 /**
- * Space permission manifests — per-user Drive-backed access control.
+ * Space permissions — manifest.eodb CRUD, fold, and shadow helpers.
  *
- * Each space member has a short EO event log stored at
- *   EO-DB/eodb-{spaceId}/members/@{userId}.eodb
- * (encrypted with the space viewer-key).
+ * The manifest.eodb is an append-only EO event log stored on Google Drive.
+ * It is the source of truth for role assignments and field sensitivity config.
+ * Encrypted with the space's viewer-key so only members can read it.
  *
- * Folding that log gives the user's current access state: role, which
- * tier files they can reach, shadow field values, and which key IDs to use.
+ * Structure in the Drive folder EO-DB/eodb-{spaceId}/:
+ *   manifest.eodb  — role grants/revocations + field restriction config
  *
- * Key bytes themselves are never stored here — they travel via Matrix
- * to-device messages. The manifest only records key IDs (routing info).
+ * Event schema inside the manifest:
+ *   INS("{spaceId}.space")
+ *   DEF("{spaceId}.space.name",  "Amino")
+ *   DEF("{spaceId}.member.@alice:server",  { role, grantedBy, grantedAt, keyIds })
+ *   NUL("{spaceId}.member.@alice:server")          — revocation
+ *   DEF("{spaceId}.field.ssn",  { sensitivity, shadowValue, shadowLabel })
+ *
+ * Security:
+ *   - Viewer-key encrypted at rest.  Non-members who download the bytes cannot decrypt them.
+ *   - n8n blocks non-members at the proxy layer via Matrix room membership check.
+ *   - Three independent enforcement layers (token + membership + encryption).
+ *
+ * Bootstrap note:
+ *   A new member must receive the viewer-key via Matrix to-device BEFORE attempting
+ *   to download and decrypt the manifest.  The client should wait for key delivery
+ *   rather than failing permanently if the manifest cannot be decrypted on first try.
  */
 
-import type { MatrixClient } from 'matrix-js-sdk';
-import type { LocalKeyring } from '../db/crypto-types';
 import type { EoEvent } from '../db/types';
-import type { AccessRole } from '../permissions/types';
-import { ROLE_POWER_LEVELS } from '../permissions/types';
-import { packEodb, unpackEodb } from './eodb-format';
+import type { LocalKeyring } from '../db/crypto-types';
+import { packEodb, unpackEodb, type EodbFile } from './eodb-format';
 import { encryptSnapshot, decryptSnapshot } from '../crypto/snapshot-crypto';
-import { resolveSnapshotKeyId, bufferToBase64, base64ToBuffer } from '../crypto/segment-keys';
-import { gdriveStoreNamed, gdriveRetrieveNamed } from './gdrive-api';
-import { PERMISSIONS_KEY_DELIVER, PERMISSIONS_UPDATED } from '../lib/matrix-domain';
-import { buildToDeviceContent } from '../matrix/peer-sync';
+import { gdriveRetrieveNamed, gdriveStoreNamed } from './gdrive-api';
+
+// ─── Role tier ordering ────────────────────────────────────────────────────────
+
+/** Space-level roles in ascending capability order. */
+export type SpaceRole = 'viewer' | 'editor' | 'restricted' | 'admin' | 'owner';
+
+const ROLE_ORDER: SpaceRole[] = ['viewer', 'editor', 'restricted', 'admin', 'owner'];
+
+/** Return true if `a` >= `b` in capability order. */
+export function roleAtLeast(a: SpaceRole, b: SpaceRole): boolean {
+  return ROLE_ORDER.indexOf(a) >= ROLE_ORDER.indexOf(b);
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-export interface UserManifest {
-  userId: string;
-  spaceId: string;
-  /** Folded role — the highest role granted and not subsequently revoked. */
-  role: AccessRole;
-  /** Drive file IDs the user can access (populated via CON events). */
-  fileAccess: {
-    'space-log': string | null;
-    'space-recent': string | null;
-    'restricted-log': string | null;
-    'admin-log': string | null;
-  };
+export interface ManifestMember {
+  role: SpaceRole;
+  grantedBy: string;
+  grantedAt: string;
+  /** Active key IDs for each tier the member can access (set at grant time). */
+  keyIds: Partial<Record<'viewer' | 'editor' | 'restricted' | 'admin', string>>;
+}
+
+export interface FieldShadowConfig {
+  /** Log tier required to decrypt this field's events. */
+  sensitivity: 'restricted' | 'admin';
   /**
-   * Shadow values for restricted fields (populated via DEF events).
-   * The user sees these placeholders instead of the real restricted values.
+   * Value rendered for users who cannot decrypt this field.
+   * null = hide the column entirely.
+   * string = show this placeholder (e.g. "***-**-****").
    */
-  shadowFields: Record<string, { shadowValue: string | null; shadowLabel: string }>;
-  /** Key IDs to use per tier (the actual keys arrive via Matrix to-device). */
-  keyIds: {
-    viewer?: string;
-    restricted?: string;
-    admin?: string;
-  };
-  /** Whether access has been explicitly revoked (NUL event present). */
-  revoked: boolean;
+  shadowValue: string | null;
+  /** Optional column header override when the field is shadowed. */
+  shadowLabel?: string;
 }
 
-// Internal fold state while building the manifest from events.
-interface ManifestFold {
-  role: AccessRole | null;
-  fileAccess: UserManifest['fileAccess'];
-  shadowFields: UserManifest['shadowFields'];
-  keyIds: UserManifest['keyIds'];
-  revoked: boolean;
+export interface ManifestState {
+  spaceName?: string;
+  /** userId → current member entry (NUL events remove entries). */
+  members: Record<string, ManifestMember>;
+  /** fieldKey → restriction config for fields above viewer tier. */
+  fields: Record<string, FieldShadowConfig>;
 }
 
-// ─── File naming ──────────────────────────────────────────────────────────────
+// ─── Filename constant ────────────────────────────────────────────────────────
 
-/** Folder dataType for a space's Drive folder. */
-function spaceDataType(spaceId: string): string {
-  return 'eodb-' + spaceId;
-}
+const MANIFEST_FILENAME = 'manifest.eodb';
+
+// ─── Fold ─────────────────────────────────────────────────────────────────────
 
 /**
- * Filename for a user's manifest within the space folder.
- * Uses 'members/' prefix so files are visually grouped in the Drive UI.
- * Note: Drive filenames can contain '/' and '@' — this is a flat filename,
- * not an actual subfolder path.
+ * Fold a list of manifest events into a ManifestState snapshot.
+ *
+ * Rules:
+ *   DEF("{spaceId}.space.name", "...")           → spaceName
+ *   DEF("{spaceId}.member.{userId}", {...})       → members[userId]
+ *   NUL("{spaceId}.member.{userId}")              → delete members[userId]
+ *   DEF("{spaceId}.field.{fieldKey}", {...})      → fields[fieldKey]
+ *   NUL("{spaceId}.field.{fieldKey}")             → delete fields[fieldKey]
  */
-function manifestFileName(userId: string): string {
-  return 'members/' + userId + '.eodb';
-}
+export function foldManifest(events: EoEvent[]): ManifestState {
+  const state: ManifestState = { members: {}, fields: {} };
 
-// ─── Manifest fold ────────────────────────────────────────────────────────────
+  for (const ev of events) {
+    const parts = ev.target.split('.');
+    // parts[0] = spaceId, parts[1] = segment type, parts[2..] = identifier
 
-function foldManifestEvents(events: EoEvent[]): ManifestFold {
-  const fold: ManifestFold = {
-    role: null,
-    fileAccess: {
-      'space-log': null,
-      'space-recent': null,
-      'restricted-log': null,
-      'admin-log': null,
-    },
-    shadowFields: {},
-    keyIds: {},
-    revoked: false,
-  };
+    if (parts.length < 3) continue;
+    const segment = parts[1]; // "space" | "member" | "field"
+    const key = parts.slice(2).join('.'); // userId or fieldKey
 
-  for (const evt of events) {
-    switch (evt.op) {
-      case 'SEG':
-        // SEG event sets the role.
-        if (evt.operand?.role && typeof evt.operand.role === 'string') {
-          fold.role = evt.operand.role as AccessRole;
-        }
-        // SEG event may also carry a key ID for a tier.
-        if (evt.operand?.key_id && typeof evt.operand.key_id === 'string') {
-          const tier = evt.operand.tier as keyof UserManifest['keyIds'] | undefined;
-          if (tier === 'viewer' || tier === 'restricted' || tier === 'admin') {
-            fold.keyIds[tier] = evt.operand.key_id;
-          }
-        }
-        break;
+    if (segment === 'space' && key === 'name' && ev.op === 'DEF') {
+      state.spaceName = ev.operand as string;
+      continue;
+    }
 
-      case 'CON':
-        // CON event maps a file tier to its Drive file ID.
-        if (evt.operand?.file && evt.operand?.file_id) {
-          const file = evt.operand.file as keyof UserManifest['fileAccess'];
-          if (file in fold.fileAccess) {
-            fold.fileAccess[file] = evt.operand.file_id as string;
-          }
-        }
-        break;
+    if (segment === 'member') {
+      if (ev.op === 'DEF' && ev.operand && typeof ev.operand === 'object') {
+        state.members[key] = ev.operand as ManifestMember;
+      } else if (ev.op === 'NUL') {
+        delete state.members[key];
+      }
+      continue;
+    }
 
-      case 'DEF':
-        // DEF event records a shadow value for a restricted field.
-        if (evt.operand?.field && typeof evt.operand.field === 'string') {
-          fold.shadowFields[evt.operand.field] = {
-            shadowValue: evt.operand.shadow_value ?? null,
-            shadowLabel: evt.operand.shadow_label ?? '[restricted]',
-          };
-        }
-        break;
-
-      case 'NUL':
-        // NUL event revokes access.
-        fold.revoked = true;
-        fold.role = null;
-        break;
+    if (segment === 'field') {
+      if (ev.op === 'DEF' && ev.operand && typeof ev.operand === 'object') {
+        state.fields[key] = ev.operand as FieldShadowConfig;
+      } else if (ev.op === 'NUL') {
+        delete state.fields[key];
+      }
     }
   }
 
-  return fold;
+  return state;
 }
 
-// ─── Read ─────────────────────────────────────────────────────────────────────
-
-/**
- * Read and fold a user's permission manifest from Drive.
- * Returns `null` if no manifest exists or if access has been revoked.
- */
-export async function readUserManifest(
-  matrixAccessToken: string,
-  spaceId: string,
-  userId: string,
-  keyring: LocalKeyring,
-): Promise<UserManifest | null> {
-  const result = await gdriveRetrieveNamed(
-    matrixAccessToken,
-    spaceDataType(spaceId),
-    manifestFileName(userId),
-  );
-  if (!result) return null;
-
-  let decrypted: Uint8Array;
-  try {
-    decrypted = await decryptSnapshot(result.data, keyring);
-  } catch {
-    // If decryption fails the keyring doesn't have the right key yet.
-    console.warn('[EO-DB] readUserManifest: decryption failed for', userId);
-    return null;
-  }
-
-  let file;
-  try {
-    file = unpackEodb(decrypted);
-  } catch {
-    console.warn('[EO-DB] readUserManifest: unpack failed for', userId);
-    return null;
-  }
-
-  const fold = foldManifestEvents(file.events);
-  if (fold.revoked || !fold.role) return null;
-
-  return {
-    userId,
-    spaceId,
-    role: fold.role,
-    fileAccess: fold.fileAccess,
-    shadowFields: fold.shadowFields,
-    keyIds: fold.keyIds,
-    revoked: false,
-  };
+/** Get the resolved role for a user ID, or null if not a member. */
+export function getOwnRole(state: ManifestState, userId: string): SpaceRole | null {
+  return state.members[userId]?.role ?? null;
 }
 
-/**
- * Read the raw event list from a user's manifest without folding.
- * Returns an empty array if the manifest doesn't exist.
- * Used by writeUserManifest to preserve existing history.
- */
-async function readManifestEvents(
-  matrixAccessToken: string,
-  spaceId: string,
-  userId: string,
-  keyring: LocalKeyring,
-): Promise<EoEvent[]> {
-  const result = await gdriveRetrieveNamed(
-    matrixAccessToken,
-    spaceDataType(spaceId),
-    manifestFileName(userId),
-  );
-  if (!result) return [];
-
-  let decrypted: Uint8Array;
-  try {
-    decrypted = await decryptSnapshot(result.data, keyring);
-  } catch {
-    return [];
-  }
-
-  try {
-    const file = unpackEodb(decrypted);
-    return file.events;
-  } catch {
-    return [];
-  }
+/** Get all field shadow configs keyed by field name. */
+export function getFieldShadows(state: ManifestState): Record<string, FieldShadowConfig> {
+  return { ...state.fields };
 }
 
-// ─── Write ────────────────────────────────────────────────────────────────────
+// ─── Encrypt / Decrypt helpers ────────────────────────────────────────────────
+// Uses the same encryptSnapshot / decryptSnapshot pattern as gdrive-sync.ts.
+// Callers pass a LocalKeyring containing the viewer-key for the space.
 
-/**
- * Write (or overwrite) a user's manifest by combining existing events with
- * new events, encrypting, and uploading.
- *
- * @param existingEvents  Pass `null` to have this function fetch existing
- *                        events automatically. Pass `[]` to start fresh.
- */
-export async function writeUserManifest(
-  matrixAccessToken: string,
+async function encryptManifest(
+  events: EoEvent[],
   spaceId: string,
-  userId: string,
-  newEvents: EoEvent[],
-  keyring: LocalKeyring,
-  existingEvents?: EoEvent[] | null,
-): Promise<void> {
-  const prior = existingEvents !== undefined && existingEvents !== null
-    ? existingEvents
-    : await readManifestEvents(matrixAccessToken, spaceId, userId, keyring);
-
-  const allEvents = [...prior, ...newEvents];
-  const now = new Date().toISOString();
-
-  const file = packEodb({
+  spaceName: string,
+  viewerKeyring: LocalKeyring,
+  viewerKeyId: string,
+): Promise<Uint8Array> {
+  const file: EodbFile = {
     version: 1,
     type: 'current',
     space_id: spaceId,
-    space_name: spaceId,
-    from_seq: allEvents[0]?.seq ?? 1,
-    to_seq: allEvents[allEvents.length - 1]?.seq ?? 1,
-    created_by: userId,
-    created_at: now,
-    events: allEvents,
+    space_name: spaceName,
+    from_seq: events[0]?.seq ?? 0,
+    to_seq: events[events.length - 1]?.seq ?? 0,
+    created_by: 'manifest',
+    created_at: new Date().toISOString(),
+    events,
     prev_snapshots: [],
-  });
-
-  const keyId = resolveSnapshotKeyId(keyring);
-  const encrypted = keyId
-    ? await encryptSnapshot(file, keyring, keyId)
-    : file;
-
-  await gdriveStoreNamed(
-    matrixAccessToken,
-    encrypted,
-    spaceDataType(spaceId),
-    manifestFileName(userId),
-  );
+  };
+  const packed = packEodb(file);
+  return encryptSnapshot(packed, viewerKeyring, viewerKeyId);
 }
 
-// ─── Grant / Revoke ───────────────────────────────────────────────────────────
+async function decryptManifest(
+  encryptedBytes: Uint8Array,
+  viewerKeyring: LocalKeyring,
+): Promise<EoEvent[]> {
+  const decrypted = await decryptSnapshot(encryptedBytes, viewerKeyring);
+  const file = unpackEodb(decrypted);
+  return file.events;
+}
+
+// ─── Download / Upload ────────────────────────────────────────────────────────
 
 /**
- * Grant (or update) a user's role in a space.
+ * Download and decrypt manifest.eodb from the space's Drive folder.
  *
- * Creates or appends to the user's manifest with:
- * - A SEG event recording the role
- * - A SEG event recording the viewer key ID (for encryption routing)
+ * Returns the raw event list so callers can fold it with `foldManifest()`.
+ * Returns null if the manifest does not exist yet (new space).
  *
- * Then delivers the key bytes via Matrix to-device and signals peers that
- * permissions changed.
- *
- * @param adminUserId  The Matrix user ID performing the grant.
- * @param keyring      The admin's keyring (used to encrypt the manifest).
- * @param matrixClient Optional — if provided, key delivery and peer signaling fire.
+ * Bootstrap: if decryption fails due to a missing viewer-key, callers should
+ * retry after key delivery arrives via Matrix to-device, rather than failing.
  */
-export async function grantRole(
-  matrixAccessToken: string,
+export async function downloadManifest(
+  token: string,
   spaceId: string,
-  userId: string,
-  role: AccessRole,
-  adminUserId: string,
-  keyring: LocalKeyring,
-  matrixClient?: MatrixClient,
-): Promise<void> {
-  const existingEvents = await readManifestEvents(
-    matrixAccessToken, spaceId, userId, keyring,
-  );
-  const nextSeq = (existingEvents[existingEvents.length - 1]?.seq ?? 0) + 1;
-  const now = new Date().toISOString();
-  const pl = ROLE_POWER_LEVELS[role];
+  viewerKeyring: LocalKeyring,
+): Promise<EoEvent[] | null> {
+  const dataType = `eodb-${spaceId}`;
+  const result = await gdriveRetrieveNamed(token, dataType, MANIFEST_FILENAME);
+  if (!result) return null;
 
-  const newEvents: EoEvent[] = [
+  return decryptManifest(result.data, viewerKeyring);
+}
+
+/**
+ * Download, append new events, re-encrypt and upload manifest.eodb.
+ *
+ * This is a read-modify-write cycle. Concurrent writes from multiple admins
+ * could result in one overwriting the other — acceptable for the low-frequency
+ * permission management use case. The event log is append-only so the fold
+ * result converges regardless of ordering.
+ */
+export async function appendManifestEvents(
+  token: string,
+  spaceId: string,
+  spaceName: string,
+  viewerKeyring: LocalKeyring,
+  viewerKeyId: string,
+  newEvents: EoEvent[],
+): Promise<void> {
+  const existing = await downloadManifest(token, spaceId, viewerKeyring) ?? [];
+  const allEvents = [...existing, ...newEvents];
+  const encrypted = await encryptManifest(allEvents, spaceId, spaceName, viewerKeyring, viewerKeyId);
+  await gdriveStoreNamed(token, encrypted, `eodb-${spaceId}`, MANIFEST_FILENAME);
+}
+
+/**
+ * Write a brand-new manifest.eodb (for space creation).
+ * Overwrites any existing file at the same path.
+ */
+export async function initManifest(
+  token: string,
+  spaceId: string,
+  spaceName: string,
+  creatorUserId: string,
+  viewerKeyring: LocalKeyring,
+  viewerKeyId: string,
+  editorKeyId: string,
+  restrictedKeyId: string,
+  adminKeyId: string,
+): Promise<void> {
+  const now = new Date().toISOString();
+  const baseSeq = 1;
+
+  const initEvents: EoEvent[] = [
     {
-      seq: nextSeq,
-      op: 'SEG',
-      target: userId + '/role',
-      operand: { role, power_level: pl },
-      agent: adminUserId,
+      seq: baseSeq,
+      op: 'INS',
+      target: `${spaceId}.space`,
+      operand: null,
+      agent: creatorUserId,
+      ts: now,
+      acquired_ts: now,
+    },
+    {
+      seq: baseSeq + 1,
+      op: 'DEF',
+      target: `${spaceId}.space.name`,
+      operand: spaceName,
+      agent: creatorUserId,
+      ts: now,
+      acquired_ts: now,
+    },
+    {
+      seq: baseSeq + 2,
+      op: 'DEF',
+      target: `${spaceId}.member.${creatorUserId}`,
+      operand: {
+        role: 'owner',
+        grantedBy: creatorUserId,
+        grantedAt: now,
+        keyIds: {
+          viewer: viewerKeyId,
+          editor: editorKeyId,
+          restricted: restrictedKeyId,
+          admin: adminKeyId,
+        },
+      } satisfies ManifestMember,
+      agent: creatorUserId,
       ts: now,
       acquired_ts: now,
     },
   ];
 
-  // Record the viewer key ID in the manifest so the client knows which
-  // key to look up in its local keyring when decrypting space files.
-  const viewerKeyId = resolveSnapshotKeyId(keyring);
-  if (viewerKeyId) {
-    newEvents.push({
-      seq: nextSeq + 1,
-      op: 'SEG',
-      target: userId + '/keys',
-      operand: { tier: 'viewer', key_id: viewerKeyId },
-      agent: adminUserId,
-      ts: now,
-      acquired_ts: now,
-    });
-  }
-
-  await writeUserManifest(
-    matrixAccessToken, spaceId, userId, newEvents, keyring, existingEvents,
-  );
-
-  if (matrixClient) {
-    await deliverKeyToUser(matrixClient, userId, keyring);
-    await signalPermissionsUpdated(matrixClient, userId);
-  }
+  const encrypted = await encryptManifest(initEvents, spaceId, spaceName, viewerKeyring, viewerKeyId);
+  await gdriveStoreNamed(token, encrypted, `eodb-${spaceId}`, MANIFEST_FILENAME);
 }
 
-/**
- * Revoke a user's access to a space by appending a NUL event.
- * Does not delete the manifest — the history is preserved for audit.
- *
- * TODO: Rotate the restricted-key after revocation if the user had
- * restricted-tier access, then re-deliver the new key to remaining members.
- */
-export async function revokeRole(
-  matrixAccessToken: string,
-  spaceId: string,
-  userId: string,
-  adminUserId: string,
-  keyring: LocalKeyring,
-  matrixClient?: MatrixClient,
-): Promise<void> {
-  const existingEvents = await readManifestEvents(
-    matrixAccessToken, spaceId, userId, keyring,
-  );
-  const nextSeq = (existingEvents[existingEvents.length - 1]?.seq ?? 0) + 1;
-  const now = new Date().toISOString();
+// ─── Permission grant / revoke helpers ────────────────────────────────────────
 
-  const revokeEvent: EoEvent = {
-    seq: nextSeq,
-    op: 'NUL',
-    target: userId + '/role',
-    operand: { reason: 'access_revoked' },
-    agent: adminUserId,
+/**
+ * Build the DEF event for granting a role to a user.
+ * Caller is responsible for delivering keys via to-device BEFORE uploading
+ * the updated manifest to Drive.
+ */
+export function buildGrantEvent(
+  spaceId: string,
+  targetUserId: string,
+  role: SpaceRole,
+  grantedByUserId: string,
+  keyIds: ManifestMember['keyIds'],
+  seq: number,
+): EoEvent {
+  const now = new Date().toISOString();
+  return {
+    seq,
+    op: 'DEF',
+    target: `${spaceId}.member.${targetUserId}`,
+    operand: {
+      role,
+      grantedBy: grantedByUserId,
+      grantedAt: now,
+      keyIds,
+    } satisfies ManifestMember,
+    agent: grantedByUserId,
     ts: now,
     acquired_ts: now,
   };
-
-  await writeUserManifest(
-    matrixAccessToken, spaceId, userId, [revokeEvent], keyring, existingEvents,
-  );
-
-  if (matrixClient) {
-    await signalPermissionsUpdated(matrixClient, userId);
-  }
 }
 
-// ─── Key delivery helpers ─────────────────────────────────────────────────────
-
 /**
- * Deliver the viewer-tier key bytes to a user via Matrix to-device message.
- * The key_bytes_b64 field carries the raw AES key so the recipient can add
- * it to their local keyring and decrypt space files.
+ * Build the NUL event for revoking a user's access.
+ * After appending this event, the admin must:
+ *   1. Remove the user from the Matrix main room (hard revocation at proxy layer)
+ *   2. Rotate affected tier keys and re-deliver to remaining eligible members
  */
-async function deliverKeyToUser(
-  matrixClient: MatrixClient,
-  userId: string,
-  keyring: LocalKeyring,
-): Promise<void> {
-  const keyId = resolveSnapshotKeyId(keyring);
-  if (!keyId) return;
-
-  const entry = keyring.keys.get(keyId);
-  if (!entry) return;
-
-  // Export the CryptoKey to raw bytes so we can transmit it.
-  let keyBytes: Uint8Array;
-  try {
-    const exported = await crypto.subtle.exportKey('raw', entry.key);
-    keyBytes = new Uint8Array(exported);
-  } catch (e) {
-    console.warn('[EO-DB] deliverKeyToUser: key export failed', e);
-    return;
-  }
-
-  const payload = {
-    key_id: keyId,
-    key_bytes_b64: bufferToBase64(keyBytes),
-    scope: entry.scope,
-    tier: 'viewer',
+export function buildRevokeEvent(
+  spaceId: string,
+  targetUserId: string,
+  revokedByUserId: string,
+  seq: number,
+): EoEvent {
+  const now = new Date().toISOString();
+  return {
+    seq,
+    op: 'NUL',
+    target: `${spaceId}.member.${targetUserId}`,
+    operand: null,
+    agent: revokedByUserId,
+    ts: now,
+    acquired_ts: now,
+    nul_state: 'cleared',
   };
-
-  try {
-    await matrixClient.sendToDevice(
-      PERMISSIONS_KEY_DELIVER,
-      buildToDeviceContent(userId, '*', payload),
-    );
-  } catch (e) {
-    console.warn('[EO-DB] deliverKeyToUser: to-device send failed', e);
-  }
 }
 
 /**
- * Broadcast to the target user (all their devices) that their permissions
- * have changed. The recipient should re-fetch their manifest and invalidate
- * any cached permission state.
+ * Build DEF events for setting field sensitivity / shadow config.
  */
-async function signalPermissionsUpdated(
-  matrixClient: MatrixClient,
-  userId: string,
-): Promise<void> {
-  try {
-    await matrixClient.sendToDevice(
-      PERMISSIONS_UPDATED,
-      buildToDeviceContent(userId, '*', { updated_at: new Date().toISOString() }),
-    );
-  } catch (e) {
-    console.warn('[EO-DB] signalPermissionsUpdated: to-device send failed', e);
-  }
+export function buildFieldConfigEvent(
+  spaceId: string,
+  fieldKey: string,
+  config: FieldShadowConfig,
+  agentUserId: string,
+  seq: number,
+): EoEvent {
+  const now = new Date().toISOString();
+  return {
+    seq,
+    op: 'DEF',
+    target: `${spaceId}.field.${fieldKey}`,
+    operand: config,
+    agent: agentUserId,
+    ts: now,
+    acquired_ts: now,
+  };
 }
 
-// ─── Key ingestion helper ─────────────────────────────────────────────────────
+// ─── Key-tier helpers ─────────────────────────────────────────────────────────
 
 /**
- * Parse an incoming `com.eo-db.key.grant` to-device message and return a
- * keyring entry ready to be added to the local keyring.
- *
- * Returns null if the message is malformed or the key cannot be imported.
+ * The fixed Drive file names for each encrypted log tier.
+ * Clients use these to know which files to download based on their role.
  */
-export async function ingestDeliveredKey(
-  content: Record<string, unknown>,
-): Promise<{ keyId: string; keyringEntry: import('../db/crypto-types').KeyringEntry } | null> {
-  const { key_id, key_bytes_b64, scope } = content;
-  if (
-    typeof key_id !== 'string' ||
-    typeof key_bytes_b64 !== 'string' ||
-    typeof scope !== 'string'
-  ) {
-    return null;
-  }
+export const LOG_FILE_NAMES: Record<'viewer' | 'restricted' | 'admin', string> = {
+  viewer: 'space-log.eodb',
+  restricted: 'restricted-log.eodb',
+  admin: 'admin-log.eodb',
+};
 
-  try {
-    const keyBytes = base64ToBuffer(key_bytes_b64);
-    const cryptoKey = await crypto.subtle.importKey(
-      'raw',
-      keyBytes as unknown as BufferSource,
-      { name: 'AES-GCM', length: 256 },
-      false,
-      ['encrypt', 'decrypt'],
-    );
-    return {
-      keyId: key_id,
-      keyringEntry: { key: cryptoKey, scope, version: 1 },
-    };
-  } catch (e) {
-    console.warn('[EO-DB] ingestDeliveredKey: import failed', e);
-    return null;
-  }
+export const RECENT_FILE_NAMES: Record<'viewer' | 'restricted', string> = {
+  viewer: 'space-recent.eodb',
+  restricted: 'restricted-recent.eodb',
+};
+
+/**
+ * Given a resolved role, return the set of log tiers the user can access.
+ */
+export function accessibleTiers(role: SpaceRole): Array<'viewer' | 'restricted' | 'admin'> {
+  const tiers: Array<'viewer' | 'restricted' | 'admin'> = ['viewer'];
+  if (roleAtLeast(role, 'restricted')) tiers.push('restricted');
+  if (roleAtLeast(role, 'admin')) tiers.push('admin');
+  return tiers;
 }

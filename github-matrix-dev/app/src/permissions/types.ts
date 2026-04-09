@@ -45,8 +45,9 @@ export function powerLevelToRole(pl: number): AccessRole {
   return 'viewer';
 }
 
-// --- Field Assignments ---
+// --- Field Assignments (legacy — replaced by manifest.eodb fieldRestrictions) ---
 
+/** @deprecated Use FieldShadowConfig from space-permissions.ts instead. */
 export interface FieldAssignment {
   /** Field key (e.g. "fldSSN") */
   field: string;
@@ -70,7 +71,8 @@ export interface SpaceConfig {
     restricted?: string;
     governance?: string;
   };
-  field_assignments: FieldAssignment[];
+  /** @deprecated Use manifest.eodb fieldRestrictions instead. */
+  field_assignments?: FieldAssignment[];
   space_settings: SpaceSettings;
   /** Cloud storage paths provisioned when the space was created. */
   storage?: {

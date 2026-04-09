@@ -23,6 +23,7 @@ export const EO_SNAPSHOT_TYPE = 'com.eo-db.snapshot';
 // --- Room creation ---
 
 /**
+ * @deprecated Use manifest.eodb field sensitivity + role-scoped keys instead.
  * Create a restricted room for a space.
  * Contains DEF events for sensitive fields (SSN, salary, etc.).
  * Membership: Owner, Admin, plus explicitly granted Editors.
@@ -63,6 +64,7 @@ export async function createRestrictedRoom(
 }
 
 /**
+ * @deprecated Use manifest.eodb + admin-log.eodb instead.
  * Create a governance room for a space.
  * Contains EVA policies, schema changes, field permission config, slice definitions.
  * Membership: Owner + Admin only.
@@ -298,6 +300,7 @@ export interface SpaceRooms {
 }
 
 /**
+ * @deprecated Use single-room topology with manifest.eodb permissions model instead.
  * Build the full space room topology. Creates restricted/governance rooms
  * if they don't exist yet and the caller requests them.
  */

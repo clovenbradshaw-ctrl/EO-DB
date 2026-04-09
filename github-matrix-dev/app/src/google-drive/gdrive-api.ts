@@ -86,12 +86,17 @@ function base64ToUint8(b64: string): Uint8Array {
 /**
  * Send a Drive API request through the n8n proxy.
  * The proxy validates Matrix token then forwards to Google Drive with OAuth creds.
+ *
+ * space_room_id: the Matrix main room ID for this space.  The n8n proxy checks
+ * that the authenticated user is a member of this room before proxying the
+ * request.  Omit only for legacy/unauthenticated contexts.
  */
 async function driveProxy(
   matrixAccessToken: string,
   driveUrl: string,
   driveMethod: string = 'GET',
   driveBody?: Record<string, unknown> | null,
+  spaceRoomId?: string,
 ): Promise<any> {
   console.log('[EO-DB] GDrive proxy:', driveMethod, driveUrl);
   const res = await fetch(EO_STORE_WEBHOOK, {
@@ -101,6 +106,7 @@ async function driveProxy(
       matrix_token: matrixAccessToken,
       drive_url: driveUrl,
       drive_method: driveMethod,
+      ...(spaceRoomId ? { space_room_id: spaceRoomId } : {}),
       ...(driveBody ? { drive_body: driveBody } : {}),
     }),
   });
@@ -108,6 +114,9 @@ async function driveProxy(
   console.log('[EO-DB] GDrive proxy response:', res.status, text.slice(0, 300));
   if (res.status === 401) {
     throw new Error('Unauthorized — Matrix token invalid or expired');
+  }
+  if (res.status === 403) {
+    throw new Error('Forbidden — not a member of this space');
   }
   if (!text) return {};
   return JSON.parse(text);
@@ -119,6 +128,19 @@ async function driveProxy(
 
 /** Cache: "parentId/name" → folderId (avoids repeated lookups within a session). */
 const folderIdCache = new Map<string, string>();
+
+// Active space room ID — set by the app shell when switching spaces.
+// Injected into all proxy calls for n8n membership verification.
+let activeSpaceRoomId: string | undefined;
+
+/**
+ * Set the current space's Matrix main room ID.
+ * Call this whenever the user opens or switches spaces.
+ * All subsequent Drive API calls will include this room ID for n8n membership check.
+ */
+export function setActiveSpaceRoomId(roomId: string | undefined): void {
+  activeSpaceRoomId = roomId;
+}
 
 /**
  * Find a folder by name, optionally inside a parent. Returns ID or null.
@@ -135,7 +157,7 @@ async function findFolder(
   let q = `name='${name}' and mimeType='application/vnd.google-apps.folder' and trashed=false`;
   if (parentId) q += ` and '${parentId}' in parents`;
   const url = `${DRIVE_API}?q=${encodeURIComponent(q)}&fields=files(id,name)&spaces=drive`;
-  const data = await driveProxy(token, url);
+  const data = await driveProxy(token, url, 'GET', null, activeSpaceRoomId);
   const files = data.files || [];
   if (files.length > 0) {
     folderIdCache.set(cacheKey, files[0].id);
@@ -157,7 +179,7 @@ async function createFolder(
     mimeType: 'application/vnd.google-apps.folder',
   };
   if (parentId) body.parents = [parentId];
-  const data = await driveProxy(token, DRIVE_API, 'POST', body);
+  const data = await driveProxy(token, DRIVE_API, 'POST', body, activeSpaceRoomId);
   const cacheKey = `${parentId || 'root'}/${name}`;
   folderIdCache.set(cacheKey, data.id);
   return data.id;
@@ -202,7 +224,7 @@ async function findFileInFolder(
 ): Promise<string | null> {
   const q = `name='${fileName}' and '${folderId}' in parents and trashed=false`;
   const url = `${DRIVE_API}?q=${encodeURIComponent(q)}&fields=files(id)&spaces=drive`;
-  const data = await driveProxy(token, url);
+  const data = await driveProxy(token, url, 'GET', null, activeSpaceRoomId);
   const files = data.files || [];
   return files.length > 0 ? files[0].id : null;
 }
@@ -241,7 +263,7 @@ export async function gdriveStore(
       mimeType: 'application/octet-stream',
       description: `EO-DB encrypted backup | ${dataType} | ${dataId}`,
     };
-    const created = await driveProxy(matrixAccessToken, DRIVE_API, 'POST', metadata);
+    const created = await driveProxy(matrixAccessToken, DRIVE_API, 'POST', metadata, activeSpaceRoomId);
     fileId = created.id;
     console.log('[EO-DB] GDrive .eodb file created:', fileId, contentHash);
   }
@@ -251,7 +273,7 @@ export async function gdriveStore(
   await driveProxy(matrixAccessToken, uploadUrl, 'PATCH', {
     _raw_content_base64: base64Data,
     _content_type: 'application/octet-stream',
-  });
+  }, activeSpaceRoomId);
 
   return {
     ok: true,
@@ -271,14 +293,14 @@ export async function gdriveRetrieve(
   // Try .eodb first, fall back to legacy .json
   const qEodb = `name='${contentHash}.eodb' and trashed=false`;
   const urlEodb = `${DRIVE_API}?q=${encodeURIComponent(qEodb)}&fields=files(id,name)&spaces=drive`;
-  const dataEodb = await driveProxy(matrixAccessToken, urlEodb);
+  const dataEodb = await driveProxy(matrixAccessToken, urlEodb, 'GET', null, activeSpaceRoomId);
   let files = dataEodb.files || [];
   let isBinary = true;
 
   if (!files.length) {
     const qJson = `name='${contentHash}.json' and trashed=false`;
     const urlJson = `${DRIVE_API}?q=${encodeURIComponent(qJson)}&fields=files(id,name)&spaces=drive`;
-    const dataJson = await driveProxy(matrixAccessToken, urlJson);
+    const dataJson = await driveProxy(matrixAccessToken, urlJson, 'GET', null, activeSpaceRoomId);
     files = dataJson.files || [];
     isBinary = false;
   }
@@ -288,7 +310,7 @@ export async function gdriveRetrieve(
   }
 
   const downloadUrl = `${DRIVE_API}/${files[0].id}?alt=media`;
-  const content = await driveProxy(matrixAccessToken, downloadUrl);
+  const content = await driveProxy(matrixAccessToken, downloadUrl, 'GET', null, activeSpaceRoomId);
 
   if (isBinary) {
     // Proxy returns base64-encoded binary in _raw_content_base64
@@ -326,7 +348,7 @@ export async function gdriveList(
   }
 
   const url = `${DRIVE_API}?q=${encodeURIComponent(q)}&fields=files(id,name,createdTime,parents)&spaces=drive&pageSize=100`;
-  const data = await driveProxy(matrixAccessToken, url);
+  const data = await driveProxy(matrixAccessToken, url, 'GET', null, activeSpaceRoomId);
   const files = data.files || [];
 
   const entries: GDriveListEntry[] = files.map((f: any) => ({
@@ -365,7 +387,7 @@ export async function gdriveStoreNamed(
       parents: [folderId],
       mimeType: 'application/octet-stream',
     };
-    const created = await driveProxy(matrixAccessToken, DRIVE_API, 'POST', metadata);
+    const created = await driveProxy(matrixAccessToken, DRIVE_API, 'POST', metadata, activeSpaceRoomId);
     fileId = created.id;
     console.log('[EO-DB] GDrive created named file:', fileName, fileId);
   }
@@ -374,7 +396,7 @@ export async function gdriveStoreNamed(
   await driveProxy(matrixAccessToken, uploadUrl, 'PATCH', {
     _raw_content_base64: base64Data,
     _content_type: 'application/octet-stream',
-  });
+  }, activeSpaceRoomId);
 
   return { ok: true, drive_file_id: fileId };
 }
@@ -395,7 +417,7 @@ export async function gdriveListByPrefix(
 
   const q = `'${dataFolderId}' in parents and trashed=false and name contains '${prefix}'`;
   const url = `${DRIVE_API}?q=${encodeURIComponent(q)}&fields=files(id,name,createdTime)&spaces=drive&pageSize=1000`;
-  const data = await driveProxy(matrixAccessToken, url);
+  const data = await driveProxy(matrixAccessToken, url, 'GET', null, activeSpaceRoomId);
   const files = data.files || [];
 
   const entries: GDriveListEntry[] = files.map((f: any) => ({
@@ -417,7 +439,7 @@ export async function gdriveDeleteFile(
   fileId: string,
 ): Promise<void> {
   const url = `${DRIVE_API}/${fileId}`;
-  await driveProxy(matrixAccessToken, url, 'PATCH', { trashed: true });
+  await driveProxy(matrixAccessToken, url, 'PATCH', { trashed: true }, activeSpaceRoomId);
 }
 
 /**
@@ -445,7 +467,7 @@ export async function gdriveStoreJson(
       parents: [folderId],
       mimeType: 'application/json',
     };
-    const created = await driveProxy(matrixAccessToken, DRIVE_API, 'POST', metadata);
+    const created = await driveProxy(matrixAccessToken, DRIVE_API, 'POST', metadata, activeSpaceRoomId);
     fileId = created.id;
   }
 
@@ -453,7 +475,7 @@ export async function gdriveStoreJson(
   await driveProxy(matrixAccessToken, uploadUrl, 'PATCH', {
     _raw_content_base64: base64Data,
     _content_type: 'application/json',
-  });
+  }, activeSpaceRoomId);
 
   return { ok: true, drive_file_id: fileId };
 }
@@ -475,7 +497,7 @@ export async function gdriveReadJson(
   if (!fileId) return null;
 
   const downloadUrl = `${DRIVE_API}/${fileId}?alt=media`;
-  const content = await driveProxy(matrixAccessToken, downloadUrl);
+  const content = await driveProxy(matrixAccessToken, downloadUrl, 'GET', null, activeSpaceRoomId);
 
   // Proxy may return base64-encoded content for binary types; handle both
   if (content._raw_content_base64) {
@@ -500,7 +522,7 @@ export async function gdriveRetrieveNamed(
   if (!fileId) return null;
 
   const downloadUrl = `${DRIVE_API}/${fileId}?alt=media`;
-  const content = await driveProxy(matrixAccessToken, downloadUrl);
+  const content = await driveProxy(matrixAccessToken, downloadUrl, 'GET', null, activeSpaceRoomId);
   const b64 = content._raw_content_base64 || content;
   const data = typeof b64 === 'string' ? base64ToUint8(b64) : (b64 as Uint8Array);
   return { ok: true, data, fileId };
@@ -553,6 +575,27 @@ export async function gdriveRetrieveRange(
     data: new Uint8Array(buffer),
     contentRange: res.headers.get('Content-Range') ?? undefined,
   };
+}
+
+/**
+ * Derive a stable, deterministic UUID for a space's Drive file.
+ *
+ * Uses SHA-256 of "eo-db:space-file:{spaceId}:{role}", formatted as UUID v4.
+ * Because the derivation is deterministic, all space members independently
+ * compute the same GUID — no coordination needed.
+ *
+ * @param spaceId  The space's internal ID (e.g. "space_amino")
+ * @param role     File role: "log" | "recent" | "manifest" | "restricted-log" | etc.
+ */
+export async function deriveSpaceFileGuid(spaceId: string, role: string): Promise<string> {
+  const input = `eo-db:space-file:${spaceId}:${role}`;
+  const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input));
+  const bytes = new Uint8Array(hash).slice(0, 16);
+  // Set UUID v4 version and RFC 4122 variant bits
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
 }
 
 /**

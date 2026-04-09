@@ -7,15 +7,15 @@
         "path": "eo-store",
         "responseMode": "responseNode",
         "options": {
-          "rawBody": true,
-          "allowedOrigins": "*"
+          "allowedOrigins": "*",
+          "rawBody": true
         }
       },
-      "id": "2c1d1ff0-32d8-40cc-bd53-b1f0e47d5bef",
+      "id": "2824c055-ce37-49a5-93bb-8053540aabc9",
       "name": "Webhook1",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
-      "position": [-800, 400],
+      "position": [-4576, 976],
       "webhookId": "11111111-1111-1111-1111-111111111001"
     },
     {
@@ -38,79 +38,180 @@
           }
         }
       },
-      "id": "431eb540-d7f4-4b78-83d7-bea4d7bf54dd",
+      "id": "1a29936a-ece4-414c-9d70-48f6c066f04e",
       "name": "Matrix Auth",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [-576, 400]
+      "position": [-4352, 976]
     },
     {
       "parameters": {
         "conditions": {
-          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
           "conditions": [
             {
               "id": "cond-auth",
               "leftValue": "={{ $json.user_id }}",
               "rightValue": "",
-              "operator": { "type": "string", "operation": "isNotEmpty" }
+              "operator": {
+                "type": "string",
+                "operation": "isNotEmpty"
+              }
             }
           ],
           "combinator": "and"
         },
         "options": {}
       },
-      "id": "3e8bdfe4-823c-4469-a338-6dc0348cc3e7",
+      "id": "d6aad078-4ff0-4615-99eb-3745f23b0f52",
       "name": "Auth OK?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
-      "position": [-352, 400]
+      "position": [-4128, 976]
     },
     {
       "parameters": {
         "respondWith": "json",
         "responseBody": "{\"error\":\"unauthorized\"}",
-        "options": { "responseCode": 401 }
+        "options": {
+          "responseCode": 401
+        }
       },
-      "id": "d80da38a-f043-4136-a300-67650181b62c",
+      "id": "ab3238ad-e1e4-44da-be09-b9dc2e91e382",
       "name": "Respond 401",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
-      "position": [-128, 544]
+      "position": [-3968, 784]
     },
     {
       "parameters": {
-        "jsCode": "const body = $('Webhook1').first().json.body;\nconst driveUrl = body.drive_url;\nconst driveMethod = (body.drive_method || 'GET').toUpperCase();\nconst driveBody = body.drive_body || null;\n\nif (!driveUrl || !driveUrl.startsWith('https://www.googleapis.com/')) {\n  throw new Error('Invalid or missing drive_url');\n}\n\nreturn [{ json: { driveUrl, driveMethod, driveBody } }];"
+        "jsCode": "// Matrix room membership check.\n// Clients include space_room_id in the request body to identify which space they are\n// accessing. We verify the authenticated user is a member of that room by calling\n// /_matrix/client/v3/rooms/{roomId}/joined_members with their own token.\n// Matrix only returns 200 for this endpoint if the requesting user is in the room.\n// Any non-200 response (typically 403) means they are not a member.\n//\n// If space_room_id is absent (legacy clients), the check is skipped and the request\n// proceeds — encryption still prevents access to restricted data.\n\nconst body = $('Webhook1').first().json.body;\nconst matrixToken = body.matrix_token;\nconst spaceRoomId = body.space_room_id;\n\nif (!spaceRoomId) {\n  // Legacy request without a room ID — skip membership check.\n  return [{ json: { membershipOk: true } }];\n}\n\ntry {\n  const response = await this.helpers.httpRequest({\n    url: `https://app.aminoimmigration.com/_matrix/client/v3/rooms/${encodeURIComponent(spaceRoomId)}/joined_members`,\n    method: 'GET',\n    headers: {\n      Authorization: 'Bearer ' + matrixToken,\n    },\n    returnFullResponse: true,\n    ignoreHttpStatusErrors: true,\n  });\n\n  // Matrix returns 200 only when the requesting user is already a room member.\n  const isMember = response.statusCode === 200;\n  return [{ json: { membershipOk: isMember } }];\n} catch {\n  // Network error or unexpected failure — treat as not a member.\n  return [{ json: { membershipOk: false } }];\n}\n"
       },
-      "id": "a1000001-0000-4000-a000-000000000001",
+      "id": "b1000001-0000-4000-b000-000000000001",
+      "name": "Check Membership",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-3904, 976]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "cond-member",
+              "leftValue": "={{ $json.membershipOk }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b1000001-0000-4000-b000-000000000002",
+      "name": "Member?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [-3680, 976]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{\"error\":\"forbidden\"}",
+        "options": {
+          "responseCode": 403
+        }
+      },
+      "id": "b1000001-0000-4000-b000-000000000003",
+      "name": "Respond 403",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [-3680, 784]
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $('Webhook1').first().json.body;\nconst headers = $('Webhook1').first().json.headers || {};\n\nconst driveUrl = body.drive_url;\nconst driveMethod = (body.drive_method || 'GET').toUpperCase();\nconst driveBody = body.drive_body || null;\n\n// Forward Range header if present (for partial log downloads)\nconst rangeHeader = headers['range'] || headers['Range'] || null;\n\nif (!driveUrl || !driveUrl.startsWith('https://www.googleapis.com/')) {\n  throw new Error('Invalid or missing drive_url');\n}\n\n// Detect if this is a binary file download (alt=media in URL)\nconst isBinaryDownload = driveUrl.includes('alt=media');\n\nreturn [{ json: { driveUrl, driveMethod, driveBody, rangeHeader, isBinaryDownload } }];"
+      },
+      "id": "5eddcdb0-84a1-467e-9ffd-c983564c9327",
       "name": "Prep Proxy",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [-128, 400]
+      "position": [-3456, 976]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "cond-binary",
+              "leftValue": "={{ $json.isBinaryDownload }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "48131398-5bb1-4712-8448-c7550576bfd9",
+      "name": "Binary Download?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [-3232, 976]
     },
     {
       "parameters": {
         "method": "={{ $json.driveMethod }}",
         "url": "={{ $json.driveUrl }}",
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ $json.driveBody ? JSON.stringify($json.driveBody) : '{}' }}",
         "authentication": "predefinedCredentialType",
         "nodeCredentialType": "googleDriveOAuth2Api",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Range",
+              "value": "={{ $json.rangeHeader || '' }}"
+            }
+          ]
+        },
         "options": {
           "response": {
             "response": {
+              "fullResponse": true,
               "neverError": true,
-              "fullResponse": true
+              "responseFormat": "file"
             }
           }
         }
       },
-      "id": "a1000001-0000-4000-a000-000000000002",
-      "name": "Drive Proxy",
+      "id": "b75c2c09-bfff-4c1b-9180-07d1f87f0e06",
+      "name": "Drive Proxy Binary",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [96, 400],
+      "position": [-3008, 864],
       "credentials": {
         "googleDriveOAuth2Api": {
           "id": "aAKNhRE1Lbsc2eVY",
@@ -120,37 +221,231 @@
     },
     {
       "parameters": {
+        "method": "={{ $json.driveMethod }}",
+        "url": "={{ $json.driveUrl }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleDriveOAuth2Api",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.driveBody ? JSON.stringify($json.driveBody) : '{}' }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "a3a51808-60c9-4e83-ba72-b06326431b01",
+      "name": "Drive Proxy JSON",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-3008, 1088],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "aAKNhRE1Lbsc2eVY",
+          "name": "RK LAcy Law App"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build response for binary downloads\n// Pass through statusCode and Content-Range header if present\nconst item = $input.first();\nconst statusCode = item.json.statusCode || 200;\nconst contentRange = item.json.headers?.['content-range'] || null;\nconst contentLength = item.json.headers?.['content-length'] || null;\n\nreturn [{\n  json: {\n    statusCode,\n    contentRange,\n    contentLength,\n    isBinary: true\n  },\n  binary: item.binary\n}];"
+      },
+      "id": "4869f1ed-9e9b-4dcd-8fa1-f0495c03a292",
+      "name": "Prep Binary Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-2784, 864]
+    },
+    {
+      "parameters": {
+        "respondWith": "binary",
+        "options": {
+          "responseCode": "={{ $json.statusCode }}",
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Range",
+                "value": "={{ $json.contentRange || '' }}"
+              },
+              {
+                "name": "Content-Length",
+                "value": "={{ $json.contentLength || '' }}"
+              },
+              {
+                "name": "Accept-Ranges",
+                "value": "bytes"
+              },
+              {
+                "name": "Access-Control-Allow-Origin",
+                "value": "*"
+              }
+            ]
+          }
+        }
+      },
+      "id": "dc43aa1c-b575-45c0-bf05-970e9e1a1499",
+      "name": "Respond Binary",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [-2560, 864]
+    },
+    {
+      "parameters": {
         "respondWith": "json",
         "responseBody": "={{ JSON.stringify($json.body || $json) }}",
         "options": {
-          "responseCode": "={{ $json.statusCode || 200 }}"
+          "responseCode": "={{ $json.statusCode || 200 }}",
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Access-Control-Allow-Origin",
+                "value": "*"
+              }
+            ]
+          }
         }
       },
-      "id": "a1000001-0000-4000-a000-000000000003",
-      "name": "Respond Proxy",
+      "id": "c7d0e1b2-c526-43be-b3b9-a3b4c3c0a8a9",
+      "name": "Respond JSON",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
-      "position": [320, 400]
+      "position": [-2560, 1088]
     }
   ],
   "connections": {
     "Webhook1": {
-      "main": [[{ "node": "Matrix Auth", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Matrix Auth",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Matrix Auth": {
-      "main": [[{ "node": "Auth OK?", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Auth OK?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Auth OK?": {
       "main": [
-        [{ "node": "Prep Proxy", "type": "main", "index": 0 }],
-        [{ "node": "Respond 401", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Check Membership",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 401",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Membership": {
+      "main": [
+        [
+          {
+            "node": "Member?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Member?": {
+      "main": [
+        [
+          {
+            "node": "Prep Proxy",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 403",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Prep Proxy": {
-      "main": [[{ "node": "Drive Proxy", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Binary Download?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
-    "Drive Proxy": {
-      "main": [[{ "node": "Respond Proxy", "type": "main", "index": 0 }]]
+    "Binary Download?": {
+      "main": [
+        [
+          {
+            "node": "Drive Proxy Binary",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Drive Proxy JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Drive Proxy Binary": {
+      "main": [
+        [
+          {
+            "node": "Prep Binary Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Drive Proxy JSON": {
+      "main": [
+        [
+          {
+            "node": "Respond JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prep Binary Response": {
+      "main": [
+        [
+          {
+            "node": "Respond Binary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
   "pinData": {},

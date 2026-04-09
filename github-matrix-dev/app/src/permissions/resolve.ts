@@ -17,7 +17,11 @@ import {
   powerLevelToRole,
   ROLE_POWER_LEVELS,
 } from './types';
-import type { UserManifest } from '../google-drive/space-permissions';
+import {
+  type ManifestState,
+  type SpaceRole,
+  roleAtLeast,
+} from '../google-drive/space-permissions';
 
 /**
  * Read a user's power level from a Matrix Room object.
@@ -200,80 +204,84 @@ export function resolvePermissionsFromSharing(
   };
 }
 
+// ─── Manifest-based resolver (new model) ─────────────────────────────────────
+
 /**
- * Resolve permissions from a Drive-backed UserManifest instead of from the
- * legacy `_sharing` array or Matrix power levels.
+ * Map a SpaceRole to a numeric power level for capability flag derivation.
+ * Keeps the same thresholds as the Matrix power level model for consistency.
+ */
+function spaceRoleToPowerLevel(role: SpaceRole): number {
+  switch (role) {
+    case 'owner': return 100;
+    case 'admin': return 50;
+    case 'restricted': return 30;  // between editor and admin
+    case 'editor': return 25;
+    case 'viewer': return 0;
+  }
+}
+
+/**
+ * Resolve permissions from a folded manifest state.
  *
- * When `manifest` is null (no Drive manifest exists yet for this user), falls
- * back to editor-level access (pl=25) — the same default as
- * resolvePermissionsFromSharing.
+ * This replaces the Matrix-power-level-based resolver for spaces using the
+ * new Drive-based permission model.  The manifest fold state is downloaded
+ * from manifest.eodb on space open and cached in Zustand.
  *
- * Use this function when the space has Drive sync enabled and the current
- * user's manifest has been loaded into the Zustand store.
+ * Field-level access is determined by the manifest's fieldRestrictions:
+ *   - Fields with sensitivity "restricted" are redacted for viewer/editor roles.
+ *   - Fields with sensitivity "admin" are redacted for everyone below admin.
+ *   - Shadow values from the manifest are used in place of redacted values.
  */
 export function resolvePermissionsFromManifest(
   userId: string,
-  owner: string,
-  manifest: UserManifest | null,
-  fieldAssignments?: FieldAssignment[],
+  manifestState: ManifestState,
   userTypeAssignments?: UserTypeAssignment[] | null,
   fieldTypeVisibility?: FieldTypeVisibility[] | null,
   activeUserType?: string | null,
 ): ResolvedPermissions {
-  let pl: number;
+  const member = manifestState.members[userId];
+  const role: SpaceRole = member?.role ?? 'viewer';
+  const pl = spaceRoleToPowerLevel(role);
+  const accessRole = powerLevelToRole(pl);
 
-  if (userId === owner) {
-    pl = 100;
-  } else if (manifest) {
-    pl = ROLE_POWER_LEVELS[manifest.role];
-  } else {
-    // No manifest yet — default to editor (25) so the user isn't locked out
-    // while their manifest is being created.
-    pl = 25;
+  // Field-level access from manifest field restrictions.
+  const restrictedFields: string[] = [];
+  const redactedFields: string[] = [];
+
+  for (const [field, config] of Object.entries(manifestState.fields)) {
+    if (config.sensitivity === 'restricted' && !roleAtLeast(role, 'restricted')) {
+      restrictedFields.push(field);
+      redactedFields.push(field);
+    } else if (config.sensitivity === 'admin' && !roleAtLeast(role, 'admin')) {
+      restrictedFields.push(field);
+      redactedFields.push(field);
+    }
   }
 
-  const role = powerLevelToRole(pl);
-  const assignments = fieldAssignments ?? [];
-
-  const restrictedFields = assignments
-    .filter(f => f.room === 'restricted')
-    .map(f => f.field);
-
-  const lockedFields = assignments
-    .filter(f => f.locked_to && !f.locked_to.includes(role))
-    .map(f => f.field);
-
-  // Shadow fields from manifest — show placeholder instead of real value
-  // for fields the user cannot access.
-  const redactedFields = manifest
-    ? restrictedFields.filter(f => !(f in manifest.shadowFields) && pl < 50)
-    : restrictedFields.filter(() => pl < 50);
-
-  const userTypes = userTypeAssignments
-    ?.find(a => a.user_id === userId)?.type_ids ?? [];
+  // User types
+  const userTypes = userTypeAssignments?.find(a => a.user_id === userId)?.type_ids ?? [];
   const effectiveActiveType = activeUserType ?? null;
-
   const typeHiddenFields = pl >= 50 ? [] : (fieldTypeVisibility ?? [])
     .filter(ftv =>
       ftv.visible_to_types.length > 0 &&
-      (effectiveActiveType === null ||
-        !ftv.visible_to_types.includes(effectiveActiveType))
+      (effectiveActiveType === null || !ftv.visible_to_types.includes(effectiveActiveType))
     )
     .map(ftv => ftv.field);
 
   return {
-    role,
+    role: accessRole,
     powerLevel: pl,
-    is_owner: pl >= 100,
+    is_owner: role === 'owner',
 
-    in_main_room: true,
-    in_restricted_room: pl >= 50,
-    in_governance_room: pl >= 50,
+    // Simplified: single room per space.
+    in_main_room: !!member,
+    in_restricted_room: roleAtLeast(role, 'restricted'),
+    in_governance_room: roleAtLeast(role, 'admin'),
 
-    can_read: true,
-    can_add_records: pl >= 10,
+    can_read: !!member,
+    can_add_records: pl >= 25,
     can_edit_any_record: pl >= 25,
-    can_edit_own_records: pl >= 10,
+    can_edit_own_records: pl >= 25,
     can_create_fields: pl >= 50,
     can_build_slices: pl >= 50,
     can_manage_members: pl >= 50,
@@ -282,7 +290,7 @@ export function resolvePermissionsFromManifest(
     can_share: pl >= 50,
 
     restricted_fields: restrictedFields,
-    locked_fields: lockedFields,
+    locked_fields: [],
     redacted_fields: redactedFields,
 
     user_types: userTypes,
