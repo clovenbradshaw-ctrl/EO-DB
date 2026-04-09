@@ -478,6 +478,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   const allStatesFetchGenRef = useRef(0);
   const [timeScrubberFilter, setTimeScrubberFilter] = useState<TimeScrubberFilter>(DEFAULT_FILTER);
   const [tableRecordTargets, setTableRecordTargets] = useState<string[]>([]);
+  const [recordOpenedViaNav, setRecordOpenedViaNav] = useState(false);
   const [scopedRecords, setScopedRecords] = useState<EoState[]>([]);
   const prevScopedRecordsKeyRef = useRef<string>('');
   const scopedRecordsFetchGenRef = useRef(0);
@@ -2227,7 +2228,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                 onSelectSegment={(_scope, _seg) => { navigate({ view: 'records', scope: _scope }); }}
                 userId={session.userId}
                 selectedRecord={selectedRecord}
-                onSelectRecord={(rec) => navigate({ record: rec })}
+                onSelectRecord={(rec) => { setRecordOpenedViaNav(true); navigate({ record: rec }); }}
               />
             </>
           )}
@@ -2472,11 +2473,12 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           <RecordPageOrDrawer
             recordTarget={selectedRecord}
             allStates={allStates}
-            onClose={() => navigate({ record: null })}
-            onNavigate={(t) => navigate({ record: t })}
+            onClose={() => { setRecordOpenedViaNav(false); navigate({ record: null }); }}
+            onNavigate={(t) => { setRecordOpenedViaNav(false); navigate({ record: t }); }}
             profileFields={selectedScope ? sliceStore.getConfig(selectedScope).profileFields : undefined}
             isMobile={isMobile}
             tableRecordTargets={tableRecordTargets}
+            layoutOverride={recordOpenedViaNav ? 'modal' : undefined}
           />
         )}
       </div>
@@ -2489,7 +2491,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
  * record page view for the record's collection. If yes, render RecordPageView
  * in a drawer. If no, fall back to the default RecordDetailDrawer.
  */
-function RecordPageOrDrawer({ recordTarget, allStates, onClose, onNavigate, profileFields, isMobile, tableRecordTargets }: {
+function RecordPageOrDrawer({ recordTarget, allStates, onClose, onNavigate, profileFields, isMobile, tableRecordTargets, layoutOverride }: {
   recordTarget: string;
   allStates: EoState[];
   onClose: () => void;
@@ -2497,6 +2499,7 @@ function RecordPageOrDrawer({ recordTarget, allStates, onClose, onNavigate, prof
   profileFields?: string[];
   isMobile?: boolean;
   tableRecordTargets?: string[];
+  layoutOverride?: LayoutDisplayType;
 }) {
   const loadView = useBuilderStore((s) => s.loadView);
   const getState = useEoStore((s) => s.getState);
@@ -2568,7 +2571,7 @@ function RecordPageOrDrawer({ recordTarget, allStates, onClose, onNavigate, prof
       onNavigate={onNavigate}
       profileFields={profileFields}
       isMobile={isMobile}
-      layoutType={layoutType}
+      layoutType={layoutOverride ?? layoutType}
       tableRecordTargets={tableRecordTargets}
     />
   );
