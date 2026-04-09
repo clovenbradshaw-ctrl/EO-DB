@@ -133,6 +133,92 @@ function renderDefDiff(operand: any, theme: any): React.ReactNode {
   );
 }
 
+/** Reconstruct current value for each field by scanning events newest-first */
+function getCurrentValues(events: EoEvent[], fields: string[]): Record<string, any> {
+  const result: Record<string, any> = {};
+  for (const field of fields) {
+    for (const evt of events) {
+      if (evt.operand && typeof evt.operand === 'object' && field in (evt.operand as object)) {
+        result[field] = (evt.operand as Record<string, any>)[field];
+        break;
+      }
+    }
+  }
+  return result;
+}
+
+interface RevertConfirmProps {
+  event: EoEvent;
+  events: EoEvent[];
+  theme: any;
+  s: Record<string, React.CSSProperties>;
+  onConfirm: () => void;
+  onCancel: () => void;
+}
+
+function RevertConfirm({ event, events, theme, s, onConfirm, onCancel }: RevertConfirmProps) {
+  const isRevertOfRevert = !!(event.meta as any)?.reverted_from_seq;
+  const affectedFields = event.operand && typeof event.operand === 'object'
+    ? Object.keys(event.operand).filter(k => !k.startsWith('_'))
+    : [];
+  const currentValues = getCurrentValues(events, affectedFields);
+  const changedFields = affectedFields.filter(f =>
+    JSON.stringify(currentValues[f]) !== JSON.stringify((event.operand as Record<string, any>)[f])
+  );
+  const noChange = affectedFields.length > 0 && changedFields.length === 0;
+
+  return (
+    <div style={{
+      marginTop: 8,
+      padding: '10px 12px',
+      background: theme.warningBg || '#FFF8E1',
+      border: `1px solid ${theme.warningBorder || '#F9A825'}`,
+      borderRadius: 6,
+      fontSize: 11,
+      fontFamily: "'JetBrains Mono', monospace",
+    }}>
+      <div style={{ fontWeight: 600, color: theme.warning || '#854F0B', marginBottom: 6 }}>
+        Confirm revert
+      </div>
+      {noChange ? (
+        <div style={{ color: theme.textMuted || '#888', marginBottom: 8, lineHeight: 1.5 }}>
+          No change — current values already match this snapshot.
+        </div>
+      ) : (
+        <>
+          <div style={{ color: theme.textSecondary || '#555', marginBottom: 6, lineHeight: 1.5 }}>
+            {isRevertOfRevert
+              ? 'This event is itself a revert. Applying it adds a new change on top — previous history is preserved.'
+              : 'This adds a new event restoring the values from this snapshot. Previous history is preserved.'}
+          </div>
+          {changedFields.length > 0 && (
+            <div style={{ marginBottom: 8 }}>
+              <span style={{ color: theme.textMuted }}>Fields affected: </span>
+              <span style={{ color: theme.text || '#333' }}>{changedFields.join(', ')}</span>
+            </div>
+          )}
+        </>
+      )}
+      <div style={{ display: 'flex', gap: 8 }}>
+        {!noChange && (
+          <button
+            style={{ ...s.revertBtn, background: theme.warning || '#854F0B', color: '#fff', border: 'none' }}
+            onClick={(e) => { e.stopPropagation(); onConfirm(); }}
+          >
+            Confirm revert
+          </button>
+        )}
+        <button
+          style={{ ...s.revertBtn, background: 'transparent', color: theme.textMuted }}
+          onClick={(e) => { e.stopPropagation(); onCancel(); }}
+        >
+          {noChange ? 'Dismiss' : 'Cancel'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function ElementHistory({ target, onRevert }: ElementHistoryProps) {
   const store = useEoStore((s) => s.store);
   const dispatch = useEoStore((s) => s.dispatch);
@@ -140,6 +226,7 @@ export function ElementHistory({ target, onRevert }: ElementHistoryProps) {
   const [loading, setLoading] = useState(true);
   const [expandedSeq, setExpandedSeq] = useState<number | null>(null);
   const [reverting, setReverting] = useState<number | null>(null);
+  const [pendingRevert, setPendingRevert] = useState<EoEvent | null>(null);
   const { theme } = useTheme();
   const s = makeStyles(theme);
 
@@ -152,13 +239,16 @@ export function ElementHistory({ target, onRevert }: ElementHistoryProps) {
     });
   }, [store, target]);
 
-  async function handleRevert(event: EoEvent) {
+  function handleRevert(event: EoEvent) {
     if (onRevert) {
       onRevert(event);
       return;
     }
+    setPendingRevert(event);
+  }
 
-    // Revert by dispatching a DEF with the event's operand
+  async function confirmRevert(event: EoEvent) {
+    setPendingRevert(null);
     setReverting(event.seq);
     try {
       await dispatch({
@@ -243,14 +333,41 @@ export function ElementHistory({ target, onRevert }: ElementHistoryProps) {
                           role="button"
                           tabIndex={0}
                           style={s.revertLink}
-                          onClick={(e) => { e.stopPropagation(); handleRevert(event); }}
-                          onKeyDown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); handleRevert(event); } }}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (pendingRevert?.seq === event.seq) {
+                              setPendingRevert(null);
+                            } else {
+                              handleRevert(event);
+                            }
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              e.stopPropagation();
+                              if (pendingRevert?.seq === event.seq) {
+                                setPendingRevert(null);
+                              } else {
+                                handleRevert(event);
+                              }
+                            }
+                          }}
                         >
-                          {reverting === event.seq ? 'reverting...' : 'revert'}
+                          {reverting === event.seq ? 'reverting...' : pendingRevert?.seq === event.seq ? 'cancel' : 'revert'}
                         </span>
                       </>
                     )}
                   </div>
+                  {/* Inline revert confirmation */}
+                  {pendingRevert?.seq === event.seq && (
+                    <RevertConfirm
+                      event={event}
+                      events={events}
+                      theme={theme}
+                      s={s}
+                      onConfirm={() => confirmRevert(event)}
+                      onCancel={() => setPendingRevert(null)}
+                    />
+                  )}
                 </div>
 
                 {/* Expanded detail — raw operand JSON */}
