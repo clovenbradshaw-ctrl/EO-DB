@@ -47,6 +47,8 @@ export interface GDriveListEntry {
   content_hash: string;
   data_type: string;
   stored_at: string;
+  /** The raw Drive file name (e.g. "op-00000001.eodb"). */
+  name: string;
 }
 
 export interface GDriveListResult {
@@ -332,9 +334,155 @@ export async function gdriveList(
     content_hash: (f.name || '').replace(/\.(eodb|json)$/, ''),
     data_type: dataType || 'unknown',
     stored_at: f.createdTime || '',
+    name: f.name || '',
   }));
 
   return { ok: true, entries };
+}
+
+/**
+ * Store binary on Google Drive under an explicit filename (not content-hash-derived).
+ * Creates or overwrites `{fileName}` inside EO-DB/<dataType>/.
+ * Used for op-{seq}.eodb, hydration-{slot}.eodb, etc.
+ */
+export async function gdriveStoreNamed(
+  matrixAccessToken: string,
+  binary: Uint8Array,
+  dataType: string,
+  fileName: string,
+): Promise<{ ok: boolean; drive_file_id: string }> {
+  const folderId = await resolveDataFolder(matrixAccessToken, dataType);
+  const base64Data = uint8ToBase64(binary);
+  const existingId = await findFileInFolder(matrixAccessToken, fileName, folderId);
+
+  let fileId: string;
+  if (existingId) {
+    fileId = existingId;
+    console.log('[EO-DB] GDrive overwriting named file:', fileName);
+  } else {
+    const metadata: Record<string, unknown> = {
+      name: fileName,
+      parents: [folderId],
+      mimeType: 'application/octet-stream',
+    };
+    const created = await driveProxy(matrixAccessToken, DRIVE_API, 'POST', metadata);
+    fileId = created.id;
+    console.log('[EO-DB] GDrive created named file:', fileName, fileId);
+  }
+
+  const uploadUrl = `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`;
+  await driveProxy(matrixAccessToken, uploadUrl, 'PATCH', {
+    _raw_content_base64: base64Data,
+    _content_type: 'application/octet-stream',
+  });
+
+  return { ok: true, drive_file_id: fileId };
+}
+
+/**
+ * List files in EO-DB/<dataType>/ whose names start with the given prefix.
+ * Useful for listing op-*.eodb, hydration-*.eodb, or bake-intent-*.json separately.
+ */
+export async function gdriveListByPrefix(
+  matrixAccessToken: string,
+  dataType: string,
+  prefix: string,
+): Promise<GDriveListResult> {
+  const rootId = await findFolder(matrixAccessToken, 'EO-DB');
+  if (!rootId) return { ok: true, entries: [] };
+  const dataFolderId = await findFolder(matrixAccessToken, dataType, rootId);
+  if (!dataFolderId) return { ok: true, entries: [] };
+
+  const q = `'${dataFolderId}' in parents and trashed=false and name contains '${prefix}'`;
+  const url = `${DRIVE_API}?q=${encodeURIComponent(q)}&fields=files(id,name,createdTime)&spaces=drive&pageSize=1000`;
+  const data = await driveProxy(matrixAccessToken, url);
+  const files = data.files || [];
+
+  const entries: GDriveListEntry[] = files.map((f: any) => ({
+    data_id: f.id,
+    content_hash: (f.name || '').replace(/\.(eodb|json)$/, ''),
+    data_type: dataType,
+    stored_at: f.createdTime || '',
+    name: f.name || '',
+  }));
+
+  return { ok: true, entries };
+}
+
+/**
+ * Trash (soft-delete) a Drive file by its file ID.
+ */
+export async function gdriveDeleteFile(
+  matrixAccessToken: string,
+  fileId: string,
+): Promise<void> {
+  const url = `${DRIVE_API}/${fileId}`;
+  await driveProxy(matrixAccessToken, url, 'PATCH', { trashed: true });
+}
+
+/**
+ * Store a JSON object as a named file in EO-DB/<dataType>/.
+ * Used for coordination files like bake-intent-{userId}.json.
+ */
+export async function gdriveStoreJson(
+  matrixAccessToken: string,
+  dataType: string,
+  fileName: string,
+  body: Record<string, unknown>,
+): Promise<{ ok: boolean; drive_file_id: string }> {
+  const text = JSON.stringify(body);
+  const bytes = new TextEncoder().encode(text);
+  const folderId = await resolveDataFolder(matrixAccessToken, dataType);
+  const base64Data = uint8ToBase64(bytes);
+  const existingId = await findFileInFolder(matrixAccessToken, fileName, folderId);
+
+  let fileId: string;
+  if (existingId) {
+    fileId = existingId;
+  } else {
+    const metadata: Record<string, unknown> = {
+      name: fileName,
+      parents: [folderId],
+      mimeType: 'application/json',
+    };
+    const created = await driveProxy(matrixAccessToken, DRIVE_API, 'POST', metadata);
+    fileId = created.id;
+  }
+
+  const uploadUrl = `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`;
+  await driveProxy(matrixAccessToken, uploadUrl, 'PATCH', {
+    _raw_content_base64: base64Data,
+    _content_type: 'application/json',
+  });
+
+  return { ok: true, drive_file_id: fileId };
+}
+
+/**
+ * Download and parse a named JSON file from EO-DB/<dataType>/.
+ * Returns null if the file does not exist.
+ */
+export async function gdriveReadJson(
+  matrixAccessToken: string,
+  dataType: string,
+  fileName: string,
+): Promise<Record<string, unknown> | null> {
+  const rootId = await findFolder(matrixAccessToken, 'EO-DB');
+  if (!rootId) return null;
+  const dataFolderId = await findFolder(matrixAccessToken, dataType, rootId);
+  if (!dataFolderId) return null;
+  const fileId = await findFileInFolder(matrixAccessToken, fileName, dataFolderId);
+  if (!fileId) return null;
+
+  const downloadUrl = `${DRIVE_API}/${fileId}?alt=media`;
+  const content = await driveProxy(matrixAccessToken, downloadUrl);
+
+  // Proxy may return base64-encoded content for binary types; handle both
+  if (content._raw_content_base64) {
+    const bytes = base64ToUint8(content._raw_content_base64);
+    return JSON.parse(new TextDecoder().decode(bytes));
+  }
+  return content as Record<string, unknown>;
 }
 
 /**
