@@ -166,64 +166,54 @@ export function RecordTimeline({ target, onTimestampChange, onEventsLoaded }: Re
 
   const s = styles(theme);
 
-  // Don't render if there are no events to scrub
-  if (markers.length < 2) return null;
+  // Need at least one event to show anything
+  if (markers.length === 0) return null;
 
   return (
     <div style={s.wrap}>
       {/* Header row */}
       <div style={s.header}>
         <div style={s.headerLeft}>
-          <div style={{ ...s.dot, background: active ? theme.accent : theme.bgMuted }} />
+          <div style={{ ...s.dot, background: active ? theme.accent : theme.border }} />
           <span style={{ ...s.label, color: active ? theme.textSecondary : theme.textMuted }}>
             Record Timeline
           </span>
-          {!active && (
-            <span style={s.hint}>— scrub through history</span>
-          )}
+          {!active && <span style={s.hint}>— scrub through history</span>}
         </div>
         <button style={{ ...s.toggleBtn, ...(active ? s.toggleBtnActive : {}) }} onClick={handleToggle}>
           {active ? 'exit' : 'time travel'}
         </button>
       </div>
 
-      {/* Expanded slider */}
+      {/* Expanded panel */}
       {active && (
         <div style={s.body}>
-          {/* Date + present/past badge */}
+          {/* Date + past badge — own readable row */}
           <div style={s.dateLine}>
             <span style={s.dateText}>{formatTs(recordTs)}</span>
-            <span style={s.pastBadge}>{isPresent ? 'present' : 'past'}</span>
+            {!isPresent && <span style={s.pastBadge}>past</span>}
           </div>
 
           {/* Slider with event dots */}
           <div style={s.trackWrap}>
-            {/* Event dot overlay */}
             <div style={s.dotLayer}>
               {markers.map((m, i) => {
                 const pct = maxTs > minTs ? ((m.ts - minTs) / (maxTs - minTs)) * 100 : 50;
                 const isNearest = nearestMarker?.ts === m.ts;
                 return (
-                  <div
-                    key={i}
-                    style={{
-                      position: 'absolute',
-                      left: `${pct}%`,
-                      top: '50%',
-                      transform: 'translate(-50%, -50%)',
-                      width: isNearest ? 8 : 4,
-                      height: isNearest ? 8 : 4,
-                      borderRadius: '50%',
-                      background: isNearest
-                        ? theme.accent
-                        : m.ts <= recordTs
-                          ? theme.textMuted
-                          : theme.bgMuted,
-                      transition: 'all 0.12s',
-                      zIndex: 2,
-                      pointerEvents: 'none',
-                    }}
-                  />
+                  <div key={i} style={{
+                    position: 'absolute',
+                    left: `${pct}%`,
+                    top: '50%',
+                    transform: 'translate(-50%, -50%)',
+                    width: isNearest ? 7 : 3,
+                    height: isNearest ? 7 : 3,
+                    borderRadius: '50%',
+                    background: isNearest ? theme.accent : m.ts <= recordTs ? theme.textMuted : theme.border,
+                    transition: 'all 0.1s',
+                    zIndex: 2,
+                    pointerEvents: 'none',
+                  }} />
                 );
               })}
             </div>
@@ -234,40 +224,21 @@ export function RecordTimeline({ target, onTimestampChange, onEventsLoaded }: Re
               value={recordTs}
               step={1}
               onChange={handleSlider}
-              style={{ ...s.rangeInput }}
+              style={s.rangeInput}
             />
           </div>
 
-          {/* Date endpoints */}
-          <div style={s.endpoints}>
-            <span style={s.endpointLabel}>{formatTs(minTs)}</span>
-            <span style={s.endpointLabel}>{formatTs(maxTs)}</span>
-          </div>
-
-          {/* Provenance card */}
+          {/* Provenance — single compact line */}
           {nearestMarker && (
-            <div style={s.provenanceCard}>
-              <div style={s.provenanceItem}>
-                <div style={s.provenanceKey}>CHANGED BY</div>
-                <div style={s.provenanceValue}>{nearestMarker.agent}</div>
-              </div>
+            <div style={s.provenance}>
+              <span style={s.provenanceAgent}>{nearestMarker.agent}</span>
               {nearestMarker.fields.length > 0 && (
-                <div style={s.provenanceItem}>
-                  <div style={s.provenanceKey}>FIELDS</div>
-                  <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' as const }}>
-                    {nearestMarker.fields.map((f) => (
-                      <span key={f} style={s.fieldChip}>{f}</span>
-                    ))}
-                  </div>
-                </div>
+                <span style={s.provenanceMeta}>{' · '}{nearestMarker.fields.join(', ')}</span>
               )}
               {nearestMarker.note && (
-                <div style={s.provenanceItem}>
-                  <div style={s.provenanceKey}>NOTE</div>
-                  <div style={{ ...s.provenanceValue, fontStyle: 'italic' as const, opacity: 0.75 }}>
-                    &ldquo;{nearestMarker.note}&rdquo;
-                  </div>
-                </div>
+                <span style={{ ...s.provenanceMeta, fontStyle: 'italic' as const }}>
+                  {' · \u201c'}{nearestMarker.note}{'\u201d'}
+                </span>
               )}
             </div>
           )}
@@ -285,24 +256,23 @@ function styles(t: Theme): Record<string, React.CSSProperties> {
   return {
     wrap: {
       borderBottom: `1px solid ${t.border}`,
-      paddingBottom: 0,
-      marginBottom: 4,
+      marginBottom: 2,
     },
     header: {
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'space-between',
-      padding: '8px 0 6px',
+      padding: '5px 0 4px',
     },
     headerLeft: {
       display: 'flex',
       alignItems: 'center',
-      gap: 7,
+      gap: 6,
       minWidth: 0,
     },
     dot: {
-      width: 6,
-      height: 6,
+      width: 5,
+      height: 5,
       borderRadius: '50%',
       flexShrink: 0,
       transition: 'background 0.2s',
@@ -310,7 +280,7 @@ function styles(t: Theme): Record<string, React.CSSProperties> {
     label: {
       fontFamily: "'JetBrains Mono', monospace",
       fontSize: 10,
-      letterSpacing: '0.08em',
+      letterSpacing: '0.07em',
       textTransform: 'uppercase' as const,
       transition: 'color 0.2s',
     },
@@ -318,7 +288,7 @@ function styles(t: Theme): Record<string, React.CSSProperties> {
       fontFamily: "'JetBrains Mono', monospace",
       fontSize: 10,
       color: t.textMuted,
-      opacity: 0.6,
+      opacity: 0.5,
     },
     toggleBtn: {
       fontFamily: "'JetBrains Mono', monospace",
@@ -328,7 +298,7 @@ function styles(t: Theme): Record<string, React.CSSProperties> {
       color: t.textMuted,
       border: `1px solid ${t.border}`,
       borderRadius: 4,
-      padding: '3px 9px',
+      padding: '2px 8px',
       cursor: 'pointer',
       flexShrink: 0,
       transition: 'all 0.15s',
@@ -338,28 +308,26 @@ function styles(t: Theme): Record<string, React.CSSProperties> {
       borderColor: t.textMuted,
     },
     body: {
-      paddingBottom: 12,
+      paddingBottom: 10,
+    },
+    // Compact inline row: date + badge + slider
+    sliderRow: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      marginBottom: 5,
     },
     dateLine: {
       display: 'flex',
-      alignItems: 'baseline',
-      gap: 8,
-      marginBottom: 10,
+      alignItems: 'center',
+      gap: 7,
+      marginBottom: 6,
     },
     dateText: {
       fontFamily: "'JetBrains Mono', monospace",
-      fontSize: 13,
+      fontSize: 11,
       fontWeight: 500,
       color: t.text,
-    },
-    pastBadge: {
-      fontFamily: "'JetBrains Mono', monospace",
-      fontSize: 9,
-      letterSpacing: '0.08em',
-      color: t.textMuted,
-      padding: '2px 6px',
-      border: `1px solid ${t.border}`,
-      borderRadius: 3,
     },
     trackWrap: {
       position: 'relative' as const,
@@ -381,52 +349,30 @@ function styles(t: Theme): Record<string, React.CSSProperties> {
       cursor: 'pointer',
       accentColor: t.accent,
       height: 2,
-      margin: '9px 0',
+      margin: '7px 0',
     },
-    endpoints: {
-      display: 'flex',
-      justifyContent: 'space-between',
-      marginBottom: 12,
-    },
-    endpointLabel: {
+    // Single-line provenance below slider
+    provenance: {
       fontFamily: "'JetBrains Mono', monospace",
-      fontSize: 9,
+      fontSize: 10,
       color: t.textMuted,
-      opacity: 0.7,
+      marginTop: 2,
+      lineHeight: 1.4,
     },
-    provenanceCard: {
-      background: t.bgMuted,
-      border: `1px solid ${t.border}`,
-      borderRadius: 6,
-      padding: '8px 12px',
-      display: 'flex',
-      gap: 20,
-      flexWrap: 'wrap' as const,
-    },
-    provenanceItem: {
-      display: 'flex',
-      flexDirection: 'column' as const,
-      gap: 3,
-    },
-    provenanceKey: {
-      fontFamily: "'JetBrains Mono', monospace",
-      fontSize: 9,
-      letterSpacing: '0.08em',
-      color: t.textMuted,
-    },
-    provenanceValue: {
-      fontFamily: "'JetBrains Mono', monospace",
-      fontSize: 11,
+    provenanceAgent: {
       color: t.textSecondary,
     },
-    fieldChip: {
+    provenanceMeta: {
+      color: t.textMuted,
+    },
+    pastBadge: {
       fontFamily: "'JetBrains Mono', monospace",
       fontSize: 9,
-      background: t.bgCard,
       color: t.textMuted,
-      padding: '1px 6px',
-      borderRadius: 3,
       border: `1px solid ${t.border}`,
+      padding: '1px 5px',
+      borderRadius: 3,
+      flexShrink: 0,
     },
   };
 }
