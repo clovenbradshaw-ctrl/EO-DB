@@ -947,7 +947,9 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     setRenameCol(null);
   }
 
-  async function handleSetColumnType(fieldKey: string, type: string, linkedTableId?: string) {
+  const COMPUTED_TYPES = new Set(['formula', 'rollup', 'lookup', 'count']);
+
+  async function handleSetColumnType(fieldKey: string, type: string, linkedTableId?: string, position?: { x: number; y: number }) {
     const operand: Record<string, string> = { type };
     if (linkedTableId) operand.linkedTableId = linkedTableId;
     try {
@@ -977,6 +979,10 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     } catch { /* ignore */ }
     setColumnTypeSelector(null);
     setLinkedRecordPicker(null);
+    // Computed types need a resolution policy to do anything — open it automatically
+    if (COMPUTED_TYPES.has(type) && position) {
+      setResolutionComposer({ x: position.x, y: position.y, key: fieldKey });
+    }
   }
 
   async function handleClearColumnType(fieldKey: string) {
@@ -1747,7 +1753,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                   setColumnTypeSelector(null);
                   setLinkedRecordPicker({ x: columnTypeSelector.x, y: columnTypeSelector.y, key: columnTypeSelector.key, tables });
                 } else {
-                  handleSetColumnType(columnTypeSelector.key, type);
+                  handleSetColumnType(columnTypeSelector.key, type, undefined, { x: columnTypeSelector.x, y: columnTypeSelector.y });
                 }
               }}
               onClear={() => handleClearColumnType(columnTypeSelector.key)}
@@ -1841,6 +1847,10 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
             }}>
               <ConstraintComposer
                 fieldKey={constraintComposer.key}
+                columnType={
+                  fieldSchemas.get(constraintComposer.key)?.typeDef?.value?.type
+                  ?? entityColumns.find(c => c.key === constraintComposer.key)?.type
+                }
                 existingConstraints={fs?.constraints ?? []}
                 onAdd={(name, value) => handleAddConstraint(constraintComposer.key, name, value)}
                 onRemove={(name) => handleRemoveConstraint(constraintComposer.key, name)}

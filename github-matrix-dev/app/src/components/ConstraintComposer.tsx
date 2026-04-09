@@ -123,8 +123,27 @@ const UNIQUENESS_SCOPES = [
 
 // ─── Component ──────────────────────────────────────────────────────────
 
+// ─── Smart default for Type constraint sub-type based on column type ─────
+
+function defaultTypeSubType(columnType?: string): string {
+  switch (columnType) {
+    case 'number':
+    case 'currency':
+    case 'percent':
+    case 'rating':
+    case 'duration':
+      return 'range';
+    case 'select':
+    case 'multiSelect':
+      return 'enum';
+    default:
+      return 'format';
+  }
+}
+
 interface ConstraintComposerProps {
   fieldKey: string;
+  columnType?: string;
   existingConstraints: Array<{ name: string; value: any }>;
   onAdd: (name: string, value: any) => void;
   onRemove: (name: string) => void;
@@ -133,6 +152,7 @@ interface ConstraintComposerProps {
 
 export function ConstraintComposer({
   fieldKey,
+  columnType,
   existingConstraints,
   onAdd,
   onRemove,
@@ -153,7 +173,7 @@ export function ConstraintComposer({
   );
 
   const [typeSubType, setTypeSubType] = useState<string>(
-    existingConstraints.find(c => c.name === 'type')?.value?.subType ?? 'enum'
+    existingConstraints.find(c => c.name === 'type')?.value?.subType ?? defaultTypeSubType(columnType)
   );
   const [typeEnumValues, setTypeEnumValues] = useState<string>(
     (() => {
