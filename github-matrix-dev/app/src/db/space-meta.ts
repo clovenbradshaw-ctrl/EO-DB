@@ -1,13 +1,13 @@
 /**
- * Space metadata persistence — saves space UUIDs and associated IDs to the
- * root IndexedDB so the app can reconnect to Google Drive without needing
+ * Space metadata persistence — saves space UUIDs and associated IDs to
+ * localStorage so the app can reconnect to Google Drive without needing
  * Matrix for space discovery.
  *
- * Stored under the `kv` object store of the root `eo-db` database using
- * keys prefixed with `spacemeta:`. Values are JSON-encoded Uint8Arrays.
+ * Replaces the previous IDB-based implementation (root `eo-db` database,
+ * `spacemeta:` key prefix).  localStorage is sufficient because space
+ * metadata is small (a few fields per space) and does not need the
+ * range-scan or encryption capabilities of the old IDB layer.
  */
-
-import { createIdb, idbGet, idbPut, idbIterator, type EoIdb } from './idb';
 
 export interface SpaceMeta {
   /** Internal space target, e.g. "space_amino" */
@@ -22,74 +22,95 @@ export interface SpaceMeta {
   updatedAt: string;
 }
 
-const PREFIX = 'spacemeta:';
-const encoder = new TextEncoder();
-const decoder = new TextDecoder();
+const LS_PREFIX = 'eo-spacemeta:';
 
-function encodeJson(obj: unknown): Uint8Array {
-  return encoder.encode(JSON.stringify(obj));
-}
-
-function decodeJson<T>(buf: Uint8Array): T {
-  return JSON.parse(decoder.decode(buf));
+function lsKey(spaceId: string): string {
+  return `${LS_PREFIX}${spaceId}`;
 }
 
 /**
- * Save (upsert) space metadata to the root IDB.
+ * Save (upsert) space metadata to localStorage.
  * Merges with any existing entry so callers can update individual fields.
  */
-export async function saveSpaceMeta(
-  rootIdb: EoIdb,
+export function saveSpaceMeta(
   meta: Partial<SpaceMeta> & Pick<SpaceMeta, 'spaceId'>,
-): Promise<void> {
-  const key = `${PREFIX}${meta.spaceId}`;
-  const existing = await idbGet(rootIdb, key);
-  let merged: SpaceMeta;
-  if (existing) {
-    const prev = decodeJson<SpaceMeta>(existing);
-    merged = { ...prev, ...meta, updatedAt: new Date().toISOString() };
-  } else {
-    merged = {
-      spaceName: meta.spaceId,
-      mainRoomId: '',
-      ...meta,
-      updatedAt: new Date().toISOString(),
-    } as SpaceMeta;
+): void {
+  const existing = getSpaceMeta(meta.spaceId);
+  const merged: SpaceMeta = {
+    spaceName: meta.spaceId,
+    mainRoomId: '',
+    ...existing,
+    ...meta,
+    updatedAt: new Date().toISOString(),
+  };
+  try {
+    localStorage.setItem(lsKey(meta.spaceId), JSON.stringify(merged));
+  } catch {
+    // quota exceeded — best effort
   }
-  await idbPut(rootIdb, key, encodeJson(merged));
 }
 
 /**
- * Read space metadata for a single space from the root IDB.
+ * Read space metadata for a single space from localStorage.
  */
-export async function getSpaceMeta(
-  rootIdb: EoIdb,
-  spaceId: string,
-): Promise<SpaceMeta | null> {
-  const raw = await idbGet(rootIdb, `${PREFIX}${spaceId}`);
-  if (!raw) return null;
-  return decodeJson<SpaceMeta>(raw);
+export function getSpaceMeta(spaceId: string): SpaceMeta | null {
+  try {
+    const raw = localStorage.getItem(lsKey(spaceId));
+    if (!raw) return null;
+    return JSON.parse(raw) as SpaceMeta;
+  } catch {
+    return null;
+  }
 }
 
 /**
- * List all persisted space metadata entries from the root IDB.
+ * List all persisted space metadata entries from localStorage.
  */
-export async function listSpaceMeta(rootIdb: EoIdb): Promise<SpaceMeta[]> {
-  const rows = await idbIterator(rootIdb, PREFIX);
-  return rows.map(([, buf]) => decodeJson<SpaceMeta>(buf));
+export function listSpaceMeta(): SpaceMeta[] {
+  const metas: SpaceMeta[] = [];
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith(LS_PREFIX)) {
+        const raw = localStorage.getItem(key);
+        if (raw) {
+          try { metas.push(JSON.parse(raw) as SpaceMeta); } catch { /* skip corrupt entry */ }
+        }
+      }
+    }
+  } catch {
+    // localStorage unavailable
+  }
+  return metas;
 }
 
 /**
- * Convenience: open the root IDB, save, then close.
- * Use when you don't already have a root IDB handle.
+ * Delete space metadata for a single space from localStorage.
+ */
+export function removeSpaceMeta(spaceId: string): void {
+  try { localStorage.removeItem(lsKey(spaceId)); } catch { /* best effort */ }
+}
+
+/**
+ * Clear ALL space metadata entries from localStorage (e.g., on sign-out).
+ */
+export function clearAllSpaceMetas(): void {
+  const keys: string[] = [];
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith(LS_PREFIX)) keys.push(key);
+    }
+    for (const key of keys) localStorage.removeItem(key);
+  } catch { /* best effort */ }
+}
+
+/**
+ * Convenience wrapper kept for call-site compatibility.
+ * Now synchronous — no IDB handle needed.
  */
 export async function persistSpaceMeta(
   meta: Partial<SpaceMeta> & Pick<SpaceMeta, 'spaceId'>,
 ): Promise<void> {
-  const rootIdb = await createIdb();
-  try {
-    await saveSpaceMeta(rootIdb, meta);
-  } finally {
-    rootIdb.close();
-  }
+  saveSpaceMeta(meta);
 }

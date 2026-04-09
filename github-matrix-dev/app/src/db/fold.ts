@@ -1101,3 +1101,59 @@ function deepEqual(a: any, b: any): boolean {
 }
 
 export { mergeOperand, isFormulaOperand, deepEqual };
+
+/**
+ * Replay already-processed events from the OPFS log into a fresh in-memory
+ * store (used on page load after scanning the fold worker's OPFS log).
+ *
+ * Unlike processEventsBulk, this:
+ *   - Accepts ALL event types (including system-generated REC/NUL).
+ *   - Does NOT run EVA recomputation or REC detection phases — those
+ *     system events are already present in `events` and will be replayed.
+ *   - Silently ignores operator errors (the original fold was valid).
+ *   - Does NOT trigger the MemoryStore's persistence hook, so no duplicate
+ *     writes go back to the OPFS fold worker.
+ *
+ * Events must be in ascending seq order (as returned by the fold worker's
+ * scanLog). The store's nextSeq() counter advances in step with the
+ * replayed seq numbers because events are sequential with no gaps.
+ */
+export async function replayFromLog(
+  store: EoStore,
+  events: EoEvent[],
+  onProgress?: (current: number, total: number) => void,
+): Promise<void> {
+  return foldMutex.run(async () => {
+    for (let i = 0; i < events.length; i++) {
+      const event = events[i];
+
+      // Skip already-replayed events (idempotency guard for double-init).
+      if (event.client_event_id) {
+        const idem = await store.get(`idem:${event.client_event_id}`);
+        if (idem != null) {
+          onProgress?.(i + 1, events.length);
+          continue;
+        }
+      }
+
+      // Assign seq via nextSeq() — sequential replay means counter matches.
+      const seq = await store.nextSeq();
+      const fullEvent: EoEvent = { ...event, seq };
+
+      await appendToLog(store, fullEvent);
+      if (fullEvent.client_event_id) {
+        await store.put(`idem:${fullEvent.client_event_id}`, seq);
+      }
+
+      // Apply operator (REC falls through as a no-op in executeOperator).
+      try {
+        await executeOperator(store, fullEvent);
+      } catch {
+        // Ignore errors during replay — the original fold succeeded.
+      }
+
+      await updateFoldCache(store, fullEvent);
+      onProgress?.(i + 1, events.length);
+    }
+  });
+}

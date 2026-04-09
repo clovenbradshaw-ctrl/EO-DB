@@ -75,6 +75,7 @@ export function GDriveStorageWidget() {
   } = useGDriveStore();
 
   const store = useEoStore((st) => st.store);
+  const workerClient = useEoStore((st) => st.workerClient);
   const init = useEoStore((st) => st.init);
 
   const [entries, setEntries] = useState<GDriveListEntry[]>([]);
@@ -134,13 +135,13 @@ export function GDriveStorageWidget() {
       }
 
       // Re-init store to pick up new data
-      await init(store);
+      if (workerClient) await init(workerClient);
 
       setDl(prev => ({ ...prev, phase: 'done', eventsApplied: applied }));
     } catch (e: any) {
       setDl(prev => ({ ...prev, phase: 'error', error: e.message || 'Download failed' }));
     }
-  }, [matrixAccessToken, store, init]);
+  }, [matrixAccessToken, store, workerClient, init]);
 
   const loadFiles = useCallback(async () => {
     if (!matrixAccessToken || !dataType) return;
