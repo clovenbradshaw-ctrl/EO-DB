@@ -21,6 +21,7 @@ import { ResolutionPolicyComposer, summarizePolicy, type ResolvePolicy } from '.
 import { ConstraintComposer } from './ConstraintComposer';
 import { useIsMobile, useIsNarrow } from '../hooks/useIsMobile';
 import { ColumnManagerPanel } from './ColumnManagerPanel';
+import { AddColumnDialog } from './AddColumnDialog';
 import {
   DndContext,
   DragOverlay,
@@ -526,6 +527,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
 
   const [showProfilePicker, setShowProfilePicker] = useState(false);
   const [showColumnManager, setShowColumnManager] = useState(false);
+  const [showAddColumn, setShowAddColumn] = useState(false);
 
   const setSorts = useCallback((s: SortRule[]) => sliceStore.setSorts(scope, s), [scope, sliceStore]);
   const setAdvancedFilters = useCallback((f: FilterRule[]) => sliceStore.setFilters(scope, f), [scope, sliceStore]);
@@ -1421,6 +1423,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                   sliceStore.setHiddenColumns(scope, allKeys);
                 }}
                 onClose={() => setShowColumnManager(false)}
+                onAddColumn={() => { setShowColumnManager(false); setShowAddColumn(true); }}
               />
             )}
           </div>
@@ -1866,6 +1869,11 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
           </>
         );
       })()}
+
+      {/* Add column dialog */}
+      {showAddColumn && (
+        <AddColumnDialog scope={scope} onClose={() => setShowAddColumn(false)} />
+      )}
     </div>
   );
 }
