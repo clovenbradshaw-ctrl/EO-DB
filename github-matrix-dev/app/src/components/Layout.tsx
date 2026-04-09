@@ -521,9 +521,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         ? 'online'
         : connectionError
           ? 'error'
-          : matrixReady
-            ? 'online'
-            : 'syncing';
+          : 'syncing';
   const connectionMessage = connectionError?.message
     ?? connectionDetail
     ?? (connectionState === 'syncing' ? 'Matrix is starting and performing initial sync.' : undefined);
