@@ -8,10 +8,196 @@ import { AsyncMutex } from './mutex';
 import { eventHash } from './hash';
 import { validateEvent, formatValidationErrors } from './validate';
 import { updateFoldCache, refreshGraphMetrics } from './fold-cache';
-import type { EoEvent, EoEventInput, EoState, EvaRegistration, RecResult, ExternalOperator, DerivedEntity } from './types';
+import type { EoEvent, EoEventInput, EoState, EvaRegistration, RecResult, ExternalOperator, DerivedEntity, HelixPosition, LoggableOperator } from './types';
 
 /** Fold mutex — ensures only one processEvent executes at a time. */
 const foldMutex = new AsyncMutex();
+
+// ─── Helix Infrastructure ────────────────────────────────────────────────────
+
+/**
+ * Helix level assignment. Determines wave ordering during bulk import.
+ * REC is excluded — system-generated and handled separately after all waves.
+ */
+const HELIX_LEVEL: Partial<Record<LoggableOperator, number>> = {
+  NUL: 0, SIG: 0,
+  INS: 1,
+  SEG: 2, CON: 2,
+  SYN: 3,
+  DEF: 4,
+  EVA: 5,
+};
+
+/** A group of events at the same helix level, ready for wave processing. */
+export interface HelixWave {
+  level: number;
+  events: EoEventInput[];
+}
+
+/**
+ * Groups events by helix level in ascending order, preserving arrival order
+ * within each level. REC events are excluded (system-generated).
+ */
+export function sortByHelixLevel(events: EoEventInput[]): HelixWave[] {
+  const byLevel = new Map<number, EoEventInput[]>();
+  for (const event of events) {
+    const level = HELIX_LEVEL[event.op as LoggableOperator];
+    if (level === undefined) continue; // skip REC and unknown ops
+    if (!byLevel.has(level)) byLevel.set(level, []);
+    byLevel.get(level)!.push(event);
+  }
+  return Array.from(byLevel.entries())
+    .sort(([a], [b]) => a - b)
+    .map(([level, evts]) => ({ level, events: evts }));
+}
+
+/**
+ * Records that an operator fired on a target. O(1) — no log traversal.
+ * Called after every successful executeOperator, and for system-generated events
+ * that bypass executeOperator (REC, INS2+ from detectAndEmitREC).
+ */
+async function updateHelixPosition(
+  store: EoStore,
+  target: string,
+  op: LoggableOperator,
+  seq: number,
+): Promise<void> {
+  const existing = await store.get(`helix:${target}`) as HelixPosition | null;
+  const pos: HelixPosition = existing ?? { declared: [], firstSeq: {}, lastSeq: {}, count: {} };
+  if (!pos.declared.includes(op)) {
+    pos.declared = [...pos.declared, op];
+  }
+  pos.firstSeq = pos.firstSeq[op] === undefined
+    ? { ...pos.firstSeq, [op]: seq }
+    : pos.firstSeq;
+  pos.lastSeq  = { ...pos.lastSeq,  [op]: seq };
+  pos.count    = { ...pos.count,    [op]: (pos.count[op] ?? 0) + 1 };
+  await store.put(`helix:${target}`, pos);
+}
+
+/**
+ * Returns true if the current helix position satisfies the operator's preconditions.
+ *
+ *   NUL, SIG, REC — always valid (no preconditions)
+ *   INS           — valid only if target has NOT yet been instantiated
+ *   SEG, CON, SYN, DEF, EVA — require INS to have fired on the target
+ *
+ * CON's requirement that destination targets be instantiated is checked
+ * separately in checkAndPromote (operand-level, not target-level).
+ * EVA's CON-edge requirement is handled in handleEVA (checked post-INS).
+ */
+function isHelixValid(op: LoggableOperator, pos: HelixPosition | null): boolean {
+  const declared = new Set(pos?.declared ?? []);
+  switch (op) {
+    case 'NUL': return true;
+    case 'SIG': return true;
+    case 'INS': return !declared.has('INS');
+    case 'SEG': return declared.has('INS');
+    case 'CON': return declared.has('INS');
+    case 'SYN': return declared.has('INS');
+    case 'DEF': return declared.has('INS');
+    case 'EVA': return declared.has('INS');
+    case 'REC': return true;
+  }
+}
+
+/** Maximum auto-promotion depth — prevents infinite cascade. */
+const MAX_PROMOTION_DEPTH = 5;
+
+/**
+ * Emits system-generated operator events to satisfy an operator's helix preconditions.
+ * Each emitted event goes through processEventCore so it is logged with its own seq,
+ * updates the helix position, and fires onEvent.
+ *
+ * Promotions are emitted BEFORE the original event gets its seq assigned, so they
+ * appear earlier in the log (lower seq numbers) and replay correctly.
+ *
+ * If the depth guard fires (> MAX_PROMOTION_DEPTH), a NUL event with
+ * nul_state 'promotion_blocked' is emitted and promotion stops.
+ */
+async function promoteToHelix(
+  store: EoStore,
+  target: string,
+  requiredOps: LoggableOperator[],
+  onEvent: ((event: EoEvent) => void) | undefined,
+  depth: number,
+): Promise<void> {
+  if (depth >= MAX_PROMOTION_DEPTH) {
+    const now = new Date().toISOString();
+    const blockedSeq = await store.nextSeq();
+    const blockedEvent: EoEvent = {
+      seq: blockedSeq,
+      op: 'NUL',
+      target,
+      operand: {},
+      agent: 'system:helix',
+      ts: now,
+      acquired_ts: now,
+      nul_state: 'promotion_blocked',
+      meta: { auto_promoted: false, promotion_blocked: true, reason: 'max promotion depth exceeded' },
+    };
+    await appendToLog(store, blockedEvent);
+    await updateHelixPosition(store, target, 'NUL', blockedSeq);
+    await updateFoldCache(store, blockedEvent);
+    if (onEvent) onEvent(blockedEvent);
+    return;
+  }
+
+  const helixPos = await store.get(`helix:${target}`) as HelixPosition | null;
+  const declared = new Set(helixPos?.declared ?? []);
+
+  for (const op of requiredOps) {
+    if (declared.has(op)) continue;
+    const now = new Date().toISOString();
+    const systemInput: EoEventInput = {
+      op,
+      target,
+      operand: {},
+      agent: 'system:helix',
+      ts: now,
+      acquired_ts: now,
+      meta: { auto_promoted: true, reason: `required by helix — missing ${op}` },
+    };
+    await processEventCore(store, systemInput, onEvent, depth + 1);
+    // Refresh declared after each promotion so subsequent checks are current.
+    const updated = await store.get(`helix:${target}`) as HelixPosition | null;
+    if (updated) for (const d of updated.declared) declared.add(d);
+  }
+}
+
+/**
+ * Checks whether event.target satisfies the helix preconditions for event.op.
+ * If not, auto-promotes the target (and for CON, destination targets) by
+ * emitting system INS events via promoteToHelix → processEventCore.
+ *
+ * Called BEFORE seq is assigned to the original event, so promotions
+ * receive lower seq numbers and appear first in replay order.
+ */
+async function checkAndPromote(
+  store: EoStore,
+  event: EoEventInput,
+  onEvent: ((event: EoEvent) => void) | undefined,
+  depth: number,
+): Promise<void> {
+  // These operators have no helix preconditions — nothing to promote.
+  if (event.op === 'NUL' || event.op === 'SIG' || event.op === 'REC' || event.op === 'INS') return;
+
+  const pos = await store.get(`helix:${event.target}`) as HelixPosition | null;
+  if (!isHelixValid(event.op as LoggableOperator, pos)) {
+    await promoteToHelix(store, event.target, ['INS'], onEvent, depth);
+  }
+
+  // CON: also check every destination target.
+  if (event.op === 'CON' && event.operand?.added) {
+    for (const item of event.operand.added as ConEdgeAddItem[]) {
+      const dest = typeof item === 'string' ? item : item.dest;
+      const destPos = await store.get(`helix:${dest}`) as HelixPosition | null;
+      if (!new Set(destPos?.declared ?? []).has('INS')) {
+        await promoteToHelix(store, dest, ['INS'], onEvent, depth);
+      }
+    }
+  }
+}
 
 /**
  * Process a single EO event through the fold.
@@ -30,10 +216,13 @@ export async function processEvent(
 }
 
 /**
- * Bulk-import mode: process events quickly by deferring expensive
- * recomputation (recomputeDependents, detectAndEmitREC, cascadeUpward)
- * until after all events are ingested.  Runs the deferred work once
- * per unique target instead of once per event.
+ * Bulk-import mode: process events quickly by:
+ *   1. Sorting events into helix waves (NUL/SIG → INS → SEG/CON → SYN → DEF → EVA)
+ *   2. Within each wave, processing events on different targets in parallel
+ *      (they are independent at the same helix level), sequential within a target
+ *      (preserves arrival order for determinism).
+ *   3. Deferring recomputeDependents and detectAndEmitREC until all waves complete,
+ *      then running them once per unique target.
  */
 export async function processEventsBulk(
   store: EoStore,
@@ -44,12 +233,37 @@ export async function processEventsBulk(
   return foldMutex.run(async () => {
     const touchedTargets = new Set<string>();
     let lastSeq = 0;
+    let processed = 0;
 
-    // Phase 1: ingest all events (skip deferred recomputation)
-    for (let i = 0; i < events.length; i++) {
-      lastSeq = await processEventCore(store, events[i], onEvent);
-      touchedTargets.add(events[i].target);
-      onProgress?.(i + 1, events.length);
+    // Phase 1: wave-based ingestion
+    const waves = sortByHelixLevel(events);
+
+    for (const wave of waves) {
+      // Group events by target within this wave.
+      const byTarget = new Map<string, EoEventInput[]>();
+      for (const event of wave.events) {
+        if (!byTarget.has(event.target)) byTarget.set(event.target, []);
+        byTarget.get(event.target)!.push(event);
+        touchedTargets.add(event.target);
+      }
+
+      // Process targets in parallel, sequential within each target.
+      const waveSeqs = await Promise.all(
+        [...byTarget.values()].map(async (targetEvents) => {
+          let targetLastSeq = 0;
+          for (const event of targetEvents) {
+            const seq = await processEventCore(store, event, onEvent);
+            if (seq > targetLastSeq) targetLastSeq = seq;
+            processed++;
+            onProgress?.(processed, events.length);
+          }
+          return targetLastSeq;
+        })
+      );
+
+      for (const seq of waveSeqs) {
+        if (seq > lastSeq) lastSeq = seq;
+      }
     }
 
     // Phase 2: run deferred recomputation once per unique target
@@ -58,7 +272,6 @@ export async function processEventsBulk(
     }
 
     // Phase 3: detect cycles once per unique target
-    // Build a synthetic triggering event for cascading
     const now = new Date().toISOString();
     const syntheticTrigger: EoEvent = {
       seq: lastSeq,
@@ -81,11 +294,15 @@ export async function processEventsBulk(
 /**
  * Core event processing — steps 1-7 only (no deferred recomputation).
  * Used by bulk import to defer steps 7b-9 until after all events are ingested.
+ *
+ * _promotionDepth is an internal parameter used by promoteToHelix to track
+ * recursion depth and prevent infinite cascade (cap: MAX_PROMOTION_DEPTH).
  */
 async function processEventCore(
   store: EoStore,
   event: EoEventInput,
   onEvent?: (event: EoEvent) => void,
+  _promotionDepth = 0,
 ): Promise<number> {
   if (event.op === 'REC') {
     throw new Error('REC is system-generated and cannot be submitted externally');
@@ -100,18 +317,22 @@ async function processEventCore(
   }
 
   // Idempotency check
-  const existing = await store.get(`idem:${event.client_event_id}`);
-  if (existing != null) {
-    return existing as number;
+  const idemExisting = await store.get(`idem:${event.client_event_id}`);
+  if (idemExisting != null) {
+    return idemExisting as number;
   }
 
-  // Pre-check for INS: reject before logging if target already exists
+  // Pre-check for INS: reject before any state mutation if target already exists.
   if (event.op === 'INS') {
     const existingState = await checkExists(store, event.target);
     if (existingState) {
       throw new Error(`Target already instantiated: ${event.target}`);
     }
   }
+
+  // Helix promotion — runs BEFORE seq assignment so promoted events get lower
+  // seq numbers and appear before the original event in replay order.
+  await checkAndPromote(store, event, onEvent, _promotionDepth);
 
   const seq = await store.nextSeq();
   const fullEvent: EoEvent = { ...event, seq };
@@ -135,6 +356,7 @@ async function processEventCore(
     return seq;
   }
 
+  await updateHelixPosition(store, fullEvent.target, fullEvent.op as LoggableOperator, seq);
   await updateFoldCache(store, fullEvent);
 
   if (onEvent) {
@@ -168,9 +390,9 @@ async function processEventInner(
   }
 
   // 2. Idempotency check — works for both caller-provided and derived IDs
-  const existing = await store.get(`idem:${event.client_event_id}`);
-  if (existing != null) {
-    return existing as number;
+  const idemExisting = await store.get(`idem:${event.client_event_id}`);
+  if (idemExisting != null) {
+    return idemExisting as number;
   }
 
   // 2b. Pre-check for INS: reject before logging if target already exists
@@ -180,6 +402,10 @@ async function processEventInner(
       throw new Error(`Target already instantiated: ${event.target}`);
     }
   }
+
+  // 2c. Helix promotion — runs BEFORE seq assignment so promoted events get
+  //     lower seq numbers and appear before the original event in replay order.
+  await checkAndPromote(store, event, onEvent, 0);
 
   // 3. Assign sequence number
   const seq = await store.nextSeq();
@@ -210,6 +436,9 @@ async function processEventInner(
     if (onEvent) onEvent({ ...fullEvent, meta: { ...fullEvent.meta, _error: message } });
     return seq;
   }
+
+  // 6b. Record this operator in the target's helix position.
+  await updateHelixPosition(store, fullEvent.target, fullEvent.op as LoggableOperator, seq);
 
   // 7. Update the incrementally-maintained fold cache on the target's state
   //    (trajectory, trajectoryFingerprint, cadence, _lastRecSeq). This is the
@@ -285,33 +514,22 @@ async function handleINS(store: EoStore, event: EoEvent): Promise<void> {
 }
 
 // --- SEG: Segment (Boundary) ---
+// checkAndPromote guarantees INS has fired before handleSEG runs.
 async function handleSEG(store: EoStore, event: EoEvent): Promise<void> {
   const existing = await checkExists(store, event.target);
-  if (!existing) {
-    throw new Error(`SEG target does not exist: ${event.target}`);
-  }
 
   await setState(store, {
     target: event.target,
     value: event.operand,
-    level: existing.level,
+    level: existing?.level ?? 1,
     ...stateFromEvent(event, 'SEG'),
   });
 }
 
 // --- CON: Connect ---
+// checkAndPromote guarantees INS has fired on both source and all destination targets.
 async function handleCON(store: EoStore, event: EoEvent): Promise<void> {
   const operand = event.operand;
-
-  if (operand.added) {
-    for (const item of operand.added as ConEdgeAddItem[]) {
-      const dest = typeof item === 'string' ? item : item.dest;
-      const destExists = await checkExists(store, dest);
-      if (!destExists) {
-        throw new Error(`CON target does not exist: ${dest}`);
-      }
-    }
-  }
 
   if (operand.added) {
     for (const item of operand.added as ConEdgeAddItem[]) {
@@ -330,6 +548,26 @@ async function handleCON(store: EoStore, event: EoEvent): Promise<void> {
   if (operand.removed) {
     for (const dest of operand.removed) {
       await removeEdge(store, event.target, dest);
+    }
+  }
+
+  // If source had a deferred EVA registration (registered with no CON edges),
+  // it can now be activated since this CON event has added edges.
+  const evaReg = await store.get(`eva:${event.target}`) as EvaRegistration | null;
+  if (evaReg && evaReg.mode === 'deferred') {
+    const freshEdges = await getEdgesFrom(store, event.target);
+    if (freshEdges.length > 0) {
+      const activeMode = formulaReferencesExternal(evaReg.formula?.formula) ? 'horizon' : 'fold';
+      const activatedReg: EvaRegistration = {
+        target: evaReg.target,
+        formula: evaReg.formula,
+        mode: activeMode,
+        dependencies: freshEdges.map(e => e.dest),
+      };
+      await store.put(`eva:${event.target}`, activatedReg);
+      if (activeMode === 'fold') {
+        await evaluateFormula(store, activatedReg);
+      }
     }
   }
 
@@ -480,26 +718,18 @@ async function handleSIG(store: EoStore, event: EoEvent): Promise<void> {
 }
 
 // --- DEF: Define Value or Register Computation ---
+// checkAndPromote guarantees INS has fired before handleDEF runs.
 // Includes Creator ownership check: agents with PL 10-24 can only DEF
 // records they created (identified by _created_by field).
 async function handleDEF(store: EoStore, event: EoEvent): Promise<void> {
   const target = await resolveAlias(store, event.target);
 
-  let existing = await getState(store, target);
-  if (!existing) {
-    existing = {
-      target,
-      value: {},
-      level: 1,
-      ...stateFromEvent(event, 'INS'),
-    };
-    await setState(store, existing);
-  }
+  const existing = await getState(store, target);
 
   // Level guard: reject DEFs on core content of derived entities (INS2+).
-  if (existing.level > 1 && event.agent !== 'system') {
+  if ((existing?.level ?? 1) > 1 && event.agent !== 'system') {
     throw new Error(
-      `Cannot DEF core content of derived entity at level ${existing.level}: ${target}`
+      `Cannot DEF core content of derived entity at level ${existing!.level}: ${target}`
     );
   }
 
@@ -508,7 +738,7 @@ async function handleDEF(store: EoStore, event: EoEvent): Promise<void> {
   // permission check — everything else is Matrix-native.
   const agentPL = event.meta?._power_level;
   if (typeof agentPL === 'number' && agentPL >= 10 && agentPL < 25) {
-    const createdBy = existing.value?._created_by;
+    const createdBy = existing?.value?._created_by;
     if (createdBy && createdBy !== event.agent) {
       throw new Error(
         `Creator-level agent cannot edit records created by others: ${target} (created by ${createdBy})`
@@ -516,7 +746,7 @@ async function handleDEF(store: EoStore, event: EoEvent): Promise<void> {
     }
   }
 
-  const merged = mergeOperand(existing.value, event.operand);
+  const merged = mergeOperand(existing?.value, event.operand);
 
   // Clear _sigs for saved fields, then prune any stale entries from dead tabs.
   let finalValue = merged;
@@ -538,7 +768,7 @@ async function handleDEF(store: EoStore, event: EoEvent): Promise<void> {
   await setState(store, {
     target,
     value: finalValue,
-    level: existing.level,
+    level: existing?.level ?? 1,
     ...stateFromEvent(event, 'DEF'),
   });
 
@@ -548,9 +778,31 @@ async function handleDEF(store: EoStore, event: EoEvent): Promise<void> {
 }
 
 // --- EVA: Evaluate ---
+// checkAndPromote guarantees INS has fired before handleEVA runs.
+// If the operand is a formula and the target has no CON edges yet, the
+// registration is marked 'deferred' rather than failing or fabricating edges.
+// The registration is activated automatically when a CON edge is later added
+// (see handleCON above).
 async function handleEVA(store: EoStore, event: EoEvent): Promise<void> {
   const target = await resolveAlias(store, event.target);
   const existing = await getState(store, target);
+
+  if (isFormulaOperand(event.operand)) {
+    const edges = await getEdgesFrom(store, target);
+    if (edges.length === 0) {
+      // No CON edges — register as deferred rather than evaluating against nothing.
+      const deferredReg: EvaRegistration = {
+        target,
+        formula: event.operand,
+        mode: 'deferred',
+        dependencies: [],
+        deferred_reason: 'no_con_edges',
+      };
+      await store.put(`eva:${target}`, deferredReg);
+    } else {
+      await registerEvaActive(store, target, event.operand);
+    }
+  }
 
   await setState(store, {
     target,
@@ -781,6 +1033,7 @@ async function detectAndEmitREC(
   };
 
   await appendToLog(store, recEvent);
+  await updateHelixPosition(store, changedTarget, 'REC', recSeq);
 
   const existingPivot = await getState(store, changedTarget);
   await setState(store, {
@@ -826,6 +1079,7 @@ async function detectAndEmitREC(
       triggered_by: triggeringEvent.seq,
     };
     await appendToLog(store, updateEvent);
+    await updateHelixPosition(store, derivedTargetId, 'DEF', updateSeq);
     await setState(store, {
       target: derivedTargetId,
       value: derivedOperand,
@@ -848,6 +1102,7 @@ async function detectAndEmitREC(
       triggered_by: triggeringEvent.seq,
     };
     await appendToLog(store, insEvent);
+    await updateHelixPosition(store, derivedTargetId, 'INS', insSeq);
     await setState(store, {
       target: derivedTargetId,
       value: derivedOperand,
@@ -967,6 +1222,7 @@ async function cascadeUpward(
       triggered_by: triggeringEvent.seq,
     };
     await appendToLog(store, reEvalEvent);
+    await updateHelixPosition(store, derivedTarget, 'REC', reEvalSeq);
 
     const existingDerived = await getState(store, derivedTarget);
     if (existingDerived) {
@@ -1148,6 +1404,7 @@ export async function replayFromLog(
       // Apply operator (REC falls through as a no-op in executeOperator).
       try {
         await executeOperator(store, fullEvent);
+        await updateHelixPosition(store, fullEvent.target, fullEvent.op as LoggableOperator, seq);
       } catch {
         // Ignore errors during replay — the original fold succeeded.
       }

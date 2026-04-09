@@ -8,7 +8,7 @@ export type Operator = 'NUL' | 'SIG' | 'INS' | 'SEG' | 'CON' | 'SYN' | 'DEF' | '
 // ─── Self-Healing Types ───────────────────────────────────────────────────────
 
 /** Three NUL states — distinct absence conditions (F1.2). */
-export type NulState = 'never-set' | 'unknown' | 'cleared';
+export type NulState = 'never-set' | 'unknown' | 'cleared' | 'promotion_blocked';
 
 /** Partition context envelope — stamped on writes during split operation (F2.1). */
 export interface ContextEnvelope {
@@ -39,6 +39,23 @@ export interface HealingRecord {
 
 // Operators that produce log entries (post-INS threshold)
 export type LoggableOperator = 'NUL' | 'SIG' | 'INS' | 'SEG' | 'CON' | 'SYN' | 'DEF' | 'EVA' | 'REC';
+
+/**
+ * Per-target structural record of which operators have been declared over the target's lifetime.
+ * Monotonically advancing: operators are added to declared but never removed.
+ * Stored at helix:<target> — separate from EoState to avoid TypeScript construction-site churn
+ * across all the existing setState call sites.
+ */
+export interface HelixPosition {
+  /** Which operators have fired on this target (monotonically growing). */
+  declared: LoggableOperator[];
+  /** Seq of the first event per operator. */
+  firstSeq: Partial<Record<LoggableOperator, number>>;
+  /** Seq of the most recent event per operator. */
+  lastSeq: Partial<Record<LoggableOperator, number>>;
+  /** How many times each operator has fired. */
+  count: Partial<Record<LoggableOperator, number>>;
+}
 
 // Operators that can be submitted externally (by humans or sync bridges)
 export type ExternalOperator = 'INS' | 'SEG' | 'CON' | 'SYN' | 'DEF' | 'EVA' | 'NUL' | 'SIG';
@@ -136,8 +153,10 @@ export interface EdgeAttrDef {
 export interface EvaRegistration {
   target: string;
   formula: any;
-  mode: 'fold' | 'horizon';
+  mode: 'fold' | 'horizon' | 'deferred';
   dependencies: string[];
+  /** Set when mode is 'deferred' — explains why evaluation is pending. */
+  deferred_reason?: string;
 }
 
 // REC recursion result
@@ -256,7 +275,7 @@ export interface GovernanceEntry {
   target: string;
   strategy?: string;
   formula?: any;
-  mode?: 'fold' | 'horizon';
+  mode?: 'fold' | 'horizon' | 'deferred';
   scope: 'direct' | 'collection' | 'ancestor';
 }
 
