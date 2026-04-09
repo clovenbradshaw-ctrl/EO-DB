@@ -13,7 +13,7 @@ const EODB_MAGIC = new Uint8Array([0x45, 0x4F, 0x44, 0x42]);
 
 export interface EodbFile {
   version: 1;
-  type: 'current' | 'snapshot' | 'backup';
+  type: 'current' | 'snapshot' | 'backup' | 'op' | 'hydration';
   space_id: string;
   space_name: string;
   from_seq: number;
