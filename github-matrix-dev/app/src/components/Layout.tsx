@@ -4,6 +4,8 @@ import { useEoStore } from '../store/eo-store';
 import { persistSpaceMeta, listSpaceMeta, clearAllSpaceMetas, saveSpaceMeta, removeSpaceMeta } from '../db/space-meta';
 import { createFoldWorkerClient, initFoldWorker, type FoldWorkerClient } from '../db/lazy-fold';
 import { SyncManager } from '../matrix/sync-manager';
+import { PeerSync } from '../matrix/peer-sync';
+import { WebRTCPeer } from '../matrix/webrtc-peer';
 import { Presence } from '../matrix/presence';
 import { OnlineUsers } from './OnlineUsers';
 import { GDriveSyncService } from '../google-drive/gdrive-sync';
@@ -427,7 +429,10 @@ function describeMatrixError(err: any): { phase: 'auth' | 'crypto' | 'sync' | 'r
 
 interface CachedSpace {
   workerClient: FoldWorkerClient;
+  /** Kept for teardown of old sessions; null in new spaces that use PeerSync. */
   syncManager: SyncManager | null;
+  peerSync: PeerSync | null;
+  webrtcPeer: WebRTCPeer | null;
   gdriveSync: GDriveSyncService | null;
   mainRoomId: string | null;
   presence: Presence | null;
@@ -919,16 +924,38 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         setMatrixReady(true);
       } catch (e) {
         console.warn('[EO-DB] startMatrix failed:', e);
-        if (mounted) {
-          setConnectionError(describeMatrixError(e));
+        if (!mounted) return;
+        const described = describeMatrixError(e);
+        // If we have a cached session (userId known), start in offline/local mode
+        // so the user can still read their OPFS data without a Matrix connection.
+        if (session.userId) {
+          console.info('[EO-DB] Falling back to offline mode — local OPFS data accessible');
+          setConnectionDetail('offline');
+          setConnectionError(described);
+          // matrixReady stays false — setupSpaceStore will skip PeerSync
+          // but will still init the OPFS worker and load data.
+          setMatrixReady(false);
+        } else {
+          setConnectionError(described);
         }
       }
     }
 
     startMatrix();
 
+    // When the browser regains connectivity, re-attempt Matrix init if we're
+    // in offline mode (matrixReady is false, client has session).
+    const handleOnline = () => {
+      if (!mounted) return;
+      if (!matrixClientRef.current || !matrixClientRef.current.isInitialSyncComplete()) {
+        setRetryCount(c => c + 1);
+      }
+    };
+    window.addEventListener('online', handleOnline);
+
     return () => {
       mounted = false;
+      window.removeEventListener('online', handleOnline);
       if (matrixClientRef.current) {
         matrixClientRef.current.removeAllListeners('sync' as any);
         matrixClientRef.current.stopClient();
@@ -1320,6 +1347,10 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         recentEvents: [...st.recentEvents.slice(-99), event],
         lastSeq: event.seq,
       }));
+      // Save each op to GDrive immediately (fire-and-forget)
+      useEoStore.getState().gdriveSync?.saveOp(event).catch(e =>
+        console.warn('[EO-DB] saveOp failed:', e),
+      );
     };
 
     async function setupSpaceStore() {
@@ -1342,26 +1373,35 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           existing.spaceRooms = resolvedSpaceRooms;
         }
 
-        // Try Google Drive hydration if store is empty
-        const currentStore = useEoStore.getState().store;
-        const cachedSeq = currentStore ? await currentStore.getCurrentSeq() : 0;
-        if (cachedSeq === 0 && session.accessToken && selectedSpace) {
-          try {
-            const dataType = `eodb-${selectedSpace}`;
-            const hydratedSeq = await GDriveSyncService.hydrateFromGDrive(
-              currentStore!, session.accessToken, dataType, onFoldEvent,
-            );
-            if (hydratedSeq > 0) {
-              await init(existing.workerClient);
-            }
-          } catch (e) {
-            console.warn('[EO-DB] Cache-path GDrive hydration failed for space', selectedSpace, e);
-          }
-        }
-
-        // Restore cached sync manager
+        // Restore cached sync manager (legacy path — null in new spaces)
         if (existing.syncManager) {
           useEoStore.getState().setSyncManager(existing.syncManager);
+        }
+
+        // Start PeerSync if room is now available but wasn't on the first run
+        if (MATRIX_ENABLED && spaceRoomId && matrixClientRef.current && !existing.peerSync) {
+          try {
+            const wrtc = new WebRTCPeer(matrixClientRef.current, spaceRoomId, useEoStore.getState().store!, onFoldEvent);
+            wrtc.start();
+            const ps = new PeerSync(matrixClientRef.current, spaceRoomId, useEoStore.getState().store!, onFoldEvent);
+            ps.setWebRTCPeer(wrtc);
+            await ps.start();
+            if (!isStale()) {
+              existing.peerSync = ps;
+              existing.webrtcPeer = wrtc;
+              useEoStore.getState().setSyncManager(ps as any);
+              cleanupFns.push(() => { ps.stop(); wrtc.stop(); });
+            } else {
+              ps.stop(); wrtc.stop();
+            }
+          } catch (e) {
+            console.warn('[EO-DB] PeerSync init failed for cached space', selectedSpace, e);
+          }
+        } else if (existing.peerSync) {
+          // Re-announce presence after re-mount
+          existing.peerSync.start().catch(() => {});
+          useEoStore.getState().setSyncManager(existing.peerSync as any);
+          cleanupFns.push(() => {});
         }
 
         // Restart Google Drive sync for cached space
@@ -1392,7 +1432,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
 
       // Cache the worker immediately so that re-runs of this effect reuse
       // the SAME worker instead of creating a new one.
-      cache.set(selectedSpace!, { workerClient, syncManager: null, gdriveSync: null, mainRoomId: spaceRoomId, presence: null, spaceRooms: resolvedSpaceRooms });
+      cache.set(selectedSpace!, { workerClient, syncManager: null, peerSync: null, webrtcPeer: null, gdriveSync: null, mainRoomId: spaceRoomId, presence: null, spaceRooms: resolvedSpaceRooms });
 
       await init(workerClient);
 
@@ -1422,44 +1462,32 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         }
       }
 
-      let syncManager: SyncManager | null = null;
-
       // If Matrix is required but we couldn't get a room, surface the error.
       if (MATRIX_ENABLED && !spaceRoomId && matrixClientRef.current) {
-        console.warn('[EO-DB] No room for space', selectedSpace, '— cannot start sync.');
+        console.warn('[EO-DB] No room for space', selectedSpace, '— cannot start PeerSync.');
         setConnectionError({
           phase: 'room',
           message: 'Could not create or find a room for this space. The homeserver may restrict room creation — try logging out and back in.',
         });
       }
 
+      let peerSync: PeerSync | null = null;
+      let webrtcPeer: WebRTCPeer | null = null;
+
       if (MATRIX_ENABLED && spaceRoomId && matrixClientRef.current) {
-        const maxRetries = 3;
-        for (let attempt = 0; attempt < maxRetries; attempt++) {
-          if (isStale()) return;
-          try {
-            syncManager = new SyncManager(
-              matrixClientRef.current,
-              spaceRoomId,
-              useEoStore.getState().store!,
-              onFoldEvent,
-            );
-            await syncManager.initialize();
-            if (isStale()) { syncManager.destroy(); return; }
-            useEoStore.getState().setSyncManager(syncManager);
-            break; // success
-          } catch (e) {
-            console.warn(`[EO-DB] SyncManager init attempt ${attempt + 1}/${maxRetries} for`, selectedSpace, e);
-            syncManager = null;
-            if (attempt < maxRetries - 1) {
-              await new Promise(r => setTimeout(r, (attempt + 1) * 2000));
-            } else {
-              setConnectionError({
-                phase: 'sync',
-                message: `Sync failed after ${maxRetries} attempts: ${e instanceof Error ? e.message : String(e)}`,
-              });
-            }
-          }
+        try {
+          webrtcPeer = new WebRTCPeer(matrixClientRef.current, spaceRoomId, useEoStore.getState().store!, onFoldEvent);
+          webrtcPeer.start();
+          peerSync = new PeerSync(matrixClientRef.current, spaceRoomId, useEoStore.getState().store!, onFoldEvent);
+          peerSync.setWebRTCPeer(webrtcPeer);
+          await peerSync.start();
+          if (isStale()) { peerSync.stop(); webrtcPeer.stop(); return; }
+          useEoStore.getState().setSyncManager(peerSync as any);
+          cleanupFns.push(() => { peerSync!.stop(); webrtcPeer!.stop(); });
+        } catch (e) {
+          console.warn('[EO-DB] PeerSync init failed for', selectedSpace, e);
+          peerSync = null;
+          webrtcPeer = null;
         }
       }
 
@@ -1487,31 +1515,13 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           // Set current space in GDrive store
           useGDriveStore.getState().setCurrentSpace(selectedSpace, gdriveSpaceName);
 
-          // On fresh device (seq=0), hydrate from Google Drive before starting sync
-          const activeStore = useEoStore.getState().store!;
-          const gdriveCurrentSeq = activeStore ? await activeStore.getCurrentSeq() : 0;
-          if (gdriveCurrentSeq === 0) {
-            try {
-              const dataType = `eodb-${selectedSpace}`;
-              const gdriveHydratedSeq = await GDriveSyncService.hydrateFromGDrive(
-                activeStore, session.accessToken, dataType, onFoldEvent,
-              );
-              if (gdriveHydratedSeq > 0) {
-                await init(workerClient);
-              }
-            } catch (e) {
-              console.warn('[EO-DB] Google Drive hydration failed for space', selectedSpace, e);
-            }
-          }
-
+          // GDriveSyncService.start() handles initial hydration immediately
           gdriveSync = new GDriveSyncService({
             store: useEoStore.getState().store!,
             spaceId: selectedSpace,
             spaceName: gdriveSpaceName,
             userId: session.userId,
             matrixAccessToken: session.accessToken,
-            matrixClient: matrixClientRef.current || undefined,
-            roomId: spaceRoomId || undefined,
             onEvent: onFoldEvent,
             onHydrated: () => { init(workerClient); },
           });
@@ -1560,7 +1570,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
 
       // Update the cached entry with sync services (worker was cached earlier
       // to prevent race conditions; now enrich with fully-initialized services).
-      cache.set(selectedSpace!, { workerClient, syncManager, gdriveSync, mainRoomId: spaceRoomId, presence: presenceInstance, spaceRooms: resolvedSpaceRooms });
+      cache.set(selectedSpace!, { workerClient, syncManager: null, peerSync, webrtcPeer, gdriveSync, mainRoomId: spaceRoomId, presence: presenceInstance, spaceRooms: resolvedSpaceRooms });
     }
 
     setupSpaceStore();

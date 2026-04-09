@@ -495,6 +495,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   const [resolutionComposer, setResolutionComposer] = useState<{ x: number; y: number; key: string } | null>(null);
   const [constraintComposer, setConstraintComposer] = useState<{ x: number; y: number; key: string } | null>(null);
   const [editingCell, setEditingCell] = useState<{ target: string; fieldKey: string; value: string } | null>(null);
+  const editDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const prevRecordsKeyRef = useRef<string>('');
   const prevSchemaKeyRef = useRef<string>('');
   const prevScopeNameRef = useRef<string | null>(null);
@@ -672,6 +673,9 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   useEffect(() => { hasCheckedEmptyScopeRef.current = false; }, [scope]);
   useEffect(() => {
     if (!recordsLoaded || hasCheckedEmptyScopeRef.current) return;
+    // Don't navigate away while seq is 0 — the store is still receiving sync
+    // and an empty result is transient, not authoritative.
+    if (lastSeq === 0) return;
     hasCheckedEmptyScopeRef.current = true;
     if (records.length === 0 && onEmptyScope) {
       // Don't navigate away if the scope itself has state — it's a leaf record
@@ -684,7 +688,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
         }
       });
     }
-  }, [records, recordsLoaded, scope, onEmptyScope, getState]);
+  }, [records, recordsLoaded, lastSeq, scope, onEmptyScope, getState]);
 
   // Reset filter and loaded state when scope changes.
   // NOTE: records are NOT cleared here — the stale-fetch guard (fetchGenRef)
@@ -1131,6 +1135,11 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   }
 
   async function handleCellSave(target: string, fieldKey: string, rawValue: string) {
+    // Cancel any pending debounced dispatch before the final save
+    if (editDebounceRef.current !== null) {
+      clearTimeout(editDebounceRef.current);
+      editDebounceRef.current = null;
+    }
     let parsed: any = rawValue;
     try { parsed = JSON.parse(rawValue); } catch { /* keep as string */ }
 
@@ -1150,6 +1159,31 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
       syncEditToAirtable({ target, fieldKey, value: parsed, getStateByPrefix }).catch(console.warn);
     } catch { /* ignore */ }
     setEditingCell(null);
+  }
+
+  /**
+   * Dispatch a cell edit without closing the editor.
+   * Used for real-time per-character sync — other users see changes as you type.
+   */
+  async function dispatchCellEdit(target: string, fieldKey: string, rawValue: string) {
+    let parsed: any = rawValue;
+    try { parsed = JSON.parse(rawValue); } catch { /* keep as string */ }
+
+    const operand = useFieldsSub
+      ? { fields: { [fieldKey]: parsed } }
+      : { [fieldKey]: parsed };
+
+    try {
+      await dispatch({
+        op: 'DEF',
+        target,
+        operand,
+        agent: `user:${session.userId}`,
+        ts: new Date().toISOString(),
+        acquired_ts: new Date().toISOString(),
+      });
+    } catch { /* ignore */ }
+    // Do NOT call setEditingCell(null) — keep editing
   }
 
   function handleContextMenu(e: React.MouseEvent, target: string) {
@@ -1616,7 +1650,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                           {isEditingThis
                             ? <input
                                 autoFocus
-                                defaultValue={editingCell.value}
+                                value={editingCell.value}
                                 style={{
                                   width: '100%',
                                   padding: '2px 4px',
@@ -1630,12 +1664,23 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                                   fontFamily: "'JetBrains Mono', monospace",
                                 }}
                                 onClick={(e) => e.stopPropagation()}
+                                onChange={(e) => {
+                                  const newVal = e.target.value;
+                                  setEditingCell({ ...editingCell, value: newVal });
+                                  // Debounced real-time dispatch (300ms)
+                                  if (editDebounceRef.current !== null) clearTimeout(editDebounceRef.current);
+                                  editDebounceRef.current = setTimeout(() => {
+                                    editDebounceRef.current = null;
+                                    dispatchCellEdit(rec.target, col.key, newVal);
+                                  }, 300);
+                                }}
                                 onKeyDown={(e) => {
                                   if (e.key === 'Enter') {
                                     e.preventDefault();
                                     handleCellSave(rec.target, col.key, (e.target as HTMLInputElement).value);
                                   }
                                   if (e.key === 'Escape') {
+                                    if (editDebounceRef.current !== null) { clearTimeout(editDebounceRef.current); editDebounceRef.current = null; }
                                     setEditingCell(null);
                                   }
                                 }}

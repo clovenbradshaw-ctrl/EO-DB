@@ -170,9 +170,11 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     const { store, syncManager } = get();
     if (!store) throw new Error('Store not initialized');
 
-    // If Matrix sync is active, route through SyncManager.
-    if (syncManager) {
-      const seq = await syncManager.processLocalEvent(event);
+    // If a SyncManager (not PeerSync) is active, route through it so it can
+    // broadcast to the Matrix room timeline. PeerSync handles sync via
+    // to-device messages on its own schedule — dispatch locally for PeerSync.
+    if (syncManager && 'processLocalEvent' in syncManager) {
+      const seq = await (syncManager as any).processLocalEvent(event);
       return seq;
     }
 
