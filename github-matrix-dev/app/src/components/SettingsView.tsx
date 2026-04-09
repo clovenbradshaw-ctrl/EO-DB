@@ -11,6 +11,7 @@ import { OP_COLORS, TRIAD_LABELS } from './LogView';
 import { ArchivedSpacesSection } from './ArchivedSpaces';
 import { AirtableSettingsSection } from './AirtableSettings';
 import { useGDriveStore } from '../google-drive/gdrive-store';
+import { useEoServerStore } from '../store/eo-server-store';
 
 interface SettingsViewProps {
   session: MatrixSession;
@@ -50,6 +51,21 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
   const [deleteConfirm, setDeleteConfirm] = useState('');
   const [deleteError, setDeleteError] = useState('');
   const [showEraseConfirm, setShowEraseConfirm] = useState(false);
+
+  const serverUrl = useEoServerStore((s) => s.serverUrl);
+  const serverConnected = useEoServerStore((s) => s.connected);
+  const setServerUrl = useEoServerStore((s) => s.setServerUrl);
+  const [serverUrlInput, setServerUrlInput] = useState(serverUrl || '');
+
+  function handleSaveServerUrl() {
+    const trimmed = serverUrlInput.trim();
+    setServerUrl(trimmed || null);
+    // Connection will be established on next space load (Layout.tsx effect)
+    // Reload to pick up new URL immediately
+    if (trimmed !== (serverUrl || '')) {
+      window.location.reload();
+    }
+  }
 
 
 
@@ -238,6 +254,48 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
                 </div>
               </div>
             )}
+          </div>
+        </Section>
+
+        {/* Real-Time Sync Server */}
+        <Section title="Real-Time Sync Server" theme={theme}>
+          <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 10 }}>
+            <StatusRow
+              theme={theme}
+              label="EO-DB Server"
+              status={serverUrl ? (serverConnected ? 'ok' : 'pending') : 'off'}
+              detail={
+                serverUrl
+                  ? serverConnected
+                    ? `Connected — ${serverUrl}`
+                    : `Connecting to ${serverUrl}…`
+                  : 'Not configured — field changes are local only'
+              }
+            />
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <input
+                style={{ ...s.input, flex: 1 }}
+                type="text"
+                placeholder="http://localhost:3000"
+                value={serverUrlInput}
+                onChange={(e) => setServerUrlInput(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') handleSaveServerUrl(); }}
+              />
+              <button style={s.actionBtn} onClick={handleSaveServerUrl}>
+                Save
+              </button>
+              {serverUrl && (
+                <button
+                  style={{ ...s.actionBtn, background: 'transparent', color: theme.danger, borderColor: theme.danger }}
+                  onClick={() => { setServerUrlInput(''); setServerUrl(null); }}
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+            <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, color: theme.textMuted }}>
+              When set, field edits are broadcast to all users connected to the same server in real-time. Uses your Matrix session token for auth.
+            </span>
           </div>
         </Section>
 
