@@ -35,8 +35,6 @@ export {
 } from './resolve';
 
 export {
-  createRestrictedRoom,
-  createGovernanceRoom,
   setSpaceConfig,
   getSpaceConfig,
   setSchemaManifest,
@@ -45,7 +43,6 @@ export {
   applyEoPowerLevels,
   inviteToRoom,
   removeFromRoom,
-  ensureSpaceRooms,
   assignFieldToRoom,
   removeFieldAssignment,
   migrateShareToMatrix,

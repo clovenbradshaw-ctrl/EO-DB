@@ -36,6 +36,7 @@ import type { LocalKeyring } from '../db/crypto-types';
 import type { EoEvent } from '../db/types';
 import { encryptSnapshot, decryptSnapshot } from '../crypto/snapshot-crypto';
 import { resolveSnapshotKeyId } from '../crypto/segment-keys';
+import type { FieldShadowConfig } from './space-permissions';
 import { packEodb, unpackEodb, type EodbFile } from './eodb-format';
 import {
   gdriveListByPrefix,
@@ -46,6 +47,7 @@ import {
   gdriveRetrieveNamed,
   gdriveRetrieveRange,
   gdriveRetrieve,
+  deriveSpaceFileGuid,
 } from './gdrive-api';
 import type { GDriveListEntry } from './gdrive-api';
 import { processEvent } from '../db/fold';
@@ -61,8 +63,9 @@ const RECENT_BUFFER_MAX = 256;
 const BAKE_VOTE_GRACE_MS = 2_000;
 const BAKE_LOCK_TTL_MS = 60_000;
 
-const LOG_FILE = 'space-log.eodb';
-const RECENT_FILE = 'space-recent.eodb';
+// Legacy plaintext filenames — used as fallback before GUID-naming was introduced.
+const LEGACY_LOG_FILE = 'space-log.eodb';
+const LEGACY_RECENT_FILE = 'space-recent.eodb';
 const MANIFEST_FILE = 'space-manifest.json';
 const LOG_PENDING_PREFIX = 'space-log-pending-';
 
@@ -114,6 +117,17 @@ export class GDriveSyncService {
    */
   private opsBuffer: EoEvent[] = [];
 
+  // GUID-derived Drive filenames — set in start() before first use.
+  // All three tiers (viewer / restricted / admin) are initialised here.
+  private logFile: string = LEGACY_LOG_FILE;
+  private recentFile: string = LEGACY_RECENT_FILE;
+  private manifestFile: string = MANIFEST_FILE;
+  private logPendingPrefix: string = LOG_PENDING_PREFIX;
+  private restrictedLogFile: string = 'restricted-log.eodb';
+  private restrictedRecentFile: string = 'restricted-recent.eodb';
+  private adminLogFile: string = 'admin-log.eodb';
+  private adminRecentFile: string = 'admin-recent.eodb';
+
   private store: EoStore;
   private spaceId: string;
   private spaceName: string;
@@ -121,6 +135,8 @@ export class GDriveSyncService {
   private sessionId: string;
   private matrixAccessToken: string;
   private keyring: LocalKeyring;
+  /** Field sensitivity map from the folded manifest — drives 3-tier event routing. */
+  private manifestFields: Record<string, FieldShadowConfig> = {};
 
   onEvent?: (event: any) => void;
   onHydrated?: () => void;
@@ -158,14 +174,57 @@ export class GDriveSyncService {
     this.keyring = keyring;
   }
 
+  /** Update the field sensitivity map from a freshly-folded manifest. */
+  setManifestFields(fields: Record<string, FieldShadowConfig>): void {
+    this.manifestFields = fields;
+  }
+
+  /**
+   * Classify an event into a log tier based on its op type and the field it touches.
+   *   'admin'      — EVA policies, or events touching admin-sensitivity fields
+   *   'restricted' — events touching restricted-sensitivity fields
+   *   'viewer'     — everything else (public record data)
+   */
+  private classifyEventTier(event: EoEvent): 'viewer' | 'restricted' | 'admin' {
+    if (event.op === 'EVA') return 'admin';
+    for (const [fieldKey, config] of Object.entries(this.manifestFields)) {
+      if (event.target === fieldKey || event.target.endsWith(`.${fieldKey}`)) {
+        return config.sensitivity === 'admin' ? 'admin' : 'restricted';
+      }
+    }
+    return 'viewer';
+  }
+
+  /**
+   * Find the keyring entry whose scope ends with `{spaceId}.{tier}`.
+   * Returns undefined if the user doesn't hold that tier key.
+   */
+  private resolveKeyIdForTier(tier: 'viewer' | 'restricted' | 'admin'): string | undefined {
+    const scopeSuffix = `${this.spaceId}.${tier}`;
+    for (const [keyId, entry] of this.keyring.keys) {
+      if (entry.scope === scopeSuffix) return keyId;
+    }
+    return undefined;
+  }
+
+  private async encryptBinaryForTier(
+    binary: Uint8Array,
+    tier: 'viewer' | 'restricted' | 'admin',
+  ): Promise<Uint8Array> {
+    const keyId = this.resolveKeyIdForTier(tier);
+    if (keyId) return encryptSnapshot(binary, this.keyring, keyId);
+    // Fallback: try the generic snapshot key (pre-manifest-model spaces)
+    const fallbackKeyId = resolveSnapshotKeyId(this.keyring);
+    if (fallbackKeyId) return encryptSnapshot(binary, this.keyring, fallbackKeyId);
+    return binary;
+  }
+
   private get dataType(): string {
     return `eodb-${this.spaceId}`;
   }
 
   private async encryptBinary(binary: Uint8Array): Promise<Uint8Array> {
-    const keyId = resolveSnapshotKeyId(this.keyring);
-    if (!keyId) return binary;
-    return encryptSnapshot(binary, this.keyring, keyId);
+    return this.encryptBinaryForTier(binary, 'viewer');
   }
 
   private async decryptBinary(binary: Uint8Array): Promise<Uint8Array> {
@@ -177,11 +236,39 @@ export class GDriveSyncService {
   async start(): Promise<void> {
     if (this.timer) return;
 
+    // Derive stable GUIDs from spaceId so all space members use the same filenames.
+    const [logGuid, recentGuid, manifestGuid, rLogGuid, rRecentGuid, aLogGuid, aRecentGuid] =
+      await Promise.all([
+        deriveSpaceFileGuid(this.spaceId, 'log'),
+        deriveSpaceFileGuid(this.spaceId, 'recent'),
+        deriveSpaceFileGuid(this.spaceId, 'manifest'),
+        deriveSpaceFileGuid(this.spaceId, 'restricted-log'),
+        deriveSpaceFileGuid(this.spaceId, 'restricted-recent'),
+        deriveSpaceFileGuid(this.spaceId, 'admin-log'),
+        deriveSpaceFileGuid(this.spaceId, 'admin-recent'),
+      ]);
+    this.logFile = `${logGuid}.eodb`;
+    this.recentFile = `${recentGuid}.eodb`;
+    this.manifestFile = `${manifestGuid}.json`;
+    this.logPendingPrefix = `${logGuid}-pending-`;
+    this.restrictedLogFile = `${rLogGuid}.eodb`;
+    this.restrictedRecentFile = `${rRecentGuid}.eodb`;
+    this.adminLogFile = `${aLogGuid}.eodb`;
+    this.adminRecentFile = `${aRecentGuid}.eodb`;
+
     const dt = this.dataType;
     try {
       this.onStatus?.('syncing');
       const hydratedSeq = await GDriveSyncService.hydrateFromGDrive(
         this.store, this.matrixAccessToken, dt, this.onEvent, this.keyring,
+        {
+          log: this.logFile,
+          recent: this.recentFile,
+          restrictedLog: this.restrictedLogFile,
+          restrictedRecent: this.restrictedRecentFile,
+          adminLog: this.adminLogFile,
+          adminRecent: this.adminRecentFile,
+        },
       );
       if (hydratedSeq > 0) {
         this.onHydrated?.();
@@ -254,8 +341,12 @@ export class GDriveSyncService {
   }
 
   /**
-   * Read space-recent.eodb, merge with own opsBuffer, keep most recent
-   * RECENT_BUFFER_MAX events, write back.
+   * Read tier-specific recent buffers, merge with own opsBuffer, write back.
+   *
+   * Events are classified by field sensitivity into three tiers:
+   *   viewer     → space-recent.eodb       (viewer-key encrypted)
+   *   restricted → restricted-recent.eodb  (restricted-key encrypted)
+   *   admin      → admin-recent.eodb       (admin-key encrypted)
    *
    * Race condition note: last-write-wins. If two clients write simultaneously
    * the loser's last event is temporarily absent from the buffer. It remains
@@ -265,49 +356,76 @@ export class GDriveSyncService {
   private async flushBuffer(): Promise<void> {
     const dt = this.dataType;
 
-    // Read remote buffer for events we may not have yet
-    const remoteEvents = await this.downloadRecentBuffer();
-
-    // Merge: own buffer takes precedence (dedup by client_event_id)
-    const merged = new Map<string, EoEvent>();
-    for (const e of remoteEvents) {
-      const key = e.client_event_id ?? `${e.seq}`;
-      merged.set(key, e);
-    }
+    // Split local buffer by tier
+    const viewerOps: EoEvent[] = [];
+    const restrictedOps: EoEvent[] = [];
+    const adminOps: EoEvent[] = [];
     for (const e of this.opsBuffer) {
-      const key = e.client_event_id ?? `${e.seq}`;
-      merged.set(key, e);
+      const tier = this.classifyEventTier(e);
+      if (tier === 'restricted') restrictedOps.push(e);
+      else if (tier === 'admin') adminOps.push(e);
+      else viewerOps.push(e);
     }
 
-    // Keep most recent RECENT_BUFFER_MAX by seq
-    const sorted = Array.from(merged.values()).sort((a, b) => a.seq - b.seq);
-    const trimmed = sorted.slice(-RECENT_BUFFER_MAX);
+    // Helper: merge remote + local events for a tier, write back
+    const flushTier = async (
+      local: EoEvent[],
+      remoteFile: string,
+      tier: 'viewer' | 'restricted' | 'admin',
+    ): Promise<{ lastSeq: number; fromSeq: number }> => {
+      let remote: EoEvent[] = [];
+      try {
+        const r = await gdriveRetrieveNamed(this.matrixAccessToken, dt, remoteFile);
+        if (r?.ok) remote = safeUnpackEvents(await this.decryptBinary(r.data));
+      } catch { /* remote file may not exist yet */ }
 
-    // Pack and write
-    const recentFile: EodbFile = {
-      version: 1,
-      type: 'op',
-      space_id: this.spaceId,
-      space_name: this.spaceName,
-      from_seq: trimmed.length > 0 ? trimmed[0].seq : 0,
-      to_seq: trimmed.length > 0 ? trimmed[trimmed.length - 1].seq : 0,
-      created_by: this.userId,
-      created_at: new Date().toISOString(),
-      events: trimmed,
-      prev_snapshots: [],
+      const merged = new Map<string, EoEvent>();
+      for (const e of remote) merged.set(e.client_event_id ?? `${e.seq}`, e);
+      for (const e of local) merged.set(e.client_event_id ?? `${e.seq}`, e);
+
+      const sorted = Array.from(merged.values()).sort((a, b) => a.seq - b.seq);
+      const trimmed = sorted.slice(-RECENT_BUFFER_MAX);
+
+      if (trimmed.length > 0 || local.length > 0) {
+        const file: EodbFile = {
+          version: 1,
+          type: 'op',
+          space_id: this.spaceId,
+          space_name: this.spaceName,
+          from_seq: trimmed.length > 0 ? trimmed[0].seq : 0,
+          to_seq: trimmed.length > 0 ? trimmed[trimmed.length - 1].seq : 0,
+          created_by: this.userId,
+          created_at: new Date().toISOString(),
+          events: trimmed,
+          prev_snapshots: [],
+        };
+        const encrypted = await this.encryptBinaryForTier(packEodb(file), tier);
+        await gdriveStoreNamed(this.matrixAccessToken, encrypted, dt, remoteFile);
+      }
+
+      return {
+        lastSeq: trimmed.length > 0 ? trimmed[trimmed.length - 1].seq : 0,
+        fromSeq: trimmed.length > 0 ? trimmed[0].seq : 0,
+      };
     };
-    const binary = packEodb(recentFile);
-    const encrypted = await this.encryptBinary(binary);
-    await gdriveStoreNamed(this.matrixAccessToken, encrypted, dt, RECENT_FILE);
 
-    const lastSeq = trimmed.length > 0 ? trimmed[trimmed.length - 1].seq : 0;
-    const fromSeq = trimmed.length > 0 ? trimmed[0].seq : 0;
+    const [viewerSeqs, , ] = await Promise.all([
+      flushTier(viewerOps, this.recentFile, 'viewer'),
+      restrictedOps.length > 0 ? flushTier(restrictedOps, this.restrictedRecentFile, 'restricted') : Promise.resolve({ lastSeq: 0, fromSeq: 0 }),
+      adminOps.length > 0 ? flushTier(adminOps, this.adminRecentFile, 'admin') : Promise.resolve({ lastSeq: 0, fromSeq: 0 }),
+    ]);
+
+    const { lastSeq, fromSeq } = viewerSeqs;
+    const allLastSeq = Math.max(
+      lastSeq,
+      ...this.opsBuffer.map(e => e.seq),
+    );
 
     // Preserve log fields from existing manifest (written by bake)
     let logSizeBytes = 0;
     let checkpoints: SyncManifest['checkpoints'] = [];
     try {
-      const existing = await gdriveReadJson(this.matrixAccessToken, dt, MANIFEST_FILE);
+      const existing = await gdriveReadJson(this.matrixAccessToken, dt, this.manifestFile);
       if (existing) {
         const m = existing as unknown as SyncManifest;
         logSizeBytes = m.log_size_bytes ?? 0;
@@ -316,39 +434,56 @@ export class GDriveSyncService {
     } catch { /* non-critical */ }
 
     const manifest: SyncManifest = {
-      head_seq: lastSeq,
+      head_seq: allLastSeq,
       buffer_from_seq: fromSeq,
-      buffer_to_seq: lastSeq,
+      buffer_to_seq: allLastSeq,
       log_size_bytes: logSizeBytes,
       checkpoints,
       updated_at: new Date().toISOString(),
     };
     await gdriveStoreJson(
-      this.matrixAccessToken, dt, MANIFEST_FILE,
+      this.matrixAccessToken, dt, this.manifestFile,
       manifest as unknown as Record<string, unknown>,
     );
 
     // Notify peers after write confirms
-    if (lastSeq > 0) {
-      this.onOpSaved?.(lastSeq);
+    if (allLastSeq > 0) {
+      this.onOpSaved?.(allLastSeq);
     }
 
     useGDriveStore.getState().recordSync(this.spaceId);
     this.onStatus?.('synced');
-    console.log(`[EO-DB] GDrive buffer flushed: ${trimmed.length} events, head_seq=${lastSeq}`);
+    console.log(`[EO-DB] GDrive buffer flushed: ${this.opsBuffer.length} events, head_seq=${allLastSeq}`);
   }
 
+  /**
+   * Download all accessible recent buffers (viewer always; restricted/admin if keys held).
+   * Merges and deduplicates events from all tiers.
+   */
   private async downloadRecentBuffer(): Promise<EoEvent[]> {
-    try {
-      const result = await gdriveRetrieveNamed(
-        this.matrixAccessToken, this.dataType, RECENT_FILE,
-      );
-      if (!result?.ok) return [];
-      const data = await this.decryptBinary(result.data);
-      return safeUnpackEvents(data);
-    } catch {
-      return [];
+    const dt = this.dataType;
+    const tiers: Array<{ file: string; tier: 'viewer' | 'restricted' | 'admin' }> = [
+      { file: this.recentFile, tier: 'viewer' },
+    ];
+    if (this.resolveKeyIdForTier('restricted')) {
+      tiers.push({ file: this.restrictedRecentFile, tier: 'restricted' });
     }
+    if (this.resolveKeyIdForTier('admin')) {
+      tiers.push({ file: this.adminRecentFile, tier: 'admin' });
+    }
+
+    const merged = new Map<string, EoEvent>();
+    for (const { file } of tiers) {
+      try {
+        const result = await gdriveRetrieveNamed(this.matrixAccessToken, dt, file);
+        if (!result?.ok) continue;
+        const data = await this.decryptBinary(result.data);
+        for (const e of safeUnpackEvents(data)) {
+          merged.set(e.client_event_id ?? `${e.seq}`, e);
+        }
+      } catch { /* tier may not exist */ }
+    }
+    return Array.from(merged.values()).sort((a, b) => a.seq - b.seq);
   }
 
   // ── Bake ──────────────────────────────────────────────────
@@ -426,12 +561,19 @@ export class GDriveSyncService {
   }
 
   /**
-   * Write the cumulative log file atomically:
-   * 1. Download existing log + buffer
-   * 2. Merge all events (dedup by client_event_id)
-   * 3. Write temp file, verify, then overwrite log
-   * 4. Update manifest with new checkpoints
-   * 5. Clear buffer
+   * Write cumulative log files atomically across all three tiers.
+   *
+   * Each tier (viewer, restricted, admin) gets its own log and recent buffer:
+   *   space-log.eodb       + space-recent.eodb       — viewer-key encrypted
+   *   restricted-log.eodb  + restricted-recent.eodb  — restricted-key encrypted
+   *   admin-log.eodb       + admin-recent.eodb        — admin-key encrypted
+   *
+   * Steps per tier:
+   *   1. Download existing tier log (prior cumulative history)
+   *   2. Merge with tier-specific recent buffer + own opsBuffer
+   *   3. Write temp file, verify, overwrite tier log
+   *   4. Clear tier recent buffer
+   *   5. Update sync manifest
    */
   private async bakeLog(dt: string, intentFileIds: string[]): Promise<void> {
     if (this.baking) return;
@@ -439,115 +581,138 @@ export class GDriveSyncService {
     console.log('[EO-DB] GDrive bake: starting cumulative log write');
 
     try {
-      // 1. Download existing log (full history so far)
-      const priorEvents: EoEvent[] = [];
-      try {
-        const logResult = await gdriveRetrieveNamed(this.matrixAccessToken, dt, LOG_FILE);
-        if (logResult?.ok) {
-          const data = await this.decryptBinary(logResult.data);
-          priorEvents.push(...safeUnpackEvents(data));
-        }
-      } catch { /* log may not exist yet */ }
+      // Download all accessible logs (one pass — dedup across tiers below)
+      const downloadLog = async (file: string): Promise<EoEvent[]> => {
+        try {
+          const r = await gdriveRetrieveNamed(this.matrixAccessToken, dt, file);
+          if (!r?.ok) return [];
+          return safeUnpackEvents(await this.decryptBinary(r.data));
+        } catch { return []; }
+      };
 
-      // 2. Download remote buffer
+      const [priorViewer, priorRestricted, priorAdmin] = await Promise.all([
+        downloadLog(this.logFile),
+        this.resolveKeyIdForTier('restricted') ? downloadLog(this.restrictedLogFile) : Promise.resolve([]),
+        this.resolveKeyIdForTier('admin') ? downloadLog(this.adminLogFile) : Promise.resolve([]),
+      ]);
+
+      // Also include remote recent buffers
       const bufferEvents = await this.downloadRecentBuffer();
 
-      // 3. Merge: log + buffer + own opsBuffer; dedup by client_event_id
-      const merged = new Map<string, EoEvent>();
-      for (const e of priorEvents) merged.set(e.client_event_id ?? `seq:${e.seq}`, e);
-      for (const e of bufferEvents) merged.set(e.client_event_id ?? `seq:${e.seq}`, e);
-      for (const e of this.opsBuffer) merged.set(e.client_event_id ?? `seq:${e.seq}`, e);
+      // Merge everything — dedup by client_event_id
+      const allMerged = new Map<string, EoEvent>();
+      for (const e of priorViewer) allMerged.set(e.client_event_id ?? `seq:${e.seq}`, e);
+      for (const e of priorRestricted) allMerged.set(e.client_event_id ?? `seq:${e.seq}`, e);
+      for (const e of priorAdmin) allMerged.set(e.client_event_id ?? `seq:${e.seq}`, e);
+      for (const e of bufferEvents) allMerged.set(e.client_event_id ?? `seq:${e.seq}`, e);
+      for (const e of this.opsBuffer) allMerged.set(e.client_event_id ?? `seq:${e.seq}`, e);
 
-      if (merged.size === 0) {
+      if (allMerged.size === 0) {
         console.log('[EO-DB] GDrive bake: nothing to bake');
         return;
       }
 
-      const events = Array.from(merged.values()).sort((a, b) => a.seq - b.seq);
-      const fromSeq = events[0].seq;
-      const toSeq = events[events.length - 1].seq;
+      const allEvents = Array.from(allMerged.values()).sort((a, b) => a.seq - b.seq);
+      const fromSeq = allEvents[0].seq;
+      const toSeq = allEvents[allEvents.length - 1].seq;
 
-      // Record checkpoint: byte offset where bake events start (before pack)
-      // We compute approximate offset based on prior events count
-      const priorEventCount = priorEvents.length;
-      const newEventCount = events.length - priorEventCount;
-
-      // 4. Pack and encrypt the full cumulative log
-      const logFile: EodbFile = {
-        version: 1,
-        type: 'hydration',
-        space_id: this.spaceId,
-        space_name: this.spaceName,
-        from_seq: fromSeq,
-        to_seq: toSeq,
-        created_by: this.userId,
-        created_at: new Date().toISOString(),
-        events,
-        prev_snapshots: [],
-      };
-      const binary = packEodb(logFile);
-      const encrypted = await this.encryptBinary(binary);
-
-      // 5. Atomic write: temp file → verify → rename
-      const tempFileName = `${LOG_PENDING_PREFIX}${this.userId}.eodb`;
-      const tempResult = await gdriveStoreNamed(
-        this.matrixAccessToken, encrypted, dt, tempFileName,
-      );
-      if (!tempResult.ok) {
-        console.warn('[EO-DB] GDrive bake: temp write failed, aborting');
-        return;
+      // Split by tier
+      const viewerEvents: EoEvent[] = [];
+      const restrictedEvents: EoEvent[] = [];
+      const adminEvents: EoEvent[] = [];
+      for (const e of allEvents) {
+        const tier = this.classifyEventTier(e);
+        if (tier === 'restricted') restrictedEvents.push(e);
+        else if (tier === 'admin') adminEvents.push(e);
+        else viewerEvents.push(e);
       }
 
-      // Write the real log file
-      await gdriveStoreNamed(this.matrixAccessToken, encrypted, dt, LOG_FILE);
-      console.log(`[EO-DB] GDrive bake: wrote ${LOG_FILE} (${events.length} events, seq ${fromSeq}→${toSeq})`);
+      // Helper: pack + encrypt + write a tier log
+      const writeTierLog = async (
+        events: EoEvent[],
+        logFile: string,
+        recentFile: string,
+        tier: 'viewer' | 'restricted' | 'admin',
+        priorCount: number,
+      ): Promise<number> => {
+        if (events.length === 0) return 0;
+        const tierFrom = events[0].seq;
+        const tierTo = events[events.length - 1].seq;
+        const file: EodbFile = {
+          version: 1,
+          type: 'hydration',
+          space_id: this.spaceId,
+          space_name: this.spaceName,
+          from_seq: tierFrom,
+          to_seq: tierTo,
+          created_by: this.userId,
+          created_at: new Date().toISOString(),
+          events,
+          prev_snapshots: [],
+        };
+        const encrypted = await this.encryptBinaryForTier(packEodb(file), tier);
 
-      // 6. Clear buffer
-      const emptyFile: EodbFile = {
-        version: 1,
-        type: 'op',
-        space_id: this.spaceId,
-        space_name: this.spaceName,
-        from_seq: toSeq,
-        to_seq: toSeq,
-        created_by: this.userId,
-        created_at: new Date().toISOString(),
-        events: [],
-        prev_snapshots: [],
+        // Temp-write then overwrite (atomic-ish)
+        const tempFile = `${this.logPendingPrefix}${tier}-${this.userId}.eodb`;
+        const tempResult = await gdriveStoreNamed(this.matrixAccessToken, encrypted, dt, tempFile);
+        if (!tempResult.ok) {
+          console.warn(`[EO-DB] GDrive bake: temp write failed for ${tier} tier, skipping`);
+          return 0;
+        }
+        await gdriveStoreNamed(this.matrixAccessToken, encrypted, dt, logFile);
+        console.log(`[EO-DB] GDrive bake: wrote ${logFile} (${events.length} events, seq ${tierFrom}→${tierTo})`);
+
+        // Clear recent buffer for this tier
+        const emptyFile: EodbFile = {
+          version: 1, type: 'op',
+          space_id: this.spaceId, space_name: this.spaceName,
+          from_seq: tierTo, to_seq: tierTo,
+          created_by: this.userId, created_at: new Date().toISOString(),
+          events: [], prev_snapshots: [],
+        };
+        const emptyEncrypted = await this.encryptBinaryForTier(packEodb(emptyFile), tier);
+        await gdriveStoreNamed(this.matrixAccessToken, emptyEncrypted, dt, recentFile);
+
+        return encrypted.length;
       };
-      const emptyBinary = packEodb(emptyFile);
-      const emptyEncrypted = await this.encryptBinary(emptyBinary);
-      await gdriveStoreNamed(this.matrixAccessToken, emptyEncrypted, dt, RECENT_FILE);
 
-      // 7. Update manifest with checkpoints
-      const logSizeBytes = encrypted.length;
-      // Estimate byte offset for the new events (rough: proportional to event count)
-      const newEventsOffset = priorEventCount > 0
-        ? Math.floor(logSizeBytes * (priorEventCount / events.length))
+      const [viewerLogSize] = await Promise.all([
+        writeTierLog(viewerEvents, this.logFile, this.recentFile, 'viewer', priorViewer.length),
+        restrictedEvents.length > 0
+          ? writeTierLog(restrictedEvents, this.restrictedLogFile, this.restrictedRecentFile, 'restricted', priorRestricted.length)
+          : Promise.resolve(0),
+        adminEvents.length > 0
+          ? writeTierLog(adminEvents, this.adminLogFile, this.adminRecentFile, 'admin', priorAdmin.length)
+          : Promise.resolve(0),
+      ]);
+
+      // Update sync manifest (checkpoints based on viewer log)
+      const newEventsOffset = priorViewer.length > 0 && viewerEvents.length > 0
+        ? Math.floor(viewerLogSize * (priorViewer.length / viewerEvents.length))
         : 0;
 
       const manifest: SyncManifest = {
         head_seq: toSeq,
         buffer_from_seq: toSeq,
         buffer_to_seq: toSeq,
-        log_size_bytes: logSizeBytes,
+        log_size_bytes: viewerLogSize,
         checkpoints: [
           { from_seq: fromSeq, byte_offset: 0 },
-          ...(newEventsOffset > 0 && newEventCount > 0
-            ? [{ from_seq: events[priorEventCount]?.seq ?? toSeq, byte_offset: newEventsOffset }]
+          ...(newEventsOffset > 0 && viewerEvents.length > priorViewer.length
+            ? [{ from_seq: viewerEvents[priorViewer.length]?.seq ?? toSeq, byte_offset: newEventsOffset }]
             : []),
         ],
         updated_at: new Date().toISOString(),
       };
       await gdriveStoreJson(
-        this.matrixAccessToken, dt, MANIFEST_FILE,
+        this.matrixAccessToken, dt, this.manifestFile,
         manifest as unknown as Record<string, unknown>,
       );
 
-      // 8. Delete temp file and intent files
+      // Delete temp files and intent files
       try {
         const { entries: tempEntries } = await gdriveListByPrefix(
-          this.matrixAccessToken, dt, LOG_PENDING_PREFIX,
+          this.matrixAccessToken, dt, this.logPendingPrefix,
         );
         for (const e of tempEntries) {
           await gdriveDeleteFile(this.matrixAccessToken, e.data_id).catch(() => {});
@@ -562,7 +727,7 @@ export class GDriveSyncService {
       await this.store.put('meta:gdrive_saved_op_count', 0);
       useGDriveStore.getState().recordSync(this.spaceId);
       this.onStatus?.('synced');
-      console.log(`[EO-DB] GDrive bake complete: ${events.length} total events`);
+      console.log(`[EO-DB] GDrive bake complete: ${allEvents.length} total events (viewer:${viewerEvents.length} restricted:${restrictedEvents.length} admin:${adminEvents.length})`);
     } finally {
       this.baking = false;
     }
@@ -572,7 +737,7 @@ export class GDriveSyncService {
   private async cleanOrphanedTempFiles(): Promise<void> {
     try {
       const { entries } = await gdriveListByPrefix(
-        this.matrixAccessToken, this.dataType, LOG_PENDING_PREFIX,
+        this.matrixAccessToken, this.dataType, this.logPendingPrefix,
       );
       const cutoff = Date.now() - BAKE_LOCK_TTL_MS;
       for (const e of entries) {
@@ -613,7 +778,7 @@ export class GDriveSyncService {
     // Try manifest first
     let manifest: SyncManifest | null = null;
     try {
-      const raw = await gdriveReadJson(this.matrixAccessToken, dt, MANIFEST_FILE);
+      const raw = await gdriveReadJson(this.matrixAccessToken, dt, this.manifestFile);
       if (raw) manifest = raw as unknown as SyncManifest;
     } catch { /* manifest may not exist */ }
 
@@ -659,7 +824,7 @@ export class GDriveSyncService {
       if (checkpoint && checkpoint.byte_offset > 0) {
         try {
           const rangeResult = await gdriveRetrieveRange(
-            this.matrixAccessToken, dt, LOG_FILE, checkpoint.byte_offset,
+            this.matrixAccessToken, dt, this.logFile, checkpoint.byte_offset,
           );
           if (rangeResult?.ok && rangeResult.data.length > 0) {
             const data = await this.decryptBinary(rangeResult.data);
@@ -687,7 +852,7 @@ export class GDriveSyncService {
 
     // Fallback: download full log
     try {
-      const logResult = await gdriveRetrieveNamed(this.matrixAccessToken, dt, LOG_FILE);
+      const logResult = await gdriveRetrieveNamed(this.matrixAccessToken, dt, this.logFile);
       if (!logResult?.ok) return;
       const data = await this.decryptBinary(logResult.data);
       const events = safeUnpackEvents(data);
@@ -715,9 +880,10 @@ export class GDriveSyncService {
   /**
    * Hydrate a store from Google Drive.
    *
-   * New-format priority:
-   *   1. space-log.eodb  — cumulative full history
-   *   2. space-recent.eodb — recent events not yet baked into log
+   * New-format priority (3-tier):
+   *   1. space-log.eodb + restricted-log.eodb + admin-log.eodb  — cumulative history
+   *      (restricted and admin tiers only downloaded if the keyring has the required key)
+   *   2. space-recent.eodb + restricted-recent.eodb + admin-recent.eodb — recent buffer
    *
    * Backward-compat fallback (old hydration-*.eodb + op-*.eodb):
    *   - Collect ALL events from ALL hydration slots (dedup by client_event_id,
@@ -730,7 +896,22 @@ export class GDriveSyncService {
     dataType: string,
     onEvent?: (event: any) => void,
     keyring?: LocalKeyring,
+    fileNames?: {
+      log?: string;
+      recent?: string;
+      restrictedLog?: string;
+      restrictedRecent?: string;
+      adminLog?: string;
+      adminRecent?: string;
+    },
   ): Promise<number> {
+    const logFile = fileNames?.log ?? LEGACY_LOG_FILE;
+    const recentFile = fileNames?.recent ?? LEGACY_RECENT_FILE;
+    const restrictedLogFile = fileNames?.restrictedLog;
+    const restrictedRecentFile = fileNames?.restrictedRecent;
+    const adminLogFile = fileNames?.adminLog;
+    const adminRecentFile = fileNames?.adminRecent;
+
     console.log('[EO-DB] hydrateFromGDrive: starting, dataType =', dataType);
     const localSeq = await store.getCurrentSeq();
     let lastAppliedSeq = localSeq;
@@ -738,40 +919,68 @@ export class GDriveSyncService {
     const decrypt = async (raw: Uint8Array): Promise<Uint8Array> =>
       keyring ? decryptSnapshot(raw, keyring).catch(() => raw) : raw;
 
-    // ── 1. Try new format: space-log.eodb ──
-    let usedNewFormat = false;
-    try {
-      const logResult = await gdriveRetrieveNamed(matrixAccessToken, dataType, LOG_FILE);
-      if (logResult?.ok) {
-        const data = await decrypt(logResult.data);
-        const events = safeUnpackEvents(data);
-        if (events.length > 0) {
-          console.log(`[EO-DB] hydrateFromGDrive: applying ${LOG_FILE} (${events.length} events)`);
-          for (const event of events) {
-            if (event.seq <= localSeq) continue;
-            const seq = await processEvent(store, event, onEvent);
-            lastAppliedSeq = Math.max(lastAppliedSeq, seq);
-          }
-          usedNewFormat = true;
-        }
+    /** Check if keyring has a key for the given tier scope suffix. */
+    const hasTierKey = (tier: 'restricted' | 'admin'): boolean => {
+      if (!keyring) return false;
+      for (const entry of keyring.keys.values()) {
+        if (entry.scope.endsWith(`.${tier}`)) return true;
       }
-    } catch (e) {
-      console.warn('[EO-DB] hydrateFromGDrive: log read failed, trying fallback:', e);
+      return false;
+    };
+
+    // ── 1. Try new format: all 3 log tiers ──
+    let usedNewFormat = false;
+    const allLogEvents = new Map<string, EoEvent>();
+
+    const tryDownloadLog = async (file: string): Promise<void> => {
+      try {
+        const result = await gdriveRetrieveNamed(matrixAccessToken, dataType, file);
+        if (!result?.ok) return;
+        const data = await decrypt(result.data);
+        for (const e of safeUnpackEvents(data)) {
+          allLogEvents.set(e.client_event_id ?? `seq:${e.seq}`, e);
+        }
+      } catch { /* log may not exist */ }
+    };
+
+    await tryDownloadLog(logFile);
+    if (hasTierKey('restricted') && restrictedLogFile) await tryDownloadLog(restrictedLogFile);
+    if (hasTierKey('admin') && adminLogFile) await tryDownloadLog(adminLogFile);
+
+    if (allLogEvents.size > 0) {
+      const sorted = Array.from(allLogEvents.values()).sort((a, b) => a.seq - b.seq);
+      console.log(`[EO-DB] hydrateFromGDrive: applying log tiers (${sorted.length} events)`);
+      for (const event of sorted) {
+        if (event.seq <= localSeq) continue;
+        const seq = await processEvent(store, event, onEvent);
+        lastAppliedSeq = Math.max(lastAppliedSeq, seq);
+      }
+      usedNewFormat = true;
     }
 
-    // ── 2. Apply space-recent.eodb (new or updated events since last bake) ──
-    try {
-      const recentResult = await gdriveRetrieveNamed(matrixAccessToken, dataType, RECENT_FILE);
-      if (recentResult?.ok) {
-        const data = await decrypt(recentResult.data);
-        const events = safeUnpackEvents(data);
-        for (const event of events) {
-          if (event.seq <= lastAppliedSeq) continue;
-          const seq = await processEvent(store, event, onEvent);
-          lastAppliedSeq = Math.max(lastAppliedSeq, seq);
+    // ── 2. Apply recent buffers (events since last bake) ──
+    const allRecentEvents = new Map<string, EoEvent>();
+    const tryDownloadRecent = async (file: string): Promise<void> => {
+      try {
+        const result = await gdriveRetrieveNamed(matrixAccessToken, dataType, file);
+        if (!result?.ok) return;
+        const data = await decrypt(result.data);
+        for (const e of safeUnpackEvents(data)) {
+          allRecentEvents.set(e.client_event_id ?? `seq:${e.seq}`, e);
         }
-      }
-    } catch { /* non-critical */ }
+      } catch { /* non-critical */ }
+    };
+
+    await tryDownloadRecent(recentFile);
+    if (hasTierKey('restricted') && restrictedRecentFile) await tryDownloadRecent(restrictedRecentFile);
+    if (hasTierKey('admin') && adminRecentFile) await tryDownloadRecent(adminRecentFile);
+
+    const recentSorted = Array.from(allRecentEvents.values()).sort((a, b) => a.seq - b.seq);
+    for (const event of recentSorted) {
+      if (event.seq <= lastAppliedSeq) continue;
+      const seq = await processEvent(store, event, onEvent);
+      lastAppliedSeq = Math.max(lastAppliedSeq, seq);
+    }
 
     if (usedNewFormat) {
       console.log(`[EO-DB] hydrateFromGDrive: complete (new format). Seq ${lastAppliedSeq}`);
