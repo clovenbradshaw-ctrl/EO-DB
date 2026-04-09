@@ -33,6 +33,7 @@ const SYNC_HELLO = _syncTypes.hello;
 const SYNC_OFFER = _syncTypes.offer;
 const SYNC_REQUEST = _syncTypes.request;
 const SYNC_EVENTS = _syncTypes.events;
+const SYNC_GDRIVE = _syncTypes.gdrive;
 
 const BATCH_SIZE = 50;
 
@@ -58,6 +59,12 @@ export class PeerSync {
 
   /** Optional WebRTC peer for direct browser-to-browser transfers. */
   private webrtcPeer: WebRTCPeer | null = null;
+
+  /**
+   * Called when a peer signals that new ops were written to GDrive.
+   * Wire this to gdriveSync.triggerImmediateCheck() in the app shell.
+   */
+  onGDriveUpdate?: () => void;
 
   constructor(
     client: MatrixClient,
@@ -181,6 +188,10 @@ export class PeerSync {
         break;
       case SYNC_EVENTS:
         await this.processIncomingPeerEvents(content);
+        break;
+      case SYNC_GDRIVE:
+        // A peer wrote new ops to GDrive — trigger an immediate pull instead of waiting 15s.
+        this.onGDriveUpdate?.();
         break;
     }
   }
@@ -319,6 +330,26 @@ export class PeerSync {
 
     for (const event of events) {
       await processEvent(this.store, event, this.onEvent);
+    }
+  }
+
+  /**
+   * Notify all room members that new ops are available on GDrive.
+   * Recipients call triggerImmediateCheck() to pull without waiting 15s.
+   * Fire-and-forget — failures are non-critical (15s poll is the safety net).
+   */
+  async broadcastGDriveUpdate(seq: number): Promise<void> {
+    const room = this.client.getRoom(this.roomId);
+    if (!room) return;
+    const myUserId = this.client.getUserId();
+    const members = room.getJoinedMembers().filter(m => m.userId !== myUserId);
+    for (const member of members) {
+      try {
+        await this.client.sendToDevice(
+          SYNC_GDRIVE,
+          toDeviceContent(member.userId, '*', { seq }),
+        );
+      } catch { /* best-effort */ }
     }
   }
 }

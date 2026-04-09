@@ -198,6 +198,7 @@ export const useEoStore = create<EoDbState>((set, get) => ({
         recentEvents: [...state.recentEvents.slice(-99), fullEvent],
         lastSeq: fullEvent.seq,
       }));
+      get().gdriveSync?.saveOp(fullEvent).catch(e => console.warn('[EO-DB] saveOp failed:', e));
     });
 
     get().onDispatch?.(populatedEvent);
@@ -208,17 +209,19 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     const { store } = get();
     if (!store) throw new Error('Store not initialized');
 
+    const imported: EoEvent[] = [];
     const lastSeq = await processEventsBulk(store, events, onProgress, (fullEvent) => {
       set((state) => ({
         recentEvents: [...state.recentEvents.slice(-99), fullEvent],
         lastSeq: fullEvent.seq,
       }));
+      imported.push(fullEvent);
     });
 
     const { gdriveSync } = get();
-    if (gdriveSync) {
-      gdriveSync.forceSave().catch((e) =>
-        console.warn('[EO-DB] Google Drive upload after import failed:', e),
+    if (gdriveSync && imported.length > 0) {
+      gdriveSync.saveBulkOps(imported).catch((e) =>
+        console.warn('[EO-DB] Google Drive bulk upload after import failed:', e),
       );
     }
 

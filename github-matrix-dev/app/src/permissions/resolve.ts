@@ -130,7 +130,10 @@ export function resolvePermissionsFromSharing(
   } else {
     const entry = sharing.find(s => s.user_id === userId);
     if (!entry) {
-      pl = 0;
+      // Default: editor-level access for anyone with space access.
+      // Permissions are restrictive (restrict-by-exception), not grant-only.
+      // Admins can explicitly lower access via the sharing list.
+      pl = 25;
     } else {
       switch (entry.access) {
         case 'admin': pl = 50; break;
