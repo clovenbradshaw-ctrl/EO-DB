@@ -352,9 +352,11 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
           <div style={s.clientName}>{value.name || formatName(target.split('.').pop() || target)}</div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             {value._type && <TypeBadge type={value._type} />}
-            <div style={{ ...s.statusBadge, ...statusStyleMap[statusClass] }}>
-              {value.status || 'unknown'}
-            </div>
+            {value.status && (
+              <div style={{ ...s.statusBadge, ...statusStyleMap[statusClass] }}>
+                {value.status}
+              </div>
+            )}
             {/* Gear — open layout designer */}
             <button
               style={s.gearBtn}
