@@ -1,8 +1,11 @@
 import { EoDb, decode } from './level.js';
 import { getState, getStateByPrefix, getHashCohort } from './state.js';
+import { getBranchState } from './branch.js';
 import { getEdgesFrom, getEdgesTo } from './graph.js';
 import { getDepEdgesFrom, getDepEdgesTo } from './dep-graph.js';
 import { resolveAlias } from './helpers.js';
+import { getResolutionPolicy, resolveConflict } from './conflict.js';
+import type { ConflictState } from './types.js';
 import { readLogForTarget } from './log.js';
 import type {
   EoState, EvaRegistration, HorizonResponse, GroundEntry, SignalEntry,
@@ -40,19 +43,30 @@ export interface HorizonOpts {
  * One expensive layer (on-demand only):
  *   5. Signals — statistical patterns across populations
  */
+/**
+ * Horizon read — current state of records.
+ *
+ * @param branchId  Branch to read from. Defaults to 'main'.
+ *                  On non-main branches, the figure layer reads from getBranchState
+ *                  (which inherits from the parent chain). The nearby, ancestry, and
+ *                  governance layers remain main-only in this PR.
+ *                  KNOWN GAP: aggregateFieldColumns reads main state keyspace.
+ *                  See getStateByPrefix note below.
+ */
 export async function horizonGet(
   db: EoDb,
   target: string,
-  opts?: HorizonOpts
+  opts?: HorizonOpts,
+  branchId: string = 'main',
 ): Promise<HorizonResponse | HorizonResponse[] | null> {
   if (opts?.prefix) {
     return horizonGetByPrefix(db, target, opts);
   }
 
-  const resolved = await resolveAlias(db, target);
+  const resolved = await resolveAlias(db, target, branchId);
 
-  // Layer 1: Figure
-  const figure = await getFigureState(db, resolved);
+  // Layer 1: Figure (branch-aware)
+  const figure = await getFigureState(db, resolved, branchId);
   if (!figure) return null;
 
   // Soft-delete check: unless include_deleted is set, treat deleted entities as not found
@@ -122,15 +136,39 @@ async function horizonGetByPrefix(db: EoDb, prefix: string, opts?: HorizonOpts):
 
 // ─── Layer 1: Figure ───────────────────────────────────────────────
 
-async function getFigureState(db: EoDb, target: string): Promise<EoState | null> {
-  const state = await getState(db, target);
+async function getFigureState(
+  db: EoDb,
+  target: string,
+  branchId: string = 'main',
+): Promise<EoState | null> {
+  // Branch-aware state read
+  const state = branchId === 'main'
+    ? await getState(db, target)
+    : await getBranchState(db, branchId, target);
   if (!state) return null;
 
   if (state.value?._alias) {
-    return getFigureState(db, state.value._alias);
+    return getFigureState(db, state.value._alias, branchId);
   }
 
-  // Aggregate child field targets as columns into the figure value
+  // Conflict resolution at read time — if the state holds a ConflictState,
+  // check for a registered resolution policy and apply it.
+  if (state.value?.conflict === true) {
+    const policy = await getResolutionPolicy(db, target);
+    if (policy) {
+      const resolved = resolveConflict(state.value as ConflictState, policy);
+      const resolvedState = { ...state, value: resolved };
+      // Aggregate columns on the resolved value
+      return aggregateFieldColumns(db, target, resolvedState);
+    }
+    // No policy — Binding default: conflict IS the datum, return as-is
+    return state;
+  }
+
+  // Aggregate child field targets as columns into the figure value.
+  // KNOWN GAP: aggregateFieldColumns calls getStateByPrefix which reads main state keyspace.
+  // On non-main branches, child columns reflect main's state, not the branch's projected state.
+  // Fix deferred to next PR (branch-aware prefix scan).
   const withColumns = await aggregateFieldColumns(db, target, state);
 
   let registration: EvaRegistration | null = null;
@@ -147,8 +185,8 @@ async function getFigureState(db: EoDb, target: string): Promise<EoState | null>
       _today: new Date().toISOString().split('T')[0],
     };
     for (const dep of registration.dependencies) {
-      const resolved = await resolveAlias(db, dep);
-      const depState = await getState(db, resolved);
+      const resolved = await resolveAlias(db, dep, branchId);
+      const depState = await getBranchState(db, branchId, resolved);
       inputs[dep] = depState?.value;
     }
     return {
@@ -171,6 +209,12 @@ async function getFigureState(db: EoDb, target: string): Promise<EoState | null>
  * Aggregate child field targets into the figure value as columns.
  * e.g. if target is app.tbl.rec001 and state:app.tbl.rec001.score exists with value 100,
  * the returned figure value will include { ..., score: 100 }.
+ *
+ * NOTE: Branch-blind — uses getStateByPrefix which reads main state keyspace (state:{prefix}).
+ * On non-main branches this returns pre-fork state from main, not branch projected state.
+ * Consequence: aggregateFieldColumns, getNearby, getGovernance, detectSignals, getAncestry
+ * all read main state when called from a non-main branch Horizon.
+ * Branch-aware prefix scan is deferred to next PR. DO NOT use in branch write paths.
  */
 async function aggregateFieldColumns(db: EoDb, target: string, state: EoState): Promise<EoState> {
   const children = await getStateByPrefix(db, target + '.');

@@ -60,7 +60,10 @@ export function chainHash(previousHash: string, event: EoEvent): string {
  * produces the same hash, enabling idempotent deduplication.
  */
 export function eventHash(event: EoEventInput | EoEvent): string {
-  const input = event.op + '\0' + event.target + '\0' + deepSerialize(event.operand) + '\0' + event.agent + '\0' + event.ts;
+  // Include branch so the same content on different branches produces different hashes.
+  // This prevents false idem suppression across branches.
+  const branch = (event as any).branch ?? 'main';
+  const input = event.op + '\0' + event.target + '\0' + deepSerialize(event.operand) + '\0' + event.agent + '\0' + event.ts + '\0' + branch;
   return 'ev:' + createHash('sha256').update(input).digest('hex');
 }
 

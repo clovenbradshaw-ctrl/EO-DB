@@ -1,6 +1,66 @@
 // The nine operators
 export type Operator = 'NUL' | 'SIG' | 'INS' | 'SEG' | 'CON' | 'SYN' | 'DEF' | 'EVA' | 'REC';
 
+// ─── Branching ────────────────────────────────────────────────────────────────
+
+/** A named branch (version) of the database. Main is implicit — not stored here. */
+export interface Branch {
+  id: string;
+  name: string;
+  parent?: string;        // undefined on 'main'
+  /** seq of the fork NUL — the last shared event. Child events start at forkSeq+1. */
+  forkSeq: number;
+  createdAt: string;
+  agent: string;
+  /**
+   * Optional table scope — limits which targets this branch can diverge from its parent.
+   * If set (e.g. 'firm.cases'), getBranchState for targets outside this prefix falls
+   * directly to the parent, bypassing branch-specific state.
+   *
+   * This models "Bob's review of the cases table" — Bob's branch only holds divergent
+   * state for cases.*, not for firm-wide config or other tables.
+   */
+  scope?: string;
+  /**
+   * Optional role that created / owns this branch.
+   * Enables role-scoped parallel review: 'attorney', 'reviewer', 'caseworker', etc.
+   * Multiple users can each have their own role branch on the same table simultaneously.
+   */
+  role?: string;
+}
+
+// ─── Conflict ─────────────────────────────────────────────────────────────────
+
+/** Resolution modes — aligned with EO operator capacities. */
+export type ResolutionMode =
+  | 'Dissecting'   // analytic — one value wins by rule
+  | 'Clearing'     // reductive — VOID wins
+  | 'Binding'      // relational — conflict IS the datum (default)
+  | 'Tending'      // temporal — revert to pre-conflict value from log history
+  | 'Unraveling'   // forensic — expose full conflict structure
+  | 'Cultivating'  // deferred — flag as pending
+  | 'Composing'    // synthetic — merge values by formula (stub)
+  | 'Making'       // generative — produce new entity (stub)
+  | 'Tracing';     // genealogical — reconstruct provenance (stub)
+
+/**
+ * EVA resolution policy — stored at eva-resolve:{target}.
+ * Separate from EvaRegistration (formula), which lives at eva:{target}.
+ */
+export interface EVAResolutionPolicy {
+  type: ResolutionMode;
+  rule?: 'last-write-wins' | 'priority-weighted' | 'authority-ranked' | 'timestamp-ordered';
+  customFormula?: unknown;
+}
+
+/** A divergent conflict state — written to the target's state when merge detects disagreement. */
+export interface ConflictState {
+  conflict: true;
+  originOp: 'DEF' | 'INS' | 'CON' | 'SEG';
+  values: Array<{ value: unknown; branch: string; seq: number | null; agent: string | null }>;
+  resolutionPolicy?: EVAResolutionPolicy;
+}
+
 // Operators that produce log entries
 export type LoggableOperator = 'NUL' | 'INS' | 'SEG' | 'CON' | 'SYN' | 'DEF' | 'EVA' | 'REC';
 
@@ -21,6 +81,9 @@ export interface EoEvent {
   client_event_id?: string;
   triggered_by?: number;          // for REC/INS2+: seq of the human-initiated event that caused the cycle
   meta?: Record<string, any>;
+  branch?: string;                // branch this event belongs to ('main' if absent)
+  source?: string;                // originating context: 'agent' | 'sync' | 'sandbox' etc.
+  objectType?: string;            // semantic object class hint (optional)
 }
 
 // Projected state at a target
