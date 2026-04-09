@@ -256,10 +256,14 @@ export const useApiConnectionStore = create<ApiConnectionState>((set, get) => ({
         (partial as { _fieldTypes: unknown })._fieldTypes;
     }
 
+    const now = new Date().toISOString();
     await dispatch({
       op: 'DEF',
       target: `api.connections.${connectionId}`,
       operand: config,
+      agent: '@local:localhost',
+      ts: now,
+      acquired_ts: now,
     });
 
     set((state) => ({
@@ -271,10 +275,14 @@ export const useApiConnectionStore = create<ApiConnectionState>((set, get) => ({
 
   async deleteConnection(connectionId) {
     const { dispatch } = useEoStore.getState();
+    const now = new Date().toISOString();
     await dispatch({
       op: 'DEF',
       target: `api.connections.${connectionId}`,
       operand: null,
+      agent: '@local:localhost',
+      ts: now,
+      acquired_ts: now,
     });
     set((state) => {
       const connections = { ...state.connections };
@@ -365,6 +373,9 @@ export const useApiConnectionStore = create<ApiConnectionState>((set, get) => ({
         op: 'DEF',
         target: `api.connections.${connectionId}`,
         operand: updatedConfig,
+        agent: '@local:localhost',
+        ts: now,
+        acquired_ts: now,
       });
       set((state) => ({
         connections: { ...state.connections, [connectionId]: updatedConfig },
