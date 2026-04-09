@@ -9,6 +9,12 @@
 import { create } from 'zustand';
 import { gdriveList, type GDriveListEntry } from './gdrive-api';
 
+export interface SpaceFileGuids {
+  log: string;
+  recent: string;
+  manifest: string;
+}
+
 export interface GDriveStoreState {
   /** Whether Google Drive is connected and ready. */
   connected: boolean;
@@ -30,6 +36,8 @@ export interface GDriveStoreState {
   hydrationSlot: number;
   /** True when GDrive is unreachable — app continues with local OPFS data. */
   gdriveOffline: boolean;
+  /** Drive file GUIDs per spaceId — { log, recent, manifest }. */
+  spaceFileGuids: Record<string, SpaceFileGuids>;
 
   /** Connect to Google Drive via the n8n webhook (validates Matrix token). */
   connect: (matrixAccessToken: string) => Promise<void>;
@@ -45,6 +53,8 @@ export interface GDriveStoreState {
   setHydrationSlot: (slot: number) => void;
   /** Mark GDrive as offline or back online. */
   setGDriveOffline: (offline: boolean) => void;
+  /** Store the computed file GUIDs for a space. */
+  setSpaceFileGuids: (spaceId: string, guids: SpaceFileGuids) => void;
 }
 
 export const useGDriveStore = create<GDriveStoreState>((set, get) => ({
@@ -58,6 +68,7 @@ export const useGDriveStore = create<GDriveStoreState>((set, get) => ({
   cachedEntries: {},
   hydrationSlot: 0,
   gdriveOffline: false,
+  spaceFileGuids: {},
 
   async connect(matrixAccessToken: string) {
     set({ connecting: true, error: null });
@@ -114,5 +125,9 @@ export const useGDriveStore = create<GDriveStoreState>((set, get) => ({
 
   setGDriveOffline(offline: boolean) {
     set({ gdriveOffline: offline });
+  },
+
+  setSpaceFileGuids(spaceId: string, guids: SpaceFileGuids) {
+    set({ spaceFileGuids: { ...get().spaceFileGuids, [spaceId]: guids } });
   },
 }));
