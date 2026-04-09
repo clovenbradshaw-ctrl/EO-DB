@@ -22,6 +22,7 @@ import { ConstraintComposer } from './ConstraintComposer';
 import { useIsMobile, useIsNarrow } from '../hooks/useIsMobile';
 import { ColumnManagerPanel } from './ColumnManagerPanel';
 import { AddColumnDialog } from './AddColumnDialog';
+import { WatchedFieldsPicker } from './WatchedFieldsPicker';
 import {
   DndContext,
   DragOverlay,
@@ -485,7 +486,9 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   // responsive when the record set is large.
   const [debouncedFilterText, setDebouncedFilterText] = useState('');
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; target: string } | null>(null);
+  const [cellContextMenu, setCellContextMenu] = useState<{ x: number; y: number; target: string; fieldKey: string } | null>(null);
   const [columnMenu, setColumnMenu] = useState<{ x: number; y: number; key: string; label: string } | null>(null);
+  const [watchedFieldsPicker, setWatchedFieldsPicker] = useState<{ x: number; y: number; key: string } | null>(null);
   const [renameCol, setRenameCol] = useState<{ key: string; value: string } | null>(null);
   const [typeSelector, setTypeSelector] = useState<{ x: number; y: number; target: string; currentType?: string } | null>(null);
   const [fieldSchemas, setFieldSchemas] = useState<Map<string, FieldSchema>>(new Map());
@@ -854,8 +857,10 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
 
     // ─── ⊢ Definitions ───
     if (!isSystemCol) {
+      const resolvedColType: string = fs?.typeDef?.value?.type ?? currentCol?.type ?? 'text';
+      const watchedFields: string[] = Array.isArray(fs?.typeDef?.value?.watchedFields) ? fs.typeDef.value.watchedFields : [];
       const typeLabel = fs?.typeDef
-        ? `${fs.typeDef.value?.type ?? 'unknown'}${fs.typeDef.value?.format ? ` (${fs.typeDef.value.format})` : ''}`
+        ? `${resolvedColType}${fs.typeDef.value?.format ? ` (${fs.typeDef.value.format})` : ''}${resolvedColType === 'lastModifiedTime' && watchedFields.length > 0 ? ` — watching ${watchedFields.length} field${watchedFields.length !== 1 ? 's' : ''}` : ''}`
         : `${currentCol?.type ?? 'text'} (inferred)`;
 
       items.push(
@@ -868,6 +873,15 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
             setColumnMenu(null);
           },
         },
+        // For lastModifiedTime columns: offer watched-fields configuration
+        ...(resolvedColType === 'lastModifiedTime' ? [{
+          label: watchedFields.length > 0 ? 'Configure watched fields…' : 'Configure watched fields…',
+          icon: '⊛',
+          onClick: () => {
+            setWatchedFieldsPicker({ key: colKey, x: columnMenu?.x ?? 0, y: columnMenu?.y ?? 0 });
+            setColumnMenu(null);
+          },
+        }] : []),
         // List existing constraints (click to remove)
         ...fs?.constraints.map(c => ({
           label: `Constraint: ${c.name}`,
@@ -1073,6 +1087,29 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     setResolutionComposer(null);
   }
 
+  async function handleSaveWatchedFields(fieldKey: string, watchedFields: string[]) {
+    try {
+      await dispatch({
+        op: 'DEF',
+        target: schemaTypeTarget(scope, fieldKey),
+        operand: { type: 'lastModifiedTime', watchedFields },
+        agent: `user:${session.userId}`,
+        ts: new Date().toISOString(),
+        acquired_ts: new Date().toISOString(),
+      });
+      setFieldSchemas((prev) => {
+        const next = new Map(prev);
+        const existing = next.get(fieldKey) ?? { fieldKey, constraints: [] };
+        next.set(fieldKey, {
+          ...existing,
+          typeDef: { target: schemaTypeTarget(scope, fieldKey), value: { type: 'lastModifiedTime', watchedFields } },
+        });
+        return next;
+      });
+    } catch { /* ignore */ }
+    setWatchedFieldsPicker(null);
+  }
+
   async function handleAddConstraint(fieldKey: string, name: string, value: any) {
     try {
       await dispatch({
@@ -1190,7 +1227,132 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     e.preventDefault();
     e.stopPropagation();
     const rec = records.find((r) => r.target === target);
+    void rec;
     setContextMenu({ x: e.clientX, y: e.clientY, target });
+  }
+
+  /** Right-click on a cell — shows a type-aware context menu for select/relation fields. */
+  function handleCellContextMenu(e: React.MouseEvent, rec: EoState, col: ColumnDef) {
+    const interceptTypes = new Set(['select', 'multiSelect', 'link', 'linkedRecord', 'relationship']);
+    if (!interceptTypes.has(col.type)) return; // fall through to row handler
+    e.preventDefault();
+    e.stopPropagation();
+    setCellContextMenu({ x: e.clientX, y: e.clientY, target: rec.target, fieldKey: col.key });
+  }
+
+  function getCellContextMenuItems(target: string, col: ColumnDef): ContextMenuItem[] {
+    const rec = records.find((r) => r.target === target);
+    const rawValue = rec ? getFieldValue(rec, col.key, useFieldsSub) : undefined;
+    const items: ContextMenuItem[] = [];
+
+    if (col.type === 'select') {
+      const currentVal: string = typeof rawValue === 'string'
+        ? rawValue
+        : (rawValue?.name ? String(rawValue.name) : '');
+      const opts = col.selectOptions ?? [];
+      items.push({ header: true, label: 'Set value', onClick: () => {}, icon: '○' });
+      if (opts.length === 0) {
+        items.push({ label: 'No options defined', onClick: () => {}, disabled: true });
+      } else {
+        for (const opt of opts) {
+          items.push({
+            label: opt,
+            icon: currentVal === opt ? '✓' : '',
+            onClick: () => handleCellSave(target, col.key, opt),
+          });
+        }
+      }
+      if (currentVal) {
+        items.push({ label: '', onClick: () => {}, separator: true });
+        items.push({
+          label: 'Clear value',
+          danger: true,
+          onClick: () => handleCellSave(target, col.key, ''),
+        });
+      }
+    } else if (col.type === 'multiSelect') {
+      let currentArr: string[] = [];
+      if (Array.isArray(rawValue)) {
+        currentArr = rawValue.map((v: any) => (typeof v === 'object' && v?.name ? String(v.name) : String(v)));
+      }
+      const currentSet = new Set(currentArr);
+      const opts = col.selectOptions ?? [];
+      items.push({ header: true, label: 'Toggle options', onClick: () => {}, icon: '○' });
+      if (opts.length === 0) {
+        items.push({ label: 'No options defined', onClick: () => {}, disabled: true });
+      } else {
+        for (const opt of opts) {
+          const isActive = currentSet.has(opt);
+          items.push({
+            label: opt,
+            icon: isActive ? '✓' : '',
+            onClick: () => {
+              const next = isActive
+                ? currentArr.filter((v) => v !== opt)
+                : [...currentArr, opt];
+              handleCellSave(target, col.key, JSON.stringify(next));
+            },
+          });
+        }
+      }
+      if (currentArr.length > 0) {
+        items.push({ label: '', onClick: () => {}, separator: true });
+        items.push({
+          label: 'Clear all',
+          danger: true,
+          onClick: () => handleCellSave(target, col.key, '[]'),
+        });
+      }
+    } else if (col.type === 'link' || col.type === 'linkedRecord' || col.type === 'relationship') {
+      // Linked record chips — show current links and option to edit
+      const linked: string[] = [];
+      if (typeof rawValue === 'object' && rawValue !== null && Array.isArray(rawValue?.linked)) {
+        linked.push(...rawValue.linked);
+      } else if (Array.isArray(rawValue)) {
+        linked.push(...rawValue.filter((v: any) => typeof v === 'string'));
+      } else if (typeof rawValue === 'string' && rawValue) {
+        linked.push(rawValue);
+      }
+
+      if (linked.length > 0) {
+        items.push({ header: true, label: 'Linked records', onClick: () => {}, icon: '⊢' });
+        for (const id of linked.slice(0, 8)) {
+          const shortId = id.split('.').pop() || id;
+          const resolved = idResolver?.resolveTarget(id) ?? idResolver?.resolve(shortId);
+          const label = resolved?.name ? `${shortId} · ${resolved.name}` : shortId;
+          items.push({
+            label,
+            onClick: () => onSelectRecord(id),
+          });
+        }
+        if (linked.length > 8) {
+          items.push({ label: `…and ${linked.length - 8} more`, onClick: () => {}, disabled: true });
+        }
+        items.push({ label: '', onClick: () => {}, separator: true });
+      }
+
+      items.push({
+        label: 'Edit links…',
+        icon: '✎',
+        onClick: () => {
+          setCellContextMenu(null);
+          handleCellDoubleClick(rec!, col.key);
+        },
+        disabled: !rec || !canEdit,
+      });
+    }
+
+    // Universal fallback — raw text edit
+    items.push({ label: '', onClick: () => {}, separator: true });
+    items.push({
+      label: 'Edit raw value',
+      onClick: () => {
+        setCellContextMenu(null);
+        if (rec) handleCellDoubleClick(rec, col.key);
+      },
+      disabled: !rec || !canEdit,
+    });
+    return items;
   }
 
   function getContextMenuItems(target: string): ContextMenuItem[] {
@@ -1643,7 +1805,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                             ...(isEditableCol && !isEditingThis ? { cursor: 'text' } : {}),
                           }}
                           title={
-                            isEditableCol && !isEditingThis ? 'Double-click to edit' :
+                            isEditableCol && !isEditingThis ? 'Double-click to edit · right-click for options' :
                             col.key === '_record' ? 'Click to open record · double-click to open' :
                             undefined
                           }
@@ -1655,6 +1817,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                             e.stopPropagation();
                             onSelectRecord(rec.target);
                           } : undefined}
+                          onContextMenu={isEditableCol ? (e) => handleCellContextMenu(e, rec, col) : undefined}
                           onMouseEnter={col.key === '_record' ? (e) => {
                             const icon = (e.currentTarget as HTMLElement).querySelector('[data-open-icon]') as HTMLElement | null;
                             if (icon) icon.style.opacity = '1';
@@ -1664,7 +1827,40 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                             if (icon) icon.style.opacity = '0';
                           } : undefined}
                         >
-                          {isEditingThis
+                          {isEditingThis && col.type === 'select' && (col.selectOptions?.length ?? 0) > 0
+                            ? <select
+                                autoFocus
+                                value={editingCell.value}
+                                style={{
+                                  width: '100%',
+                                  padding: '2px 4px',
+                                  fontSize: 12,
+                                  border: `1px solid ${theme.accent}`,
+                                  borderRadius: 3,
+                                  background: theme.bg,
+                                  color: theme.text,
+                                  outline: 'none',
+                                  boxSizing: 'border-box' as const,
+                                  fontFamily: 'inherit',
+                                }}
+                                onClick={(e) => e.stopPropagation()}
+                                onChange={(e) => {
+                                  handleCellSave(rec.target, col.key, e.target.value);
+                                }}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Escape') {
+                                    if (editDebounceRef.current !== null) { clearTimeout(editDebounceRef.current); editDebounceRef.current = null; }
+                                    setEditingCell(null);
+                                  }
+                                }}
+                                onBlur={(e) => handleCellSave(rec.target, col.key, e.target.value)}
+                              >
+                                <option value="">—</option>
+                                {(col.selectOptions ?? []).map(opt => (
+                                  <option key={opt} value={opt}>{opt}</option>
+                                ))}
+                              </select>
+                          : isEditingThis
                             ? <input
                                 autoFocus
                                 value={editingCell.value}
@@ -1780,6 +1976,20 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
           onClose={() => setContextMenu(null)}
         />
       )}
+
+      {/* Right-click context menu (cells — select/multiSelect/relation fields) */}
+      {cellContextMenu && (() => {
+        const col = entityColumns.find(c => c.key === cellContextMenu.fieldKey);
+        if (!col) return null;
+        return (
+          <ContextMenu
+            x={cellContextMenu.x}
+            y={cellContextMenu.y}
+            items={getCellContextMenuItems(cellContextMenu.target, col)}
+            onClose={() => setCellContextMenu(null)}
+          />
+        );
+      })()}
 
       {/* Right-click context menu (columns) */}
       {columnMenu && (
@@ -1955,6 +2165,30 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
               />
             </div>
           </>
+        );
+      })()}
+
+      {/* Watched fields picker (lastModifiedTime columns) */}
+      {watchedFieldsPicker && (() => {
+        const fs = fieldSchemas.get(watchedFieldsPicker.key);
+        const currentWatched: string[] = Array.isArray(fs?.typeDef?.value?.watchedFields)
+          ? fs.typeDef.value.watchedFields
+          : [];
+        const pickerCols = orderedColumns.filter(c =>
+          c.key !== watchedFieldsPicker.key &&
+          c.key !== '_record' &&
+          c.key !== '_last_updated'
+        );
+        return (
+          <WatchedFieldsPicker
+            x={watchedFieldsPicker.x}
+            y={watchedFieldsPicker.y}
+            fieldKey={watchedFieldsPicker.key}
+            allColumns={pickerCols}
+            currentWatched={currentWatched}
+            onSave={(selected) => handleSaveWatchedFields(watchedFieldsPicker.key, selected)}
+            onClose={() => setWatchedFieldsPicker(null)}
+          />
         );
       })()}
 
