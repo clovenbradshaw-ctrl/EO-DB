@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'github-matrix-dev/app/**'
+      - '.github/workflows/ci.yml'
+
+jobs:
+  typecheck:
+    name: TypeScript
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: github-matrix-dev/app/package-lock.json
+
+      - name: Install dependencies
+        working-directory: github-matrix-dev/app
+        run: npm ci
+
+      - name: Type check
+        working-directory: github-matrix-dev/app
+        run: npx tsc -b --noEmit
