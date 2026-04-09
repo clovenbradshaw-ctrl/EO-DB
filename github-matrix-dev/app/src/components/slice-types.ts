@@ -116,6 +116,8 @@ export function defaultColumnWidth(type: string): number {
     case 'object':
     case 'attachment':
     case 'linkedRecord':
+    case 'link':
+    case 'relationship':
     case 'formula':
     case 'rollup':
     case 'lookup':

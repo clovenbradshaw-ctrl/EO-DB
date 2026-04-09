@@ -17,6 +17,8 @@ import {
   CheckSquare,
   Paperclip,
   ArrowSquareOut,
+  LinkSimple,
+  ShareNetwork,
   CubeTransparent,
   MathOperations,
   ArrowsClockwise,
@@ -61,7 +63,9 @@ export const COLUMN_TYPE_DEFS: ColumnTypeInfo[] = [
   // Other
   { value: 'boolean',            label: 'Boolean',             icon: CheckSquare,             color: '#27ae60', group: 'Other' },
   { value: 'attachment',         label: 'Attachment',           icon: Paperclip,               color: '#6b7280', group: 'Other' },
-  { value: 'linkedRecord',       label: 'Linked Record',       icon: ArrowSquareOut,           color: '#8b5cf6', group: 'Other' },
+  { value: 'link',               label: 'Link',                icon: LinkSimple,               color: '#8b5cf6', group: 'Other' },
+  { value: 'relationship',       label: 'Relationship',        icon: ShareNetwork,             color: '#06b6d4', group: 'Other' },
+  { value: 'linkedRecord',       label: 'Linked Record (legacy)', icon: ArrowSquareOut,        color: '#8b5cf6', group: 'Other' },
   { value: 'object',             label: 'Object',              icon: CubeTransparent,          color: '#6b7280', group: 'Other' },
   // Computed
   { value: 'formula',            label: 'Formula',             icon: MathOperations,          color: '#ef4444', group: 'Computed' },

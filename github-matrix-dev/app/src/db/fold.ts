@@ -1,4 +1,5 @@
 import type { EoStore } from './encrypted-store';
+import type { ConEdgeAddItem } from './types';
 import { appendToLog } from './log';
 import { getState, setState } from './state';
 import { addEdge, removeEdge, getEdgesFrom, getEdgesTo } from './graph';
@@ -288,7 +289,8 @@ async function handleCON(store: EoStore, event: EoEvent): Promise<void> {
   const operand = event.operand;
 
   if (operand.added) {
-    for (const dest of operand.added) {
+    for (const item of operand.added as ConEdgeAddItem[]) {
+      const dest = typeof item === 'string' ? item : item.dest;
       const destExists = await checkExists(store, dest);
       if (!destExists) {
         throw new Error(`CON target does not exist: ${dest}`);
@@ -297,12 +299,15 @@ async function handleCON(store: EoStore, event: EoEvent): Promise<void> {
   }
 
   if (operand.added) {
-    for (const dest of operand.added) {
+    for (const item of operand.added as ConEdgeAddItem[]) {
+      const dest = typeof item === 'string' ? item : item.dest;
+      const attrs = typeof item === 'string' ? undefined : item.attrs;
       await addEdge(store, {
         source: event.target,
         dest,
         edge_type: operand.edge_type,
         seq: event.seq,
+        attrs,
       });
     }
   }
@@ -319,7 +324,7 @@ async function handleCON(store: EoStore, event: EoEvent): Promise<void> {
     target: event.target,
     value: {
       ...(sourceState?.value ?? {}),
-      _edges: currentEdges.map(e => ({ dest: e.dest, edge_type: e.edge_type })),
+      _edges: currentEdges.map(e => ({ dest: e.dest, edge_type: e.edge_type, attrs: e.attrs })),
     },
     level: sourceState?.level ?? 1,
     ...stateFromEvent(event, 'CON'),
@@ -327,7 +332,7 @@ async function handleCON(store: EoStore, event: EoEvent): Promise<void> {
 
   // Refresh cached graphMetrics on every endpoint whose edges changed.
   const touched = new Set<string>([event.target]);
-  if (operand.added) for (const d of operand.added) touched.add(d);
+  if (operand.added) for (const item of operand.added as ConEdgeAddItem[]) touched.add(typeof item === 'string' ? item : item.dest);
   if (operand.removed) for (const d of operand.removed) touched.add(d);
   for (const t of touched) await refreshGraphMetrics(store, t);
 }

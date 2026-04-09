@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
-import type { EoState } from '../db/types';
+import type { EoState, EdgeAttrDef } from '../db/types';
 import { useEoStore } from '../store/eo-store';
 import { buildFieldNameMapFromSchema, buildFieldNameMap } from './filter-types';
 import { formatName } from './scope-picker-utils';
@@ -8,6 +8,15 @@ import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 import { useIdResolver, isEntityId, isEntityIdArray, type IdResolver } from '../hooks/useIdResolver';
 import { syncEditToAirtable } from '../ingestion/airtable-writeback';
 import { getAirtableTypeIcon, getAirtableTypeColor } from './field-type-icons';
+import { groupSchemaStates, extractEdgeAttrDefs } from '../db/schema-rules';
+import { LinkFieldPicker } from './LinkFieldPicker';
+import { RelationshipFieldPanel } from './RelationshipFieldPanel';
+
+interface FieldTypeSchema {
+  type?: string;
+  linkedTable?: string;
+  edgeAttrDefs?: EdgeAttrDef[];
+}
 
 interface FigureFieldsProps {
   figure: EoState;
@@ -29,16 +38,21 @@ export function FigureFields({ figure, onNavigate, profileFields }: FigureFields
   const [editing, setEditing] = useState<{ fieldKey: string; value: string } | null>(null);
   const [displayNameEdit, setDisplayNameEdit] = useState<{ fieldKey: string; currentLabel: string } | null>(null);
 
-  // Fetch schema-level field name map for the parent table scope
+  // Fetch schema-level field name map and type info for the parent table scope
   const [schemaFieldNames, setSchemaFieldNames] = useState<Map<string, string>>(new Map());
+  const [fieldTypeMap, setFieldTypeMap] = useState<Map<string, FieldTypeSchema>>(new Map());
   const tableScope = useMemo(() => {
     const parts = figure.target.split('.');
     // Table scope is everything except the last segment (the record ID)
     return parts.length > 1 ? parts.slice(0, -1).join('.') : figure.target;
   }, [figure.target]);
 
+  // State for open link pickers: fieldKey → true/false
+  const [openLinkPicker, setOpenLinkPicker] = useState<string | null>(null);
+
   useEffect(() => {
     getStateByPrefix(tableScope + '._schema.').then((allSchemaStates) => {
+      const schemaPrefix = tableScope + '._schema.';
       const schemaDepth = tableScope.split('.').length + 2;
       const fieldStates = allSchemaStates.filter(
         (st) => st.target.split('.').length === schemaDepth && !st.value?._alias,
@@ -54,6 +68,20 @@ export function FigureFields({ figure, onNavigate, profileFields }: FigureFields
           }
         });
       }
+
+      // Build field type map from the full schema tree (includes .type and .constraint.*)
+      const grouped = groupSchemaStates(allSchemaStates, schemaPrefix);
+      const typeMap = new Map<string, FieldTypeSchema>();
+      for (const [key, fs] of grouped) {
+        const typeDef = fs.typeDef?.value;
+        if (!typeDef?.type) continue;
+        typeMap.set(key, {
+          type: typeDef.type,
+          linkedTable: typeDef.linkedTable,
+          edgeAttrDefs: typeDef.type === 'relationship' ? extractEdgeAttrDefs(fs) : [],
+        });
+      }
+      setFieldTypeMap(typeMap);
     });
   }, [tableScope, getStateByPrefix, getState]);
 
@@ -187,76 +215,149 @@ export function FigureFields({ figure, onNavigate, profileFields }: FigureFields
 
   return (
     <div style={s.grid}>
-      {entries.map(([key, val]) => (
-        <div
-          key={key}
-          style={s.cell}
-          onContextMenu={(e) => handleContextMenu(e, key)}
-        >
-          <div style={s.label}>
-            {fieldLabels[key] || schemaFieldNames.get(key) || (key.startsWith('fld') ? formatName(key) : key)}
-            {(fieldLabels[key] || schemaFieldNames.has(key) || key.startsWith('fld')) && (
-              <span style={s.fieldKeyHint}>{key}</span>
-            )}
-            {value._computed && key === '_computed' && (
-              <span style={s.evaBadge}>EVA</span>
-            )}
-            {sigs[key] && (
-              <span style={s.sigBadge} title={`${sigs[key].agent} is editing`}>
-                {shortAgent(sigs[key].agent)} editing…
-              </span>
-            )}
-          </div>
+      {entries.map(([key, val]) => {
+        const fts = fieldTypeMap.get(key);
+        const isLinkField = fts?.type === 'link';
+        return (
           <div
-            style={{ ...s.value, cursor: editing?.fieldKey === key ? 'auto' : 'text' }}
-            onDoubleClick={() => {
-              if (editing?.fieldKey === key) return;
-              const currentVal = value[key];
-              const strVal = currentVal != null && typeof currentVal === 'object'
-                ? JSON.stringify(currentVal, null, 2)
-                : String(currentVal ?? '');
-              setEditing({ fieldKey: key, value: strVal });
-              dispatchSig(key, { draft: strVal });
-            }}
+            key={key}
+            style={s.cell}
+            onContextMenu={(e) => handleContextMenu(e, key)}
           >
-            {editing?.fieldKey === key ? (
-              <form
-                style={{ width: '100%' }}
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  const input = (e.target as HTMLFormElement).elements.namedItem('fieldVal') as HTMLInputElement;
-                  handleEditSave(key, input.value);
-                }}
-              >
-                <input
-                  name="fieldVal"
-                  autoFocus
-                  defaultValue={editing.value}
-                  style={{
-                    width: '100%',
-                    padding: '4px 6px',
-                    fontSize: 13,
-                    border: `1px solid ${theme.accent}`,
-                    borderRadius: 4,
-                    background: theme.bg,
-                    color: theme.text,
-                    outline: 'none',
-                    boxSizing: 'border-box' as const,
-                    fontFamily: "'JetBrains Mono', monospace",
+            <div style={s.label}>
+              {fieldLabels[key] || schemaFieldNames.get(key) || (key.startsWith('fld') ? formatName(key) : key)}
+              {(fieldLabels[key] || schemaFieldNames.has(key) || key.startsWith('fld')) && (
+                <span style={s.fieldKeyHint}>{key}</span>
+              )}
+              {value._computed && key === '_computed' && (
+                <span style={s.evaBadge}>EVA</span>
+              )}
+              {sigs[key] && (
+                <span style={s.sigBadge} title={`${sigs[key].agent} is editing`}>
+                  {shortAgent(sigs[key].agent)} editing…
+                </span>
+              )}
+            </div>
+            <div
+              style={{ ...s.value, cursor: editing?.fieldKey === key ? 'auto' : (isLinkField ? 'default' : 'text'), position: 'relative' as const }}
+              onDoubleClick={() => {
+                if (editing?.fieldKey === key || isLinkField) return;
+                const currentVal = value[key];
+                const strVal = currentVal != null && typeof currentVal === 'object'
+                  ? JSON.stringify(currentVal, null, 2)
+                  : String(currentVal ?? '');
+                setEditing({ fieldKey: key, value: strVal });
+                dispatchSig(key, { draft: strVal });
+              }}
+            >
+              {editing?.fieldKey === key ? (
+                <form
+                  style={{ width: '100%' }}
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    const input = (e.target as HTMLFormElement).elements.namedItem('fieldVal') as HTMLInputElement;
+                    handleEditSave(key, input.value);
                   }}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Escape') {
-                      dispatchSig(key, { editing: false });
-                      setEditing(null);
-                    }
-                  }}
-                  onBlur={(e) => handleEditSave(key, e.target.value)}
-                />
-              </form>
-            ) : renderFieldValue(val, onNavigate, theme, resolver)}
+                >
+                  <input
+                    name="fieldVal"
+                    autoFocus
+                    defaultValue={editing.value}
+                    style={{
+                      width: '100%',
+                      padding: '4px 6px',
+                      fontSize: 13,
+                      border: `1px solid ${theme.accent}`,
+                      borderRadius: 4,
+                      background: theme.bg,
+                      color: theme.text,
+                      outline: 'none',
+                      boxSizing: 'border-box' as const,
+                      fontFamily: "'JetBrains Mono', monospace",
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Escape') {
+                        dispatchSig(key, { editing: false });
+                        setEditing(null);
+                      }
+                    }}
+                    onBlur={(e) => handleEditSave(key, e.target.value)}
+                  />
+                </form>
+              ) : (
+                <>
+                  {renderFieldValue(val, onNavigate, theme, resolver)}
+                  {/* Link field: show + Add button and picker */}
+                  {isLinkField && fts?.linkedTable && (
+                    <div style={{ marginTop: 4, position: 'relative' as const, display: 'inline-block' }}>
+                      <button
+                        onClick={() => setOpenLinkPicker(openLinkPicker === key ? null : key)}
+                        style={{
+                          fontSize: 11,
+                          padding: '2px 8px',
+                          borderRadius: 4,
+                          background: 'transparent',
+                          border: `1px solid ${theme.borderLight}`,
+                          color: theme.textMuted,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        + Add link
+                      </button>
+                      {openLinkPicker === key && (
+                        <LinkFieldPicker
+                          fieldKey={key}
+                          linkedTable={fts.linkedTable}
+                          currentIds={Array.isArray(val) ? val : []}
+                          onClose={() => setOpenLinkPicker(null)}
+                          onChange={async (updatedIds) => {
+                            await dispatch({
+                              op: 'DEF',
+                              target: figure.target,
+                              operand: { [key]: updatedIds },
+                              agent: 'user',
+                              ts: new Date().toISOString(),
+                              acquired_ts: new Date().toISOString(),
+                            });
+                          }}
+                        />
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
           </div>
-        </div>
-      ))}
+        );
+      })}
+
+      {/* Relationship fields: data lives in _edges, not in value properties */}
+      {[...fieldTypeMap.entries()]
+        .filter(([, fts]) => fts.type === 'relationship')
+        .map(([key, fts]) => {
+          const allEdges: Array<{ dest: string; edge_type?: string; attrs?: Record<string, unknown> }> =
+            Array.isArray(value._edges) ? value._edges : [];
+          const fieldEdges = allEdges.filter(e => e.edge_type === key);
+          return (
+            <div key={`rel_${key}`} style={s.cell}>
+              <div style={s.label}>
+                {fieldLabels[key] || schemaFieldNames.get(key) || key}
+                <span style={s.fieldKeyHint}>{key}</span>
+              </div>
+              <div style={s.value}>
+                <RelationshipFieldPanel
+                  fieldKey={key}
+                  figure={figure}
+                  linkedTable={fts.linkedTable ?? ''}
+                  edgeAttrDefs={fts.edgeAttrDefs ?? []}
+                  edges={fieldEdges}
+                  onNavigate={onNavigate}
+                />
+              </div>
+            </div>
+          );
+        })
+      }
 
       {/* Right-click context menu */}
       {contextMenu && (
@@ -380,6 +481,14 @@ function renderFieldValue(
   t: Theme,
   resolver: IdResolver,
 ): React.ReactNode {
+  // Parse JSON-stringified arrays/objects (e.g. values stored as '["EVT-089","EVT-010"]')
+  if (typeof val === 'string' && val.startsWith('[') && val.endsWith(']')) {
+    try { const p = JSON.parse(val); if (Array.isArray(p)) val = p; } catch { /* keep as string */ }
+  }
+  if (typeof val === 'string' && val.startsWith('{') && val.endsWith('}')) {
+    try { const p = JSON.parse(val); if (p && typeof p === 'object' && !Array.isArray(p)) val = p; } catch { /* keep as string */ }
+  }
+
   // Object with CON linked array
   if (typeof val === 'object' && val !== null && val.linked && Array.isArray(val.linked)) {
     return (

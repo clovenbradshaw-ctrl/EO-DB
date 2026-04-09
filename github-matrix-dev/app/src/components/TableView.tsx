@@ -254,6 +254,14 @@ function formatCurrency(n: number): string {
 }
 
 function renderCell(value: any, key: string, onNavigate: (t: string) => void, t: Theme, resolver?: IdResolver, colType?: string): React.ReactNode {
+  // Parse JSON-stringified arrays/objects stored as strings
+  if (typeof value === 'string' && value.startsWith('[') && value.endsWith(']')) {
+    try { const p = JSON.parse(value); if (Array.isArray(p)) value = p; } catch { /* keep as string */ }
+  }
+  if (typeof value === 'string' && value.startsWith('{') && value.endsWith('}')) {
+    try { const p = JSON.parse(value); if (p && typeof p === 'object' && !Array.isArray(p)) value = p; } catch { /* keep as string */ }
+  }
+
   // Intentional clear: an explicit null assertion gets the NUL glyph.
   if (value === null) {
     return <ClearedCell t={t} />;
@@ -482,7 +490,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   const [fieldSchemas, setFieldSchemas] = useState<Map<string, FieldSchema>>(new Map());
   const [columnTypeOverrides, setColumnTypeOverrides] = useState<Map<string, any>>(new Map());
   const [columnTypeSelector, setColumnTypeSelector] = useState<{ x: number; y: number; key: string } | null>(null);
-  const [linkedRecordPicker, setLinkedRecordPicker] = useState<{ x: number; y: number; key: string; tables: { scope: string; name: string }[] } | null>(null);
+  const [linkedRecordPicker, setLinkedRecordPicker] = useState<{ x: number; y: number; key: string; tables: { scope: string; name: string }[]; mode: 'linkedRecord' | 'link' | 'relationship' } | null>(null);
   const [resolutionComposer, setResolutionComposer] = useState<{ x: number; y: number; key: string } | null>(null);
   const [constraintComposer, setConstraintComposer] = useState<{ x: number; y: number; key: string } | null>(null);
   const [editingCell, setEditingCell] = useState<{ target: string; fieldKey: string; value: string } | null>(null);
@@ -947,9 +955,17 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     setRenameCol(null);
   }
 
-  async function handleSetColumnType(fieldKey: string, type: string, linkedTableId?: string) {
+  async function handleSetColumnType(fieldKey: string, type: string, linkedTable?: string) {
     const operand: Record<string, string> = { type };
-    if (linkedTableId) operand.linkedTableId = linkedTableId;
+    if (linkedTable) {
+      // 'link' and 'relationship' store the EO scope path under 'linkedTable'
+      // 'linkedRecord' (legacy Airtable) stores under 'linkedTableId'
+      if (type === 'link' || type === 'relationship') {
+        operand.linkedTable = linkedTable;
+      } else {
+        operand.linkedTableId = linkedTable;
+      }
+    }
     try {
       await dispatch({
         op: 'DEF',
@@ -1733,7 +1749,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
               }
               isDefined={!!fieldSchemas.get(columnTypeSelector.key)?.typeDef}
               onSelect={async (type) => {
-                if (type === 'linkedRecord') {
+                if (type === 'linkedRecord' || type === 'link' || type === 'relationship') {
                   // Fetch sibling tables and show a picker before committing
                   const states = await getStateByPrefix(scopeRoot + '.');
                   const tables = states
@@ -1745,7 +1761,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                     })
                     .map(s => ({ scope: s.target, name: formatScopeName(s.target) }));
                   setColumnTypeSelector(null);
-                  setLinkedRecordPicker({ x: columnTypeSelector.x, y: columnTypeSelector.y, key: columnTypeSelector.key, tables });
+                  setLinkedRecordPicker({ x: columnTypeSelector.x, y: columnTypeSelector.y, key: columnTypeSelector.key, tables, mode: type as 'linkedRecord' | 'link' | 'relationship' });
                 } else {
                   handleSetColumnType(columnTypeSelector.key, type);
                 }
@@ -1787,7 +1803,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                   style={{ padding: '7px 12px', fontSize: 13, cursor: 'pointer', color: theme.text }}
                   onMouseEnter={e => (e.currentTarget.style.background = theme.bgHover ?? theme.bgMuted)}
                   onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                  onClick={() => handleSetColumnType(linkedRecordPicker.key, 'linkedRecord', t.scope)}
+                  onClick={() => handleSetColumnType(linkedRecordPicker.key, linkedRecordPicker.mode, t.scope)}
                 >
                   {t.name}
                 </div>
