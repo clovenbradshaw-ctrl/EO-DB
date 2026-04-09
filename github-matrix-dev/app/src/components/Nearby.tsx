@@ -1,122 +1,160 @@
-import { useMemo } from 'react';
-import type { NearbyEntry, SimilarityDimensions } from '../db/types';
+import { useMemo, useState, useEffect } from 'react';
+import type { SimilarRecord, SimilarityReason } from '../db/types';
 import { useTheme, type Theme } from '../theme';
 import { useDisplayNames } from '../hooks/useDisplayNames';
 
 interface NearbyProps {
-  entries: NearbyEntry[];
+  entries: SimilarRecord[];
   onNavigate: (target: string) => void;
 }
 
-const DIM_LABELS: Array<{ key: keyof SimilarityDimensions; label: string; color: (t: Theme) => string }> = [
-  { key: 'hash', label: 'hash', color: (t) => t.purple },
-  { key: 'trajectory', label: 'trajectory', color: (t) => t.warning },
-  { key: 'state', label: 'state', color: (t) => t.teal },
-  { key: 'connections', label: 'connections', color: (t) => t.accent },
-];
-
-export function Nearby({ entries, onNavigate }: NearbyProps) {
-  const { theme } = useTheme();
-  const s = makeStyles(theme);
-  const targets = useMemo(() => entries.map(e => e.target), [entries]);
-  const displayNames = useDisplayNames(targets);
-
+function ScoreRing({ score, theme }: { score: number; theme: Theme }) {
+  const size = 36;
+  const r = (size - 4) / 2;
+  const circ = 2 * Math.PI * r;
+  const dash = (score / 100) * circ;
+  const color = score >= 80 ? theme.accent : score >= 65 ? theme.purple : theme.textMuted;
   return (
-    <div style={s.grid}>
-      {entries.map((n) => {
-        const shortId = n.target.split('.').pop() || n.target;
-        const displayName = displayNames.get(n.target);
-        const label = displayName || shortId;
-        const pct = Math.round((n.score ?? 0) * 100);
+    <svg width={size} height={size} style={{ flexShrink: 0 }}>
+      <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={theme.bgMuted} strokeWidth={3} />
+      <circle
+        cx={size / 2} cy={size / 2} r={r}
+        fill="none" stroke={color} strokeWidth={3}
+        strokeDasharray={`${dash} ${circ - dash}`}
+        strokeLinecap="round"
+        transform={`rotate(-90 ${size / 2} ${size / 2})`}
+        style={{ transition: 'stroke-dasharray 0.6s ease' }}
+      />
+      <text
+        x={size / 2} y={size / 2 + 4}
+        textAnchor="middle"
+        fill={color}
+        fontSize={10} fontWeight={700}
+        fontFamily="'JetBrains Mono', monospace"
+      >
+        {score}
+      </text>
+    </svg>
+  );
+}
 
-        return (
-          <div key={n.target} style={s.card} onClick={() => onNavigate(n.target)}>
-            <div style={s.topRow}>
-              <div style={s.name}>{label}</div>
-              <div style={s.score}>{pct}%</div>
-            </div>
-            <div style={s.targetPath}>{displayName ? shortId : n.target}</div>
-            {n.dimensions && (
-              <div style={s.dims}>
-                {DIM_LABELS.map(({ key, label: dimLabel, color }) => {
-                  const val = n.dimensions[key];
-                  if (val === undefined || val === false) return null;
-                  const strength = val === true ? 1 : val;
-                  const dimColor = color(theme);
-                  return (
-                    <div key={key} style={s.dimRow}>
-                      <span style={{ ...s.dimLabel, color: dimColor }}>{dimLabel}</span>
-                      <div style={s.barTrack}>
-                        <div style={{
-                          ...s.barFill,
-                          width: `${Math.round(strength * 100)}%`,
-                          background: dimColor,
-                        }} />
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        );
-      })}
+function ReasonTag({ reason, theme }: { reason: SimilarityReason; theme: Theme }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '2px 0' }}>
+      <span style={{
+        fontSize: 11,
+        color: reason.color,
+        fontFamily: "'JetBrains Mono', monospace",
+        flexShrink: 0,
+        width: 14,
+        textAlign: 'center',
+      }}>
+        {reason.icon}
+      </span>
+      <span style={{
+        fontSize: 11.5,
+        color: theme.textSecondary,
+        lineHeight: 1.3,
+      }}>
+        {reason.text}
+      </span>
     </div>
   );
 }
 
-function makeStyles(t: Theme): Record<string, React.CSSProperties> {
-  return {
-    grid: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 },
-    card: {
-      padding: '14px 16px',
-      background: t.bgCard,
-      border: `1px solid ${t.border}`,
-      borderRadius: 8,
-      cursor: 'pointer',
-    },
-    topRow: {
-      display: 'flex',
-      justifyContent: 'space-between',
-      alignItems: 'baseline',
-    },
-    name: { fontWeight: 600, fontSize: 13, color: t.textHeading },
-    score: {
-      fontFamily: "'JetBrains Mono', monospace",
-      fontSize: 11,
-      fontWeight: 600,
-      color: t.teal,
-    },
-    targetPath: {
-      fontFamily: "'JetBrains Mono', monospace",
-      fontSize: 9,
-      color: t.textMuted,
-      marginBottom: 8,
-      overflow: 'hidden',
-      textOverflow: 'ellipsis',
-      whiteSpace: 'nowrap' as const,
-    },
-    dims: { display: 'flex', flexDirection: 'column' as const, gap: 3 },
-    dimRow: { display: 'flex', alignItems: 'center', gap: 6 },
-    dimLabel: {
-      fontSize: 8,
-      fontWeight: 600,
-      textTransform: 'uppercase' as const,
-      letterSpacing: 0.5,
-      width: 68,
-      flexShrink: 0,
-    },
-    barTrack: {
-      flex: 1,
-      height: 4,
-      borderRadius: 2,
-      background: t.bgMuted,
-    },
-    barFill: {
-      height: 4,
-      borderRadius: 2,
-      minWidth: 2,
-      transition: 'width 0.2s ease',
-    },
-  };
+function SimilarCard({
+  entry,
+  onNavigate,
+  theme,
+  delay,
+}: {
+  entry: SimilarRecord;
+  onNavigate: (target: string) => void;
+  theme: Theme;
+  delay: number;
+}) {
+  const [visible, setVisible] = useState(false);
+  const [hovered, setHovered] = useState(false);
+
+  useEffect(() => {
+    const t = setTimeout(() => setVisible(true), delay);
+    return () => clearTimeout(t);
+  }, [delay]);
+
+  const targets = useMemo(() => [entry.target], [entry.target]);
+  const displayNames = useDisplayNames(targets);
+  const displayName = displayNames.get(entry.target);
+  const shortId = entry.target.split('.').pop() || entry.target;
+  const label = displayName || shortId;
+
+  return (
+    <div
+      onClick={() => onNavigate(entry.target)}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        background: hovered ? theme.bgHover : theme.bgCard,
+        border: `1px solid ${hovered ? theme.border : theme.borderLight}`,
+        borderRadius: 10,
+        padding: '12px 14px',
+        cursor: 'pointer',
+        transition: 'all 0.15s ease',
+        opacity: visible ? 1 : 0,
+        transform: visible ? 'translateY(0)' : 'translateY(6px)',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 8,
+      }}
+    >
+      {/* Header */}
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{
+            fontSize: 13,
+            fontWeight: 600,
+            color: theme.textHeading,
+            whiteSpace: 'nowrap',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+          }}>
+            {label}
+          </div>
+          <div style={{
+            fontFamily: "'JetBrains Mono', monospace",
+            fontSize: 9,
+            color: theme.textMuted,
+            marginTop: 1,
+          }}>
+            {displayName ? shortId : entry.target}
+          </div>
+        </div>
+        <ScoreRing score={entry.score} theme={theme} />
+      </div>
+
+      {/* Reasons */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+        {entry.reasons.map((r, i) => (
+          <ReasonTag key={i} reason={r} theme={theme} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+export function Nearby({ entries, onNavigate }: NearbyProps) {
+  const { theme } = useTheme();
+
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+      {entries.map((entry, i) => (
+        <SimilarCard
+          key={entry.target}
+          entry={entry}
+          onNavigate={onNavigate}
+          theme={theme}
+          delay={i * 60}
+        />
+      ))}
+    </div>
+  );
 }

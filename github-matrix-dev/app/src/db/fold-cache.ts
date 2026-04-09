@@ -157,6 +157,24 @@ export async function updateFoldCache(store: EoStore, event: EoEvent): Promise<v
 
   const cadence = classifyCadence(eventCount, firstEventTs, lastEventTs, intervalsSorted, maxInHour);
 
+  // ─── Similarity signals ───
+  // touchedAgents: deduplicated list of all agents who wrote to this target
+  const prevAgents = prev?.touchedAgents ?? [];
+  const touchedAgents = prevAgents.includes(event.agent)
+    ? prevAgents
+    : [...prevAgents, event.agent];
+
+  // segmentMemberships: string tags from the most recent SEG operand
+  let segmentMemberships = prev?.segmentMemberships;
+  if (event.op === 'SEG') {
+    const op = event.operand;
+    if (Array.isArray(op)) {
+      segmentMemberships = op.map(String).filter(Boolean);
+    } else if (typeof op === 'string' && op) {
+      segmentMemberships = [op];
+    }
+  }
+
   const _fold: EoStateFold = {
     trajectory,
     trajectoryHead: head,
@@ -167,6 +185,9 @@ export async function updateFoldCache(store: EoStore, event: EoEvent): Promise<v
     lastEventTs,
     intervalsSorted,
     recentTimestamps,
+    touchedAgents,
+    ...(segmentMemberships !== undefined ? { segmentMemberships } : {}),
+    ...(prev?.crystallizedIn !== undefined ? { crystallizedIn: prev.crystallizedIn } : {}),
   };
 
   if (event.op === 'REC') {
