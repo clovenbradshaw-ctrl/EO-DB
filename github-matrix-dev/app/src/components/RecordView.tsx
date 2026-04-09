@@ -656,6 +656,9 @@ function LazySection({
 
   const hasContent = children !== undefined && children !== null && children !== false;
 
+  // Hide entirely once loaded and confirmed empty
+  if (loaded && !loading && !error && !hasContent) return null;
+
   return (
     <div style={s.section}>
       <div style={{ ...s.sectionEdge, background: color }} />
