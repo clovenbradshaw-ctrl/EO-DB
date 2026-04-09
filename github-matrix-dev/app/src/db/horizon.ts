@@ -5,9 +5,10 @@ import { resolveAlias } from './helpers';
 import { readLogForTarget } from './log';
 import type {
   EoEvent, EoState, EvaRegistration, HorizonResponse, GroundEntry, SignalEntry,
-  NearbyEntry, SimilarityDimensions, GovernanceEntry, LoggableOperator, AncestryEntry, TrajectoryEntry,
+  SimilarRecord, SimilarityReason, Observation,
+  GovernanceEntry, LoggableOperator, AncestryEntry, TrajectoryEntry,
   TrajectoryFingerprint, CadenceInfo, CadenceClass, GraphMetrics, GraphRole,
-  RecResult, RecCycleInfo,
+  RecResult, RecCycleInfo, DerivedEntity,
 } from './types';
 import { seedHash, chainHash } from './hash';
 import { classifyOnDemand } from './space-statistics';
@@ -18,7 +19,8 @@ export interface HorizonOpts {
   ancestryLight?: boolean; // default true; when true, skip expensive children/sibling counts
   signals?: boolean;      // default false (opt-in; expensive)
   grounds?: boolean;      // default true (fast — from fold cache / ground prefix)
-  nearby?: boolean;       // default false (opt-in; O(N) edge lookups)
+  nearby?: boolean;       // default false (opt-in; O(N) fold cache reads)
+  observations?: boolean; // default false (opt-in; O(N) collection scan for structural anomalies)
   governance?: boolean;   // default false (opt-in; EVA registration scan)
   trajectory?: boolean;   // default true (fast; read from fold cache)
   hashCohort?: boolean;   // default false (opt-in; collection prefix scan)
@@ -50,10 +52,11 @@ export async function horizonGet(
 
   // Run independent lookups in parallel. Expensive ones are opt-in so the
   // caller (e.g. RecordView on drawer open) can skip them for instant render.
-  const [ancestry, grounds, nearby, governance, signals, hashCohort, recCycle, classification] = await Promise.all([
+  const [ancestry, grounds, nearby, observations, governance, signals, hashCohort, recCycle, classification] = await Promise.all([
     opts?.ancestry !== false ? getAncestry(store, resolved, opts?.ancestryLight !== false) : Promise.resolve(undefined),
     opts?.grounds !== false ? getGrounds(store, resolved) : Promise.resolve([] as GroundEntry[]),
     opts?.nearby === true ? getNearby(store, resolved) : Promise.resolve(undefined),
+    opts?.observations === true ? getObservations(store, resolved) : Promise.resolve(undefined),
     opts?.governance === true ? getGovernance(store, resolved) : Promise.resolve(undefined),
     opts?.signals === true ? detectSignals(store, resolved) : Promise.resolve(undefined),
     opts?.hashCohort === true && figure?.hash
@@ -66,7 +69,7 @@ export async function horizonGet(
   ]);
 
   return {
-    target: resolved, figure, ancestry, grounds, nearby, governance, trajectory, signals,
+    target: resolved, figure, ancestry, grounds, nearby, observations, governance, trajectory, signals,
     hashCohort: hashCohort && hashCohort.length > 0 ? hashCohort : undefined,
     trajectoryFingerprint,
     cadence,
@@ -242,7 +245,7 @@ async function getAncestry(store: EoStore, target: string, light = false): Promi
 
 // --- Layer 3: Nearby ---
 
-async function getNearby(store: EoStore, target: string): Promise<NearbyEntry[]> {
+async function getNearby(store: EoStore, target: string): Promise<SimilarRecord[]> {
   const parts = target.split('.');
   if (parts.length < 3) return [];
 
@@ -250,107 +253,257 @@ async function getNearby(store: EoStore, target: string): Promise<NearbyEntry[]>
   const figureState = await getState(store, target);
   if (!figureState) return [];
 
-  const figureKeys = extractFieldKeys(figureState);
   const figureEdges = await getEdgesFrom(store, target);
   const figureLinked = new Set(figureEdges.map(e => e.dest));
-  const figureFp = figureState._fold?.trajectoryFingerprint;
-  const figureOpCounts = figureFp?.opCounts;
+  const figureConTargets = [...figureLinked];
+  const figureSegs = figureState._fold?.segmentMemberships ?? [];
+  const figureAgents = figureState._fold?.touchedAgents ?? [];
+  const figureOpCounts = figureState._fold?.trajectoryFingerprint?.opCounts;
+  const figureCrystal = figureState._fold?.crystallizedIn;
+  const figureLastMs = figureState._fold?.lastEventTs
+    ? new Date(figureState._fold.lastEventTs).getTime() : 0;
 
   const siblings = await getStateByPrefix(store, collectionPrefix + '.');
-  const candidates: NearbyEntry[] = [];
+  const candidates: SimilarRecord[] = [];
 
   for (const sib of siblings) {
     if (sib.target === target) continue;
     if (sib.value?._alias) continue;
     if (sib.target.split('.').length !== parts.length) continue;
 
-    const dims: SimilarityDimensions = {};
+    const reasons: SimilarityReason[] = [];
+    let score = 0;
 
-    // ─── Dimension 1: Hash — exact trajectory fingerprint match ───
-    const sibFp = sib._fold?.trajectoryFingerprint;
-    if (figureFp && sibFp && figureFp.fingerprint === sibFp.fingerprint) {
-      dims.hash = true;
-    }
-
-    // ─── Dimension 2: Trajectory — op-count cosine similarity ───
-    const sibOpCounts = sibFp?.opCounts;
-    if (figureOpCounts && sibOpCounts) {
-      dims.trajectory = cosineSimilarity(figureOpCounts, sibOpCounts);
-    }
-
-    // ─── Dimension 3: State — field-key Jaccard overlap ───
-    const sibKeys = extractFieldKeys(sib);
-    if (figureKeys.size > 0 || sibKeys.size > 0) {
-      let intersection = 0;
-      for (const k of figureKeys) if (sibKeys.has(k)) intersection++;
-      const union = figureKeys.size + sibKeys.size - intersection;
-      dims.state = union > 0 ? intersection / union : 0;
-    }
-
-    // ─── Dimension 4: Connections — shared link ratio ───
-    if (figureLinked.size > 0) {
-      const sibEdges = await getEdgesFrom(store, sib.target);
-      const sibLinked = new Set(sibEdges.map(e => e.dest));
-      let sharedLinks = 0;
-      for (const l of figureLinked) if (sibLinked.has(l)) sharedLinks++;
-      const linkUnion = figureLinked.size + sibLinked.size - sharedLinks;
-      dims.connections = linkUnion > 0 ? sharedLinks / linkUnion : 0;
-    }
-
-    // ─── Composite score (weighted) ───
-    const score = compositeScore(dims);
-    if (score > 0.05) {
-      candidates.push({
-        target: sib.target,
-        score,
-        dimensions: dims,
-        shared: [],   // deprecated
-        distance: score > 0 ? Math.round(1 / score) : 999,
+    // ─── 1. Shared CON targets ───
+    const sibEdges = await getEdgesFrom(store, sib.target);
+    const sibLinked = new Set(sibEdges.map(e => e.dest));
+    const sharedCon = figureConTargets.filter(t => sibLinked.has(t));
+    if (sharedCon.length > 0) {
+      const weight = sharedCon.length >= 2 ? 0.28 : 0.18;
+      score += weight;
+      const label = sharedCon.length === 1
+        ? sharedCon[0].split('.').pop() || sharedCon[0]
+        : `${sharedCon.length} shared connections`;
+      reasons.push({
+        type: 'con', weight,
+        text: sharedCon.length === 1
+          ? `Both connected to ${label}`
+          : `${sharedCon.length} shared connections`,
+        icon: '⬡', color: '#3b82f6',
       });
     }
+
+    // ─── 2. Shared segment membership ───
+    const sibSegs = sib._fold?.segmentMemberships ?? [];
+    const sharedSegs = figureSegs.filter(s => sibSegs.includes(s));
+    if (sharedSegs.length >= 2) {
+      score += 0.20;
+      const segLabel = sharedSegs.slice(0, 2).map(s => s.replace(/-/g, ' ')).join(', ');
+      reasons.push({ type: 'seg', weight: 0.20, text: `Same group: ${segLabel}`, icon: '◈', color: '#8b5cf6' });
+    } else if (sharedSegs.length === 1) {
+      score += 0.10;
+      reasons.push({ type: 'seg', weight: 0.10, text: `Same group: ${sharedSegs[0].replace(/-/g, ' ')}`, icon: '◈', color: '#8b5cf6' });
+    }
+
+    // ─── 3. Co-constituent of same derived entity ───
+    if (figureCrystal && figureCrystal === sib._fold?.crystallizedIn) {
+      score += 0.22;
+      reasons.push({ type: 'crystal', weight: 0.22, text: 'Co-produced an emergent group together', icon: '✦', color: '#f59e0b' });
+    }
+
+    // ─── 4. Shared agent ───
+    const sibAgents = sib._fold?.touchedAgents ?? [];
+    const sharedAgents = figureAgents.filter(a => sibAgents.includes(a));
+    if (sharedAgents.length > 0) {
+      score += 0.12;
+      const agentName = sharedAgents[0].replace(/^@/, '');
+      reasons.push({ type: 'agent', weight: 0.12, text: `Both touched by ${agentName}`, icon: '◉', color: '#6b7280' });
+    }
+
+    // ─── 5. Similar op shape ───
+    const sibOpCounts = sib._fold?.trajectoryFingerprint?.opCounts;
+    if (figureOpCounts && sibOpCounts) {
+      const allOps = new Set([...Object.keys(figureOpCounts), ...Object.keys(sibOpCounts)]);
+      const opMatch = [...allOps].every(op =>
+        Math.abs((figureOpCounts[op as LoggableOperator] ?? 0) - (sibOpCounts[op as LoggableOperator] ?? 0)) <= 1
+      );
+      if (opMatch) {
+        score += 0.12;
+        reasons.push({ type: 'ops', weight: 0.12, text: 'Went through the same process steps', icon: '→', color: '#10b981' });
+      }
+    }
+
+    // ─── 6. REC oscillating on both ───
+    if (figureState._lastRecSeq !== undefined && sib._lastRecSeq !== undefined) {
+      const padded = String(sib._lastRecSeq).padStart(12, '0');
+      const sibRecEvent = await store.get(`log:${padded}`) as EoEvent | null;
+      if (sibRecEvent && sibRecEvent.operand?.converged === false) {
+        score += 0.18;
+        reasons.push({ type: 'rec', weight: 0.18, text: 'Both have unresolved feedback loops', icon: '⟳', color: '#ec4899' });
+      }
+    }
+
+    // ─── 7. Temporal proximity (no shared agent) ───
+    const sibLastMs = sib._fold?.lastEventTs ? new Date(sib._fold.lastEventTs).getTime() : 0;
+    if (figureLastMs > 0 && sibLastMs > 0 && sharedAgents.length === 0) {
+      const daysDiff = Math.abs(figureLastMs - sibLastMs) / (1000 * 60 * 60 * 24);
+      if (daysDiff <= 3) {
+        score += 0.08;
+        reasons.push({ type: 'temporal', weight: 0.08, text: 'Active at the same time, no shared connection yet', icon: '◷', color: '#6b7280' });
+      }
+    }
+
+    if (reasons.length === 0) continue;
+
+    reasons.sort((a, b) => b.weight - a.weight);
+    const cappedScore = Math.min(Math.round(score * 100), 99);
+    candidates.push({ target: sib.target, score: cappedScore, reasons: reasons.slice(0, 3) });
   }
 
   candidates.sort((a, b) => b.score - a.score);
   return candidates.slice(0, 10);
 }
 
-/** Extract non-internal field keys from a state value. */
-function extractFieldKeys(state: EoState): Set<string> {
-  const keys = new Set<string>();
-  if (!state.value || typeof state.value !== 'object') return keys;
-  for (const key of Object.keys(state.value)) {
-    if (!key.startsWith('_')) keys.add(key);
+// --- Layer 3b: Observations ---
+
+/** Extract a human-readable display name from a state record. */
+function displayNameFromState(state: EoState): string {
+  const v = state.value;
+  if (v && typeof v === 'object' && !Array.isArray(v)) {
+    if (typeof v.name === 'string') return v.name;
+    if (typeof v.displayName === 'string') return v.displayName;
+    if (typeof v.title === 'string') return v.title;
   }
-  return keys;
+  return state.target.split('.').pop() || state.target;
 }
 
-/** Cosine similarity between two op-count vectors. */
-function cosineSimilarity(
-  a: Record<string, number>,
-  b: Record<string, number>,
-): number {
-  const allKeys = new Set([...Object.keys(a), ...Object.keys(b)]);
-  let dot = 0, magA = 0, magB = 0;
-  for (const k of allKeys) {
-    const va = a[k] ?? 0;
-    const vb = b[k] ?? 0;
-    dot += va * vb;
-    magA += va * va;
-    magB += vb * vb;
-  }
-  const denom = Math.sqrt(magA) * Math.sqrt(magB);
-  return denom > 0 ? dot / denom : 0;
+/** Format an ISO timestamp as "Month Day" (e.g. "March 15"). */
+function formatObsDate(iso: string): string {
+  const d = new Date(iso);
+  return d.toLocaleDateString('en-US', { month: 'long', day: 'numeric' });
 }
 
-/** Weighted composite of similarity dimensions. */
-function compositeScore(dims: SimilarityDimensions): number {
-  let score = 0;
-  let weight = 0;
-  if (dims.hash) { score += 0.3; weight += 0.3; }
-  if (dims.trajectory !== undefined) { score += dims.trajectory * 0.3; weight += 0.3; }
-  if (dims.state !== undefined) { score += dims.state * 0.2; weight += 0.2; }
-  if (dims.connections !== undefined) { score += dims.connections * 0.2; weight += 0.2; }
-  return weight > 0 ? score / weight : 0;
+async function getObservations(store: EoStore, target: string): Promise<Observation[]> {
+  const parts = target.split('.');
+  if (parts.length < 3) return [];
+  const collectionPrefix = parts.slice(0, 2).join('.');
+
+  const focalState = await getState(store, target);
+  if (!focalState) return [];
+
+  const siblings = await getStateByPrefix(store, collectionPrefix + '.');
+  const population = siblings.filter(s =>
+    s.target !== target &&
+    !s.value?._alias &&
+    s.target.split('.').length === parts.length,
+  );
+
+  const observations: Observation[] = [];
+
+  // ─── 1. REC oscillation ───
+  for (const sib of population) {
+    if (sib._lastRecSeq === undefined) continue;
+    const padded = String(sib._lastRecSeq).padStart(12, '0');
+    const recEvent = await store.get(`log:${padded}`) as EoEvent | null;
+    if (!recEvent || recEvent.operand?.converged !== false) continue;
+    const sibName = displayNameFromState(sib);
+    const fieldPath: string = recEvent.operand?.pivot ?? recEvent.operand?.target ?? 'a field';
+    const fieldName = fieldPath.split('.').pop() || fieldPath;
+    const date = recEvent.acquired_ts ? formatObsDate(recEvent.acquired_ts) : 'recently';
+    observations.push({
+      icon: '⟳',
+      color: '#ec4899',
+      text: `${sibName}'s ${fieldName} has been oscillating since ${date}. The rule governing it hasn't converged.`,
+      action: 'Review rule →',
+      actionTarget: sib.target,
+    });
+    if (observations.length >= 4) return observations;
+  }
+
+  // ─── 2. Temporal gap — pairs active at same time with no CON edge between them ───
+  const focalSegs = focalState._fold?.segmentMemberships ?? [];
+  const focalAgents = focalState._fold?.touchedAgents ?? [];
+  for (let i = 0; i < population.length && observations.length < 4; i++) {
+    const a = population[i];
+    const b = population[i + 1];
+    if (!b) break;
+    const aMs = a._fold?.lastEventTs ? new Date(a._fold.lastEventTs).getTime() : 0;
+    const bMs = b._fold?.lastEventTs ? new Date(b._fold.lastEventTs).getTime() : 0;
+    if (aMs === 0 || bMs === 0) continue;
+    const daysDiff = Math.abs(aMs - bMs) / (1000 * 60 * 60 * 24);
+    if (daysDiff > 3) continue;
+    // No CON edge between them
+    const aEdges = await getEdgesFrom(store, a.target);
+    const aLinked = new Set(aEdges.map(e => e.dest));
+    if (aLinked.has(b.target)) continue;
+    // At least one shares a segment or agent with the focal record
+    const aSegs = a._fold?.segmentMemberships ?? [];
+    const bSegs = b._fold?.segmentMemberships ?? [];
+    const aAgents = a._fold?.touchedAgents ?? [];
+    const bAgents = b._fold?.touchedAgents ?? [];
+    const relatedToFocal =
+      aSegs.some(s => focalSegs.includes(s)) || bSegs.some(s => focalSegs.includes(s)) ||
+      aAgents.some(ag => focalAgents.includes(ag)) || bAgents.some(ag => focalAgents.includes(ag));
+    if (!relatedToFocal) continue;
+    const aName = displayNameFromState(a);
+    const bName = displayNameFromState(b);
+    const dateStr = formatObsDate(new Date(Math.max(aMs, bMs)).toISOString());
+    observations.push({
+      icon: '◷',
+      color: '#6b7280',
+      text: `${aName} and ${bName} were both active on ${dateStr} but share no connection. They may be working the same matter independently.`,
+      action: 'Connect them →',
+      actionTarget: a.target,
+    });
+  }
+
+  // ─── 3. Crystallization — co-constituents + potential expansion ───
+  if (observations.length < 4) {
+    const focalCrystalId = focalState._fold?.crystallizedIn;
+    if (focalCrystalId) {
+      const derived = await store.get(`derived:${focalCrystalId}`) as DerivedEntity | null;
+      if (derived && derived.constituents.length >= 2) {
+        const constituentNames: string[] = [];
+        for (const c of derived.constituents) {
+          const cs = await getState(store, c);
+          constituentNames.push(cs ? displayNameFromState(cs) : c.split('.').pop() || c);
+        }
+        const qualifyingCount = population.filter(s =>
+          !derived.constituents.includes(s.target) && !s._fold?.crystallizedIn,
+        ).length;
+        const extra = qualifyingCount > 0
+          ? ` ${qualifyingCount} other record${qualifyingCount > 1 ? 's' : ''} in this table may qualify to join it.`
+          : '';
+        observations.push({
+          icon: '✦',
+          color: '#f59e0b',
+          text: `${constituentNames[0]} and ${constituentNames[1]} co-produced a ${derived.topology} cohort.${extra}`,
+          action: 'View cohort →',
+          actionTarget: focalCrystalId,
+        });
+      }
+    }
+  }
+
+  // ─── 4. Reviewed with no field changes (last_op NUL, inactive > 14 days) ───
+  if (observations.length < 4) {
+    const cutoffMs = Date.now() - 14 * 24 * 60 * 60 * 1000;
+    for (const sib of population) {
+      if (sib.last_op !== 'NUL') continue;
+      const lastMs = sib.last_ts ? new Date(sib.last_ts).getTime() : 0;
+      if (lastMs === 0 || lastMs > cutoffMs) continue;
+      const sibName = displayNameFromState(sib);
+      const dateStr = formatObsDate(sib.last_ts);
+      observations.push({
+        icon: '👁',
+        color: '#9ca3af',
+        text: `${sibName} was reviewed on ${dateStr} with no field changes made. It hasn't been opened since.`,
+      });
+      break;
+    }
+  }
+
+  return observations.slice(0, 4);
 }
 
 // --- Layer 4: Governance ---

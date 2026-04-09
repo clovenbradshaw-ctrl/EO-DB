@@ -4,7 +4,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { HorizonResponse, NearbyEntry, SignalEntry, RecCycleInfo, GovernanceEntry } from '../db/types';
+import type { HorizonResponse, SimilarRecord, Observation, SignalEntry, RecCycleInfo, GovernanceEntry } from '../db/types';
 import { useEoStore } from '../store/eo-store';
 import { FigureFields } from './FigureFields';
 import { ConnectionsPanel, type ConnectionSectionConfig as ConnSectionCfg } from './ConnectionsPanel';
@@ -13,6 +13,7 @@ import { DesignerView } from './DesignerView';
 import { Trajectory } from './Trajectory';
 import { Grounds } from './Grounds';
 import { Nearby } from './Nearby';
+import { Noticed } from './Noticed';
 import { Governance } from './Governance';
 import { Signals } from './Signals';
 import { HashCohort } from './HashCohort';
@@ -52,9 +53,12 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
   const [error, setError] = useState<string | null>(null);
 
   // Lazy section state — populated only when the user expands the section.
-  const [nearby, setNearby] = useState<NearbyEntry[] | undefined>(undefined);
+  const [nearby, setNearby] = useState<SimilarRecord[] | undefined>(undefined);
   const [nearbyLoading, setNearbyLoading] = useState(false);
   const [nearbyError, setNearbyError] = useState<string | null>(null);
+  const [observations, setObservations] = useState<Observation[] | undefined>(undefined);
+  const [observationsLoading, setObservationsLoading] = useState(false);
+  const [observationsError, setObservationsError] = useState<string | null>(null);
   const [signals, setSignals] = useState<SignalEntry[] | undefined>(undefined);
   const [signalsLoading, setSignalsLoading] = useState(false);
   const [signalsError, setSignalsError] = useState<string | null>(null);
@@ -94,6 +98,7 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
       setLoading(true);
       setError(null);
       setNearby(undefined); setNearbyLoading(false); setNearbyError(null);
+      setObservations(undefined); setObservationsLoading(false); setObservationsError(null);
       setSignals(undefined); setSignalsLoading(false); setSignalsError(null);
       setGovernance(undefined); setGovernanceLoading(false); setGovernanceError(null);
       setHashCohort(undefined); setHashLoading(false); setHashError(null);
@@ -153,6 +158,20 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
       setNearbyLoading(false);
     }
   }, [target, horizon, nearby, nearbyLoading]);
+
+  const loadObservations = useCallback(async () => {
+    if (observations !== undefined || observationsLoading) return;
+    setObservationsLoading(true); setObservationsError(null);
+    try {
+      const result = await horizon(target, { observations: true });
+      if (result && !Array.isArray(result)) setObservations(result.observations ?? []);
+    } catch (err: any) {
+      console.error('[RecordView] lazy observations failed', err);
+      setObservationsError(err?.message ?? String(err));
+    } finally {
+      setObservationsLoading(false);
+    }
+  }, [target, horizon, observations, observationsLoading]);
 
   const loadSignals = useCallback(async () => {
     if (signals !== undefined || signalsLoading) return;
@@ -432,10 +451,10 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
         </Section>
       )}
 
-      {/* Similar Records — multi-dimensional similarity */}
+      {/* Similar Records — reason-based similarity cards */}
       <LazySection
         title="Similar Records"
-        subtitle="by hash, trajectory, state & connections"
+        subtitle="self-generated from record structure"
         color={theme.teal}
         loaded={nearby !== undefined}
         loading={nearbyLoading}
@@ -444,6 +463,22 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
         emptyMessage="No similar records"
       >
         {nearby && nearby.length > 0 && <Nearby entries={nearby} onNavigate={onNavigate} />}
+      </LazySection>
+
+      {/* Noticed — template-fired structural observations */}
+      <LazySection
+        title="Noticed"
+        subtitle="things you didn't ask about"
+        color={theme.warning}
+        loaded={observations !== undefined}
+        loading={observationsLoading}
+        error={observationsError}
+        onLoad={loadObservations}
+        emptyMessage="Nothing unusual detected"
+      >
+        {observations && observations.length > 0 && (
+          <Noticed observations={observations} onNavigate={onNavigate} />
+        )}
       </LazySection>
 
       {/* Patterns — lazy: full collection scan + population stats */}

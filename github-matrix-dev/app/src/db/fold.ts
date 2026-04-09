@@ -847,6 +847,15 @@ async function detectAndEmitREC(
 
     for (const constituent of sortedConstituents) {
       await store.put(`rdep:${constituent}:${derivedTargetId}`, derivedTargetId);
+      // Write crystallizedIn on each constituent's fold cache so the similarity
+      // engine can detect co-constituents in O(1) without scanning rdep:* keys.
+      const constituentState = await getState(store, constituent);
+      if (constituentState?._fold) {
+        await setState(store, {
+          ...constituentState,
+          _fold: { ...constituentState._fold, crystallizedIn: derivedTargetId },
+        });
+      }
     }
 
     if (onEvent) onEvent(insEvent);

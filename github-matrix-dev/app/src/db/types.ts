@@ -89,6 +89,10 @@ export interface EoStateFold {
   lastEventTs: string;
   intervalsSorted: number[];             // sorted ms gaps between consecutive events (capped window)
   recentTimestamps: number[];            // event timestamps within the last hour of lastEventTs
+  // ─── Similarity signals (incrementally maintained) ───
+  touchedAgents?: string[];              // deduplicated list of all agents who wrote to this target
+  segmentMemberships?: string[];         // segment/boundary tags from the last SEG event
+  crystallizedIn?: string;              // target ID of the derived entity this record is a constituent of
 }
 
 // Derived entity registration — tracks INS2+ entities and their constituents
@@ -149,7 +153,8 @@ export interface HorizonResponse {
   figure: EoState | null;
   ancestry?: AncestryEntry[];
   grounds: GroundEntry[];
-  nearby?: NearbyEntry[];
+  nearby?: SimilarRecord[];
+  observations?: Observation[];
   governance?: GovernanceEntry[];
   trajectory?: TrajectoryEntry[];
   signals?: SignalEntry[];
@@ -200,6 +205,31 @@ export interface NearbyEntry {
   shared: string[];
   /** @deprecated use 1/score instead. */
   distance: number;
+}
+
+/** A single plain-English reason why two records are similar. */
+export interface SimilarityReason {
+  type: 'con' | 'seg' | 'eva' | 'agent' | 'ops' | 'conflict' | 'rec' | 'crystal' | 'temporal';
+  weight: number;
+  text: string;
+  icon: string;
+  color: string;
+}
+
+/** A similar record with score and ranked plain-English reasons. */
+export interface SimilarRecord {
+  target: string;
+  score: number;
+  reasons: SimilarityReason[];
+}
+
+/** A template-fired structural observation about the population. */
+export interface Observation {
+  icon: string;
+  color: string;
+  text: string;
+  action?: string;
+  actionTarget?: string;
 }
 
 export interface GovernanceEntry {
