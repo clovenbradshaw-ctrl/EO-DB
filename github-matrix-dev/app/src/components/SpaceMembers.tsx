@@ -68,6 +68,7 @@ export function SpaceMembers({ spaceTarget, currentUserId, onClose, matrixClient
   const s = styles(theme);
   const dispatch = useEoStore((st) => st.dispatch);
   const getState = useEoStore((st) => st.getState);
+  const getStateByPrefix = useEoStore((st) => st.getStateByPrefix);
 
   const [spaceState, setSpaceState] = useState<EoState | null>(null);
   const [members, setMembers] = useState<ShareEntry[]>([]);
@@ -108,6 +109,26 @@ export function SpaceMembers({ spaceTarget, currentUserId, onClose, matrixClient
       setOwner(state.last_agent);
       setMembers(state.value?._sharing || []);
     }
+
+    // Derive available fields from schema states under this space.
+    // Schema fields are stored at {spaceTarget}.{scope}._schema.{fieldKey}
+    // We collect all direct field-key targets (no further sub-paths).
+    const schemaMarker = '._schema.';
+    const allSpaceStates = await getStateByPrefix(spaceTarget + '.');
+    const fieldKeySet = new Set<string>();
+    for (const s of allSpaceStates) {
+      const idx = s.target.indexOf(schemaMarker);
+      if (idx === -1) continue;
+      const remainder = s.target.slice(idx + schemaMarker.length);
+      // Only direct field entries — skip sub-paths like .type, .constraint.*, .resolve
+      if (remainder && !remainder.includes('.')) {
+        fieldKeySet.add(remainder);
+      }
+    }
+    if (fieldKeySet.size > 0) {
+      setAvailableFields([...fieldKeySet].sort());
+    }
+
     setLoading(false);
   }
 
@@ -133,9 +154,6 @@ export function SpaceMembers({ spaceTarget, currentUserId, onClose, matrixClient
   useEffect(() => {
     if (spaceState?.value?._field_assignments) {
       setFieldAssignments(spaceState.value._field_assignments);
-    }
-    if (spaceState?.value?._available_fields) {
-      setAvailableFields(spaceState.value._available_fields);
     }
     if (spaceState?.value?._user_type_definitions) {
       setUserTypeDefinitions(spaceState.value._user_type_definitions);
