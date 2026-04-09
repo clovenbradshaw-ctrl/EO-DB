@@ -21,6 +21,7 @@ import type {
 } from '../lib/api-adapters/types';
 import { normalizeTimestamp } from '../lib/api-adapters/types';
 import { AirtableAdapter } from '../lib/api-adapters/airtable';
+import { GenericRestAdapter } from '../lib/api-adapters/generic-rest';
 
 // ─── Record cache ─────────────────────────────────────────────────────────────
 
@@ -110,8 +111,10 @@ function buildAdapter(
       null, // injected after discoverFields if a lastModifiedTime field exists in mappings
     );
   }
-  // generic_rest placeholder — not yet implemented
-  throw new Error(`Adapter for sourceType "${credentials.sourceType}" is not yet implemented`);
+  if (credentials.sourceType === 'generic_rest') {
+    return new GenericRestAdapter(credentials);
+  }
+  throw new Error(`Adapter for sourceType "${(credentials as ApiCredentials).sourceType}" is not yet implemented`);
 }
 
 /**
