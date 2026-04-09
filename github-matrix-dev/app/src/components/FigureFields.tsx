@@ -275,9 +275,6 @@ export function FigureFields({ figure, onNavigate, profileFields, recordTs, allE
           >
             <div style={s.label}>
               {fieldLabels[key] || schemaFieldNames.get(key) || (key.startsWith('fld') ? formatName(key) : key)}
-              {(fieldLabels[key] || schemaFieldNames.has(key) || key.startsWith('fld')) && (
-                <span style={s.fieldKeyHint}>{key}</span>
-              )}
               {value._computed && key === '_computed' && (
                 <span style={s.evaBadge}>EVA</span>
               )}
@@ -502,7 +499,6 @@ export function FigureFields({ figure, onNavigate, profileFields, recordTs, allE
             <div key={`rel_${key}`} style={s.cell}>
               <div style={s.label}>
                 {fieldLabels[key] || schemaFieldNames.get(key) || key}
-                <span style={s.fieldKeyHint}>{key}</span>
               </div>
               <div style={s.value}>
                 <RelationshipFieldPanel
@@ -902,7 +898,7 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       fontSize: 11,
       fontWeight: 500,
       color: t.textMuted,
-      minWidth: 120,
+      width: 160,
       flexShrink: 0,
       display: 'flex',
       alignItems: 'center',
