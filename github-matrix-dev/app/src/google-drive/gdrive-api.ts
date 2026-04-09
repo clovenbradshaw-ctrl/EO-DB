@@ -611,23 +611,3 @@ export async function computeContentHash(data: string): Promise<string> {
     .join('');
 }
 
-/**
- * Derive a stable, deterministic UUID for a space's Drive file.
- *
- * Uses SHA-256 of "eo-db:space-file:{spaceId}:{role}", formatted as UUID v4.
- * Because the derivation is deterministic, all space members independently
- * compute the same GUID — no coordination needed.
- *
- * @param spaceId  The space's internal ID (e.g. "space_amino")
- * @param role     File role: "log" | "recent" | "manifest"
- */
-export async function deriveSpaceFileGuid(spaceId: string, role: string): Promise<string> {
-  const input = `eo-db:space-file:${spaceId}:${role}`;
-  const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input));
-  const bytes = new Uint8Array(hash).slice(0, 16);
-  // Set UUID v4 version and RFC 4122 variant bits
-  bytes[6] = (bytes[6] & 0x0f) | 0x40;
-  bytes[8] = (bytes[8] & 0x3f) | 0x80;
-  const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
-}

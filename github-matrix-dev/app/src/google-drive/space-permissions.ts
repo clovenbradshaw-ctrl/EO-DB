@@ -75,6 +75,9 @@ export interface ManifestState {
   fields: Record<string, FieldShadowConfig>;
 }
 
+/** Alias for ManifestState — the folded per-space permission manifest. */
+export type UserManifest = ManifestState;
+
 // ─── Filename constant ────────────────────────────────────────────────────────
 
 const MANIFEST_FILENAME = 'manifest.eodb';
