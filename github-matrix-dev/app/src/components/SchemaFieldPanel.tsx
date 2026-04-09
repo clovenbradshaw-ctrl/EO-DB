@@ -65,8 +65,8 @@ export function SchemaFieldPanel({
 
   return (
     <div style={{
-      width: 460,
-      minWidth: 460,
+      width: 520,
+      minWidth: 520,
       borderLeft: `1px solid ${theme.border}`,
       display: 'flex',
       flexDirection: 'column',
@@ -214,6 +214,14 @@ export function SchemaFieldPanel({
             }}>
               ⊢ CONSTRAINTS
             </span>
+            <span style={{
+              fontSize: 10,
+              fontFamily: "'JetBrains Mono', monospace",
+              color: theme.textMuted,
+              opacity: 0.6,
+            }}>
+              for {fieldKey}
+            </span>
             {constraintCount > 0 ? (
               <span style={{
                 fontSize: 10,
@@ -278,6 +286,14 @@ export function SchemaFieldPanel({
             </span>
             <span style={{
               fontSize: 10,
+              fontFamily: "'JetBrains Mono', monospace",
+              color: theme.textMuted,
+              opacity: 0.6,
+            }}>
+              for {fieldKey}
+            </span>
+            <span style={{
+              fontSize: 10,
               color: currentPolicy ? theme.text : theme.textMuted,
               fontFamily: currentPolicy ? "'JetBrains Mono', monospace" : 'inherit',
             }}>
@@ -296,6 +312,7 @@ export function SchemaFieldPanel({
             <div style={{ overflowX: 'auto' }}>
               <ResolutionPolicyComposer
                 embedded
+                fieldKey={fieldKey}
                 currentPolicy={currentPolicy}
                 onApply={onSetResolution}
                 onClear={onClearResolution}

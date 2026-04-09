@@ -181,6 +181,8 @@ interface ResolutionPolicyComposerProps {
   onClose: () => void;
   /** When true, renders without popup container styling (no shadow/border/minWidth). */
   embedded?: boolean;
+  /** Field key this policy applies to — used for contextual labeling when embedded. */
+  fieldKey?: string;
 }
 
 export function ResolutionPolicyComposer({
@@ -189,9 +191,10 @@ export function ResolutionPolicyComposer({
   onClear,
   onClose,
   embedded,
+  fieldKey,
 }: ResolutionPolicyComposerProps) {
   const { theme } = useTheme();
-  const s = makeStyles(theme);
+  const s = makeStyles(theme, embedded);
   const gpuAvailable = useMemo(hasWebGPU, []);
 
   // Local editing state — initialize from currentPolicy
@@ -260,7 +263,7 @@ export function ResolutionPolicyComposer({
       )}
 
       <div style={s.subtitle}>
-        Select one or more resolution stances to compose a policy.
+        Select one or more stances to compose a resolution policy{fieldKey ? ` for ${fieldKey}` : ''}.
       </div>
 
       {/* Column headers */}
@@ -420,7 +423,8 @@ export function ResolutionPolicyComposer({
 
 // ─── Styles ─────────────────────────────────────────────────────────────
 
-function makeStyles(t: Theme): Record<string, React.CSSProperties> {
+function makeStyles(t: Theme, embedded?: boolean): Record<string, React.CSSProperties> {
+  const labelW = embedded ? 72 : 90;
   return {
     container: {
       padding: 16,
@@ -467,11 +471,11 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
     },
     colHeaders: {
       display: 'grid',
-      gridTemplateColumns: '90px 1fr 1fr 1fr',
+      gridTemplateColumns: `${labelW}px 1fr 1fr 1fr`,
       gap: 6,
       marginBottom: 2,
     },
-    rowLabelSpacer: { width: 90 },
+    rowLabelSpacer: { width: labelW },
     colHeader: {
       display: 'flex',
       flexDirection: 'column',
@@ -490,7 +494,7 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
     },
     gridRow: {
       display: 'grid',
-      gridTemplateColumns: '90px 1fr 1fr 1fr',
+      gridTemplateColumns: `${labelW}px 1fr 1fr 1fr`,
       gap: 6,
     },
     rowLabel: {
