@@ -207,6 +207,14 @@ export const useEoStore = create<EoDbState>((set, get) => ({
         recentEvents: [...state.recentEvents.slice(-99), fullEvent],
         lastSeq: fullEvent.seq,
       }));
+      // Broadcast to peers first (encrypted, via Matrix to-device)
+      const sm = get().syncManager;
+      if (sm && 'broadcastLocalEvent' in sm) {
+        (sm as any).broadcastLocalEvent(fullEvent).catch((e: unknown) =>
+          console.warn('[EO-DB] broadcastLocalEvent failed:', e)
+        );
+      }
+      // Then persist to Google Drive
       get().gdriveSync?.saveOp(fullEvent).catch(e => console.warn('[EO-DB] saveOp failed:', e));
     });
 
