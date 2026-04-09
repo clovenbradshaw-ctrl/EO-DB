@@ -52,6 +52,9 @@ const toDeviceContent = buildToDeviceContent;
 /** Gap size threshold for upgrading to WebRTC or Filen transport. */
 const GAP_THRESHOLD = 100;
 
+/** How often to re-announce presence to peers (ms). Handles late-join timing issues. */
+const HEARTBEAT_INTERVAL_MS = 30_000;
+
 export class PeerSync {
   private client: MatrixClient;
   private roomId: string;
@@ -62,6 +65,9 @@ export class PeerSync {
 
   /** Optional WebRTC peer for direct browser-to-browser transfers. */
   private webrtcPeer: WebRTCPeer | null = null;
+
+  /** Periodic heartbeat timer — re-announces presence so late-joining peers can sync. */
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
   /**
    * Called when a peer signals that new ops were written to GDrive.
@@ -102,11 +108,20 @@ export class PeerSync {
 
   /**
    * Start peer sync — announce presence and listen for messages.
+   *
+   * Safe to call multiple times (e.g. on space re-mount): replaces any
+   * previous listener and restarts the heartbeat.
    */
   async start(): Promise<void> {
     // Remove previous listener if start() is called again
     if (this.toDeviceHandler) {
       this.client.removeListener('toDeviceEvent' as any, this.toDeviceHandler);
+    }
+
+    // Clear any existing heartbeat before restarting
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
     }
 
     // Attach listener BEFORE announcing — if announceToPeers() fails,
@@ -122,12 +137,26 @@ export class PeerSync {
       // Non-fatal — listener is active, peers can still reach us.
       console.warn('[EO-DB] PeerSync announce failed:', e);
     }
+
+    // Periodic heartbeat: re-announce every 30 s so peers that joined late
+    // (or whose initial HELLO was lost during a room-state race) get a chance
+    // to sync. Each heartbeat triggers the normal HELLO→OFFER→REQUEST→EVENTS
+    // exchange for any peer whose seq differs from ours.
+    this.heartbeatTimer = setInterval(() => {
+      this.announceToPeers().catch((e) => {
+        console.warn('[EO-DB] PeerSync heartbeat failed:', e);
+      });
+    }, HEARTBEAT_INTERVAL_MS);
   }
 
   /**
-   * Stop peer sync — remove the event listener.
+   * Stop peer sync — remove the event listener and cancel the heartbeat.
    */
   stop(): void {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
     if (this.toDeviceHandler) {
       this.client.removeListener('toDeviceEvent' as any, this.toDeviceHandler);
       this.toDeviceHandler = undefined;
@@ -157,12 +186,34 @@ export class PeerSync {
   }
 
   /**
+   * Wait for the room to appear in the Matrix SDK's local store.
+   *
+   * After a fresh joinRoom() call the SDK needs one sync cycle to deliver
+   * room state. Poll with exponential backoff (~6 s max) so announceToPeers
+   * doesn't silently no-op when called immediately after joining.
+   */
+  private async waitForRoom(maxAttempts = 5): Promise<any | null> {
+    let delay = 200;
+    for (let i = 0; i < maxAttempts; i++) {
+      const room = this.client.getRoom(this.roomId);
+      if (room) return room;
+      await new Promise(resolve => setTimeout(resolve, delay));
+      delay *= 2;
+    }
+    return this.client.getRoom(this.roomId); // final attempt after full backoff
+  }
+
+  /**
    * Announce our current seq + fingerprint to all devices in the room.
+   *
+   * Waits for the room to be available in the SDK before sending — this
+   * handles the race condition where announceToPeers is called immediately
+   * after joinRoom(), before the Matrix sync cycle has delivered room state.
    */
   private async announceToPeers(): Promise<void> {
     const mySeq = await this.store.getCurrentSeq();
     const fingerprint = await this.computeFingerprint();
-    const room = this.client.getRoom(this.roomId);
+    const room = await this.waitForRoom();
     if (!room) return;
 
     const members = room.getJoinedMembers();
