@@ -620,16 +620,22 @@ async function detectSignals(store: EoStore, target: string): Promise<SignalEntr
     const targetFieldState = await getState(store, `${target}.${field}`);
     if (targetFieldState && typeof targetFieldState.value === 'number') {
       const z = (targetFieldState.value - mean) / std;
-      if (Math.abs(z) > 1.5) {
-        signals.push({
-          description: `${field} is ${z > 0 ? 'above' : 'below'} population average (z=${z.toFixed(2)})`,
-          measure: field,
-          value: { target_value: targetFieldState.value, population_mean: mean, z_score: z },
-          population: collectionPrefix,
-          n: values.length,
-          computed_at: new Date().toISOString(),
-        });
-      }
+      const isOutlier = Math.abs(z) > 1.5;
+      const description = isOutlier
+        ? `${field} is ${z > 0 ? 'unusually high' : 'unusually low'} (z=${z.toFixed(2)})`
+        : z > 0.2
+        ? `${field} is above average (z=${z.toFixed(2)})`
+        : z < -0.2
+        ? `${field} is below average (z=${z.toFixed(2)})`
+        : `${field} is near the population average`;
+      signals.push({
+        description,
+        measure: field,
+        value: { target_value: targetFieldState.value, population_mean: mean, z_score: z, isOutlier },
+        population: collectionPrefix,
+        n: values.length,
+        computed_at: new Date().toISOString(),
+      });
     }
   }
 
