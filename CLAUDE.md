@@ -14,7 +14,7 @@ The CI pipeline runs `tsc -b && vite build` on every push to `main` — the same
 
 ## TypeScript Error Checklist
 
-These 5 patterns have repeatedly broken CI. Verify each one when editing TypeScript:
+These 6 patterns have repeatedly broken CI. Verify each one when editing TypeScript:
 
 ### 1. Interface completeness
 When adding a field to an interface or type, **grep for every place that constructs an object of that type** and add the new field to each one. Missing fields on even one construction site will fail `tsc`.
@@ -30,10 +30,13 @@ const keyed = 'keyed' in result ? (result as { keyed: KeyedSummary }).keyed : nu
 ```
 Never cast a union type directly to access a member-specific property.
 
-### 3. Dead code after early returns
+### 3. Stale references after deletions
+When deleting code (state variables, functions, imports, components), **search the entire file for every reference** to the deleted identifier before committing. A partial deletion that removes a declaration but leaves call sites causes TS2304/TS2552 errors. This is the #1 cause of CI failures in this repo.
+
+### 4. Dead code after early returns
 If you add an early `return` to disable a function body, **delete all code below it**. TypeScript's control-flow analysis will reject variable references in unreachable code. For unused parameters, add `void paramName;` before the return.
 
-### 4. Browser API type mismatches
+### 5. Browser API type mismatches
 `Uint8Array` is NOT assignable to `BufferSource` or `BodyInit` in strict mode. When passing binary data to Web APIs (`fetch`, `SubtleCrypto`, etc.):
 ```ts
 // For fetch body: wrap in Blob
@@ -43,7 +46,7 @@ fetch(url, { method: 'PUT', body: new Blob([data]) });
 crypto.subtle.digest('SHA-256', data as unknown as BufferSource);
 ```
 
-### 5. Duplicate exports
+### 6. Duplicate exports
 Before adding a named export, verify the same name isn't already exported from that file. `tsc` rejects duplicate export identifiers.
 
 ## Project Layout

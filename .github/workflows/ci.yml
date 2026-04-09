@@ -8,8 +8,8 @@ on:
       - '.github/workflows/ci.yml'
 
 jobs:
-  typecheck:
-    name: TypeScript
+  build:
+    name: TypeScript & Build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,3 +27,7 @@ jobs:
       - name: Type check
         working-directory: github-matrix-dev/app
         run: npx tsc -b --noEmit
+
+      - name: Build
+        working-directory: github-matrix-dev/app
+        run: npx vite build
