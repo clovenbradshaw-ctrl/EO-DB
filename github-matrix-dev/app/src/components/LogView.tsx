@@ -129,9 +129,10 @@ function OpBadge({ op, size = 'normal' }: { op: string; size?: 'normal' | 'small
 
 // --- NulStateBadge (F1.2) ---
 const NUL_STATE_COLORS: Record<NulState, { bg: string; text: string }> = {
-  'never-set': { bg: '#6b7280', text: '#fff' },
-  'unknown':   { bg: '#d97706', text: '#fff' },
-  'cleared':   { bg: '#3b82f6', text: '#fff' },
+  'never-set':         { bg: '#6b7280', text: '#fff' },
+  'unknown':           { bg: '#d97706', text: '#fff' },
+  'cleared':           { bg: '#3b82f6', text: '#fff' },
+  'promotion_blocked': { bg: '#ef4444', text: '#fff' },
 };
 
 function NulStateBadge({ nulState }: { nulState: NulState }) {
