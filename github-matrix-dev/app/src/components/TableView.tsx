@@ -482,6 +482,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   const [fieldSchemas, setFieldSchemas] = useState<Map<string, FieldSchema>>(new Map());
   const [columnTypeOverrides, setColumnTypeOverrides] = useState<Map<string, any>>(new Map());
   const [columnTypeSelector, setColumnTypeSelector] = useState<{ x: number; y: number; key: string } | null>(null);
+  const [linkedRecordPicker, setLinkedRecordPicker] = useState<{ x: number; y: number; key: string; tables: { scope: string; name: string }[] } | null>(null);
   const [resolutionComposer, setResolutionComposer] = useState<{ x: number; y: number; key: string } | null>(null);
   const [constraintComposer, setConstraintComposer] = useState<{ x: number; y: number; key: string } | null>(null);
   const [editingCell, setEditingCell] = useState<{ target: string; fieldKey: string; value: string } | null>(null);
@@ -946,12 +947,14 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     setRenameCol(null);
   }
 
-  async function handleSetColumnType(fieldKey: string, type: string) {
+  async function handleSetColumnType(fieldKey: string, type: string, linkedTableId?: string) {
+    const operand: Record<string, string> = { type };
+    if (linkedTableId) operand.linkedTableId = linkedTableId;
     try {
       await dispatch({
         op: 'DEF',
         target: schemaTypeTarget(scope, fieldKey),
-        operand: { type },
+        operand,
         agent: `user:${session.userId}`,
         ts: new Date().toISOString(),
         acquired_ts: new Date().toISOString(),
@@ -959,7 +962,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
       // Update local state immediately
       setColumnTypeOverrides((prev) => {
         const next = new Map(prev);
-        next.set(fieldKey, { type });
+        next.set(fieldKey, operand);
         return next;
       });
       setFieldSchemas((prev) => {
@@ -967,12 +970,13 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
         const existing = next.get(fieldKey) ?? { fieldKey, constraints: [] };
         next.set(fieldKey, {
           ...existing,
-          typeDef: { target: schemaTypeTarget(scope, fieldKey), value: { type } },
+          typeDef: { target: schemaTypeTarget(scope, fieldKey), value: operand },
         });
         return next;
       });
     } catch { /* ignore */ }
     setColumnTypeSelector(null);
+    setLinkedRecordPicker(null);
   }
 
   async function handleClearColumnType(fieldKey: string) {
@@ -1728,10 +1732,67 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                 ?? 'text'
               }
               isDefined={!!fieldSchemas.get(columnTypeSelector.key)?.typeDef}
-              onSelect={(type) => handleSetColumnType(columnTypeSelector.key, type)}
+              onSelect={async (type) => {
+                if (type === 'linkedRecord') {
+                  // Fetch sibling tables and show a picker before committing
+                  const states = await getStateByPrefix(scopeRoot + '.');
+                  const tables = states
+                    .filter(s => {
+                      const parts = s.target.split('.');
+                      if (parts.length !== 2) return false;
+                      const seg = parts[1];
+                      return !seg.startsWith('_') && seg !== scope.split('.')[1];
+                    })
+                    .map(s => ({ scope: s.target, name: formatScopeName(s.target) }));
+                  setColumnTypeSelector(null);
+                  setLinkedRecordPicker({ x: columnTypeSelector.x, y: columnTypeSelector.y, key: columnTypeSelector.key, tables });
+                } else {
+                  handleSetColumnType(columnTypeSelector.key, type);
+                }
+              }}
               onClear={() => handleClearColumnType(columnTypeSelector.key)}
               onClose={() => setColumnTypeSelector(null)}
             />
+          </div>
+        </>
+      )}
+      {linkedRecordPicker && (
+        <>
+          <div
+            style={{ position: 'fixed', inset: 0, zIndex: 9998 }}
+            onClick={() => setLinkedRecordPicker(null)}
+          />
+          <div style={{
+            position: 'fixed',
+            left: linkedRecordPicker.x,
+            top: linkedRecordPicker.y,
+            zIndex: 9999,
+            background: theme.bgCard,
+            border: `1px solid ${theme.border}`,
+            borderRadius: 8,
+            boxShadow: `0 8px 30px ${theme.shadow}`,
+            minWidth: 220,
+            maxWidth: 320,
+            padding: '8px 0',
+          }}>
+            <div style={{ padding: '6px 12px 8px', fontSize: 11, fontWeight: 600, color: theme.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+              Link to table
+            </div>
+            {linkedRecordPicker.tables.length === 0 ? (
+              <div style={{ padding: '6px 12px', fontSize: 13, color: theme.textMuted }}>No other tables found</div>
+            ) : (
+              linkedRecordPicker.tables.map(t => (
+                <div
+                  key={t.scope}
+                  style={{ padding: '7px 12px', fontSize: 13, cursor: 'pointer', color: theme.text }}
+                  onMouseEnter={e => (e.currentTarget.style.background = theme.bgHover ?? theme.bgMuted)}
+                  onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                  onClick={() => handleSetColumnType(linkedRecordPicker.key, 'linkedRecord', t.scope)}
+                >
+                  {t.name}
+                </div>
+              ))
+            )}
           </div>
         </>
       )}
