@@ -11,6 +11,7 @@ import { registerAdminRoutes } from './api/admin.js';
 import { registerAuthRoutes } from './api/auth.js';
 import { registerIngestionRoutes } from './api/ingestion.js';
 import { registerLogImportRoutes } from './api/log-import.js';
+import { registerImportJobRoutes } from './api/import-jobs.js';
 import { registerRoomSyncRoutes } from './api/room-sync.js';
 import { registerDedupRoutes } from './api/dedup.js';
 import { registerChatRoutes } from './api/chat.js';
@@ -92,7 +93,8 @@ async function start(): Promise<void> {
     registerQueryRoutes(protectedApp, db);
     registerAdminRoutes(protectedApp, db);
     registerIngestionRoutes(protectedApp, db, feed, syncManager);
-    registerLogImportRoutes(protectedApp, db, feed, syncManager);
+    registerLogImportRoutes(protectedApp, db, feed, syncManager, DATA_DIR);
+    registerImportJobRoutes(protectedApp, db, feed, DATA_DIR);
     registerRoomSyncRoutes(protectedApp, db, coordinator);
     registerDedupRoutes(protectedApp, db, feed);
     registerChatRoutes(protectedApp, db, chatFeed);
