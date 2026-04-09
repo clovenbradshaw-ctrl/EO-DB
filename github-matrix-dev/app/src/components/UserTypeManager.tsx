@@ -22,6 +22,18 @@ const DEFAULT_COLORS = [
   '#ef4444', '#ec4899', '#06b6d4', '#84cc16',
 ];
 
+/** Views that admins can configure per-role. Records is always visible. Multiuser is a testing tool. */
+const CONFIGURABLE_VIEWS: { id: string; label: string }[] = [
+  { id: 'compose', label: 'Compose' },
+  { id: 'import', label: 'Import' },
+  { id: 'api', label: 'API Connections' },
+  { id: 'people', label: 'People' },
+  { id: 'messages', label: 'Messages' },
+  { id: 'log', label: 'Log' },
+  { id: 'builder', label: 'Builder' },
+  { id: 'settings', label: 'Settings' },
+];
+
 const AGGREGATION_OPTIONS: { value: HeadlineMetric['aggregation']; label: string }[] = [
   { value: 'count', label: 'Count' },
   { value: 'sum', label: 'Sum' },
@@ -49,6 +61,7 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
   const [newDescription, setNewDescription] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editMetrics, setEditMetrics] = useState<HeadlineMetric[]>([]);
+  const [editingViewsId, setEditingViewsId] = useState<string | null>(null);
 
   if (!canManage && typeDefinitions.length === 0) return null;
 
@@ -87,6 +100,31 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
     ));
     setEditingId(null);
     setEditMetrics([]);
+  }
+
+  function handleToggleView(typeId: string, viewId: string) {
+    onUpdate(typeDefinitions.map(t => {
+      if (t.id !== typeId) return t;
+      const cur = t.visible_views;
+      if (cur == null) {
+        // Currently unrestricted — restrict to all except this view
+        const next = CONFIGURABLE_VIEWS.map(v => v.id).filter(v => v !== viewId);
+        return { ...t, visible_views: ['records', ...next] };
+      }
+      if (cur.includes(viewId)) {
+        // Uncheck — remove from list
+        const next = cur.filter(v => v !== viewId);
+        return { ...t, visible_views: next };
+      } else {
+        // Check — add to list; if now all views checked, remove restriction
+        const next = [...cur, viewId];
+        const allIds = CONFIGURABLE_VIEWS.map(v => v.id);
+        if (allIds.every(v => next.includes(v))) {
+          return { ...t, visible_views: undefined };
+        }
+        return { ...t, visible_views: next };
+      }
+    }));
   }
 
   function addMetric() {
@@ -140,13 +178,14 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
         <div style={{ marginTop: 8 }}>
           {/* Existing types */}
           {typeDefinitions.map((def) => (
-            <div key={def.id} style={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              padding: '6px 0',
-              borderBottom: `1px solid ${theme.border}`,
-            }}>
+            <div key={def.id} style={{ borderBottom: `1px solid ${theme.border}` }}>
+              {/* Type row */}
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                padding: '6px 0',
+              }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <UserTypeBadge label={def.label} color={def.color} />
                 {def.description && (
@@ -160,6 +199,15 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
                     background: theme.accentBg, padding: '1px 5px', borderRadius: 4,
                   }}>
                     {def.headline_metrics.length} metric{def.headline_metrics.length !== 1 ? 's' : ''}
+                  </span>
+                )}
+                {def.visible_views != null && (
+                  <span style={{
+                    fontFamily: mono, fontSize: 9, color: def.color || theme.textSecondary,
+                    background: def.color ? `${def.color}14` : theme.bgMuted,
+                    padding: '1px 5px', borderRadius: 4,
+                  }}>
+                    {def.visible_views.length} views
                   </span>
                 )}
               </div>
@@ -178,6 +226,24 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
                     metrics
                   </button>
                   <button
+                    onClick={() => setEditingViewsId(editingViewsId === def.id ? null : def.id)}
+                    style={{
+                      fontFamily: mono, fontSize: 9,
+                      color: editingViewsId === def.id ? '#fff' : (def.color || theme.textSecondary),
+                      background: editingViewsId === def.id ? (def.color || theme.accent) : 'none',
+                      border: 'none', cursor: 'pointer',
+                      padding: '2px 6px', borderRadius: 4,
+                    }}
+                    onMouseEnter={(e) => {
+                      if (editingViewsId !== def.id) e.currentTarget.style.background = theme.bgMuted;
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.background = editingViewsId === def.id ? (def.color || theme.accent) : 'none';
+                    }}
+                  >
+                    views
+                  </button>
+                  <button
                     onClick={() => handleDelete(def.id)}
                     style={{
                       fontFamily: mono, fontSize: 9, color: theme.danger,
@@ -189,6 +255,53 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
                   >
                     remove
                   </button>
+                </div>
+              )}
+              </div>
+              {/* Views config panel — inline, expands when "views" button is clicked */}
+              {canManage && editingViewsId === def.id && (
+                <div style={{
+                  padding: '10px 0 10px 8px',
+                  background: theme.bgMuted,
+                  borderRadius: 6,
+                  marginBottom: 6,
+                }}>
+                  <div style={{ fontFamily: mono, fontSize: 10, fontWeight: 600, color: theme.textSecondary, marginBottom: 8 }}>
+                    Visible nav for "{def.label}"
+                    <span style={{ fontWeight: 400, color: theme.textMuted, marginLeft: 6 }}>
+                      (Records always visible)
+                    </span>
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4 }}>
+                    {CONFIGURABLE_VIEWS.map(view => {
+                      const active = !def.visible_views || def.visible_views.includes(view.id);
+                      return (
+                        <label key={view.id} style={{
+                          display: 'flex', alignItems: 'center', gap: 6,
+                          padding: '5px 8px', borderRadius: 6, cursor: 'pointer',
+                          background: active ? (def.color ? `${def.color}12` : theme.accentBg) : theme.bgCard,
+                          border: `1px solid ${active ? (def.color ? `${def.color}30` : theme.accentBorder) : theme.border}`,
+                        }}>
+                          <input
+                            type="checkbox"
+                            checked={active}
+                            onChange={() => handleToggleView(def.id, view.id)}
+                            style={{ accentColor: def.color || theme.accent, width: 12, height: 12 }}
+                          />
+                          <span style={{
+                            fontFamily: mono, fontSize: 10,
+                            color: active ? (def.color || theme.accent) : theme.textMuted,
+                            fontWeight: active ? 500 : 400,
+                          }}>
+                            {view.label}
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                  <div style={{ fontFamily: mono, fontSize: 9, color: theme.textMuted, marginTop: 6 }}>
+                    {def.visible_views ? `${def.visible_views.length} views enabled` : 'All views visible (no restriction)'}
+                  </div>
                 </div>
               )}
             </div>

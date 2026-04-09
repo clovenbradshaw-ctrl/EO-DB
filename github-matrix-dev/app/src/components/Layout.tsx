@@ -43,7 +43,7 @@ import { useBuilderStore } from '../store/builder-store';
 import { useSyncStore } from '../store/sync-store';
 import { useEoServerStore } from '../store/eo-server-store';
 import { processEvent } from '../db/fold';
-import { useTheme, spaceBackgroundTint, type Theme } from '../theme';
+import { useTheme, spaceBackgroundTint, roleBackgroundTint, type Theme } from '../theme';
 import type { EoState } from '../db/types';
 import type { ViewDefinition } from '../blocks/types';
 import type { SliceType } from './slice-types';
@@ -1694,6 +1694,11 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   const spaceUserTypeDefinitions: UserTypeDefinition[] = currentSpaceState?.value?._user_type_definitions || [];
   const spaceUserTypeAssignments = currentSpaceState?.value?._user_type_assignments || [];
   const spaceFieldTypeVisibility = currentSpaceState?.value?._field_type_visibility || [];
+
+  // Active role definition and its background tint (computed after spaceUserTypeDefinitions is available)
+  const activeTypeDef = spaceUserTypeDefinitions.find(d => d.id === activeUserType) ?? null;
+  const roleTint = roleBackgroundTint(activeTypeDef?.color, theme.mode);
+  const roleAccentColor = activeTypeDef?.color ?? null;
   const currentUserAssignedTypes: string[] = useMemo(() => {
     const assignment = spaceUserTypeAssignments.find(
       (a: { user_id: string }) => a.user_id === session.userId,
@@ -1716,6 +1721,13 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       setActiveUserType(null);
     }
   }, [selectedSpace, currentUserAssignedTypes]);
+
+  // When the active role restricts nav views, redirect away from now-hidden views
+  useEffect(() => {
+    if (activeTypeDef?.visible_views?.length && !activeTypeDef.visible_views.includes(activeView)) {
+      navigate({ view: 'records' });
+    }
+  }, [activeUserType]);
 
   const currentPermissions = useMemo(() => {
     if (!currentSpaceState) {
@@ -1752,10 +1764,24 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     return sv?.sliceType || 'grid';
   }, [selectedScope, sliceSigs, savedSlices]);
 
+  const mono = "'JetBrains Mono', monospace";
+
   return (
-    <div style={s.container}>
+    <div style={{
+      ...s.container,
+      background: roleTint ? roleTint.bg : themedBg.bg,
+      transition: 'background 0.5s cubic-bezier(.4,0,.2,1)',
+    }}>
       {/* Top bar */}
-      <header style={s.topBar}>
+      <header style={{
+        ...s.topBar,
+        background: roleTint ? roleTint.bgCard : themedBg.bgCard,
+        borderBottom: `1px solid ${roleTint ? roleTint.border : themedBg.border}`,
+        boxShadow: roleAccentColor
+          ? `0 2px 0 0 ${roleAccentColor}50`
+          : s.topBar.boxShadow ?? 'none',
+        transition: 'background 0.4s, border-color 0.4s, box-shadow 0.4s',
+      }}>
         <div style={s.topBarLeft}>
           {isMobile && (
             <button
@@ -1957,7 +1983,11 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           </button>
           {/* User */}
           <div style={s.userArea}>
-            <div style={s.avatar}>{displayName.charAt(0).toUpperCase()}</div>
+            <div style={{
+              ...s.avatar,
+              border: roleAccentColor ? `2px solid ${roleAccentColor}60` : (s.avatar as React.CSSProperties & { border?: string }).border,
+              transition: 'border-color 0.4s',
+            }}>{displayName.charAt(0).toUpperCase()}</div>
             {!isMobile && (
               <span style={{ fontSize: 12, color: theme.textSecondary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{displayName}</span>
             )}
@@ -1968,6 +1998,45 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           }}>Log out</button>
         </div>
       </header>
+
+      {/* Role banner — appears when an active user type (role) is selected */}
+      {activeTypeDef && roleAccentColor && (
+        <div style={{
+          background: `${roleAccentColor}12`,
+          borderBottom: `1px solid ${roleAccentColor}25`,
+          padding: '5px 16px',
+          display: 'flex', alignItems: 'center', gap: 8,
+          fontFamily: mono, fontSize: 11,
+          flexShrink: 0,
+        }}>
+          <div style={{ width: 6, height: 6, borderRadius: '50%', background: roleAccentColor, flexShrink: 0 }} />
+          <span style={{ color: roleAccentColor, fontWeight: 600 }}>Viewing as {activeTypeDef.label}</span>
+          {activeTypeDef.description && (
+            <>
+              <span style={{ color: roleAccentColor, opacity: 0.5 }}>·</span>
+              <span style={{ color: roleAccentColor, opacity: 0.7 }}>{activeTypeDef.description}</span>
+            </>
+          )}
+          {activeTypeDef.visible_views && (
+            <>
+              <span style={{ color: roleAccentColor, opacity: 0.5 }}>·</span>
+              <span style={{ color: roleAccentColor, opacity: 0.7 }}>
+                {activeTypeDef.visible_views.length} of 8 views
+              </span>
+            </>
+          )}
+          <div style={{ flex: 1 }} />
+          <button
+            onClick={() => setActiveUserType(null)}
+            style={{
+              fontFamily: mono, fontSize: 11, fontWeight: 600,
+              color: roleAccentColor, background: 'none',
+              border: `1px solid ${roleAccentColor}40`, borderRadius: 6,
+              padding: '3px 8px', cursor: 'pointer',
+            }}
+          >Exit role</button>
+        </div>
+      )}
 
       {/* View-only banner for Viewer role */}
       {selectedSpace && isViewer && <ViewOnlyBanner />}
@@ -2007,6 +2076,9 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         )}
         <aside style={{
           ...s.sidebar,
+          background: roleTint ? roleTint.bgCard : s.sidebar.background,
+          borderRight: roleTint ? `1px solid ${roleTint.border}` : s.sidebar.borderRight,
+          transition: 'background 0.5s, border-color 0.4s',
           ...(isTablet ? { width: 180, minWidth: 140 } : {}),
           ...(isMobile ? {
             position: 'fixed' as const, left: 0, top: 0, bottom: 0, zIndex: 999,
@@ -2040,83 +2112,94 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             </>
           )}
 
-          {selectedSpace && (
+          {selectedSpace && (() => {
+            // Helper: is this view visible given the active role's visible_views restriction?
+            function isNavViewVisible(view: View): boolean {
+              if (!activeTypeDef?.visible_views?.length) return true;
+              return activeTypeDef.visible_views.includes(view);
+            }
+            // Helper: nav item style, applying role color to active items
+            function navItemStyle(view: View): React.CSSProperties {
+              const active = activeView === view;
+              return {
+                ...s.navItem,
+                ...(active ? s.navItemActive : {}),
+                ...(active && roleAccentColor ? {
+                  background: `${roleAccentColor}18`,
+                  color: roleAccentColor,
+                  borderLeft: `3px solid ${roleAccentColor}`,
+                } : {}),
+              };
+            }
+            // Configurable views (excludes records/multiuser which are special-cased)
+            const CONFIGURABLE_VIEWS: View[] = ['compose', 'import', 'api', 'people', 'messages', 'log', 'builder', 'settings'];
+            const hiddenCount = activeTypeDef?.visible_views
+              ? CONFIGURABLE_VIEWS.filter(v => !activeTypeDef.visible_views!.includes(v)).length
+              : 0;
+            return (
           <nav style={s.sidebarNav}>
             <div style={s.navGroupLabel}>Actions</div>
-            {(['compose', 'import'] as View[]).map((view) => (
+            {(['compose', 'import'] as View[]).map((view) => isNavViewVisible(view) && (
               <button
                 key={view}
                 onClick={() => { navigate({ view }); }}
-                style={{
-                  ...s.navItem,
-                  ...(activeView === view ? s.navItemActive : {}),
-                }}
+                style={navItemStyle(view)}
               >
                 <span style={s.navIcon}>{NAV_ICONS[view]}</span>
                 {view === 'compose' ? '+ Compose' : view.charAt(0).toUpperCase() + view.slice(1)}
               </button>
             ))}
-            <button
-              onClick={() => { navigate({ view: 'api' }); }}
-              style={{
-                ...s.navItem,
-                ...(activeView === 'api' ? s.navItemActive : {}),
-              }}
-            >
-              <span style={s.navIcon}>{NAV_ICONS.api}</span>
-              API Connections
-            </button>
+            {isNavViewVisible('api') && (
+              <button
+                onClick={() => { navigate({ view: 'api' }); }}
+                style={navItemStyle('api')}
+              >
+                <span style={s.navIcon}>{NAV_ICONS.api}</span>
+                API Connections
+              </button>
+            )}
             <div style={s.navGroupLabel}>Collaborate</div>
-            <button
-              onClick={() => navigate({ view: 'people' })}
-              style={{
-                ...s.navItem,
-                ...(activeView === 'people' ? s.navItemActive : {}),
-              }}
-            >
-              <span style={s.navIcon}>{NAV_ICONS.people}</span>
-              People
-            </button>
-            <button
-              onClick={() => navigate({ view: 'messages' })}
-              style={{
-                ...s.navItem,
-                ...(activeView === 'messages' ? s.navItemActive : {}),
-              }}
-            >
-              <span style={s.navIcon}>{NAV_ICONS.messages}</span>
-              Messages
-            </button>
+            {isNavViewVisible('people') && (
+              <button
+                onClick={() => navigate({ view: 'people' })}
+                style={navItemStyle('people')}
+              >
+                <span style={s.navIcon}>{NAV_ICONS.people}</span>
+                People
+              </button>
+            )}
+            {isNavViewVisible('messages') && (
+              <button
+                onClick={() => navigate({ view: 'messages' })}
+                style={navItemStyle('messages')}
+              >
+                <span style={s.navIcon}>{NAV_ICONS.messages}</span>
+                Messages
+              </button>
+            )}
             <div style={s.navGroupLabel}>System</div>
-            <button
-              onClick={() => { navigate({ view: 'log' }); }}
-              style={{
-                ...s.navItem,
-                ...(activeView === 'log' ? s.navItemActive : {}),
-              }}
-            >
-              <span style={s.navIcon}>{NAV_ICONS.log}</span>
-              Log
-            </button>
-            {currentPermissions?.can_build_slices !== false && (
+            {isNavViewVisible('log') && (
+              <button
+                onClick={() => { navigate({ view: 'log' }); }}
+                style={navItemStyle('log')}
+              >
+                <span style={s.navIcon}>{NAV_ICONS.log}</span>
+                Log
+              </button>
+            )}
+            {currentPermissions?.can_build_slices !== false && isNavViewVisible('builder') && (
               <button
                 onClick={() => { navigate({ view: 'builder', builderViewId: null, customPageId: null }); }}
-                style={{
-                  ...s.navItem,
-                  ...(activeView === 'builder' ? s.navItemActive : {}),
-                }}
+                style={navItemStyle('builder')}
               >
                 <span style={s.navIcon}>{NAV_ICONS.builder}</span>
                 Builder
               </button>
             )}
-            {currentPermissions?.can_set_governance !== false && (
+            {currentPermissions?.can_set_governance !== false && isNavViewVisible('settings') && (
               <button
                 onClick={() => { navigate({ view: 'settings' }); }}
-                style={{
-                  ...s.navItem,
-                  ...(activeView === 'settings' ? s.navItemActive : {}),
-                }}
+                style={navItemStyle('settings')}
               >
                 <span style={s.navIcon}>{NAV_ICONS.settings}</span>
                 Settings
@@ -2125,16 +2208,26 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             <div style={s.navGroupLabel}>Testing</div>
             <button
               onClick={() => { navigate({ view: 'multiuser' }); }}
-              style={{
-                ...s.navItem,
-                ...(activeView === 'multiuser' ? s.navItemActive : {}),
-              }}
+              style={navItemStyle('multiuser')}
             >
               <span style={s.navIcon}>{NAV_ICONS.multiuser}</span>
               Multi-User Test
             </button>
+            {/* Hidden views badge — shown when role restricts nav access */}
+            {hiddenCount > 0 && roleAccentColor && (
+              <div style={{
+                marginTop: 'auto', padding: '8px 12px',
+                fontFamily: mono, fontSize: 10, color: roleAccentColor,
+                background: `${roleAccentColor}12`,
+                borderTop: `1px solid ${roleAccentColor}25`,
+                borderRadius: '0 0 0 0',
+              }}>
+                {hiddenCount} view{hiddenCount !== 1 ? 's' : ''} hidden by role
+              </div>
+            )}
           </nav>
-          )}
+            );
+          })()}
         </aside>
 
         <main style={s.main} key={selectedSpace ?? '__all__'}>
