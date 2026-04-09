@@ -89,6 +89,9 @@ interface ApiConnectionState {
 
   clearError: (connectionId: string) => void;
 
+  /** Reset all state on space switch — prevents data from a previous space leaking in. */
+  reset: () => void;
+
   // Internal — not part of the public interface but typed here to avoid TS errors
   _fetchRecordsInternal: (connectionId: string, fullRefresh: boolean) => Promise<void>;
 }
@@ -447,6 +450,17 @@ export const useApiConnectionStore = create<ApiConnectionState>((set, get) => ({
     set((state) => ({
       errors: { ...state.errors, [connectionId]: '' },
     }));
+  },
+
+  reset() {
+    set({
+      connections: {},
+      connectionsLoading: false,
+      recordsCache: {},
+      recordsLoading: {},
+      errors: {},
+      lastSyncAttemptAt: {},
+    });
   },
 }));
 

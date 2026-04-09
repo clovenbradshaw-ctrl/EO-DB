@@ -103,6 +103,7 @@ export const useGDriveStore = create<GDriveStoreState>((set, get) => ({
     set({
       currentSpaceId: spaceId,
       spaceDisplayNames: { ...get().spaceDisplayNames, [spaceId]: spaceName },
+      cachedEntries: {},
     });
   },
 

@@ -65,6 +65,9 @@ import { setSpaceConfig, getSpaceConfig, applyEoPowerLevels, EO_SPACE_CONFIG_TYP
 import { EO_POWER_LEVEL_CONTENT } from '../permissions/types';
 import { listAllHomeserverUsers } from '../matrix/user-discovery';
 import { withRetry } from '../matrix/connection-resilience';
+import { invalidateStatsCache } from '../db/space-statistics';
+import { clearFolderIdCache } from '../google-drive/gdrive-api';
+import { useApiConnectionStore } from '../store/api-connection-store';
 
 /** Set to false to disable all Matrix activity (sync, room creation, discovery). */
 const MATRIX_ENABLED = true;
@@ -545,6 +548,10 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   // Helper to select a space and persist the choice
   function selectSpace(target: string) {
     const canonical = normalizeSpaceTarget(target);
+    // Hardwall: purge all caches not scoped to a space before loading new space data.
+    invalidateStatsCache();
+    clearFolderIdCache();
+    useApiConnectionStore.getState().reset();
     setSelectedSpace(canonical);
     localStorage.setItem('eo-selected-space', canonical);
     // Clear route state when switching spaces — space is now part of the URL
