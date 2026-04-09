@@ -1,7 +1,7 @@
 /**
  * Space metadata persistence — saves space UUIDs and associated IDs to the
- * root IndexedDB so the app can reconnect to Google Drive and Filen without
- * needing Matrix for space discovery.
+ * root IndexedDB so the app can reconnect to Google Drive without needing
+ * Matrix for space discovery.
  *
  * Stored under the `kv` object store of the root `eo-db` database using
  * keys prefixed with `spacemeta:`. Values are JSON-encoded Uint8Arrays.
@@ -16,8 +16,6 @@ export interface SpaceMeta {
   spaceName: string;
   /** Matrix main room ID (for signaling) */
   mainRoomId: string;
-  /** Filen folder UUID (if provisioned) */
-  filenFolderUuid?: string;
   /** Google Drive folder ID (if known) */
   gdriveFolderId?: string;
   /** Last updated timestamp (ISO) */

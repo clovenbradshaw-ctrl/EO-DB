@@ -9,7 +9,6 @@ import { getState, getStateByPrefix, getStateByPrefixPage, type StatePage } from
 import { readLogSince } from '../db/log';
 import { backfillFoldCaches } from '../db/fold-cache';
 import type { SyncManager } from '../matrix/sync-manager';
-import type { FilenSyncService } from '../filen/filen-sync';
 import type { GDriveSyncService } from '../google-drive/gdrive-sync';
 import type { ResolvedPermissions } from '../permissions/types';
 
@@ -18,8 +17,6 @@ interface EoDbState {
   store: EoStore | null;
   /** The sync manager for sending events to Matrix (currently disabled) */
   syncManager: SyncManager | null;
-  /** The Filen sync service for backup/restore */
-  filenSync: FilenSyncService | null;
   /** The Google Drive sync service for backup */
   gdriveSync: GDriveSyncService | null;
   /** Recent events processed through the fold */
@@ -41,9 +38,6 @@ interface EoDbState {
 
   /** Set the sync manager after it's initialized */
   setSyncManager: (syncManager: SyncManager) => void;
-
-  /** Set the Filen sync service */
-  setFilenSync: (filenSync: FilenSyncService) => void;
 
   /** Set the Google Drive sync service */
   setGDriveSync: (gdriveSync: GDriveSyncService) => void;
@@ -76,7 +70,7 @@ interface EoDbState {
    */
   getStateByPrefixPage: (prefix: string, limit: number, afterTarget?: string) => Promise<StatePage>;
 
-  /** Take a manual snapshot via Filen */
+  /** Take a manual snapshot via Google Drive */
   manualSnapshot: () => Promise<{ mxc: string; seq: number }>;
 
   /** Tear down the store (logout) */
@@ -86,7 +80,6 @@ interface EoDbState {
 export const useEoStore = create<EoDbState>((set, get) => ({
   store: null,
   syncManager: null,
-  filenSync: null,
   gdriveSync: null,
   recentEvents: [],
   lastSeq: 0,
@@ -162,10 +155,6 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     set({ syncManager });
   },
 
-  setFilenSync(filenSync: FilenSyncService) {
-    set({ filenSync });
-  },
-
   setGDriveSync(gdriveSync: GDriveSyncService) {
     set({ gdriveSync });
   },
@@ -195,7 +184,7 @@ export const useEoStore = create<EoDbState>((set, get) => ({
       return seq;
     }
 
-    // Otherwise fold locally only — Filen sync picks up new events on its 30s timer
+    // Otherwise fold locally only — Google Drive sync picks up new events on its 30s timer
     const seq = await processEvent(store, event, (fullEvent) => {
       set((state) => ({
         recentEvents: [...state.recentEvents.slice(-99), fullEvent],
@@ -218,13 +207,8 @@ export const useEoStore = create<EoDbState>((set, get) => ({
       }));
     });
 
-    // Upload to Filen + Google Drive immediately after import (don't wait for 30s timer)
-    const { filenSync, gdriveSync } = get();
-    if (filenSync) {
-      filenSync.forceSave().catch((e) =>
-        console.warn('[EO-DB] Filen upload after import failed:', e),
-      );
-    }
+    // Upload to Google Drive immediately after import (don't wait for 30s timer)
+    const { gdriveSync } = get();
     if (gdriveSync) {
       gdriveSync.forceSave().catch((e) =>
         console.warn('[EO-DB] Google Drive upload after import failed:', e),
@@ -259,19 +243,18 @@ export const useEoStore = create<EoDbState>((set, get) => ({
   },
 
   async manualSnapshot() {
-    const { store, filenSync } = get();
+    const { store, gdriveSync } = get();
     if (!store) throw new Error('Store not initialized');
-    if (filenSync) {
-      const result = await filenSync.createManualSnapshot();
-      return { mxc: 'filen', seq: result.seq };
+    if (gdriveSync) {
+      await gdriveSync.forceSave();
     }
     const seq = await store.getCurrentSeq();
-    return { mxc: 'local', seq };
+    return { mxc: 'gdrive', seq };
   },
 
   teardown() {
     const { store } = get();
     if (store) store.close();
-    set({ store: null, syncManager: null, filenSync: null, gdriveSync: null, ready: false, recentEvents: [], lastSeq: 0, resolvedPermissions: null, activeUserType: null });
+    set({ store: null, syncManager: null, gdriveSync: null, ready: false, recentEvents: [], lastSeq: 0, resolvedPermissions: null, activeUserType: null });
   },
 }));

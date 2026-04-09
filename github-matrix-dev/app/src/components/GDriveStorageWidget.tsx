@@ -10,7 +10,7 @@ import type { Theme } from '../theme';
 import { useTheme } from '../theme';
 import { useGDriveStore } from '../google-drive/gdrive-store';
 import { gdriveList, gdriveRetrieve, type GDriveListEntry } from '../google-drive/gdrive-api';
-import { unpackEodb } from '../filen/eodb-format';
+import { unpackEodb } from '../google-drive/eodb-format';
 import { decryptSnapshot } from '../crypto/snapshot-crypto';
 import { processEvent } from '../db/fold';
 import { useEoStore } from '../store/eo-store';

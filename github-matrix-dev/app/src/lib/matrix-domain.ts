@@ -90,17 +90,6 @@ export function whisperEventTypes(prefix?: string) {
   } as const;
 }
 
-/** Filen P2P sharing event types. */
-export function filenShareEventTypes(prefix?: string) {
-  const p = prefix ?? _eventPrefix;
-  return {
-    /** Timeline event: peer offers data via Filen. */
-    share: `${p}.peer.filen.share`,
-    /** Room state event: latest Filen share pointer per space. */
-    latest: `${p}.peer.filen.latest`,
-  } as const;
-}
-
 /** Collaborative editing (Yjs) signaling event types (to-device). */
 export function collabEventTypes(prefix?: string) {
   const p = prefix ?? _eventPrefix;

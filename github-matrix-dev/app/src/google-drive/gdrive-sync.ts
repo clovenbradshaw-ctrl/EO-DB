@@ -1,10 +1,10 @@
 /**
  * Google Drive sync service — uploads EO-DB backups to Google Drive via n8n.
  *
- * Runs in parallel with FilenSyncService. Each sync cycle:
+ * Each sync cycle:
  * 1. Check if there are new events since last sync
  * 2. Pack events into .eodb binary format (magic header + msgpack)
- * 3. Encrypt with room keyring (AES-256-GCM, same as Filen — no Filen-specific encryption)
+ * 3. Encrypt with room keyring (AES-256-GCM)
  * 4. Upload encrypted binary as {content_hash}.eodb via n8n proxy
  * 5. Signal via Matrix timeline + update state event
  *
@@ -18,9 +18,8 @@ import type { LocalKeyring } from '../db/crypto-types';
 import { readLogSince } from '../db/log';
 import { encryptSnapshot } from '../crypto/snapshot-crypto';
 import { resolveSnapshotKeyId } from '../crypto/segment-keys';
-import { packEodb, type EodbFile } from '../filen/eodb-format';
+import { packEodb, unpackEodb, type EodbFile } from './eodb-format';
 import { gdriveStore, gdriveList, gdriveRetrieve, computeContentHash } from './gdrive-api';
-import { unpackEodb } from '../filen/eodb-format';
 import { decryptSnapshot } from '../crypto/snapshot-crypto';
 import { processEvent } from '../db/fold';
 import { useGDriveStore } from './gdrive-store';

@@ -1,24 +1,17 @@
 /**
- * Yjs persistence — local IndexedDB cache + Filen remote backup.
+ * Yjs persistence — local IndexedDB cache.
  *
  * The Yjs binary state is stored directly in IndexedDB (via EoStore) as a
  * key-value blob under `yjs:{target}:{fieldKey}`. No DEF, no fold, no
  * Matrix timeline event. The CRDT state is its own world — the fold is
  * for structured record-level transformations.
  *
- * On click-out (blur), the state is flushed to local storage and uploaded
- * to Filen. The Filen upload is the durable persistence event — the toast
- * confirms that.
- *
- * Debounced auto-save writes to IndexedDB only (fast, silent).
- * Explicit save (blur) writes to IndexedDB + Filen (shows toast).
+ * Debounced auto-save writes to IndexedDB on change.
+ * Explicit save (blur) also writes to IndexedDB.
  */
 
 import * as Y from 'yjs';
 import type { EoStore } from '../db/encrypted-store';
-import { useFilenStore } from '../filen/filen-store';
-import { filenUploadFile } from '../filen/filen-api';
-import { packEodb, type EodbFile } from '../filen/eodb-format';
 
 // --------------------------------------------------------------------------
 // IndexedDB key format
@@ -61,12 +54,11 @@ export async function loadYjsDoc(
 }
 
 // --------------------------------------------------------------------------
-// Save to IndexedDB (local only, fast, silent)
+// Save to IndexedDB (local only)
 // --------------------------------------------------------------------------
 
 /**
  * Save the current Yjs document state to IndexedDB.
- * This is the fast local-only path — no network, no toast.
  */
 export async function saveYjsDocLocal(
   doc: Y.Doc,
@@ -79,64 +71,26 @@ export async function saveYjsDocLocal(
 }
 
 // --------------------------------------------------------------------------
-// Save to Filen (remote, durable)
+// Combined save (kept for API compatibility)
 // --------------------------------------------------------------------------
 
 /**
- * Upload the Yjs document state to Filen as an .eodb file.
- * Returns true if the upload succeeded, false if Filen is not connected.
- */
-export async function saveYjsDocToFilen(
-  doc: Y.Doc,
-  target: string,
-  fieldKey: string,
-  spaceId: string,
-  userId: string,
-): Promise<boolean> {
-  const { auth, masterKeys, spaceFolders } = useFilenStore.getState();
-  if (!auth) return false;
-
-  const spaceFolderUuid = spaceFolders[spaceId];
-  if (!spaceFolderUuid) return false;
-
-  const state = Y.encodeStateAsUpdate(doc);
-  const filename = `yjs-${target}-${fieldKey}-${Date.now()}.bin`;
-
-  await filenUploadFile(
-    auth.apiKey,
-    spaceFolderUuid,
-    filename,
-    state,
-    masterKeys[0],
-  );
-
-  return true;
-}
-
-// --------------------------------------------------------------------------
-// Combined save (local + Filen)
-// --------------------------------------------------------------------------
-
-/**
- * Save to IndexedDB and upload to Filen.
- * Returns true if the Filen upload succeeded.
+ * Save to IndexedDB. Returns true on success.
+ * The spaceId and userId parameters are kept for API compatibility.
  */
 export async function saveYjsDocFull(
   doc: Y.Doc,
   store: EoStore,
   target: string,
   fieldKey: string,
-  spaceId: string,
-  userId: string,
+  _spaceId: string,
+  _userId: string,
 ): Promise<boolean> {
-  // Always save locally first
-  await saveYjsDocLocal(doc, store, target, fieldKey);
-
-  // Then try Filen
   try {
-    return await saveYjsDocToFilen(doc, target, fieldKey, spaceId, userId);
+    await saveYjsDocLocal(doc, store, target, fieldKey);
+    return true;
   } catch (err) {
-    console.warn('[EO-DB] Filen upload failed for Yjs doc:', err);
+    console.warn('[EO-DB] Local save failed for Yjs doc:', err);
     return false;
   }
 }
@@ -146,16 +100,16 @@ export async function saveYjsDocFull(
 // --------------------------------------------------------------------------
 
 /**
- * Create a debounced save that writes to IndexedDB only (fast, silent).
- * The explicit `flush()` does IndexedDB + Filen and returns whether Filen succeeded.
+ * Create a debounced save that writes to IndexedDB.
+ * The spaceId and userId parameters are kept for API compatibility.
  */
 export function createDebouncedSave(
   doc: Y.Doc,
   store: EoStore,
   target: string,
   fieldKey: string,
-  spaceId: string,
-  userId: string,
+  _spaceId: string,
+  _userId: string,
   delayMs = 5000,
 ): { trigger: () => void; flush: () => Promise<boolean>; cleanup: () => void } {
   let timer: ReturnType<typeof setTimeout> | null = null;
@@ -175,7 +129,7 @@ export function createDebouncedSave(
     }
     if (!dirty) return false; // nothing changed since last save
     dirty = false;
-    return saveYjsDocFull(doc, store, target, fieldKey, spaceId, userId);
+    return saveYjsDocFull(doc, store, target, fieldKey, _spaceId, _userId);
   };
 
   const trigger = () => {

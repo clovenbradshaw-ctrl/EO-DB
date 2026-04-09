@@ -10,7 +10,7 @@
  *       `com.eo-db.airtable.lock`   — sync lock claim/release signals
  *
  * Only the elected primary syncer calls the Airtable API. Other clients receive
- * data through the normal EO changefeed / Filen snapshot chain.
+ * data through the normal EO changefeed / Google Drive snapshot chain.
  *
  * Primary syncer election:
  *   1. Read `eo.airtable.head` from room state

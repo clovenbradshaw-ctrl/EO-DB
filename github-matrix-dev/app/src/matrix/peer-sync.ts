@@ -27,7 +27,6 @@ import { getKeyById, resolveSnapshotKeyId } from '../crypto/segment-keys';
 import { encryptPeerPayload, decryptPeerPayload } from '../crypto/snapshot-crypto';
 import { selectTransport, executeSync, type TransportRouterDeps, type PeerInfo } from './transport-router';
 import type { WebRTCPeer } from './webrtc-peer';
-import type { FilenShareService } from '../filen/filen-share';
 
 const _syncTypes = peerSyncEventTypes();
 const SYNC_HELLO = _syncTypes.hello;
@@ -59,8 +58,6 @@ export class PeerSync {
 
   /** Optional WebRTC peer for direct browser-to-browser transfers. */
   private webrtcPeer: WebRTCPeer | null = null;
-  /** Optional Filen share service for async dead-drop transfers. */
-  private filenShare: FilenShareService | null = null;
 
   constructor(
     client: MatrixClient,
@@ -84,11 +81,6 @@ export class PeerSync {
   /** Attach a WebRTC peer instance for transport upgrades. */
   setWebRTCPeer(peer: WebRTCPeer): void {
     this.webrtcPeer = peer;
-  }
-
-  /** Attach a Filen share service for async dead-drop transfers. */
-  setFilenShare(share: FilenShareService): void {
-    this.filenShare = share;
   }
 
   /**
@@ -238,7 +230,7 @@ export class PeerSync {
       const gapSize = content.my_seq - mySeq;
 
       // For large gaps, use the transport router to select the best transport
-      if (gapSize > GAP_THRESHOLD && (this.webrtcPeer || this.filenShare)) {
+      if (gapSize > GAP_THRESHOLD && this.webrtcPeer) {
         const peer: PeerInfo = {
           userId: senderUserId,
           deviceId: content.my_device,
@@ -250,7 +242,6 @@ export class PeerSync {
         const deps: TransportRouterDeps = {
           sendViaMatrix: (uid, did, from) => this.requestEvents(uid, did, from),
           webrtcPeer: this.webrtcPeer,
-          filenShare: this.filenShare,
         };
         const result = await executeSync(peer, needFrom, gapSize, deps);
         if (result.success) return;
