@@ -1,3 +1,4 @@
+import { useState, useEffect } from 'react';
 import { useTheme, type Theme } from '../theme';
 import type { ColumnType } from './filter-types';
 import {
@@ -104,7 +105,9 @@ function groupedTypes(): Array<{ group: string; items: ColumnTypeInfo[] }> {
 interface ColumnTypeSelectorProps {
   currentType: string;
   isDefined: boolean;
+  selectOptions?: string[];
   onSelect: (type: string) => void;
+  onSaveOptions?: (options: string[]) => void;
   onClear: () => void;
   onClose: () => void;
 }
@@ -112,13 +115,22 @@ interface ColumnTypeSelectorProps {
 export function ColumnTypeSelector({
   currentType,
   isDefined,
+  selectOptions,
   onSelect,
+  onSaveOptions,
   onClear,
   onClose,
 }: ColumnTypeSelectorProps) {
   const { theme } = useTheme();
   const s = makeStyles(theme);
   const groups = groupedTypes();
+  const isSelectType = currentType === 'select' || currentType === 'multiSelect';
+  const [localOptions, setLocalOptions] = useState<string[]>(isSelectType ? (selectOptions ?? []) : []);
+  const [newOption, setNewOption] = useState('');
+
+  useEffect(() => {
+    setLocalOptions(isSelectType ? (selectOptions ?? []) : []);
+  }, [selectOptions, isSelectType]);
 
   return (
     <div style={s.container}>
@@ -163,6 +175,55 @@ export function ColumnTypeSelector({
           </div>
         ))}
       </div>
+      {isSelectType && onSaveOptions && (
+        <div style={s.optionsSection}>
+          <div style={s.optionsSectionTitle}>OPTIONS</div>
+          {localOptions.map((opt, i) => (
+            <div key={i} style={s.optionRow}>
+              <span style={s.optionLabel}>{opt}</span>
+              <button
+                style={s.optionDeleteBtn}
+                onClick={() => {
+                  const next = localOptions.filter((_, j) => j !== i);
+                  setLocalOptions(next);
+                  onSaveOptions(next);
+                }}
+              >&times;</button>
+            </div>
+          ))}
+          <div style={s.addOptionRow}>
+            <input
+              style={{ ...s.addOptionInput, color: theme.text }}
+              placeholder="Add option…"
+              value={newOption}
+              onChange={e => setNewOption(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter' && newOption.trim()) {
+                  const next = [...localOptions, newOption.trim()];
+                  setLocalOptions(next);
+                  onSaveOptions(next);
+                  setNewOption('');
+                }
+              }}
+            />
+            <button
+              style={{
+                ...s.addOptionBtn,
+                opacity: newOption.trim() ? 1 : 0.4,
+                cursor: newOption.trim() ? 'pointer' : 'default',
+              }}
+              disabled={!newOption.trim()}
+              onClick={() => {
+                if (!newOption.trim()) return;
+                const next = [...localOptions, newOption.trim()];
+                setLocalOptions(next);
+                onSaveOptions(next);
+                setNewOption('');
+              }}
+            >+</button>
+          </div>
+        </div>
+      )}
       {isDefined && (
         <button style={s.clearBtn} onClick={onClear}>
           Clear definition
@@ -251,6 +312,70 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       color: t.danger,
       cursor: 'pointer',
       textAlign: 'left' as const,
+      fontFamily: 'inherit',
+    },
+    optionsSection: {
+      marginTop: 8,
+      paddingTop: 8,
+      borderTop: `1px solid ${t.border}`,
+    },
+    optionsSectionTitle: {
+      fontSize: 8,
+      fontWeight: 700,
+      letterSpacing: '0.1em',
+      textTransform: 'uppercase' as const,
+      color: t.textMuted,
+      fontFamily: "'JetBrains Mono', monospace",
+      padding: '0 10px 4px',
+    },
+    optionRow: {
+      display: 'flex',
+      alignItems: 'center',
+      padding: '2px 10px',
+      gap: 4,
+    },
+    optionLabel: {
+      flex: 1,
+      fontSize: 12,
+      color: t.text,
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+      whiteSpace: 'nowrap' as const,
+    },
+    optionDeleteBtn: {
+      background: 'none',
+      border: 'none',
+      fontSize: 14,
+      color: t.textMuted,
+      cursor: 'pointer',
+      padding: '0 2px',
+      lineHeight: 1,
+      flexShrink: 0,
+    },
+    addOptionRow: {
+      display: 'flex',
+      alignItems: 'center',
+      padding: '4px 10px 2px',
+      gap: 4,
+    },
+    addOptionInput: {
+      flex: 1,
+      fontSize: 11,
+      padding: '3px 6px',
+      border: `1px solid ${t.border}`,
+      borderRadius: 4,
+      background: t.bgCard,
+      fontFamily: 'inherit',
+      outline: 'none',
+    },
+    addOptionBtn: {
+      background: 'none',
+      border: `1px solid ${t.border}`,
+      borderRadius: 4,
+      fontSize: 14,
+      color: t.textMuted,
+      padding: '2px 6px',
+      lineHeight: 1,
       fontFamily: 'inherit',
     },
   };

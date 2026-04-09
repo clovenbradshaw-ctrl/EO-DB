@@ -717,7 +717,18 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   // Detect if records use the Airtable-style fields sub-object
   const useFieldsSub = useMemo(() => hasFieldsSubObject(records), [records]);
 
-  const entityColumns = useMemo(() => deriveColumns(records, fieldNameMap, columnTypeOverrides, showFieldIds), [records, fieldNameMap, columnTypeOverrides, showFieldIds]);
+  const entityColumns = useMemo(() => {
+    const cols = deriveColumns(records, fieldNameMap, columnTypeOverrides, showFieldIds);
+    return cols.map(col => {
+      if (col.type === 'select' || col.type === 'multiSelect') {
+        const enumConstraint = fieldSchemas.get(col.key)?.constraints.find(c => c.name === 'enum');
+        if (enumConstraint?.value?.choices) {
+          return { ...col, selectOptions: enumConstraint.value.choices as string[] };
+        }
+      }
+      return col;
+    });
+  }, [records, fieldNameMap, columnTypeOverrides, showFieldIds, fieldSchemas]);
   const columns = useMemo<ColumnDef[]>(() => {
     const all = [
       { key: '_record', label: 'record', type: 'text' as const },
@@ -975,7 +986,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     setRenameCol(null);
   }
 
-  async function handleSetColumnType(fieldKey: string, type: string, linkedTable?: string) {
+  async function handleSetColumnType(fieldKey: string, type: string, linkedTable?: string, keepOpen = false) {
     const operand: Record<string, string> = { type };
     if (linkedTable) {
       // 'link' and 'relationship' store the EO scope path under 'linkedTable'
@@ -1011,8 +1022,10 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
         return next;
       });
     } catch { /* ignore */ }
-    setColumnTypeSelector(null);
-    setLinkedRecordPicker(null);
+    if (!keepOpen) {
+      setColumnTypeSelector(null);
+      setLinkedRecordPicker(null);
+    }
   }
 
   async function handleClearColumnType(fieldKey: string) {
@@ -2049,6 +2062,11 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                 ?? 'text'
               }
               isDefined={!!fieldSchemas.get(columnTypeSelector.key)?.typeDef}
+              selectOptions={
+                (fieldSchemas.get(columnTypeSelector.key)?.constraints.find(c => c.name === 'enum')?.value?.choices as string[] | undefined)
+                ?? entityColumns.find(c => c.key === columnTypeSelector.key)?.selectOptions
+              }
+              onSaveOptions={(options) => handleAddConstraint(columnTypeSelector.key, 'enum', { choices: options })}
               onSelect={async (type) => {
                 if (type === 'linkedRecord' || type === 'link' || type === 'relationship') {
                   // Fetch sibling tables and show a picker before committing
@@ -2063,6 +2081,8 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                     .map(s => ({ scope: s.target, name: formatScopeName(s.target) }));
                   setColumnTypeSelector(null);
                   setLinkedRecordPicker({ x: columnTypeSelector.x, y: columnTypeSelector.y, key: columnTypeSelector.key, tables, mode: type as 'linkedRecord' | 'link' | 'relationship' });
+                } else if (type === 'select' || type === 'multiSelect') {
+                  handleSetColumnType(columnTypeSelector.key, type, undefined, true);
                 } else {
                   handleSetColumnType(columnTypeSelector.key, type);
                 }
