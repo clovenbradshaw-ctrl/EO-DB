@@ -227,6 +227,18 @@ export function FigureFields({ figure, onNavigate, profileFields, recordTs, allE
     setDisplayNameEdit(null);
   }
 
+  async function handleLinkRemove(fieldKey: string, idToRemove: string, currentIds: string[]) {
+    const updatedIds = currentIds.filter(id => id !== idToRemove);
+    await dispatch({
+      op: 'DEF',
+      target: figure.target,
+      operand: { [fieldKey]: updatedIds },
+      agent: 'user',
+      ts: new Date().toISOString(),
+      acquired_ts: new Date().toISOString(),
+    });
+  }
+
   return (
     <div style={s.grid}>
       {entries.map(([key, val]) => {
@@ -321,6 +333,132 @@ export function FigureFields({ figure, onNavigate, profileFields, recordTs, allE
                     onBlur={(e) => handleEditSave(key, e.target.value)}
                   />
                 </form>
+              ) : isLinkField ? (
+                /* Airtable-style inline link field cell */
+                <div style={{ position: 'relative' as const }}>
+                  {notYetRecorded ? (
+                    <span style={{
+                      fontFamily: "'JetBrains Mono', monospace",
+                      fontSize: 11,
+                      color: theme.textMuted,
+                      fontStyle: 'italic' as const,
+                    }}>not yet recorded</span>
+                  ) : (
+                    <div
+                      style={{
+                        display: 'flex',
+                        flexWrap: 'wrap' as const,
+                        gap: 4,
+                        alignItems: 'center',
+                        padding: '3px 4px',
+                        borderRadius: 4,
+                        border: `1px solid ${openLinkPicker === key ? theme.accent : theme.borderLight}`,
+                        cursor: effectiveLinkedTable && !recordTs ? 'pointer' : 'default',
+                        minHeight: 28,
+                        background: openLinkPicker === key ? `${theme.accent}10` : 'transparent',
+                        transition: 'border-color 0.15s',
+                      }}
+                      onClick={() => {
+                        if (effectiveLinkedTable && !recordTs && openLinkPicker !== key)
+                          setOpenLinkPicker(key);
+                      }}
+                    >
+                      {Array.isArray(parsedVal) && (parsedVal as string[]).map((id: string) => {
+                        const resolved = resolver.resolve(id);
+                        return (
+                          <span key={id} style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: 3,
+                            padding: '2px 4px 2px 8px',
+                            borderRadius: 4,
+                            fontSize: 12,
+                            background: theme.bgMuted,
+                            border: `1px solid ${theme.borderLight}`,
+                            fontFamily: "'JetBrains Mono', monospace",
+                            color: resolved ? theme.purple : theme.textSecondary,
+                          }}>
+                            <span
+                              onClick={e => { e.stopPropagation(); if (resolved) onNavigate(resolved.target); }}
+                              style={{ cursor: resolved ? 'pointer' : 'default' }}
+                            >
+                              {id}
+                              {resolved?.name && (
+                                <span style={{ fontWeight: 400, color: theme.text, marginLeft: 4, fontFamily: 'inherit', fontSize: 11 }}>{resolved.name}</span>
+                              )}
+                            </span>
+                            {!recordTs && (
+                              <span
+                                onClick={e => {
+                                  e.stopPropagation();
+                                  if (Array.isArray(parsedVal)) handleLinkRemove(key, id, parsedVal as string[]);
+                                }}
+                                style={{
+                                  marginLeft: 2,
+                                  cursor: 'pointer',
+                                  color: theme.textMuted,
+                                  lineHeight: 1,
+                                  fontSize: 14,
+                                  fontWeight: 300,
+                                  padding: '0 2px',
+                                  opacity: 0.7,
+                                }}
+                                title="Remove link"
+                              >×</span>
+                            )}
+                          </span>
+                        );
+                      })}
+                      {effectiveLinkedTable && !recordTs && (
+                        <span style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          width: 20,
+                          height: 20,
+                          borderRadius: 3,
+                          fontSize: 16,
+                          lineHeight: '1',
+                          color: theme.textMuted,
+                          cursor: 'pointer',
+                          flexShrink: 0,
+                        }}>+</span>
+                      )}
+                      {valueChanged && (
+                        <span style={{
+                          fontFamily: "'JetBrains Mono', monospace",
+                          fontSize: 9,
+                          color: theme.textMuted,
+                          border: `1px solid ${theme.border}`,
+                          padding: '1px 5px',
+                          borderRadius: 3,
+                          flexShrink: 0,
+                        }}>was</span>
+                      )}
+                    </div>
+                  )}
+                  {openLinkPicker === key && effectiveLinkedTable && (
+                    <>
+                      <div style={{ position: 'fixed' as const, inset: 0, zIndex: 199 }} onClick={() => setOpenLinkPicker(null)} />
+                      <LinkFieldPicker
+                        fieldKey={key}
+                        linkedTable={effectiveLinkedTable}
+                        currentIds={Array.isArray(parsedVal) ? parsedVal as string[] : []}
+                        onClose={() => setOpenLinkPicker(null)}
+                        onChange={async (updatedIds) => {
+                          await dispatch({
+                            op: 'DEF',
+                            target: figure.target,
+                            operand: { [key]: updatedIds },
+                            agent: 'user',
+                            ts: new Date().toISOString(),
+                            acquired_ts: new Date().toISOString(),
+                          });
+                        }}
+                      />
+                    </>
+                  )}
+                </div>
               ) : (
                 <>
                   {notYetRecorded ? (
@@ -345,43 +483,6 @@ export function FigureFields({ figure, onNavigate, profileFields, recordTs, allE
                         }}>was</span>
                       )}
                     </span>
-                  )}
-                  {/* Link field: show + Add button and picker */}
-                  {isLinkField && effectiveLinkedTable && (
-                    <div style={{ marginTop: 4, position: 'relative' as const, display: 'inline-block' }}>
-                      <button
-                        onClick={() => setOpenLinkPicker(openLinkPicker === key ? null : key)}
-                        style={{
-                          fontSize: 11,
-                          padding: '2px 8px',
-                          borderRadius: 4,
-                          background: 'transparent',
-                          border: `1px solid ${theme.borderLight}`,
-                          color: theme.textMuted,
-                          cursor: 'pointer',
-                        }}
-                      >
-                        + Add link
-                      </button>
-                      {openLinkPicker === key && (
-                        <LinkFieldPicker
-                          fieldKey={key}
-                          linkedTable={effectiveLinkedTable}
-                          currentIds={Array.isArray(parsedVal) ? parsedVal as string[] : []}
-                          onClose={() => setOpenLinkPicker(null)}
-                          onChange={async (updatedIds) => {
-                            await dispatch({
-                              op: 'DEF',
-                              target: figure.target,
-                              operand: { [key]: updatedIds },
-                              agent: 'user',
-                              ts: new Date().toISOString(),
-                              acquired_ts: new Date().toISOString(),
-                            });
-                          }}
-                        />
-                      )}
-                    </div>
                   )}
                 </>
               )}
