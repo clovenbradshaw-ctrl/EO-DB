@@ -16,7 +16,7 @@ import { defaultColumnWidth, MIN_COLUMN_WIDTH } from './slice-types';
 import { formatName } from './scope-picker-utils';
 import { useIdResolver, isEntityId, isEntityIdArray, type IdResolver } from '../hooks/useIdResolver';
 import { groupSchemaStates, extractColumnTypeOverrides, schemaTypeTarget, schemaConstraintTarget, schemaResolveTarget, type FieldSchema } from '../db/schema-rules';
-import { ColumnTypeSelector } from './ColumnTypeSelector';
+import { ColumnTypeSelector, COLUMN_TYPE_ICON_MAP } from './ColumnTypeSelector';
 import { ResolutionPolicyComposer, summarizePolicy, type ResolvePolicy } from './ResolutionPolicyComposer';
 import { ConstraintComposer } from './ConstraintComposer';
 import { useIsMobile, useIsNarrow } from '../hooks/useIsMobile';
@@ -1516,7 +1516,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
             <thead>
               <SortableContext items={orderedColumns.map((c) => c.key)} strategy={horizontalListSortingStrategy}>
                 <tr>
-                  <th style={{ ...s.th, width: 40, textAlign: 'center', padding: '8px 4px', userSelect: 'none' }}>#</th>
+                  <th style={{ ...s.th, width: 40, textAlign: 'center', padding: '0 4px', userSelect: 'none', color: theme.textMuted, fontSize: 11 }}>#</th>
                   {orderedColumns.map((col) => (
                     <SortableColumnHeader
                       key={col.key}
@@ -1538,6 +1538,21 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                       }}
                     />
                   ))}
+                  <th
+                    style={{
+                      ...s.th,
+                      width: 40,
+                      textAlign: 'center',
+                      padding: '0',
+                      cursor: 'pointer',
+                      color: theme.textMuted,
+                      fontSize: 18,
+                      fontWeight: 400,
+                      borderRight: 'none',
+                    }}
+                    onClick={() => setShowAddColumn(true)}
+                    title="Add field"
+                  >+</th>
                 </tr>
               </SortableContext>
             </thead>
@@ -1550,19 +1565,19 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                 </tr>
               )}
               {filtered.map((rec, rowIndex) => {
+                void rowIndex;
                 const isActive = rec.target === activeRecord;
-                const zebraBg = rowIndex % 2 === 0 ? theme.bgCard : theme.bgMuted;
                 return (
                   <tr
                     key={rec.target}
-                    style={{ background: isActive ? theme.accentBg : zebraBg }}
+                    style={{ background: isActive ? theme.accentBg : theme.bgCard }}
                     onClick={() => onSelectRecord(rec.target)}
                     onContextMenu={(e) => handleContextMenu(e, rec.target)}
                     onMouseEnter={(e) => {
                       if (!isActive) (e.currentTarget as HTMLElement).style.background = theme.bgHover;
                     }}
                     onMouseLeave={(e) => {
-                      if (!isActive) (e.currentTarget as HTMLElement).style.background = zebraBg;
+                      if (!isActive) (e.currentTarget as HTMLElement).style.background = theme.bgCard;
                     }}
                   >
                     <td style={{
@@ -1571,10 +1586,10 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                       textAlign: 'center',
                       padding: `${rowHeight === 'compact' ? 4 : rowHeight === 'tall' ? 18 : 10}px 4px`,
                       fontFamily: "'JetBrains Mono', monospace",
-                      fontSize: 10,
+                      fontSize: 11,
                       color: theme.textMuted,
                       userSelect: 'none',
-                      borderLeft: `3px solid ${theme.accent}`,
+                      background: 'inherit',
                     }}>{rowIndex + 1}</td>
                     {orderedColumns.map((col, colIndex) => {
                       const isRedacted = permissions?.redacted_fields?.includes(col.key);
@@ -1969,27 +1984,39 @@ function SortableColumnHeader({
           onBlur={(e) => onRename(e.target.value)}
         />
       ) : (
-        <span style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 5, minWidth: 0, flex: 1 }}>
+          {(() => {
+            const typeInfo = COLUMN_TYPE_ICON_MAP.get(col.type as Parameters<typeof COLUMN_TYPE_ICON_MAP.get>[0]);
+            if (!typeInfo) return null;
+            const TypeIcon = typeInfo.icon;
+            return <TypeIcon size={13} color={typeInfo.color} style={{ flexShrink: 0 }} />;
+          })()}
           {isLocked && <LockIcon />}
-          {col.label}
+          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, minWidth: 0 }}>
+            {col.label}
+          </span>
           {sorts.find((s) => s.field === col.key) && (
-            <span style={{ marginLeft: 4, fontSize: 10 }}>
+            <span style={{ fontSize: 10, flexShrink: 0 }}>
               {sorts.find((s) => s.field === col.key)!.direction === 'asc' ? '\u25B4' : '\u25BE'}
             </span>
           )}
+          <span className="col-header-chevron" style={{ fontSize: 10, color: theme.textMuted, opacity: 0, flexShrink: 0, marginLeft: 'auto', transition: 'opacity 0.1s' }}>▾</span>
         </span>
       )}
-      {/* Resize handle — wide invisible hit area with narrow visible indicator */}
+      {/* Resize handle — wide invisible hit area with 1px visible indicator */}
       <div
         style={{
           position: 'absolute',
           top: 0,
-          right: -4,
-          width: 12,
+          right: 0,
+          width: 8,
           height: '100%',
           cursor: 'col-resize',
           zIndex: 3,
           background: 'transparent',
+          display: 'flex',
+          alignItems: 'stretch',
+          justifyContent: 'flex-end',
         }}
         onMouseDown={(e) => {
           e.stopPropagation();
@@ -1998,21 +2025,19 @@ function SortableColumnHeader({
         }}
         onMouseEnter={(e) => {
           const indicator = e.currentTarget.firstElementChild as HTMLElement;
-          if (!isResizing && indicator) indicator.style.background = theme.borderDivider;
+          if (!isResizing && indicator) indicator.style.background = theme.accent;
         }}
         onMouseLeave={(e) => {
           const indicator = e.currentTarget.firstElementChild as HTMLElement;
-          if (!isResizing && indicator) indicator.style.background = theme.border;
+          if (!isResizing && indicator) indicator.style.background = 'transparent';
         }}
       >
         <div
           style={{
-            position: 'absolute',
-            top: 0,
-            right: 4,
-            width: 5,
+            width: 3,
             height: '100%',
-            background: isResizing ? theme.accent : theme.border,
+            background: isResizing ? theme.accent : 'transparent',
+            borderRadius: 2,
             pointerEvents: 'none',
           }}
         />
@@ -2124,15 +2149,17 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
     } as React.CSSProperties,
     th: {
       position: 'relative' as const,
-      background: t.bgCard,
-      padding: '8px 8px 8px 12px',
+      background: t.bgMuted,
+      padding: '0 8px 0 10px',
+      height: 32,
       textAlign: 'left' as const,
-      fontSize: 11,
-      fontWeight: 400,
-      textTransform: 'uppercase' as const,
-      letterSpacing: '0.3px',
-      color: t.textMuted,
-      borderBottom: `2px solid ${t.borderDivider}`,
+      fontSize: 12,
+      fontWeight: 500,
+      textTransform: 'none' as const,
+      letterSpacing: '0',
+      color: t.textSecondary,
+      borderBottom: `1px solid ${t.border}`,
+      borderRight: `1px solid ${t.border}`,
       whiteSpace: 'nowrap' as const,
       overflow: 'hidden' as const,
       textOverflow: 'ellipsis' as const,
@@ -2140,6 +2167,7 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
     td: {
       padding: '8px 8px 8px 12px',
       borderBottom: `1px solid ${t.borderLight}`,
+      borderRight: `1px solid ${t.borderLight}`,
       verticalAlign: 'middle' as const,
       maxWidth: 300,
       overflow: 'hidden',

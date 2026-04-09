@@ -43,6 +43,11 @@
         ::-webkit-scrollbar { width: 4px; height: 4px; }
       }
 
+      /* Airtable-style column header interactions */
+      th:hover .col-header-chevron { opacity: 1 !important; }
+      th:hover { background-color: #ece9e4 !important; }
+      [data-theme="dark"] th:hover { background-color: #21262d !important; }
+
       /* Reduce motion for users who prefer it */
       @media (prefers-reduced-motion: reduce) {
         *, *::before, *::after {
