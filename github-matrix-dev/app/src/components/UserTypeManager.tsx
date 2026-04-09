@@ -29,6 +29,7 @@ const CONFIGURABLE_VIEWS: { id: string; label: string }[] = [
   { id: 'api', label: 'API Connections' },
   { id: 'people', label: 'People' },
   { id: 'messages', label: 'Messages' },
+  { id: 'members', label: 'Members & Roles' },
   { id: 'log', label: 'Log' },
   { id: 'builder', label: 'Builder' },
   { id: 'settings', label: 'Settings' },
