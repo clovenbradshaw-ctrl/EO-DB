@@ -40,6 +40,9 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
   const syncManager = useEoStore((s) => s.syncManager);
   const gdriveSync = useEoStore((s) => s.gdriveSync);
   const gdriveConnected = useGDriveStore((s) => s.connected);
+  const gdriveCurrentSpaceId = useGDriveStore((s) => s.currentSpaceId);
+  const gdriveSpaceFileGuids = useGDriveStore((s) => s.spaceFileGuids);
+  const currentFileGuids = gdriveCurrentSpaceId ? (gdriveSpaceFileGuids[gdriveCurrentSpaceId] ?? null) : null;
   const manualSnapshot = useEoStore((s) => s.manualSnapshot);
   const [showRoomData, setShowRoomData] = useState(false);
   const [showAllRooms, setShowAllRooms] = useState(false);
@@ -154,7 +157,7 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
   }
 
   if (showRoomData) {
-    return <RoomDataViewer onBack={() => setShowRoomData(false)} />;
+    return <RoomDataViewer onBack={() => setShowRoomData(false)} matrixClient={matrixClient} roomId={roomId} />;
   }
 
   return (
@@ -406,6 +409,24 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
                 </span>
               )}
             </div>
+            {currentFileGuids && (
+              <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 2 }}>
+                <div style={{
+                  fontFamily: "'JetBrains Mono', monospace",
+                  fontSize: 9,
+                  fontWeight: 700,
+                  textTransform: 'uppercase' as const,
+                  letterSpacing: '0.06em',
+                  color: theme.textMuted,
+                  marginBottom: 4,
+                }}>
+                  Drive File IDs
+                </div>
+                <Field label="Log" value={`${currentFileGuids.log}.eodb`} theme={theme} />
+                <Field label="Recent" value={`${currentFileGuids.recent}.eodb`} theme={theme} />
+                <Field label="Manifest" value={`${currentFileGuids.manifest}.json`} theme={theme} />
+              </div>
+            )}
             {(gdriveSync || gdriveConnected) && <GDriveStorageWidget />}
           </div>
         </Section>

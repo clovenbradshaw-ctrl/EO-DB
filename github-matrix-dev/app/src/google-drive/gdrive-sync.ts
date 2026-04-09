@@ -51,6 +51,7 @@ import {
 } from './gdrive-api';
 import type { GDriveListEntry } from './gdrive-api';
 import { processEvent } from '../db/fold';
+import { readLogSince } from '../db/log';
 import { useGDriveStore } from './gdrive-store';
 
 // ──────────────────────────────────────────────────────────────
@@ -127,6 +128,12 @@ export class GDriveSyncService {
   private restrictedRecentFile: string = 'restricted-recent.eodb';
   private adminLogFile: string = 'admin-log.eodb';
   private adminRecentFile: string = 'admin-recent.eodb';
+
+  /**
+   * The stable GUIDs for this space's Drive files.
+   * Null until start() has been called (GUIDs are derived async).
+   */
+  fileGuids: { log: string; recent: string; manifest: string } | null = null;
 
   private store: EoStore;
   private spaceId: string;
@@ -255,6 +262,8 @@ export class GDriveSyncService {
     this.restrictedRecentFile = `${rRecentGuid}.eodb`;
     this.adminLogFile = `${aLogGuid}.eodb`;
     this.adminRecentFile = `${aRecentGuid}.eodb`;
+    this.fileGuids = { log: logGuid, recent: recentGuid, manifest: manifestGuid };
+    useGDriveStore.getState().setSpaceFileGuids(this.spaceId, this.fileGuids);
 
     const dt = this.dataType;
     try {
@@ -274,6 +283,21 @@ export class GDriveSyncService {
         this.onHydrated?.();
         console.log(`[EO-DB] GDrive startup hydration: reached seq ${hydratedSeq}`);
       }
+
+      // If local store has data but GDrive has none, push everything up now.
+      const localSeq = await this.store.getCurrentSeq();
+      if (localSeq > 0) {
+        let gdriveHasData = false;
+        try {
+          const manifest = await gdriveReadJson(this.matrixAccessToken, dt, this.manifestFile);
+          gdriveHasData = !!manifest && (manifest as unknown as SyncManifest).head_seq > 0;
+        } catch { /* manifest may not exist */ }
+        if (!gdriveHasData) {
+          console.log('[EO-DB] GDrive empty but local has data — pushing full backup on start');
+          await this.fullPushToGDrive();
+        }
+      }
+
       this.onStatus?.('synced');
       useGDriveStore.getState().setGDriveOffline(false);
     } catch (e) {
@@ -308,7 +332,7 @@ export class GDriveSyncService {
 
   async forceSave(): Promise<void> {
     if (this.destroyed) return;
-    this.triggerImmediateCheck();
+    await this.fullPushToGDrive();
   }
 
   // ── Per-op save ──────────────────────────────────────────
@@ -454,6 +478,92 @@ export class GDriveSyncService {
     useGDriveStore.getState().recordSync(this.spaceId);
     this.onStatus?.('synced');
     console.log(`[EO-DB] GDrive buffer flushed: ${this.opsBuffer.length} events, head_seq=${allLastSeq}`);
+  }
+
+  /**
+   * Push the entire local event log to GDrive as the log file.
+   *
+   * Used by forceSave() ("Take Snapshot") and auto-triggered on start()
+   * when the local store has data but GDrive is empty.
+   */
+  async fullPushToGDrive(): Promise<void> {
+    if (this.destroyed) return;
+    const dt = this.dataType;
+
+    // Read all events from the local OPFS store
+    const storedEvents = await readLogSince(this.store, 0);
+
+    // Merge with any unsaved in-memory ops
+    const merged = new Map<string, EoEvent>();
+    for (const e of storedEvents) merged.set(e.client_event_id ?? `seq:${e.seq}`, e);
+    for (const e of this.opsBuffer) merged.set(e.client_event_id ?? `seq:${e.seq}`, e);
+
+    if (merged.size === 0) {
+      console.log('[EO-DB] fullPushToGDrive: no events to push');
+      return;
+    }
+
+    const events = Array.from(merged.values()).sort((a, b) => a.seq - b.seq);
+    const fromSeq = events[0].seq;
+    const toSeq = events[events.length - 1].seq;
+
+    console.log(`[EO-DB] fullPushToGDrive: pushing ${events.length} events (seq ${fromSeq}→${toSeq})`);
+    this.onStatus?.('syncing');
+
+    // Pack and encrypt the full log
+    const logFile: EodbFile = {
+      version: 1,
+      type: 'hydration',
+      space_id: this.spaceId,
+      space_name: this.spaceName,
+      from_seq: fromSeq,
+      to_seq: toSeq,
+      created_by: this.userId,
+      created_at: new Date().toISOString(),
+      events,
+      prev_snapshots: [],
+    };
+    const binary = packEodb(logFile);
+    const encrypted = await this.encryptBinary(binary);
+
+    await gdriveStoreNamed(this.matrixAccessToken, encrypted, dt, this.logFile);
+    console.log(`[EO-DB] fullPushToGDrive: wrote ${this.logFile} (${events.length} events)`);
+
+    // Write empty recent buffer
+    const emptyFile: EodbFile = {
+      version: 1,
+      type: 'op',
+      space_id: this.spaceId,
+      space_name: this.spaceName,
+      from_seq: toSeq,
+      to_seq: toSeq,
+      created_by: this.userId,
+      created_at: new Date().toISOString(),
+      events: [],
+      prev_snapshots: [],
+    };
+    const emptyBinary = packEodb(emptyFile);
+    const emptyEncrypted = await this.encryptBinary(emptyBinary);
+    await gdriveStoreNamed(this.matrixAccessToken, emptyEncrypted, dt, this.recentFile);
+
+    // Update manifest
+    const manifest: SyncManifest = {
+      head_seq: toSeq,
+      buffer_from_seq: toSeq,
+      buffer_to_seq: toSeq,
+      log_size_bytes: encrypted.length,
+      checkpoints: [{ from_seq: fromSeq, byte_offset: 0 }],
+      updated_at: new Date().toISOString(),
+    };
+    await gdriveStoreJson(
+      this.matrixAccessToken, dt, this.manifestFile,
+      manifest as unknown as Record<string, unknown>,
+    );
+
+    this.opsBuffer = [];
+    useGDriveStore.getState().recordSync(this.spaceId);
+    this.onStatus?.('synced');
+    console.log(`[EO-DB] fullPushToGDrive: complete — ${events.length} events at seq ${toSeq}`);
   }
 
   /**
@@ -1027,7 +1137,7 @@ export class GDriveSyncService {
     ).catch(() => ({ entries: [] as GDriveListEntry[] }));
 
     const newOps = opEntries
-      .filter(e => !e.name.startsWith('space-')) // skip new-format files
+      .filter(e => !e.name.startsWith('space-') && !/^[0-9a-f-]{36}\.eodb$/.test(e.name)) // skip current-format files
       .sort((a, b) => a.name.localeCompare(b.name));
 
     for (const entry of newOps) {

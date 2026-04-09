@@ -15,6 +15,7 @@ import {
   type UserTypeAssignment,
   type FieldTypeVisibility,
   powerLevelToRole,
+  ROLE_POWER_LEVELS,
 } from './types';
 import {
   type ManifestState,

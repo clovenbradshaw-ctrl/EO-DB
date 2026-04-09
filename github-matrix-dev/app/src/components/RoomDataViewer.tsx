@@ -1,10 +1,14 @@
 import { useState, useEffect, useMemo } from 'react';
+import type { MatrixClient, MatrixEvent } from 'matrix-js-sdk';
 import { useEoStore } from '../store/eo-store';
 import { useTheme, type Theme } from '../theme';
 import type { RoomDataSnapshot } from '../matrix/sync-manager';
+import { getDataRoom } from '../matrix/event-bridge';
 
 interface RoomDataViewerProps {
   onBack: () => void;
+  matrixClient?: MatrixClient | null;
+  roomId?: string | null;
 }
 
 const EO_EVENT_TYPE = 'com.eo-db.event';
@@ -21,9 +25,8 @@ const OP_COLORS: Record<string, string> = {
   REC: '#F472B6',
 };
 
-export function RoomDataViewer({ onBack }: RoomDataViewerProps) {
+export function RoomDataViewer({ onBack, matrixClient, roomId }: RoomDataViewerProps) {
   const { theme } = useTheme();
-  const syncManager = useEoStore((s) => s.syncManager);
   const lastSeq = useEoStore((s) => s.lastSeq);
   const [data, setData] = useState<RoomDataSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -38,21 +41,71 @@ export function RoomDataViewer({ onBack }: RoomDataViewerProps) {
   });
 
   useEffect(() => {
-    if (!syncManager) {
+    if (!matrixClient || !roomId) {
       setError('No Matrix connection — running in local-only mode. Room data is only available when connected to a Matrix homeserver. Local store has ' + lastSeq + ' event(s).');
       return;
     }
     try {
-      const roomData = syncManager.getRoomData();
-      if (!roomData) {
+      const room = matrixClient.getRoom(roomId);
+      if (!room) {
         setError('Room not found — sync may not be initialized yet');
         return;
       }
-      setData(roomData);
+
+      const currentState = room.currentState;
+      const stateEvents: RoomDataSnapshot['stateEvents'] = [];
+      for (const evMap of Object.values(currentState.events as Map<string, Map<string, MatrixEvent>> | Record<string, Record<string, MatrixEvent>>)) {
+        const entries = evMap instanceof Map ? evMap.values() : Object.values(evMap);
+        for (const ev of entries) {
+          stateEvents.push({
+            type: ev.getType(),
+            stateKey: ev.getStateKey() ?? '',
+            sender: ev.getSender() ?? '',
+            content: ev.getContent(),
+          });
+        }
+      }
+
+      const members = room.getJoinedMembers().map((m: any) => ({
+        userId: m.userId,
+        displayName: m.name || null,
+        membership: m.membership,
+      }));
+
+      const allTimelineEvents = room.getLiveTimeline().getEvents();
+      const timeline = allTimelineEvents.slice(-100).map((ev: MatrixEvent) => ({
+        eventId: ev.getId() ?? '',
+        type: ev.getType(),
+        sender: ev.getSender() ?? '',
+        ts: ev.getTs(),
+        content: ev.getContent(),
+      }));
+
+      const encryptionEvent = currentState.getStateEvents('m.room.encryption', '');
+      const joinRuleEvent = currentState.getStateEvents('m.room.join_rules', '');
+      const historyEvent = currentState.getStateEvents('m.room.history_visibility', '');
+      const createEvent = currentState.getStateEvents('m.room.create', '');
+
+      setData({
+        roomId,
+        roomAlias: getDataRoom(),
+        name: room.name || null,
+        topic: (currentState.getStateEvents('m.room.topic', '') as any)?.getContent()?.topic ?? null,
+        memberCount: members.length,
+        members,
+        encryptionEnabled: !!encryptionEvent,
+        encryptionAlgorithm: encryptionEvent?.getContent()?.algorithm ?? null,
+        timelineLength: allTimelineEvents.length,
+        timeline,
+        stateEvents,
+        roomVersion: createEvent?.getContent()?.room_version ?? null,
+        joinRule: joinRuleEvent?.getContent()?.join_rule ?? null,
+        historyVisibility: historyEvent?.getContent()?.history_visibility ?? null,
+      });
     } catch (e: any) {
       setError(e.message);
     }
-  }, [syncManager, lastSeq]);
+  }, [matrixClient, roomId, lastSeq]);
 
   const { eoEvents, systemEvents } = useMemo(() => {
     if (!data) return { eoEvents: [], systemEvents: [] };

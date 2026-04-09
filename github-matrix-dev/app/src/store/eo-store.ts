@@ -16,6 +16,7 @@ import type { EoEvent, EoEventInput, EoState, HorizonResponse } from '../db/type
 import type { SyncManager } from '../matrix/sync-manager';
 import type { GDriveSyncService } from '../google-drive/gdrive-sync';
 import type { ResolvedPermissions } from '../permissions/types';
+import type { UserManifest } from '../google-drive/space-permissions';
 import { eventHash } from '../db/hash';
 
 interface EoDbState {
@@ -35,6 +36,8 @@ interface EoDbState {
   ready: boolean;
   /** Resolved permissions for the current user in the current space */
   resolvedPermissions: ResolvedPermissions | null;
+  /** Drive-backed permission manifest for the current user (null if not loaded) */
+  userManifest: UserManifest | null;
   /** Currently active user type (selected via header switcher) */
   activeUserType: string | null;
 
@@ -54,6 +57,7 @@ interface EoDbState {
   setSyncManager: (syncManager: SyncManager) => void;
   setGDriveSync: (gdriveSync: GDriveSyncService) => void;
   setPermissions: (permissions: ResolvedPermissions | null) => void;
+  setUserManifest: (manifest: UserManifest | null) => void;
   setActiveUserType: (typeId: string | null) => void;
 
   dispatch: (event: EoEventInput) => Promise<number>;
@@ -78,6 +82,7 @@ export const useEoStore = create<EoDbState>((set, get) => ({
   lastSeq: 0,
   ready: false,
   resolvedPermissions: null,
+  userManifest: null,
   activeUserType: null,
   onDispatch: null,
 
@@ -153,6 +158,10 @@ export const useEoStore = create<EoDbState>((set, get) => ({
 
   setPermissions(permissions: ResolvedPermissions | null) {
     set({ resolvedPermissions: permissions });
+  },
+
+  setUserManifest(manifest: UserManifest | null) {
+    set({ userManifest: manifest });
   },
 
   setActiveUserType(typeId: string | null) {
@@ -275,6 +284,7 @@ export const useEoStore = create<EoDbState>((set, get) => ({
       recentEvents: [],
       lastSeq: 0,
       resolvedPermissions: null,
+      userManifest: null,
       activeUserType: null,
       onDispatch: null,
     });

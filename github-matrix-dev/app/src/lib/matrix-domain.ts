@@ -121,6 +121,11 @@ export function testEventTypes(prefix?: string) {
   } as const;
 }
 
+/** Permission management event type constants (to-device). */
+export const PERMISSIONS_KEY_DELIVER = `${DEFAULT_EVENT_PREFIX}.key.grant`;
+/** Room signal broadcast when a user's permissions have changed. */
+export const PERMISSIONS_UPDATED = `${DEFAULT_EVENT_PREFIX}.permissions.updated`;
+
 /** Airtable sync coordination event types (to-device, ephemeral). */
 export function airtableSyncEventTypes(prefix?: string) {
   const p = prefix ?? _eventPrefix;

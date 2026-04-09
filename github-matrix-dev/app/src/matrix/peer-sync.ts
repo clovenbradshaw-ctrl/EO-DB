@@ -22,7 +22,7 @@ import type { LocalKeyring } from '../db/crypto-types';
 import { processEvent } from '../db/fold';
 import { readLogSince } from '../db/log';
 import { storeFingerprint } from '../db/hash';
-import { peerSyncEventTypes } from '../lib/matrix-domain';
+import { peerSyncEventTypes, PERMISSIONS_UPDATED } from '../lib/matrix-domain';
 import { getKeyById, resolveSnapshotKeyId } from '../crypto/segment-keys';
 import { encryptPeerPayload, decryptPeerPayload } from '../crypto/snapshot-crypto';
 import { selectTransport, executeSync, type TransportRouterDeps, type PeerInfo } from './transport-router';
@@ -38,13 +38,16 @@ const SYNC_GDRIVE = _syncTypes.gdrive;
 const BATCH_SIZE = 50;
 
 /** Build the Map<userId, Map<deviceId, content>> structure for sendToDevice. */
-function toDeviceContent(userId: string, deviceId: string, content: Record<string, any>) {
+export function buildToDeviceContent(userId: string, deviceId: string, content: Record<string, any>) {
   const inner = new Map<string, Record<string, any>>();
   inner.set(deviceId, content);
   const outer = new Map<string, Map<string, Record<string, any>>>();
   outer.set(userId, inner);
   return outer;
 }
+
+/** @internal Alias for internal callers within this file. */
+const toDeviceContent = buildToDeviceContent;
 
 /** Gap size threshold for upgrading to WebRTC or Filen transport. */
 const GAP_THRESHOLD = 100;
@@ -65,6 +68,13 @@ export class PeerSync {
    * Wire this to gdriveSync.triggerImmediateCheck() in the app shell.
    */
   onGDriveUpdate?: () => void;
+
+  /**
+   * Called when the server signals that this user's permissions have changed.
+   * Wire this to re-fetch the Drive UserManifest and call
+   * useEoStore.getState().setUserManifest() in the app shell.
+   */
+  onPermissionsUpdated?: () => void;
 
   constructor(
     client: MatrixClient,
@@ -122,6 +132,11 @@ export class PeerSync {
       this.client.removeListener('toDeviceEvent' as any, this.toDeviceHandler);
       this.toDeviceHandler = undefined;
     }
+  }
+
+  /** Alias for stop() — satisfies the SyncManager.destroy() call site in Layout. */
+  destroy(): void {
+    this.stop();
   }
 
   /**
@@ -192,6 +207,10 @@ export class PeerSync {
       case SYNC_GDRIVE:
         // A peer wrote new ops to GDrive — trigger an immediate pull instead of waiting 15s.
         this.onGDriveUpdate?.();
+        break;
+      case PERMISSIONS_UPDATED:
+        // The admin updated this user's permissions — re-fetch the Drive manifest.
+        this.onPermissionsUpdated?.();
         break;
     }
   }
