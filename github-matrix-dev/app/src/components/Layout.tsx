@@ -2387,7 +2387,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                     {activeSliceType === 'schema' ? (
                       <SchemaView
                         scope={selectedScope}
-                        onFieldSelect={(fieldKey) => navigate({ record: `${selectedScope}._schema.${fieldKey}` })}
                       />
                     ) : activeSliceType === 'graph' ? (
                       <GraphView allStates={allStates} />

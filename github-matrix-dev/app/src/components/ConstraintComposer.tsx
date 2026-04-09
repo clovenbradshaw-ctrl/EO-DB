@@ -129,6 +129,8 @@ interface ConstraintComposerProps {
   onAdd: (name: string, value: any) => void;
   onRemove: (name: string) => void;
   onClose: () => void;
+  /** When true, renders without popup container styling (no shadow/border/minWidth). */
+  embedded?: boolean;
 }
 
 export function ConstraintComposer({
@@ -137,6 +139,7 @@ export function ConstraintComposer({
   onAdd,
   onRemove,
   onClose,
+  embedded,
 }: ConstraintComposerProps) {
   const { theme } = useTheme();
   const s = makeStyles(theme);
@@ -447,13 +450,15 @@ export function ConstraintComposer({
   const gpuAvailable = typeof navigator !== 'undefined' && !!navigator.gpu;
 
   return (
-    <div style={s.container}>
-      {/* Header */}
-      <div style={s.header}>
-        <span style={s.title}>⊢ CONSTRAINTS</span>
-        <span style={s.fieldKeyBadge}>{fieldKey}</span>
-        <button style={s.closeBtn} onClick={onClose}>&times;</button>
-      </div>
+    <div style={embedded ? { padding: '0 16px 8px' } : s.container}>
+      {/* Header — hidden when embedded (panel provides its own header) */}
+      {!embedded && (
+        <div style={s.header}>
+          <span style={s.title}>⊢ CONSTRAINTS</span>
+          <span style={s.fieldKeyBadge}>{fieldKey}</span>
+          <button style={s.closeBtn} onClick={onClose}>&times;</button>
+        </div>
+      )}
 
       {/* Column headers */}
       <div style={s.gridContainer}>
