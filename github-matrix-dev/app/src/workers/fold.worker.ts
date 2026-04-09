@@ -586,7 +586,11 @@ function buildFoldEntry(target: string): FoldEntry {
   try {
     switch (req.type) {
       case 'init': {
-        opfsDir = await navigator.storage.getDirectory();
+        const rootOpfsDir = await navigator.storage.getDirectory();
+        // Each space gets its own OPFS subdirectory for isolation.
+        opfsDir = req.spaceId
+          ? await rootOpfsDir.getDirectoryHandle(`space.${req.spaceId}`, { create: true })
+          : rootOpfsDir;
         log = await openLog(opfsDir);
         position = (await loadCheckpoint(opfsDir)) ?? createFoldPosition();
         nextSeq = position.seq;
@@ -691,6 +695,33 @@ function buildFoldEntry(target: string): FoldEntry {
         if (!position || !index || !log) throw new Error('Worker not initialized');
         const result = resolveQuery(req.spec);
         post({ id: req.id, type: 'result', value: result });
+        break;
+      }
+
+      case 'appendRaw': {
+        // Persist an already-folded event without EVA/REC evaluation.
+        // The main-thread fold engine drives logic; this is storage only.
+        if (!log || !index || !position) throw new Error('Worker not initialized');
+        const event = req.event;
+        if (event.seq) nextSeq = Math.max(nextSeq, event.seq);
+        const { byteOffset } = appendEvent(log, event);
+        updateIndex(index, event, byteOffset);
+        applyEvent(position, event);
+        if (event.op === 'EVA') registerEvaFormula(event);
+        post({ id: req.id, type: 'result', value: null });
+        break;
+      }
+
+      case 'scanLog': {
+        // Return all events with seq > req.since, in ascending order.
+        if (!log) throw new Error('Worker not initialized');
+        const events: EoEvent[] = [];
+        for (const entry of scanLog(log, 0)) {
+          if (entry.event.seq > req.since) {
+            events.push(entry.event);
+          }
+        }
+        post({ id: req.id, type: 'result', value: events });
         break;
       }
 

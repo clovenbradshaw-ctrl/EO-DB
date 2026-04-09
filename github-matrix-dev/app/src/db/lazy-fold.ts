@@ -66,7 +66,19 @@ export type FoldWorkerPayload =
   | { type: 'writeEventsBulk'; events: EoEvent[] }
   | { type: 'getField'; target: string; field: string }
   | { type: 'resolveQuery'; spec: SerializedQuerySpec }
-  | { type: 'applyMigration'; rules: RecMigrationRule[]; triggeredBy: number };
+  | { type: 'applyMigration'; rules: RecMigrationRule[]; triggeredBy: number }
+  /**
+   * appendRaw — append an already-folded event to the OPFS log without
+   * running EVA/REC evaluation. Used by the MemoryStore persistence hook
+   * so that fold.ts (main-thread fold engine) drives the logic while
+   * the worker handles durable storage.
+   */
+  | { type: 'appendRaw'; event: EoEvent }
+  /**
+   * scanLog — stream all events whose seq > `since` back to the main
+   * thread for replay into a fresh MemoryStore on page load.
+   */
+  | { type: 'scanLog'; since: number };
 
 export type FoldWorkerRequest = FoldWorkerPayload & { id: number };
 
@@ -234,6 +246,30 @@ export function applyMigration(
   triggeredBy: number,
 ): Promise<void> {
   return send(client, { type: 'applyMigration', rules, triggeredBy });
+}
+
+/**
+ * Append an already-folded event to the OPFS log without triggering
+ * the worker's EVA/REC evaluation pass. The main-thread fold engine
+ * (fold.ts + MemoryStore) drives logic; this call handles persistence only.
+ */
+export function appendRaw(
+  client: FoldWorkerClient,
+  event: EoEvent,
+): Promise<void> {
+  return send(client, { type: 'appendRaw', event });
+}
+
+/**
+ * Return all events in the OPFS log whose seq > `since` (default 0),
+ * in ascending seq order. Used on page load to replay into a fresh
+ * MemoryStore.
+ */
+export function scanLog(
+  client: FoldWorkerClient,
+  since = 0,
+): Promise<EoEvent[]> {
+  return send<EoEvent[]>(client, { type: 'scanLog', since });
 }
 
 // ─── getField ─────────────────────────────────────────────────────────────────
