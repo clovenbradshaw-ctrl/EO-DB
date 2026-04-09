@@ -169,6 +169,8 @@ interface ResolutionPolicyComposerProps {
   onApply: (policy: ResolvePolicy) => void;
   onClear: () => void;
   onClose: () => void;
+  /** When true, renders without popup container styling (no shadow/border/minWidth). */
+  embedded?: boolean;
 }
 
 export function ResolutionPolicyComposer({
@@ -176,6 +178,7 @@ export function ResolutionPolicyComposer({
   onApply,
   onClear,
   onClose,
+  embedded,
 }: ResolutionPolicyComposerProps) {
   const { theme } = useTheme();
   const s = makeStyles(theme);
@@ -237,12 +240,14 @@ export function ResolutionPolicyComposer({
   const isMakingSelected = selected.has('making');
 
   return (
-    <div style={s.container}>
-      {/* Header */}
-      <div style={s.header}>
-        <span style={s.title}>⊨ RESOLUTION POLICY</span>
-        <button style={s.closeBtn} onClick={onClose}>&times;</button>
-      </div>
+    <div style={embedded ? { padding: '0 16px 8px' } : s.container}>
+      {/* Header — hidden when embedded (panel provides its own header) */}
+      {!embedded && (
+        <div style={s.header}>
+          <span style={s.title}>⊨ RESOLUTION POLICY</span>
+          <button style={s.closeBtn} onClick={onClose}>&times;</button>
+        </div>
+      )}
 
       <div style={s.subtitle}>
         Select one or more resolution stances to compose a policy.

@@ -1,8 +1,8 @@
 import { useEffect, useState, useMemo } from 'react';
 import { useEoStore } from '../store/eo-store';
 import { groupSchemaStates, schemaFieldTarget, schemaResolveTarget, schemaConstraintTarget, type FieldSchema } from '../db/schema-rules';
-import { ResolutionPolicyComposer, summarizePolicy, type ResolvePolicy } from './ResolutionPolicyComposer';
-import { ConstraintComposer } from './ConstraintComposer';
+import { summarizePolicy, type ResolvePolicy } from './ResolutionPolicyComposer';
+import { SchemaFieldPanel } from './SchemaFieldPanel';
 import { readLogForPrefix } from '../db/log';
 import { useTheme, type Theme } from '../theme';
 import { formatName } from './scope-picker-utils';
@@ -185,10 +185,9 @@ function SchemaFieldHistory({ scope, fieldKey }: { scope: string; fieldKey: stri
 
 interface SchemaViewProps {
   scope: string;
-  onFieldSelect?: (fieldKey: string) => void;
 }
 
-export function SchemaView({ scope, onFieldSelect }: SchemaViewProps) {
+export function SchemaView({ scope }: SchemaViewProps) {
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
   const getState = useEoStore((s) => s.getState);
   const dispatch = useEoStore((s) => s.dispatch);
@@ -200,9 +199,8 @@ export function SchemaView({ scope, onFieldSelect }: SchemaViewProps) {
   const [fieldSchemas, setFieldSchemas] = useState<Map<string, FieldSchema>>(new Map());
   const [loading, setLoading] = useState(true);
   const [expandedField, setExpandedField] = useState<string | null>(null);
+  const [selectedFieldKey, setSelectedFieldKey] = useState<string | null>(null);
   const [editingLabel, setEditingLabel] = useState<{ fieldKey: string; value: string } | null>(null);
-  const [resolutionComposer, setResolutionComposer] = useState<{ fieldKey: string; x: number; y: number } | null>(null);
-  const [constraintComposer, setConstraintComposer] = useState<{ fieldKey: string; x: number; y: number } | null>(null);
   const [sortKey, setSortKey] = useState<SortKey>('fieldKey');
   const [sortDir, setSortDir] = useState<SortDir>('asc');
   const [filterText, setFilterText] = useState('');
@@ -504,7 +502,9 @@ export function SchemaView({ scope, onFieldSelect }: SchemaViewProps) {
   const collectionName = collectionDisplayName || formatName(collectionSegment);
 
   return (
-    <div style={s.container}>
+    <div style={{ ...s.container, flexDirection: 'row' }}>
+      {/* ── Left: table area ── */}
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
       {/* Dashboard header */}
       <div style={s.dashboard}>
         <div style={s.dashboardTitle}>{collectionName}</div>
@@ -649,14 +649,24 @@ export function SchemaView({ scope, onFieldSelect }: SchemaViewProps) {
                       style={{
                         ...s.row,
                         ...(isExpanded ? { background: theme.bgMuted } : {}),
+                        ...(selectedFieldKey === fs.fieldKey ? { background: `${theme.accent}10`, outline: `1px solid ${theme.accent}30` } : {}),
                       }}
                       onClick={() => {
-                        setExpandedField(isExpanded ? null : fs.fieldKey);
-                        if (onFieldSelect) onFieldSelect(fs.fieldKey);
+                        setSelectedFieldKey(selectedFieldKey === fs.fieldKey ? null : fs.fieldKey);
                       }}
                     >
                       <div style={s.cell}>
-                        <span style={s.expandIcon}>{isExpanded ? '\u25BE' : '\u25B8'}</span>
+                        {/* Expand icon — separate click target for audit trail */}
+                        <span
+                          style={{ ...s.expandIcon, cursor: 'pointer' }}
+                          title="Toggle change history"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setExpandedField(isExpanded ? null : fs.fieldKey);
+                          }}
+                        >
+                          {isExpanded ? '\u25BE' : '\u25B8'}
+                        </span>
                         {/* Type-icon chip — file-navigator style */}
                         <span
                           style={{
@@ -734,26 +744,10 @@ export function SchemaView({ scope, onFieldSelect }: SchemaViewProps) {
                         <span style={s.typeBadge}>{typeDisplay}{formatDisplay}</span>
                       </div>
                       <div style={s.cell}>
-                        <span
-                          style={{ ...s.cellText, cursor: 'pointer', textDecoration: 'underline', textDecorationStyle: 'dotted' as const, textUnderlineOffset: '3px' }}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setConstraintComposer({ fieldKey: fs.fieldKey, x: e.clientX, y: e.clientY });
-                          }}
-                        >
-                          {constraintDisplay}
-                        </span>
+                        <span style={s.cellText}>{constraintDisplay}</span>
                       </div>
                       <div style={s.cell}>
-                        <span
-                          style={{ ...s.cellText, cursor: 'pointer', textDecoration: 'underline', textDecorationStyle: 'dotted' as const, textUnderlineOffset: '3px' }}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setResolutionComposer({ fieldKey: fs.fieldKey, x: e.clientX, y: e.clientY });
-                          }}
-                        >
-                          {resolveDisplay}
-                        </span>
+                        <span style={s.cellText}>{resolveDisplay}</span>
                       </div>
                     </div>
 
@@ -774,63 +768,21 @@ export function SchemaView({ scope, onFieldSelect }: SchemaViewProps) {
         </table>
       </div>
 
-      {/* Constraint Composer popup */}
-      {constraintComposer && (() => {
-        const fs = fieldSchemas.get(constraintComposer.fieldKey);
-        return (
-          <>
-            <div
-              style={{ position: 'fixed', inset: 0, zIndex: 9998 }}
-              onClick={() => setConstraintComposer(null)}
-            />
-            <div style={{
-              position: 'fixed',
-              left: Math.min(constraintComposer.x, window.innerWidth - 800),
-              top: Math.min(constraintComposer.y, window.innerHeight - 600),
-              zIndex: 9999,
-            }}>
-              <ConstraintComposer
-                fieldKey={constraintComposer.fieldKey}
-                existingConstraints={fs?.constraints ?? []}
-                onAdd={(name, value) => handleAddConstraint(constraintComposer.fieldKey, name, value)}
-                onRemove={(name) => handleRemoveConstraint(constraintComposer.fieldKey, name)}
-                onClose={() => setConstraintComposer(null)}
-              />
-            </div>
-          </>
-        );
-      })()}
+      </div>{/* end left table area */}
 
-      {/* Resolution Policy Composer popup */}
-      {resolutionComposer && (() => {
-        const fs = fieldSchemas.get(resolutionComposer.fieldKey);
-        const currentPolicy: ResolvePolicy | null = fs?.resolve?.value?.stances
-          ? fs.resolve.value as ResolvePolicy
-          : fs?.resolve?.value?.strategy
-            ? { stances: [{ stance: 'dissecting', subType: fs.resolve.value.strategy }] }
-            : null;
-        return (
-          <>
-            <div
-              style={{ position: 'fixed', inset: 0, zIndex: 9998 }}
-              onClick={() => setResolutionComposer(null)}
-            />
-            <div style={{
-              position: 'fixed',
-              left: Math.min(resolutionComposer.x, window.innerWidth - 800),
-              top: Math.min(resolutionComposer.y, window.innerHeight - 600),
-              zIndex: 9999,
-            }}>
-              <ResolutionPolicyComposer
-                currentPolicy={currentPolicy}
-                onApply={(policy) => handleSetResolution(resolutionComposer.fieldKey, policy)}
-                onClear={() => handleClearResolution(resolutionComposer.fieldKey)}
-                onClose={() => setResolutionComposer(null)}
-              />
-            </div>
-          </>
-        );
-      })()}
+      {/* ── Right: field editing panel ── */}
+      {selectedFieldKey && (
+        <SchemaFieldPanel
+          fieldKey={selectedFieldKey}
+          fieldSchema={fieldSchemas.get(selectedFieldKey)}
+          onClose={() => setSelectedFieldKey(null)}
+          onSaveLabel={(label) => handleLabelSave(selectedFieldKey, label)}
+          onAddConstraint={(name, value) => handleAddConstraint(selectedFieldKey, name, value)}
+          onRemoveConstraint={(name) => handleRemoveConstraint(selectedFieldKey, name)}
+          onSetResolution={(policy) => handleSetResolution(selectedFieldKey, policy)}
+          onClearResolution={() => handleClearResolution(selectedFieldKey)}
+        />
+      )}
     </div>
   );
 }
