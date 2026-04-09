@@ -1878,6 +1878,8 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                 spaceCacheRef.current.set(spaceTarget, {
                   workerClient: newSpaceWorker,
                   syncManager: null,
+                  peerSync: null,
+                  webrtcPeer: null,
                   gdriveSync: null,
                   mainRoomId,
                   presence: null,
