@@ -134,15 +134,34 @@ export function* scanLog(
     const payloadLength = view.getUint32(8, true);
     const nextOffset = view.getUint32(4, true);
 
+    // Sanity-check header fields before allocating / reading payload.
+    // A corrupt or partial final write produces wild values here.
+    if (
+      payloadLength === 0 ||
+      payloadLength > 10_000_000 ||
+      nextOffset <= offset ||
+      nextOffset > log.size + 1_000_000
+    ) {
+      // Truncate to the last known-good offset so future opens are clean.
+      try { log.syncHandle.truncate(offset); log.size = offset; } catch { /* best effort */ }
+      break;
+    }
+
     const payload = new Uint8Array(payloadLength);
     log.syncHandle.read(payload, { at: offset + HEADER_BYTES });
 
-    yield {
-      event: unpack(payload) as EoEvent,
-      byteOffset: offset,
-      nextOffset,
-    };
+    let event: EoEvent;
+    try {
+      event = unpack(payload) as EoEvent;
+    } catch {
+      // Corrupt or truncated msgpack at the tail of the log — stop here and
+      // truncate so this entry is not re-encountered on the next open.
+      console.warn('[EO-DB] OPFS log: corrupt entry at offset', offset, '— truncating and stopping scan');
+      try { log.syncHandle.truncate(offset); log.size = offset; } catch { /* best effort */ }
+      break;
+    }
 
+    yield { event, byteOffset: offset, nextOffset };
     offset = nextOffset;
   }
 }
