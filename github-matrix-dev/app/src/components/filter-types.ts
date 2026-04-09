@@ -23,7 +23,7 @@ export type ColumnType =
   | 'select' | 'multiSelect'
   | 'date'
   | 'boolean'
-  | 'attachment' | 'linkedRecord' | 'object'
+  | 'attachment' | 'linkedRecord' | 'link' | 'relationship' | 'object'
   | 'formula' | 'rollup' | 'lookup' | 'count'
   | 'autoNumber' | 'createdTime' | 'lastModifiedTime' | 'createdBy' | 'lastModifiedBy';
 
@@ -73,6 +73,8 @@ export function operatorsForType(type: ColumnDef['type']): FilterOperator[] {
     case 'object':
     case 'attachment':
     case 'linkedRecord':
+    case 'link':
+    case 'relationship':
       return OBJECT_OPS;
     default:
       return TEXT_OPS;

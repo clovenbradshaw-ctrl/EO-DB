@@ -110,6 +110,26 @@ export interface GraphEdge {
   dest: string;
   edge_type?: string;
   seq: number;
+  /** Typed attribute data carried on relationship-field edges. */
+  attrs?: Record<string, unknown>;
+}
+
+/** A single edge addition item — either a plain dest string (legacy) or an object with attrs. */
+export type ConEdgeAddItem = string | { dest: string; attrs?: Record<string, unknown> };
+
+/** CON operand structure. */
+export interface ConOperand {
+  added?: ConEdgeAddItem[];
+  removed?: string[];
+  edge_type?: string;
+}
+
+/** Definition of a typed attribute on a relationship edge. */
+export interface EdgeAttrDef {
+  key: string;
+  label: string;
+  type: 'text' | 'number' | 'date' | 'select';
+  options?: string[];
 }
 
 // EVA-active registration

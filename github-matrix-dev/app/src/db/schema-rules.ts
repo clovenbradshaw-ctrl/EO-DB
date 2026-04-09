@@ -12,7 +12,7 @@
  * One canonical DEF per kind+subject — path uniqueness eliminates conflicts.
  */
 
-import type { EoState } from './types';
+import type { EoState, EdgeAttrDef } from './types';
 
 // ─── Target path builders ────────────────────────────────────────────────
 
@@ -97,6 +97,25 @@ export function groupSchemaStates(
   }
 
   return fields;
+}
+
+// ─── Edge attribute extraction ───────────────────────────────────────────
+
+/**
+ * Extract edge attribute definitions from a relationship field's constraints.
+ *
+ * Edge attrs are stored as individual constraints named `edgeAttr_{key}`:
+ *   scope._schema.fieldKey.constraint.edgeAttr_role  → { label: "Role", type: "text" }
+ */
+export function extractEdgeAttrDefs(fs: FieldSchema): EdgeAttrDef[] {
+  return fs.constraints
+    .filter(c => c.name.startsWith('edgeAttr_'))
+    .map(c => ({
+      key: c.name.slice('edgeAttr_'.length),
+      label: c.value?.label ?? c.name.slice('edgeAttr_'.length),
+      type: c.value?.type ?? 'text',
+      options: c.value?.options,
+    }));
 }
 
 // ─── Column type extraction ──────────────────────────────────────────────
