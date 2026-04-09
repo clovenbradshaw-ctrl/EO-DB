@@ -9,13 +9,13 @@ export function Signals({ entries }: SignalsProps) {
   const { theme } = useTheme();
   const s = makeStyles(theme);
 
-  if (entries.length === 0) {
-    return <div style={s.none}>No notable patterns detected across this population</div>;
-  }
-
   // Separate the population-count summary from field signals
   const countEntry = entries.find(e => e.measure === 'count');
   const fieldEntries = entries.filter(e => e.measure !== 'count');
+
+  if (fieldEntries.length === 0) {
+    return <div style={s.none}>No notable patterns detected across this population</div>;
+  }
 
   return (
     <div style={s.row}>
