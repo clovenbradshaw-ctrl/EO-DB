@@ -1364,11 +1364,13 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
 
     async function setupSpaceStore() {
       const cache = spaceCacheRef.current;
-      const existing = cache.get(selectedSpace!);
 
+      // Resolve room first — a concurrent run may cache the worker during this await.
       const spaceRoomId = await resolveRoom();
       if (isStale()) return;
 
+      // Check cache AFTER resolveRoom so we see entries set by concurrent runs.
+      const existing = cache.get(selectedSpace!);
       if (existing) {
         // Reuse cached worker — no OPFS re-open, no replay
         if (isStale()) return;
@@ -1435,14 +1437,26 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         return;
       }
 
-      // Open space-scoped OPFS fold worker
+      // Open space-scoped OPFS fold worker.
+      // Cache the entry BEFORE initFoldWorker so that any concurrent run that
+      // starts during the await finds the entry and takes the reuse path above,
+      // preventing two workers from racing to open the same OPFS file.
       const workerClient = createFoldWorkerClient();
-      await initFoldWorker(workerClient, selectedSpace!);
-      if (isStale()) { workerClient.worker.terminate(); return; }
-
-      // Cache the worker immediately so that re-runs of this effect reuse
-      // the SAME worker instead of creating a new one.
       cache.set(selectedSpace!, { workerClient, syncManager: null, peerSync: null, webrtcPeer: null, gdriveSync: null, mainRoomId: spaceRoomId, presence: null, spaceRooms: resolvedSpaceRooms });
+
+      try {
+        await initFoldWorker(workerClient, selectedSpace!);
+      } catch (e) {
+        // Init failed — remove the cache entry so the next run retries cleanly.
+        cache.delete(selectedSpace!);
+        workerClient.worker.terminate();
+        console.error('[EO-DB] initFoldWorker failed for', selectedSpace, e);
+        return;
+      }
+
+      // If stale, don't terminate — a concurrent run already found this worker
+      // in the cache above and is about to use it. Just bail silently.
+      if (isStale()) return;
 
       await init(workerClient);
 
