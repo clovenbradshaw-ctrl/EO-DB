@@ -1510,8 +1510,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             spaceName: gdriveSpaceName,
             userId: session.userId,
             matrixAccessToken: session.accessToken,
-            matrixClient: matrixClientRef.current || undefined,
-            roomId: spaceRoomId || undefined,
             onEvent: onFoldEvent,
             onHydrated: () => { init(workerClient); },
           });
