@@ -15,7 +15,9 @@ import {
   type UserTypeAssignment,
   type FieldTypeVisibility,
   powerLevelToRole,
+  ROLE_POWER_LEVELS,
 } from './types';
+import type { UserManifest } from '../google-drive/space-permissions';
 
 /**
  * Read a user's power level from a Matrix Room object.
@@ -191,6 +193,97 @@ export function resolvePermissionsFromSharing(
     restricted_fields: restrictedFields,
     locked_fields: lockedFields,
     redacted_fields: restrictedFields.filter(() => pl < 50),
+
+    user_types: userTypes,
+    active_user_type: effectiveActiveType,
+    type_hidden_fields: typeHiddenFields,
+  };
+}
+
+/**
+ * Resolve permissions from a Drive-backed UserManifest instead of from the
+ * legacy `_sharing` array or Matrix power levels.
+ *
+ * When `manifest` is null (no Drive manifest exists yet for this user), falls
+ * back to editor-level access (pl=25) — the same default as
+ * resolvePermissionsFromSharing.
+ *
+ * Use this function when the space has Drive sync enabled and the current
+ * user's manifest has been loaded into the Zustand store.
+ */
+export function resolvePermissionsFromManifest(
+  userId: string,
+  owner: string,
+  manifest: UserManifest | null,
+  fieldAssignments?: FieldAssignment[],
+  userTypeAssignments?: UserTypeAssignment[] | null,
+  fieldTypeVisibility?: FieldTypeVisibility[] | null,
+  activeUserType?: string | null,
+): ResolvedPermissions {
+  let pl: number;
+
+  if (userId === owner) {
+    pl = 100;
+  } else if (manifest) {
+    pl = ROLE_POWER_LEVELS[manifest.role];
+  } else {
+    // No manifest yet — default to editor (25) so the user isn't locked out
+    // while their manifest is being created.
+    pl = 25;
+  }
+
+  const role = powerLevelToRole(pl);
+  const assignments = fieldAssignments ?? [];
+
+  const restrictedFields = assignments
+    .filter(f => f.room === 'restricted')
+    .map(f => f.field);
+
+  const lockedFields = assignments
+    .filter(f => f.locked_to && !f.locked_to.includes(role))
+    .map(f => f.field);
+
+  // Shadow fields from manifest — show placeholder instead of real value
+  // for fields the user cannot access.
+  const redactedFields = manifest
+    ? restrictedFields.filter(f => !(f in manifest.shadowFields) && pl < 50)
+    : restrictedFields.filter(() => pl < 50);
+
+  const userTypes = userTypeAssignments
+    ?.find(a => a.user_id === userId)?.type_ids ?? [];
+  const effectiveActiveType = activeUserType ?? null;
+
+  const typeHiddenFields = pl >= 50 ? [] : (fieldTypeVisibility ?? [])
+    .filter(ftv =>
+      ftv.visible_to_types.length > 0 &&
+      (effectiveActiveType === null ||
+        !ftv.visible_to_types.includes(effectiveActiveType))
+    )
+    .map(ftv => ftv.field);
+
+  return {
+    role,
+    powerLevel: pl,
+    is_owner: pl >= 100,
+
+    in_main_room: true,
+    in_restricted_room: pl >= 50,
+    in_governance_room: pl >= 50,
+
+    can_read: true,
+    can_add_records: pl >= 10,
+    can_edit_any_record: pl >= 25,
+    can_edit_own_records: pl >= 10,
+    can_create_fields: pl >= 50,
+    can_build_slices: pl >= 50,
+    can_manage_members: pl >= 50,
+    can_set_governance: pl >= 50,
+    can_manage_keys: pl >= 100,
+    can_share: pl >= 50,
+
+    restricted_fields: restrictedFields,
+    locked_fields: lockedFields,
+    redacted_fields: redactedFields,
 
     user_types: userTypes,
     active_user_type: effectiveActiveType,
