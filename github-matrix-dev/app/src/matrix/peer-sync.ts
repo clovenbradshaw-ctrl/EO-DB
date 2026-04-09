@@ -17,7 +17,7 @@
 import { pack, unpack } from 'msgpackr';
 import type { MatrixClient, MatrixEvent } from 'matrix-js-sdk';
 import type { EoStore } from '../db/encrypted-store';
-import type { EoEventInput, EoState } from '../db/types';
+import type { EoEvent, EoEventInput, EoState } from '../db/types';
 import type { LocalKeyring } from '../db/crypto-types';
 import { processEvent } from '../db/fold';
 import { readLogSince } from '../db/log';
@@ -357,6 +357,40 @@ export class PeerSync {
    * Recipients call triggerImmediateCheck() to pull without waiting 15s.
    * Fire-and-forget — failures are non-critical (15s poll is the safety net).
    */
+  /**
+   * Push a newly-created local event to all room members immediately.
+   * Uses the same SYNC_EVENTS + encryptPeerPayload path as sendEventsToPeer.
+   * Fire-and-forget — peers can still gap-fill via the hello/offer/request
+   * handshake if this message is lost.
+   */
+  async broadcastLocalEvent(event: EoEvent): Promise<void> {
+    const room = this.client.getRoom(this.roomId);
+    if (!room) return;
+    const myUserId = this.client.getUserId();
+    const members = room.getJoinedMembers().filter(m => m.userId !== myUserId);
+    if (members.length === 0) return;
+
+    const keyId = resolveSnapshotKeyId(this.keyring);
+    const keyEntry = keyId ? getKeyById(this.keyring, keyId) : null;
+
+    const payload = keyEntry
+      ? await encryptPeerPayload(keyEntry.key, keyId!, pack([event]))
+      : { events: [event] };
+
+    for (const member of members) {
+      try {
+        await this.client.sendToDevice(
+          SYNC_EVENTS,
+          toDeviceContent(member.userId, '*', {
+            ...payload,
+            batch_index: 0,
+            total_batches: 1,
+          }),
+        );
+      } catch { /* best-effort — gap-fill is the safety net */ }
+    }
+  }
+
   async broadcastGDriveUpdate(seq: number): Promise<void> {
     const room = this.client.getRoom(this.roomId);
     if (!room) return;
