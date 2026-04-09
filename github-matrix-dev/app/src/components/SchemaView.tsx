@@ -412,7 +412,6 @@ export function SchemaView({ scope }: SchemaViewProps) {
         return next;
       });
     } catch { /* ignore */ }
-    setResolutionComposer(null);
   }
 
   async function handleClearResolution(fieldKey: string) {
@@ -434,7 +433,6 @@ export function SchemaView({ scope }: SchemaViewProps) {
         return next;
       });
     } catch { /* ignore */ }
-    setResolutionComposer(null);
   }
 
   async function handleAddConstraint(fieldKey: string, name: string, value: any) {
