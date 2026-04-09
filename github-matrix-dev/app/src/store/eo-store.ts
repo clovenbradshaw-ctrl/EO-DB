@@ -16,7 +16,7 @@ import type { EoEvent, EoEventInput, EoState, HorizonResponse } from '../db/type
 import type { SyncManager } from '../matrix/sync-manager';
 import type { GDriveSyncService } from '../google-drive/gdrive-sync';
 import type { ResolvedPermissions } from '../permissions/types';
-import type { UserManifest } from '../google-drive/space-permissions';
+import type { ManifestState as UserManifest } from '../google-drive/space-permissions';
 import { eventHash } from '../db/hash';
 
 interface EoDbState {
