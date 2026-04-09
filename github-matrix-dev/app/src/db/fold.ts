@@ -105,6 +105,14 @@ async function processEventCore(
     return existing as number;
   }
 
+  // Pre-check for INS: reject before logging if target already exists
+  if (event.op === 'INS') {
+    const existingState = await checkExists(store, event.target);
+    if (existingState) {
+      throw new Error(`Target already instantiated: ${event.target}`);
+    }
+  }
+
   const seq = await store.nextSeq();
   const fullEvent: EoEvent = { ...event, seq };
 
@@ -163,6 +171,14 @@ async function processEventInner(
   const existing = await store.get(`idem:${event.client_event_id}`);
   if (existing != null) {
     return existing as number;
+  }
+
+  // 2b. Pre-check for INS: reject before logging if target already exists
+  if (event.op === 'INS') {
+    const existingState = await checkExists(store, event.target);
+    if (existingState) {
+      throw new Error(`Target already instantiated: ${event.target}`);
+    }
   }
 
   // 3. Assign sequence number
@@ -249,7 +265,6 @@ function stateFromEvent(event: EoEvent, op: EoEvent['op']) {
 
 // --- INS: Instantiate ---
 // External INS is always level 1. System-generated INS carries level 2+.
-// Stores `_created_by` on the record for Creator ownership enforcement.
 async function handleINS(store: EoStore, event: EoEvent): Promise<void> {
   const existing = await checkExists(store, event.target);
   if (existing) {
@@ -258,7 +273,7 @@ async function handleINS(store: EoStore, event: EoEvent): Promise<void> {
 
   const operand = event.operand ?? {};
   const value = typeof operand === 'object' && !Array.isArray(operand)
-    ? { ...operand, _created_by: event.agent }
+    ? { ...operand }
     : operand;
 
   await setState(store, {
