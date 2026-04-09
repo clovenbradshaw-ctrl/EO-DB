@@ -46,6 +46,7 @@ import {
   gdriveRetrieveNamed,
   gdriveRetrieveRange,
   gdriveRetrieve,
+  deriveSpaceFileGuid,
 } from './gdrive-api';
 import type { GDriveListEntry } from './gdrive-api';
 import { processEvent } from '../db/fold';
@@ -61,10 +62,10 @@ const RECENT_BUFFER_MAX = 256;
 const BAKE_VOTE_GRACE_MS = 2_000;
 const BAKE_LOCK_TTL_MS = 60_000;
 
-const LOG_FILE = 'space-log.eodb';
-const RECENT_FILE = 'space-recent.eodb';
-const MANIFEST_FILE = 'space-manifest.json';
-const LOG_PENDING_PREFIX = 'space-log-pending-';
+// Legacy plaintext filenames — used as fallback in the static hydrateFromGDrive
+// for spaces that haven't yet been opened under the GUID-naming scheme.
+const LEGACY_LOG_FILE = 'space-log.eodb';
+const LEGACY_RECENT_FILE = 'space-recent.eodb';
 
 // ──────────────────────────────────────────────────────────────
 // Manifest type
@@ -113,6 +114,18 @@ export class GDriveSyncService {
    * Written to space-recent.eodb on every saveOp/saveBulkOps call.
    */
   private opsBuffer: EoEvent[] = [];
+
+  // GUID-derived Drive filenames — set in start() before first use.
+  private logFile: string = LEGACY_LOG_FILE;
+  private recentFile: string = LEGACY_RECENT_FILE;
+  private manifestFile: string = 'space-manifest.json';
+  private logPendingPrefix: string = 'space-log-pending-';
+
+  /**
+   * The stable GUIDs for this space's Drive files.
+   * Null until start() has been called (GUIDs are derived async).
+   */
+  fileGuids: { log: string; recent: string; manifest: string } | null = null;
 
   private store: EoStore;
   private spaceId: string;
@@ -177,11 +190,25 @@ export class GDriveSyncService {
   async start(): Promise<void> {
     if (this.timer) return;
 
+    // Derive stable GUIDs from spaceId so all space members use the same filenames.
+    const [logGuid, recentGuid, manifestGuid] = await Promise.all([
+      deriveSpaceFileGuid(this.spaceId, 'log'),
+      deriveSpaceFileGuid(this.spaceId, 'recent'),
+      deriveSpaceFileGuid(this.spaceId, 'manifest'),
+    ]);
+    this.logFile = `${logGuid}.eodb`;
+    this.recentFile = `${recentGuid}.eodb`;
+    this.manifestFile = `${manifestGuid}.json`;
+    this.logPendingPrefix = `${logGuid}-pending-`;
+    this.fileGuids = { log: logGuid, recent: recentGuid, manifest: manifestGuid };
+    useGDriveStore.getState().setSpaceFileGuids(this.spaceId, this.fileGuids);
+
     const dt = this.dataType;
     try {
       this.onStatus?.('syncing');
       const hydratedSeq = await GDriveSyncService.hydrateFromGDrive(
         this.store, this.matrixAccessToken, dt, this.onEvent, this.keyring,
+        { log: this.logFile, recent: this.recentFile },
       );
       if (hydratedSeq > 0) {
         this.onHydrated?.();
@@ -298,7 +325,7 @@ export class GDriveSyncService {
     };
     const binary = packEodb(recentFile);
     const encrypted = await this.encryptBinary(binary);
-    await gdriveStoreNamed(this.matrixAccessToken, encrypted, dt, RECENT_FILE);
+    await gdriveStoreNamed(this.matrixAccessToken, encrypted, dt, this.recentFile);
 
     const lastSeq = trimmed.length > 0 ? trimmed[trimmed.length - 1].seq : 0;
     const fromSeq = trimmed.length > 0 ? trimmed[0].seq : 0;
@@ -307,7 +334,7 @@ export class GDriveSyncService {
     let logSizeBytes = 0;
     let checkpoints: SyncManifest['checkpoints'] = [];
     try {
-      const existing = await gdriveReadJson(this.matrixAccessToken, dt, MANIFEST_FILE);
+      const existing = await gdriveReadJson(this.matrixAccessToken, dt, this.manifestFile);
       if (existing) {
         const m = existing as unknown as SyncManifest;
         logSizeBytes = m.log_size_bytes ?? 0;
@@ -324,7 +351,7 @@ export class GDriveSyncService {
       updated_at: new Date().toISOString(),
     };
     await gdriveStoreJson(
-      this.matrixAccessToken, dt, MANIFEST_FILE,
+      this.matrixAccessToken, dt, this.manifestFile,
       manifest as unknown as Record<string, unknown>,
     );
 
@@ -341,7 +368,7 @@ export class GDriveSyncService {
   private async downloadRecentBuffer(): Promise<EoEvent[]> {
     try {
       const result = await gdriveRetrieveNamed(
-        this.matrixAccessToken, this.dataType, RECENT_FILE,
+        this.matrixAccessToken, this.dataType, this.recentFile,
       );
       if (!result?.ok) return [];
       const data = await this.decryptBinary(result.data);
@@ -442,7 +469,7 @@ export class GDriveSyncService {
       // 1. Download existing log (full history so far)
       const priorEvents: EoEvent[] = [];
       try {
-        const logResult = await gdriveRetrieveNamed(this.matrixAccessToken, dt, LOG_FILE);
+        const logResult = await gdriveRetrieveNamed(this.matrixAccessToken, dt, this.logFile);
         if (logResult?.ok) {
           const data = await this.decryptBinary(logResult.data);
           priorEvents.push(...safeUnpackEvents(data));
@@ -489,7 +516,7 @@ export class GDriveSyncService {
       const encrypted = await this.encryptBinary(binary);
 
       // 5. Atomic write: temp file → verify → rename
-      const tempFileName = `${LOG_PENDING_PREFIX}${this.userId}.eodb`;
+      const tempFileName = `${this.logPendingPrefix}${this.userId}.eodb`;
       const tempResult = await gdriveStoreNamed(
         this.matrixAccessToken, encrypted, dt, tempFileName,
       );
@@ -499,8 +526,8 @@ export class GDriveSyncService {
       }
 
       // Write the real log file
-      await gdriveStoreNamed(this.matrixAccessToken, encrypted, dt, LOG_FILE);
-      console.log(`[EO-DB] GDrive bake: wrote ${LOG_FILE} (${events.length} events, seq ${fromSeq}→${toSeq})`);
+      await gdriveStoreNamed(this.matrixAccessToken, encrypted, dt, this.logFile);
+      console.log(`[EO-DB] GDrive bake: wrote ${this.logFile} (${events.length} events, seq ${fromSeq}→${toSeq})`);
 
       // 6. Clear buffer
       const emptyFile: EodbFile = {
@@ -517,7 +544,7 @@ export class GDriveSyncService {
       };
       const emptyBinary = packEodb(emptyFile);
       const emptyEncrypted = await this.encryptBinary(emptyBinary);
-      await gdriveStoreNamed(this.matrixAccessToken, emptyEncrypted, dt, RECENT_FILE);
+      await gdriveStoreNamed(this.matrixAccessToken, emptyEncrypted, dt, this.recentFile);
 
       // 7. Update manifest with checkpoints
       const logSizeBytes = encrypted.length;
@@ -540,14 +567,14 @@ export class GDriveSyncService {
         updated_at: new Date().toISOString(),
       };
       await gdriveStoreJson(
-        this.matrixAccessToken, dt, MANIFEST_FILE,
+        this.matrixAccessToken, dt, this.manifestFile,
         manifest as unknown as Record<string, unknown>,
       );
 
       // 8. Delete temp file and intent files
       try {
         const { entries: tempEntries } = await gdriveListByPrefix(
-          this.matrixAccessToken, dt, LOG_PENDING_PREFIX,
+          this.matrixAccessToken, dt, this.logPendingPrefix,
         );
         for (const e of tempEntries) {
           await gdriveDeleteFile(this.matrixAccessToken, e.data_id).catch(() => {});
@@ -572,7 +599,7 @@ export class GDriveSyncService {
   private async cleanOrphanedTempFiles(): Promise<void> {
     try {
       const { entries } = await gdriveListByPrefix(
-        this.matrixAccessToken, this.dataType, LOG_PENDING_PREFIX,
+        this.matrixAccessToken, this.dataType, this.logPendingPrefix,
       );
       const cutoff = Date.now() - BAKE_LOCK_TTL_MS;
       for (const e of entries) {
@@ -613,7 +640,7 @@ export class GDriveSyncService {
     // Try manifest first
     let manifest: SyncManifest | null = null;
     try {
-      const raw = await gdriveReadJson(this.matrixAccessToken, dt, MANIFEST_FILE);
+      const raw = await gdriveReadJson(this.matrixAccessToken, dt, this.manifestFile);
       if (raw) manifest = raw as unknown as SyncManifest;
     } catch { /* manifest may not exist */ }
 
@@ -659,7 +686,7 @@ export class GDriveSyncService {
       if (checkpoint && checkpoint.byte_offset > 0) {
         try {
           const rangeResult = await gdriveRetrieveRange(
-            this.matrixAccessToken, dt, LOG_FILE, checkpoint.byte_offset,
+            this.matrixAccessToken, dt, this.logFile, checkpoint.byte_offset,
           );
           if (rangeResult?.ok && rangeResult.data.length > 0) {
             const data = await this.decryptBinary(rangeResult.data);
@@ -687,7 +714,7 @@ export class GDriveSyncService {
 
     // Fallback: download full log
     try {
-      const logResult = await gdriveRetrieveNamed(this.matrixAccessToken, dt, LOG_FILE);
+      const logResult = await gdriveRetrieveNamed(this.matrixAccessToken, dt, this.logFile);
       if (!logResult?.ok) return;
       const data = await this.decryptBinary(logResult.data);
       const events = safeUnpackEvents(data);
@@ -730,7 +757,11 @@ export class GDriveSyncService {
     dataType: string,
     onEvent?: (event: any) => void,
     keyring?: LocalKeyring,
+    fileNames?: { log: string; recent: string },
   ): Promise<number> {
+    const logFile = fileNames?.log ?? LEGACY_LOG_FILE;
+    const recentFile = fileNames?.recent ?? LEGACY_RECENT_FILE;
+
     console.log('[EO-DB] hydrateFromGDrive: starting, dataType =', dataType);
     const localSeq = await store.getCurrentSeq();
     let lastAppliedSeq = localSeq;
@@ -738,15 +769,15 @@ export class GDriveSyncService {
     const decrypt = async (raw: Uint8Array): Promise<Uint8Array> =>
       keyring ? decryptSnapshot(raw, keyring).catch(() => raw) : raw;
 
-    // ── 1. Try new format: space-log.eodb ──
+    // ── 1. Try GUID-named log file (falls back to legacy name if fileNames not provided) ──
     let usedNewFormat = false;
     try {
-      const logResult = await gdriveRetrieveNamed(matrixAccessToken, dataType, LOG_FILE);
+      const logResult = await gdriveRetrieveNamed(matrixAccessToken, dataType, logFile);
       if (logResult?.ok) {
         const data = await decrypt(logResult.data);
         const events = safeUnpackEvents(data);
         if (events.length > 0) {
-          console.log(`[EO-DB] hydrateFromGDrive: applying ${LOG_FILE} (${events.length} events)`);
+          console.log(`[EO-DB] hydrateFromGDrive: applying ${logFile} (${events.length} events)`);
           for (const event of events) {
             if (event.seq <= localSeq) continue;
             const seq = await processEvent(store, event, onEvent);
@@ -759,9 +790,9 @@ export class GDriveSyncService {
       console.warn('[EO-DB] hydrateFromGDrive: log read failed, trying fallback:', e);
     }
 
-    // ── 2. Apply space-recent.eodb (new or updated events since last bake) ──
+    // ── 2. Apply recent buffer (new or updated events since last bake) ──
     try {
-      const recentResult = await gdriveRetrieveNamed(matrixAccessToken, dataType, RECENT_FILE);
+      const recentResult = await gdriveRetrieveNamed(matrixAccessToken, dataType, recentFile);
       if (recentResult?.ok) {
         const data = await decrypt(recentResult.data);
         const events = safeUnpackEvents(data);
@@ -818,7 +849,7 @@ export class GDriveSyncService {
     ).catch(() => ({ entries: [] as GDriveListEntry[] }));
 
     const newOps = opEntries
-      .filter(e => !e.name.startsWith('space-')) // skip new-format files
+      .filter(e => !e.name.startsWith('space-') && !/^[0-9a-f-]{36}\.eodb$/.test(e.name)) // skip current-format files
       .sort((a, b) => a.name.localeCompare(b.name));
 
     for (const entry of newOps) {
