@@ -1,12 +1,14 @@
 import type { FastifyInstance } from 'fastify';
 import type { EoDb, decode as LevelDecode } from '../db/level.js';
-import { decode } from '../db/level.js';
+import { decode, padSeq } from '../db/level.js';
 import type { Feed } from '../db/feed.js';
-import { processEvent } from '../db/fold.js';
+import { processEvent, executeOperator } from '../db/fold.js';
 import { getState, getStateByPrefix } from '../db/state.js';
 import { readLogForTarget, readLogSince } from '../db/log.js';
+import { removeDepEdge } from '../db/dep-graph.js';
+import { checkExists } from '../db/helpers.js';
 import type { AuthenticatedRequest } from '../auth/matrix.js';
-import type { EoEvent, HealingRecord, GraphEdge } from '../db/types.js';
+import type { EoEvent, HealingRecord, GraphEdge, EvaRegistration } from '../db/types.js';
 
 // ─── /heal/partition-merge ─────────────────────────────────────────────────────
 //
@@ -278,6 +280,129 @@ async function frozenFrameHandler(
   return { scanned, flagged: flagged.length, targets: flagged };
 }
 
+// ─── /heal/retry-errors ────────────────────────────────────────────────────────
+//
+// Scans persistent error:* keys written by processEvent when executeOperator fails.
+// For each retryable failure, re-runs executeOperator on the already-logged event.
+// Clears the error key on success. Returns a full audit log.
+//
+// Response: { audit: Array<{ seq, op, target, error, retried, result }> }
+
+type ErrorAuditEntry = {
+  seq: number;
+  op: string;
+  target: string;
+  error: string;
+  retried: boolean;
+  result: string;
+};
+
+async function retryErrorsHandler(
+  db: EoDb,
+): Promise<{ audit: ErrorAuditEntry[] }> {
+  const audit: ErrorAuditEntry[] = [];
+
+  for await (const [key, val] of db.iterator({ gte: 'error:', lte: 'error:\xff' })) {
+    const entry = decode(val) as {
+      seq: number; op: string; target: string; error: string; retryable: boolean;
+    };
+
+    if (!entry.retryable) {
+      audit.push({ seq: entry.seq, op: entry.op, target: entry.target, error: entry.error, retried: false, result: 'permanent' });
+      continue;
+    }
+
+    // Re-read the original event from the log by its seq
+    let logEvent: EoEvent | null = null;
+    try {
+      const logBuf = await db.get(`log:${padSeq(entry.seq)}`);
+      logEvent = decode(logBuf) as EoEvent;
+    } catch { /* log entry missing — nothing to retry */ }
+
+    if (!logEvent) {
+      audit.push({ seq: entry.seq, op: entry.op, target: entry.target, error: entry.error, retried: false, result: 'log_missing' });
+      continue;
+    }
+
+    try {
+      // Run only the operator — the event is already in the log and has a seq.
+      await executeOperator(db, logEvent, logEvent.branch ?? 'main');
+      await db.del(key);
+      audit.push({ seq: entry.seq, op: entry.op, target: entry.target, error: entry.error, retried: true, result: 'recovered' });
+    } catch (e: any) {
+      audit.push({ seq: entry.seq, op: entry.op, target: entry.target, error: entry.error, retried: true, result: `failed: ${e.message}` });
+    }
+  }
+
+  return { audit };
+}
+
+// ─── /heal/helix-check ─────────────────────────────────────────────────────────
+//
+// Structural consistency check for fold state:
+//   1. EVA registrations: all declared dependencies must still exist in state.
+//   2. Dep-graph edges (dep:fwd:*): both source and dest must exist in state.
+//      Orphaned edges are removed immediately (they have no log footprint).
+//
+// Response: { audit: Array<{ type, target, detail }>, violations: number }
+
+type HelixAuditEntry = {
+  type: 'stale_eva_dep' | 'orphan_dep_edge';
+  target: string;
+  detail: string;
+};
+
+async function helixCheckHandler(
+  db: EoDb,
+): Promise<{ audit: HelixAuditEntry[]; violations: number }> {
+  const audit: HelixAuditEntry[] = [];
+
+  // 1. EVA registrations — all dependencies must exist
+  for await (const [, val] of db.iterator({ gte: 'eva:', lte: 'eva:\xff' })) {
+    const reg = decode(val) as EvaRegistration;
+    for (const dep of reg.dependencies ?? []) {
+      const exists = await checkExists(db, dep, 'main');
+      if (!exists) {
+        audit.push({
+          type: 'stale_eva_dep',
+          target: reg.target,
+          detail: `dependency '${dep}' does not exist`,
+        });
+      }
+    }
+  }
+
+  // 2. Dep-graph forward edges — collect violations, then remove orphans
+  const orphans: Array<{ source: string; dest: string }> = [];
+  for await (const [key] of db.iterator({ gte: 'dep:fwd:', lte: 'dep:fwd:\xff' })) {
+    // key format: dep:fwd:{source}:{dest} — EO targets use dots, not colons, so split is safe
+    const withoutPrefix = key.slice('dep:fwd:'.length); // "{source}:{dest}"
+    const colonIdx = withoutPrefix.indexOf(':');
+    if (colonIdx === -1) continue;
+    const source = withoutPrefix.slice(0, colonIdx);
+    const dest = withoutPrefix.slice(colonIdx + 1);
+
+    const sourceExists = await checkExists(db, source, 'main');
+    const destExists = await checkExists(db, dest, 'main');
+    if (!sourceExists || !destExists) {
+      const missing = !sourceExists ? source : dest;
+      audit.push({
+        type: 'orphan_dep_edge',
+        target: source,
+        detail: `edge ${source}→${dest}: '${missing}' does not exist`,
+      });
+      orphans.push({ source, dest });
+    }
+  }
+
+  // Remove orphaned edges outside the iterator to avoid concurrent-modification issues
+  for (const { source, dest } of orphans) {
+    await removeDepEdge(db, source, dest);
+  }
+
+  return { audit, violations: audit.length };
+}
+
 // ─── Route Registration ────────────────────────────────────────────────────────
 
 export function registerHealRoutes(app: FastifyInstance, db: EoDb, feed: Feed): void {
@@ -311,6 +436,24 @@ export function registerHealRoutes(app: FastifyInstance, db: EoDb, feed: Feed): 
     const agent = request.matrixUser?.user_id || 'system';
     try {
       const result = await frozenFrameHandler(db, feed, agent, ageThresholdDays);
+      return reply.send(result);
+    } catch (e: any) {
+      return reply.code(500).send({ error: e.message });
+    }
+  });
+
+  app.post('/heal/retry-errors', async (_request: AuthenticatedRequest, reply) => {
+    try {
+      const result = await retryErrorsHandler(db);
+      return reply.send(result);
+    } catch (e: any) {
+      return reply.code(500).send({ error: e.message });
+    }
+  });
+
+  app.post('/heal/helix-check', async (_request: AuthenticatedRequest, reply) => {
+    try {
+      const result = await helixCheckHandler(db);
       return reply.send(result);
     } catch (e: any) {
       return reply.code(500).send({ error: e.message });

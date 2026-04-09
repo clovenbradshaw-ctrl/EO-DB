@@ -48,6 +48,18 @@ export function getRecConfig(): RecConfig {
 }
 
 /**
+ * Classify whether an operator failure is retryable.
+ * Permanent failures (structural violations, duplicate INS) cannot be fixed by
+ * re-running; transient failures (unknown errors) may succeed on retry.
+ */
+function isRetryableError(msg: string): boolean {
+  if (msg.includes('already instantiated')) return false;
+  if (msg.includes('SEG boundary')) return false;
+  if (msg.includes('does not exist')) return false;
+  return true; // unknown errors: optimistically retryable
+}
+
+/**
  * Process a single EO event through the fold.
  * This is the heart of the database — every event flows through here.
  *
@@ -151,7 +163,21 @@ export async function processEvent(
   }
 
   // 6. Execute operator-specific logic (helix dispatch)
-  await executeOperator(db, fullEvent, branchId);
+  try {
+    await executeOperator(db, fullEvent, branchId);
+  } catch (e: any) {
+    // Persist the failure so the /heal/retry-errors endpoint can inspect and retry it.
+    await db.put(`error:${seq}`, encode({
+      seq,
+      client_event_id: fullEvent.client_event_id ?? null,
+      op: fullEvent.op,
+      target: fullEvent.target,
+      error: e.message,
+      ts: new Date().toISOString(),
+      retryable: isRetryableError(e.message),
+    }));
+    throw e;
+  }
 
   // 7. Recompute fold-computed EVA-active dependents (with cycle guard)
   // NOTE: Formula recomputation is main-branch-only in this PR.
@@ -1562,12 +1588,30 @@ async function getReverseDeps(db: EoDb, constituent: string): Promise<string[]> 
  * When a constituent changes, all derived entities that depend on it
  * need to re-run their REC loops.
  */
+const MAX_CASCADE_DEPTH = 20;
+
 async function cascadeUpward(
   db: EoDb,
   changedTarget: string,
   triggeringEvent: EoEvent,
   feed?: Feed,
+  depth: number = 0,
 ): Promise<void> {
+  if (depth >= MAX_CASCADE_DEPTH) {
+    // Emit a NUL to permanently record that the cascade limit was hit.
+    // This prevents silent infinite recursion if rdep: entries are corrupted.
+    const now = new Date().toISOString();
+    const limitEvent: EoEventInput = {
+      op: 'NUL',
+      target: changedTarget,
+      operand: { nul_state: 'cascade_limit', triggered_by: triggeringEvent.seq },
+      agent: 'system:cascade-guard',
+      ts: now,
+      acquired_ts: now,
+    };
+    await processEvent(db, limitEvent, feed);
+    return;
+  }
   const dependentTargets = await getReverseDeps(db, changedTarget);
   for (const derivedTarget of dependentTargets) {
     // Look up the derived entity registration
@@ -1634,7 +1678,7 @@ async function cascadeUpward(
     if (feed) feed.notify(reEvalEvent);
 
     // Continue cascading upward if this derived entity is itself a constituent
-    await cascadeUpward(db, derivedTarget, triggeringEvent, feed);
+    await cascadeUpward(db, derivedTarget, triggeringEvent, feed, depth + 1);
   }
 }
 

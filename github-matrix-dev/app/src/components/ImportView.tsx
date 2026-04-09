@@ -693,7 +693,7 @@ export function ImportView({ onImportComplete }: ImportViewProps) {
             // Nullify the existing record first, then re-insert
             finalEvents.push({ ...evt, op: 'NUL' as ExternalOperator, operand: {} });
           }
-          // 'update': fall through and apply the INS on top (existing behaviour)
+          if (dupRecord === 'update') continue; // skip INS; DEF events will update the record
         }
 
         // Field-level: keep existing field values, only import new ones
