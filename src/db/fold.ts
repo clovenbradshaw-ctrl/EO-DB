@@ -1,11 +1,11 @@
 import { EoDb, encode, decode, nextSeq, padSeq, allocateSeqRange } from './level.js';
-import { appendToLog } from './log.js';
-import { getState, setState } from './state.js';
+import { appendToLog, readLogForTarget } from './log.js';
+import { getState, setState, getStateByPrefix } from './state.js';
 import { getBranchState, setBranchState, branchCursor } from './branch.js';
 import { addEdge, removeEdge, getEdgesFrom, getEdgesTo } from './graph.js';
 import { addDepEdge, clearDepEdgesFrom, getDepEdgesFrom, getDepEdgesTo, getConnectedComponent } from './dep-graph.js';
 import { resolveAlias, checkExists } from './helpers.js';
-import type { EoEvent, EoEventInput, EoState, EvaRegistration, RecResult, ExternalOperator, DerivedEntity, ConflictState } from './types.js';
+import type { EoEvent, EoEventInput, EoState, EvaRegistration, RecResult, ExternalOperator, DerivedEntity, ConflictState, NulState, RecMigrationRule } from './types.js';
 import { isEncryptedOperand } from './crypto-types.js';
 import type { Feed } from './feed.js';
 import { seedHash, chainHash, eventHash } from './hash.js';
@@ -113,6 +113,16 @@ export async function processEvent(
   // 2. No-op check: skip if update would not change state
   const noOpSeq = await checkNoOp(db, event, branchId);
   if (noOpSeq !== null) return noOpSeq;
+
+  // 2.5. NUL state enrichment (F1.2): classify absence before logging
+  if (event.op === 'NUL') {
+    const nulState = await classifyNulState(db, event.target);
+    event = {
+      ...event,
+      nul_state: nulState,
+      operand: { ...(event.operand ?? {}), nul_state: nulState },
+    };
+  }
 
   // 3. Assign sequence number
   const seq = await nextSeq(db);
@@ -278,6 +288,16 @@ export async function processEventBatch(
       continue;
     }
 
+    // NUL state enrichment (F1.2): classify absence before logging
+    if (event.op === 'NUL') {
+      const nulState = await classifyNulState(db, event.target);
+      event = {
+        ...event,
+        nul_state: nulState,
+        operand: { ...(event.operand ?? {}), nul_state: nulState },
+      };
+    }
+
     if (event.client_event_id) seenIds.add(event.client_event_id);
     toProcess.push({ event, idx: i });
   }
@@ -390,6 +410,49 @@ export async function processEventBatch(
   return { seqs, errors };
 }
 
+// ─── Self-Healing Helpers ─────────────────────────────────────────────────────
+
+/**
+ * Classify the NUL state for a target by tracing G (F1.2).
+ * - 'cleared'   — INS exists in history (something was there)
+ * - 'unknown'   — SIG exists but no INS (type designated, never instantiated)
+ * - 'never-set' — no prior G activity at all
+ */
+async function classifyNulState(db: EoDb, target: string): Promise<NulState> {
+  // Fast path: state projection exists → something was INS'd
+  const state = await getState(db, target);
+  if (state !== null) return 'cleared';
+  // Scan G for prior INS or SIG on this target
+  const history = await readLogForTarget(db, target);
+  if (history.some(e => e.op === 'INS')) return 'cleared';
+  if (history.some(e => e.op === 'SIG')) return 'unknown';
+  return 'never-set';
+}
+
+/**
+ * Find whether a SEG boundary exists for the common ancestor of two targets (F2.3).
+ * Returns true if at least one SEG event covers the shared prefix.
+ */
+async function findSegAncestor(db: EoDb, targetA: string, targetB: string): Promise<boolean> {
+  const partsA = targetA.split('.');
+  const partsB = targetB.split('.');
+  const commonParts: string[] = [];
+  for (let i = 0; i < Math.min(partsA.length, partsB.length); i++) {
+    if (partsA[i] === partsB[i]) commonParts.push(partsA[i]);
+    else break;
+  }
+  if (commonParts.length === 0) return false;
+  // Walk from longest common prefix up to root — stop at first SEG found
+  for (let len = commonParts.length; len >= 1; len--) {
+    const prefix = commonParts.slice(0, len).join('.');
+    const state = await getState(db, prefix);
+    if (state && state.last_op === 'SEG') return true;
+    const history = await readLogForTarget(db, prefix);
+    if (history.some(e => e.op === 'SEG')) return true;
+  }
+  return false;
+}
+
 /**
  * Operator dispatch — routes to helix-aware handler.
  * Each handler may invoke lower handlers in the helix.
@@ -480,6 +543,21 @@ async function handleCON(db: EoDb, event: EoEvent, branchId: string = 'main'): P
       const destExists = await checkExists(db, dest, branchId);
       if (!destExists) {
         throw new Error(`CON target does not exist: ${dest}`);
+      }
+    }
+  }
+
+  // SEG capacity: verify a boundary covers the link (F2.3)
+  // Non-blocking — flags the CON for /heal/con-integrity repair if missing
+  if (operand.added) {
+    for (const dest of operand.added) {
+      const hasSegBoundary = await findSegAncestor(db, event.target, dest);
+      if (!hasSegBoundary) {
+        // Stamp a flag in meta so the heal API can surface and repair these
+        event = {
+          ...event,
+          meta: { ...(event.meta ?? {}), seg_missing: true, seg_missing_pair: [event.target, dest] },
+        };
       }
     }
   }
@@ -816,6 +894,7 @@ async function handleREC(db: EoDb, event: EoEvent): Promise<void> {
   const subOps = event.operand?.contains || [];
   const pivot = event.operand?.pivot || null;
   const maxIterations = event.operand?.max_iterations || recConfig.maxIterations;
+  const migrationRules: RecMigrationRule[] = event.operand?.migration_rules ?? [];
 
   // Collect all targets the loop body touches, plus the pivot if specified
   const watchedTargets = new Set<string>();
@@ -823,6 +902,38 @@ async function handleREC(db: EoDb, event: EoEvent): Promise<void> {
     if (subOp.target) watchedTargets.add(subOp.target);
   }
   if (pivot) watchedTargets.add(pivot);
+
+  // F3.4: Apply migration_rules before fixed-point loop.
+  // Each rule transforms states within a scope, marking them defeasible_since this REC.
+  if (migrationRules.length > 0) {
+    for (const rule of migrationRules) {
+      const scopeStates = await getStateByPrefix(db, rule.scope);
+      for (const s of scopeStates) {
+        const val: Record<string, any> = { ...(s.value ?? {}) };
+        let changed = false;
+        if (rule.op === 'rename_field' && rule.to_field && rule.field in val) {
+          val[rule.to_field] = val[rule.field];
+          delete val[rule.field];
+          changed = true;
+        } else if (rule.op === 'coerce_field' && rule.field in val) {
+          if (rule.to_type === 'number') val[rule.field] = Number(val[rule.field]);
+          else if (rule.to_type === 'string') val[rule.field] = String(val[rule.field]);
+          else if (rule.to_type === 'boolean') val[rule.field] = Boolean(val[rule.field]);
+          changed = true;
+        } else if (rule.op === 'set_field') {
+          val[rule.field] = rule.value;
+          changed = true;
+        } else if (rule.op === 'delete_field' && rule.field in val) {
+          delete val[rule.field];
+          changed = true;
+        }
+        if (changed) {
+          await setState(db, { ...s, value: val, defeasible_since: event.seq });
+          watchedTargets.add(s.target);
+        }
+      }
+    }
+  }
 
   // Snapshot: capture current projected state of all watched targets
   async function snapshot(): Promise<Record<string, any>> {
@@ -909,6 +1020,14 @@ async function handleREC(db: EoDb, event: EoEvent): Promise<void> {
     result.stable_state = finalSnap;
   }
 
+  // F3.3: Stamp defeasible_since on all watched targets — their interpretations are now superseded.
+  for (const t of watchedTargets) {
+    const tState = await getState(db, t);
+    if (tState) {
+      await setState(db, { ...tState, defeasible_since: event.seq });
+    }
+  }
+
   // Mark the REC event itself in state
   const existing = await getState(db, event.target);
   await setState(db, {
@@ -918,10 +1037,12 @@ async function handleREC(db: EoDb, event: EoEvent): Promise<void> {
       pivot,
       sub_ops: subOps.length,
       reason: event.operand?.reason,
+      migration_rules: migrationRules.length > 0 ? migrationRules : undefined,
       result,
     },
     hash: existing ? chainHash(existing.hash, event) : seedHash(event),
     level: existing?.level ?? 1,
+    defeasible_since: event.seq,
     ...stateFromEvent(event, 'REC'),
   });
 }

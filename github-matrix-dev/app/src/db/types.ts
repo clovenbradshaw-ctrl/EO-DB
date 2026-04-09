@@ -5,6 +5,38 @@ export { ROLE_POWER_LEVELS, ROLE_LABELS, powerLevelToRole } from '../permissions
 // The nine operators
 export type Operator = 'NUL' | 'SIG' | 'INS' | 'SEG' | 'CON' | 'SYN' | 'DEF' | 'EVA' | 'REC';
 
+// ─── Self-Healing Types ───────────────────────────────────────────────────────
+
+/** Three NUL states — distinct absence conditions (F1.2). */
+export type NulState = 'never-set' | 'unknown' | 'cleared';
+
+/** Partition context envelope — stamped on writes during split operation (F2.1). */
+export interface ContextEnvelope {
+  partition_id: string;
+  node_id: string;
+  seq_range?: [number, number];
+}
+
+/** Declarative migration rule for REC frame-level restructuring (F3.4). */
+export interface RecMigrationRule {
+  scope: string;
+  op: 'rename_field' | 'coerce_field' | 'set_field' | 'delete_field';
+  field: string;
+  to_field?: string;
+  to_type?: 'string' | 'number' | 'boolean';
+  value?: any;
+}
+
+/** Audit trail for a self-healing operation. */
+export interface HealingRecord {
+  failure_class: 'F1.1' | 'F1.2' | 'F2.1' | 'F2.2' | 'F2.3' | 'F3.1' | 'F3.2' | 'F3.3' | 'F3.4';
+  target: string;
+  detected_at: string;
+  helix_ops: Array<{ op: string; target: string; reason: string }>;
+  resolved: boolean;
+  resolution_tier?: 1 | 2 | 3;
+}
+
 // Operators that produce log entries (post-INS threshold)
 export type LoggableOperator = 'NUL' | 'SIG' | 'INS' | 'SEG' | 'CON' | 'SYN' | 'DEF' | 'EVA' | 'REC';
 
@@ -24,6 +56,8 @@ export interface EoEvent {
   client_event_id?: string;
   triggered_by?: number;          // for REC/INS2+: seq of the human-initiated event that caused the cycle
   meta?: Record<string, any>;
+  context_envelope?: ContextEnvelope; // set during partition operation (F2.1)
+  nul_state?: NulState;               // set by system on NUL events (F1.2)
 }
 
 // Projected state at a target
@@ -42,6 +76,7 @@ export interface EoState {
   _fold?: EoStateFold;
   graphMetrics?: GraphMetrics;    // maintained by CON/SYN on edge changes
   _lastRecSeq?: number;           // seq of latest REC event on this target (for RecCycleInfo)
+  defeasible_since?: number;      // seq of last REC that superseded this interpretation (F3.3)
 }
 
 export interface EoStateFold {
