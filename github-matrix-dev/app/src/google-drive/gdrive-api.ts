@@ -142,6 +142,11 @@ export function setActiveSpaceRoomId(roomId: string | undefined): void {
   activeSpaceRoomId = roomId;
 }
 
+/** Clear the folder ID cache. Call this on every space switch. */
+export function clearFolderIdCache(): void {
+  folderIdCache.clear();
+}
+
 /**
  * Find a folder by name, optionally inside a parent. Returns ID or null.
  */
