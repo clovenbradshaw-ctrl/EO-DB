@@ -11,6 +11,7 @@ import { backfillFoldCaches } from '../db/fold-cache';
 import type { SyncManager } from '../matrix/sync-manager';
 import type { GDriveSyncService } from '../google-drive/gdrive-sync';
 import type { ResolvedPermissions } from '../permissions/types';
+import { eventHash } from '../db/hash';
 
 interface EoDbState {
   /** The encrypted store instance (set after login + key derivation) */
@@ -75,6 +76,17 @@ interface EoDbState {
 
   /** Tear down the store (logout) */
   teardown: () => void;
+
+  /**
+   * Optional hook called after every successful local dispatch.
+   * Used by the EO server store to push events to the backend for
+   * real-time broadcast to other connected users.
+   * The event passed to the hook is fully-populated (has client_event_id).
+   */
+  onDispatch: ((event: EoEventInput) => void) | null;
+
+  /** Register or clear the post-dispatch hook. */
+  setOnDispatch: (fn: ((event: EoEventInput) => void) | null) => void;
 }
 
 export const useEoStore = create<EoDbState>((set, get) => ({
@@ -86,6 +98,7 @@ export const useEoStore = create<EoDbState>((set, get) => ({
   ready: false,
   resolvedPermissions: null,
   activeUserType: null,
+  onDispatch: null,
 
   async init(store: EoStore) {
     // Set the store immediately so the UI can start reading from it.
@@ -151,6 +164,10 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     set({ store, lastSeq, ready: true, recentEvents: hydrated });
   },
 
+  setOnDispatch(fn: ((event: EoEventInput) => void) | null) {
+    set({ onDispatch: fn });
+  },
+
   setSyncManager(syncManager: SyncManager) {
     set({ syncManager });
   },
@@ -184,13 +201,32 @@ export const useEoStore = create<EoDbState>((set, get) => ({
       return seq;
     }
 
-    // Otherwise fold locally only — Google Drive sync picks up new events on its 30s timer
-    const seq = await processEvent(store, event, (fullEvent) => {
+    // Pre-populate client_event_id so the server can deduplicate the echo.
+    // processEvent would do this internally, but we need the same ID to send
+    // to the server BEFORE the fold completes (fire-and-forget).
+    const now = new Date().toISOString();
+    let populatedEvent: EoEventInput = event;
+    if (!populatedEvent.client_event_id) {
+      const id = await eventHash({
+        op: populatedEvent.op,
+        target: populatedEvent.target,
+        operand: populatedEvent.operand,
+        agent: populatedEvent.agent || '@local:localhost',
+        ts: populatedEvent.ts || now,
+      });
+      populatedEvent = { ...populatedEvent, client_event_id: id };
+    }
+
+    // Fold locally — Google Drive sync picks up new events on its 30s timer
+    const seq = await processEvent(store, populatedEvent, (fullEvent) => {
       set((state) => ({
         recentEvents: [...state.recentEvents.slice(-99), fullEvent],
         lastSeq: fullEvent.seq,
       }));
     });
+
+    // Push to server for real-time broadcast to other connected users
+    get().onDispatch?.(populatedEvent);
 
     return seq;
   },
@@ -255,6 +291,6 @@ export const useEoStore = create<EoDbState>((set, get) => ({
   teardown() {
     const { store } = get();
     if (store) store.close();
-    set({ store: null, syncManager: null, gdriveSync: null, ready: false, recentEvents: [], lastSeq: 0, resolvedPermissions: null, activeUserType: null });
+    set({ store: null, syncManager: null, gdriveSync: null, ready: false, recentEvents: [], lastSeq: 0, resolvedPermissions: null, activeUserType: null, onDispatch: null });
   },
 }));

@@ -43,6 +43,8 @@ import { HeadlineMetrics } from './HeadlineMetrics';
 import { useSliceStore } from '../store/slice-store';
 import { useBuilderStore } from '../store/builder-store';
 import { useSyncStore } from '../store/sync-store';
+import { useEoServerStore } from '../store/eo-server-store';
+import { processEvent } from '../db/fold';
 import { useTheme, spaceBackgroundTint, type Theme } from '../theme';
 import type { EoState } from '../db/types';
 import type { ViewDefinition } from '../blocks/types';
@@ -1413,6 +1415,31 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       cache.set(selectedSpace!, { store, syncManager: null, gdriveSync: null, mainRoomId: spaceRoomId, presence: null, spaceRooms: resolvedSpaceRooms });
 
       await init(store);
+
+      // ── EO-DB server real-time sync ──────────────────────────────────────────
+      // If the user has configured a server URL, open a WebSocket to receive
+      // field changes from other users in real-time. Each incoming event is
+      // folded into the local store and bumps lastSeq so components re-render.
+      {
+        const { serverUrl, connect: connectServer, disconnect: disconnectServer } = useEoServerStore.getState();
+        if (serverUrl && session.accessToken) {
+          const currentSeq = await store.getCurrentSeq();
+
+          const handleServerEvent = async (event: any) => {
+            const s = useEoStore.getState().store;
+            if (!s) return;
+            await processEvent(s, event, onFoldEvent);
+          };
+
+          connectServer(currentSeq, session.accessToken, handleServerEvent);
+          useEoStore.getState().setOnDispatch((event) => useEoServerStore.getState().sendEvent(event));
+
+          cleanupFns.push(() => {
+            disconnectServer();
+            useEoStore.getState().setOnDispatch(null);
+          });
+        }
+      }
 
       let syncManager: SyncManager | null = null;
 
