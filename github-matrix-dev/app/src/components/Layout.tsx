@@ -1106,7 +1106,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       setAllStates([]);
       setScopedRecords([]);
       setScopeFieldNameMap(new Map());
-      setShowMembers(false);
+      navigate({ view: 'records' });
       setShowRecycleBin(false);
       // Clear connection error from previous space (e.g. stale "resolve failed")
       setConnectionError(null);
@@ -1833,7 +1833,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               onSelect={(target) => {
                 selectSpace(target);
                 setSpaceOpen(false);
-                setShowMembers(false);
                 setShowRecycleBin(false);
               }}
               onClose={() => setSpaceOpen(false)}
