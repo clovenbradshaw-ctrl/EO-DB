@@ -1,16 +1,18 @@
 import { EoDb, encode, decode, nextSeq, padSeq, allocateSeqRange } from './level.js';
 import { appendToLog, readLogForTarget } from './log.js';
 import { getState, setState, getStateByPrefix } from './state.js';
+import { getBranchState, setBranchState, branchCursor } from './branch.js';
 import { addEdge, removeEdge, getEdgesFrom, getEdgesTo } from './graph.js';
 import { addDepEdge, clearDepEdgesFrom, getDepEdgesFrom, getDepEdgesTo, getConnectedComponent } from './dep-graph.js';
 import { resolveAlias, checkExists } from './helpers.js';
-import type { EoEvent, EoEventInput, EoState, EvaRegistration, RecResult, ExternalOperator, DerivedEntity, NulState, RecMigrationRule } from './types.js';
+import type { EoEvent, EoEventInput, EoState, EvaRegistration, RecResult, ExternalOperator, DerivedEntity, ConflictState, NulState, RecMigrationRule } from './types.js';
 import { isEncryptedOperand } from './crypto-types.js';
 import type { Feed } from './feed.js';
 import { seedHash, chainHash, eventHash } from './hash.js';
 import { SigTracker } from './sig.js';
 import type { SigEvent } from './sig.js';
 import { detectAndEmitCrystallization } from './crystallize.js';
+import { detectConflict, getResolutionPolicy, setResolutionPolicy, resolutionModes } from './conflict.js';
 
 /** Global SIG tracker — ephemeral, in-memory only. */
 const sigTracker = new SigTracker();
@@ -48,11 +50,16 @@ export function getRecConfig(): RecConfig {
 /**
  * Process a single EO event through the fold.
  * This is the heart of the database — every event flows through here.
+ *
+ * @param branchId  Branch to process this event on. Defaults to 'main'.
+ *                  Non-main branches write state to state/{branchId}/{target}
+ *                  and the event is stamped with branch = branchId in the log.
  */
 export async function processEvent(
   db: EoDb,
   event: EoEventInput,
-  feed?: Feed
+  feed?: Feed,
+  branchId: string = 'main',
 ): Promise<number> {
   // 0. REC is system-generated — reject external submissions
   if (event.op === 'REC') {
@@ -77,8 +84,18 @@ export async function processEvent(
     return -1; // No seq assigned — SIG is not logged
   }
 
-  // 0.5. Deterministic event hashing — assign client_event_id from content hash
-  //       if not already provided, to prevent duplicate logging across sync paths
+  // 0.5. Stamp branch field on the event so the log records which branch it belongs to.
+  //       Backward compat: existing code that passes no branchId gets branch:'main'.
+  if (branchId !== 'main' && !event.branch) {
+    event = { ...event, branch: branchId };
+  } else if (!event.branch) {
+    event = { ...event, branch: 'main' };
+  }
+
+  // 0.6. Deterministic event hashing — assign client_event_id from content hash
+  //       if not already provided, to prevent duplicate logging across sync paths.
+  //       Branch is included in the hash (see hash.ts) so the same content on
+  //       different branches produces different hashes — no cross-branch idem suppression.
   if (!event.client_event_id) {
     event = { ...event, client_event_id: eventHash(event) };
   }
@@ -94,7 +111,7 @@ export async function processEvent(
   }
 
   // 2. No-op check: skip if update would not change state
-  const noOpSeq = await checkNoOp(db, event);
+  const noOpSeq = await checkNoOp(db, event, branchId);
   if (noOpSeq !== null) return noOpSeq;
 
   // 2.5. NUL state enrichment (F1.2): classify absence before logging
@@ -109,7 +126,21 @@ export async function processEvent(
 
   // 3. Assign sequence number
   const seq = await nextSeq(db);
-  const fullEvent: EoEvent = { ...event, seq } as EoEvent;
+  let fullEvent: EoEvent = { ...event, seq } as EoEvent;
+
+  // 3.5. NUL witnessed enrichment — happens BEFORE appendToLog so the enriched
+  //       siteCondition is recorded in the log entry, not just in state.
+  //       handleNUL remains a true no-op; enrichment lives here.
+  if (fullEvent.op === 'NUL' && fullEvent.operand?.witnessed) {
+    const existing = await getBranchState(db, branchId, fullEvent.target);
+    fullEvent = {
+      ...fullEvent,
+      operand: {
+        ...fullEvent.operand,
+        siteCondition: existing ? 'instantiated' : 'void',
+      },
+    };
+  }
 
   // 4. Append to log
   await appendToLog(db, fullEvent);
@@ -120,19 +151,24 @@ export async function processEvent(
   }
 
   // 6. Execute operator-specific logic (helix dispatch)
-  await executeOperator(db, fullEvent);
+  await executeOperator(db, fullEvent, branchId);
 
   // 7. Recompute fold-computed EVA-active dependents (with cycle guard)
-  await recomputeDependents(db, fullEvent.target, new Set());
+  // NOTE: Formula recomputation is main-branch-only in this PR.
+  // On non-main branches, formula evaluation is deferred.
+  if (branchId === 'main') {
+    await recomputeDependents(db, fullEvent.target, new Set());
+  }
 
   // 8. Detect dependency cycles and emit system-generated REC if found
   await detectAndEmitREC(db, fullEvent.target, fullEvent, feed);
 
-  // 9. Cascade upward: if this target is a constituent of any derived entity, re-evaluate it
-  await cascadeUpward(db, fullEvent.target, fullEvent, feed);
-
-  // 10. Crystallization: check if any scope containing this target has stabilized
-  await detectAndEmitCrystallization(db, fullEvent.target, fullEvent, feed);
+  // 9. Cascade upward and crystallization — main-branch-only in this PR
+  if (branchId === 'main') {
+    await cascadeUpward(db, fullEvent.target, fullEvent, feed);
+    // 10. Crystallization: check if any scope containing this target has stabilized
+    await detectAndEmitCrystallization(db, fullEvent.target, fullEvent, feed);
+  }
 
   // 11. Notify changefeed
   if (feed) {
@@ -170,6 +206,7 @@ export async function processEventBatch(
   db: EoDb,
   events: EoEventInput[],
   feed?: Feed,
+  branchId: string = 'main',
 ): Promise<ProcessBatchResult> {
   if (events.length === 0) return { seqs: [], errors: [] };
 
@@ -211,7 +248,12 @@ export async function processEventBatch(
       continue;
     }
 
-    // Assign deterministic hash if no client_event_id
+    // Stamp branch field
+    if (!event.branch) {
+      event = { ...event, branch: branchId === 'main' ? 'main' : branchId };
+    }
+
+    // Assign deterministic hash if no client_event_id (branch is now in event, so hash is branch-scoped)
     if (!event.client_event_id) {
       event = { ...event, client_event_id: eventHash(event) };
     }
@@ -239,8 +281,8 @@ export async function processEventBatch(
       }
     }
 
-    // No-op check
-    const noOpSeq = await checkNoOp(db, event);
+    // No-op check (branch-aware)
+    const noOpSeq = await checkNoOp(db, event, branchId);
     if (noOpSeq !== null) {
       seqs.push(noOpSeq);
       continue;
@@ -290,7 +332,7 @@ export async function processEventBatch(
 
     try {
       // Execute operator (reads/writes state — must be sequential)
-      await executeOperator(db, fullEvent);
+      await executeOperator(db, fullEvent, branchId);
 
       // Queue log entry (write-only — never read back during the batch)
       batchOps.push({
@@ -414,16 +456,22 @@ async function findSegAncestor(db: EoDb, targetA: string, targetB: string): Prom
 /**
  * Operator dispatch — routes to helix-aware handler.
  * Each handler may invoke lower handlers in the helix.
+ *
+ * @param branchId  Branch context for state reads/writes. Defaults to 'main'.
  */
-export async function executeOperator(db: EoDb, event: EoEvent): Promise<void> {
+export async function executeOperator(
+  db: EoDb,
+  event: EoEvent,
+  branchId: string = 'main',
+): Promise<void> {
   switch (event.op) {
-    case 'NUL': return handleNUL(db, event);
-    case 'INS': return handleINS(db, event);
-    case 'SEG': return handleSEG(db, event);
-    case 'CON': return handleCON(db, event);
-    case 'SYN': return handleSYN(db, event);
-    case 'DEF': return handleDEF(db, event);
-    case 'EVA': return handleEVA(db, event);
+    case 'NUL': return handleNUL(db, event);          // no-op — no state change ever
+    case 'INS': return handleINS(db, event, branchId);
+    case 'SEG': return handleSEG(db, event, branchId);
+    case 'CON': return handleCON(db, event, branchId);
+    case 'SYN': return handleSYN(db, event, branchId);
+    case 'DEF': return handleDEF(db, event, branchId);
+    case 'EVA': return handleEVA(db, event, branchId);
     // REC is not dispatched from outside — it is produced by the fold
     // when it detects a circular dependency after applying a human-initiated event.
   }
@@ -450,14 +498,14 @@ async function handleNUL(_db: EoDb, _event: EoEvent): Promise<void> {
 // --- INS: Instantiate ---
 // Inherited: NUL (existence check), SIG (coordinate targeting)
 // External INS is always level 1. System-generated INS (from REC convergence) carries level 2+.
-async function handleINS(db: EoDb, event: EoEvent): Promise<void> {
-  // NUL capacity: observe keyspace to check for duplicates
-  const existing = await checkExists(db, event.target);
+async function handleINS(db: EoDb, event: EoEvent, branchId: string = 'main'): Promise<void> {
+  // NUL capacity: observe keyspace to check for duplicates (branch-scoped)
+  const existing = await checkExists(db, event.target, branchId);
   if (existing) {
     throw new Error(`Target already instantiated: ${event.target}`);
   }
 
-  await setState(db, {
+  await setBranchState(db, branchId, event.target, {
     target: event.target,
     value: event.operand ?? {},
     hash: seedHash(event),
@@ -468,14 +516,14 @@ async function handleINS(db: EoDb, event: EoEvent): Promise<void> {
 
 // --- SEG: Segment (Boundary) ---
 // Inherited: INS (confirm target exists)
-async function handleSEG(db: EoDb, event: EoEvent): Promise<void> {
-  // INS capacity: confirm target exists before partitioning
-  const existing = await checkExists(db, event.target);
+async function handleSEG(db: EoDb, event: EoEvent, branchId: string = 'main'): Promise<void> {
+  // INS capacity: confirm target exists before partitioning (branch-scoped)
+  const existing = await checkExists(db, event.target, branchId);
   if (!existing) {
     throw new Error(`SEG target does not exist: ${event.target}`);
   }
 
-  await setState(db, {
+  await setBranchState(db, branchId, event.target, {
     target: event.target,
     value: event.operand,
     hash: chainHash(existing.hash, event),
@@ -486,13 +534,13 @@ async function handleSEG(db: EoDb, event: EoEvent): Promise<void> {
 
 // --- CON: Connect ---
 // Inherited: INS (existence check on endpoints), SEG (partition awareness)
-async function handleCON(db: EoDb, event: EoEvent): Promise<void> {
+async function handleCON(db: EoDb, event: EoEvent, branchId: string = 'main'): Promise<void> {
   const operand = event.operand;
 
-  // INS capacity: verify endpoints exist
+  // INS capacity: verify endpoints exist (branch-scoped)
   if (operand.added) {
     for (const dest of operand.added) {
-      const destExists = await checkExists(db, dest);
+      const destExists = await checkExists(db, dest, branchId);
       if (!destExists) {
         throw new Error(`CON target does not exist: ${dest}`);
       }
@@ -535,8 +583,8 @@ async function handleCON(db: EoDb, event: EoEvent): Promise<void> {
 
   // Update state — merge edges into existing value to preserve INS fields
   const currentEdges = await getEdgesFrom(db, event.target);
-  const sourceState = await getState(db, event.target);
-  await setState(db, {
+  const sourceState = await getBranchState(db, branchId, event.target);
+  await setBranchState(db, branchId, event.target, {
     target: event.target,
     value: {
       ...(sourceState?.value ?? {}),
@@ -551,15 +599,28 @@ async function handleCON(db: EoDb, event: EoEvent): Promise<void> {
 
 // --- SYN: Synthesis (Merge) ---
 // Inherited: CON (merge edges), SEG (dissolve boundaries), INS (mint merged identity)
-async function handleSYN(db: EoDb, event: EoEvent): Promise<void> {
+async function handleSYN(db: EoDb, event: EoEvent, branchId: string = 'main'): Promise<void> {
   const operand = event.operand;
+
+  // SYN absorb: merge a branch into the current branch
+  // operand: { absorb: sourceBranchId, at?: upToSeq, targetFilter?: string[] | string }
+  if (operand.absorb) {
+    await handleBranchMerge(
+      db, event,
+      operand.absorb,
+      operand.at,
+      branchId,
+      operand.targetFilter,
+    );
+    return;
+  }
 
   if (operand.merge) {
     const [a, b] = operand.merge;
 
-    // INS capacity: confirm both targets exist
-    const stateA = await checkExists(db, a);
-    const stateB = await checkExists(db, b);
+    // INS capacity: confirm both targets exist (branch-scoped)
+    const stateA = await checkExists(db, a, branchId);
+    const stateB = await checkExists(db, b, branchId);
     if (!stateA || !stateB) {
       throw new Error(`SYN merge targets must both exist: ${a}, ${b}`);
     }
@@ -571,7 +632,7 @@ async function handleSYN(db: EoDb, event: EoEvent): Promise<void> {
 
     // INS capacity: mint the merged target's identity
     // The merged target gets a seed hash — it is a new entity born from the SYN event
-    await setState(db, {
+    await setBranchState(db, branchId, mergedTarget, {
       target: mergedTarget,
       value: mergedValue,
       hash: seedHash(event),
@@ -597,8 +658,7 @@ async function handleSYN(db: EoDb, event: EoEvent): Promise<void> {
     }
 
     // Store alias records so queries for A or B resolve to merged target
-    // Alias targets chain from their existing hash — they carry the SYN participation
-    await setState(db, {
+    await setBranchState(db, branchId, a, {
       target: a,
       value: { _alias: mergedTarget },
       hash: chainHash(stateA.hash, event),
@@ -606,7 +666,7 @@ async function handleSYN(db: EoDb, event: EoEvent): Promise<void> {
       ...stateFromEvent(event, 'SYN'),
     });
     if (b !== mergedTarget) {
-      await setState(db, {
+      await setBranchState(db, branchId, b, {
         target: b,
         value: { _alias: mergedTarget },
         hash: chainHash(stateB.hash, event),
@@ -617,14 +677,138 @@ async function handleSYN(db: EoDb, event: EoEvent): Promise<void> {
   }
 }
 
+/**
+ * Merge a source branch into the target branch.
+ *
+ * For each target touched by the source branch (via branchCursor):
+ *   - Skip fork marker targets (branch.* prefix)
+ *   - Get the current value on the target branch
+ *   - Get the value from the source branch
+ *   - If deep-equal: no conflict, write the source value to the target branch
+ *   - If different: detect conflict and write ConflictState to the target branch
+ *
+ * @param sourceBranchId  The branch being absorbed
+ * @param upToSeq         Optional: only absorb events up to this seq (partial replay)
+ * @param targetBranchId  The branch receiving the merge (write destination)
+ * @param targetFilter    Optional: restrict merge to specific targets or a prefix.
+ *                        string   = prefix filter (e.g. 'firm.cases.rec001')
+ *                        string[] = explicit target list
+ *                        undefined = merge all targets touched by source branch
+ *
+ * NOTE: CON conflict detection (edge disagreements) is deferred to the next PR.
+ * CON events in the source branch are currently skipped during merge.
+ */
+async function handleBranchMerge(
+  db: EoDb,
+  event: EoEvent,
+  sourceBranchId: string,
+  upToSeq: number | undefined,
+  targetBranchId: string,
+  targetFilter?: string[] | string,
+): Promise<void> {
+  // Collect unique targets touched by the source branch
+  const touchedTargets = new Set<string>();
+  for await (const ev of branchCursor(db, sourceBranchId, upToSeq)) {
+    // Skip events that aren't on the source branch itself (ancestor events)
+    if ((ev.branch ?? 'main') !== sourceBranchId) continue;
+    // Skip fork marker targets
+    if (ev.target.startsWith('branch.')) continue;
+    // Skip CON events — edge conflict resolution is deferred (TODO)
+    if (ev.op === 'CON') continue;
+    touchedTargets.add(ev.target);
+  }
+
+  const now = new Date().toISOString();
+
+  for (const target of touchedTargets) {
+    // Apply targetFilter if provided
+    if (targetFilter !== undefined) {
+      if (typeof targetFilter === 'string') {
+        if (!target.startsWith(targetFilter)) continue;
+      } else {
+        if (!targetFilter.includes(target)) continue;
+      }
+    }
+
+    // Read current value on target branch
+    const currentState = await getBranchState(db, targetBranchId, target);
+
+    // Read source branch value
+    const sourceState = await getBranchState(db, sourceBranchId, target);
+    if (!sourceState) continue;
+
+    // Determine the origin operator for conflict metadata
+    const originOp: ConflictState['originOp'] =
+      currentState?.last_op === 'INS' || sourceState.last_op === 'INS' ? 'INS'
+      : sourceState.last_op === 'CON' ? 'CON'
+      : sourceState.last_op === 'SEG' ? 'SEG'
+      : 'DEF';
+
+    if (!currentState) {
+      // Target doesn't exist on the target branch — write source value directly
+      await setBranchState(db, targetBranchId, target, {
+        ...sourceState,
+        last_seq: event.seq,
+        last_op: 'SYN',
+        last_agent: event.agent,
+        last_ts: event.ts,
+        last_acquired_ts: event.acquired_ts,
+      });
+      continue;
+    }
+
+    // Detect conflict
+    const conflict = detectConflict(
+      originOp,
+      currentState.value, targetBranchId, currentState.last_seq, currentState.last_agent,
+      sourceState.value, sourceBranchId, sourceState.last_seq, sourceState.last_agent,
+    );
+
+    if (!conflict) {
+      // No conflict (deep-equal) — source value is already reflected; nothing to write
+      continue;
+    }
+
+    // Check if there's a pre-registered resolution policy
+    const policy = await getResolutionPolicy(db, target);
+    if (policy) {
+      // Auto-resolve with policy
+      const { resolveConflict } = await import('./conflict.js');
+      const resolved = resolveConflict(conflict, policy);
+      await setBranchState(db, targetBranchId, target, {
+        ...currentState,
+        value: resolved,
+        hash: chainHash(currentState.hash, event),
+        last_seq: event.seq,
+        last_op: 'SYN',
+        last_agent: event.agent,
+        last_ts: event.ts,
+        last_acquired_ts: now,
+      });
+    } else {
+      // No policy — write ConflictState (Binding default: conflict IS the datum)
+      await setBranchState(db, targetBranchId, target, {
+        ...currentState,
+        value: conflict,
+        hash: chainHash(currentState.hash, event),
+        last_seq: event.seq,
+        last_op: 'SYN',
+        last_agent: event.agent,
+        last_ts: event.ts,
+        last_acquired_ts: now,
+      });
+    }
+  }
+}
+
 // --- DEF: Define Value or Register Computation ---
 // Inherited: SYN (alias resolution), SEG (boundary respect), INS (auto-instantiation), CON (dependency recomputation)
-async function handleDEF(db: EoDb, event: EoEvent): Promise<void> {
-  // SYN capacity: resolve alias if target was merged
-  const target = await resolveAlias(db, event.target);
+async function handleDEF(db: EoDb, event: EoEvent, branchId: string = 'main'): Promise<void> {
+  // SYN capacity: resolve alias if target was merged (branch-aware)
+  const target = await resolveAlias(db, event.target, branchId);
 
-  // INS capacity: auto-instantiate if target doesn't exist
-  let existing = await getState(db, target);
+  // INS capacity: auto-instantiate if target doesn't exist (branch-scoped)
+  let existing = await getBranchState(db, branchId, target);
   if (!existing) {
     existing = {
       target,
@@ -633,7 +817,7 @@ async function handleDEF(db: EoDb, event: EoEvent): Promise<void> {
       level: 1,
       ...stateFromEvent(event, 'INS'),
     };
-    await setState(db, existing);
+    await setBranchState(db, branchId, target, existing);
   }
 
   // Level guard: reject DEFs on core content of derived entities (INS2+).
@@ -647,7 +831,7 @@ async function handleDEF(db: EoDb, event: EoEvent): Promise<void> {
   // DEF's own logic: merge operand into existing state
   const merged = mergeOperand(existing.value, event.operand);
 
-  await setState(db, {
+  await setBranchState(db, branchId, target, {
     target,
     value: merged,
     hash: chainHash(existing.hash, event),
@@ -655,8 +839,9 @@ async function handleDEF(db: EoDb, event: EoEvent): Promise<void> {
     ...stateFromEvent(event, 'DEF'),
   });
 
-  // Check if operand is a formula definition
-  if (isFormulaOperand(event.operand)) {
+  // Formula registration and REC detection are main-branch-only in this PR.
+  // On non-main branches, formula evaluation is deferred.
+  if (branchId === 'main' && isFormulaOperand(event.operand)) {
     const result = await registerEvaActive(db, target, event.operand);
     // Stash merge info on the event for detectAndEmitREC to pick up
     if (result.mergedComponent) {
@@ -667,14 +852,27 @@ async function handleDEF(db: EoDb, event: EoEvent): Promise<void> {
 
 // --- EVA: Evaluate ---
 // Inherited: All eight capacities below. Full 8-step pipeline.
-async function handleEVA(db: EoDb, event: EoEvent): Promise<void> {
-  // SYN capacity: resolve alias
-  const target = await resolveAlias(db, event.target);
+async function handleEVA(db: EoDb, event: EoEvent, branchId: string = 'main'): Promise<void> {
+  // SYN capacity: resolve alias (branch-aware)
+  const target = await resolveAlias(db, event.target, branchId);
 
-  const existing = await getState(db, target);
+  // If operand declares a resolution mode, write as EVA resolution policy (eva-resolve:{target}).
+  // This is separate from formula registration (eva:{target}) to avoid conflation.
+  if (event.operand?.type && resolutionModes.has(event.operand.type)) {
+    await setResolutionPolicy(db, target, event.operand);
+    return;
+  }
 
-  // Write evaluation policy to state
-  await setState(db, {
+  // If operand is a formula, register it at eva:{target} (not just state)
+  if (isFormulaOperand(event.operand) && branchId === 'main') {
+    await registerEvaActive(db, target, event.operand);
+    return;
+  }
+
+  const existing = await getBranchState(db, branchId, target);
+
+  // Write evaluation policy to state (branch-scoped)
+  await setBranchState(db, branchId, target, {
     target,
     value: event.operand,
     hash: existing ? chainHash(existing.hash, event) : seedHash(event),
@@ -1713,11 +1911,17 @@ function nearEqual(a: any, b: any): boolean {
 /**
  * Check if an event would be a no-op (state already matches).
  * Returns the existing last_seq if no change, null otherwise.
+ *
+ * Branch-aware: reads from the correct branch state for the comparison.
  */
-async function checkNoOp(db: EoDb, event: EoEventInput): Promise<number | null> {
+async function checkNoOp(
+  db: EoDb,
+  event: EoEventInput,
+  branchId: string = 'main',
+): Promise<number | null> {
   if (event.op === 'DEF') {
-    const target = await resolveAlias(db, event.target);
-    const existing = await getState(db, target);
+    const target = await resolveAlias(db, event.target, branchId);
+    const existing = await getBranchState(db, branchId, target);
     if (!existing) return null; // Will auto-instantiate — not a no-op
     const merged = mergeOperand(existing.value, event.operand);
     if (deepEqual(existing.value, merged)) return existing.last_seq;

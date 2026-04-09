@@ -34,6 +34,15 @@ export interface SoftDeleteResult {
  * `_deleted_by`. The rest of the value (including `_edges` / `linked`) is
  * preserved so that edge information survives as tombstones.
  */
+/**
+ * Soft-delete all entities under `prefix`.
+ *
+ * BRANCH SAFETY: softDeleteByPrefix reads and writes main state keyspace directly
+ * (via getStateByPrefix → state:{prefix}). It is NOT branch-aware and must not be
+ * called in branch-specific contexts. Calling it while on a non-main branch will
+ * silently operate on main state — DO NOT do this.
+ * Branch-aware soft delete is deferred to the next PR.
+ */
 export async function softDeleteByPrefix(
   db: EoDb,
   prefix: string,
