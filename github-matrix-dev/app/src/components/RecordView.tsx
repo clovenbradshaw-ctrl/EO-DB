@@ -23,6 +23,7 @@ import { CadenceBadge } from './CadenceBadge';
 import { GraphRoleBadge } from './GraphRoleBadge';
 import { TypeBadge } from './TypeSelector';
 import { ElementHistory } from './ElementHistory';
+import { RecordTimeline } from './RecordTimeline';
 import { RedactedCell } from './RedactedCell';
 import { useTheme, type Theme } from '../theme';
 import { formatName } from './scope-picker-utils';
@@ -73,6 +74,10 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
   const [recCycleLoading, setRecCycleLoading] = useState(false);
   const [recCycleError, setRecCycleError] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
+
+  // Per-record time travel
+  const [recordTs, setRecordTs] = useState<number | null>(null);
+  const [recordEvents, setRecordEvents] = useState<import('../db/types').EoEvent[]>([]);
 
   // ─── Detail layout config (designer modal) ─────────────────────────
   const [designerOpen, setDesignerOpen] = useState(false);
@@ -390,9 +395,21 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
 
       {/* Fields — entity's own DEF values */}
       <Section title="Fields" subtitle="" color={theme.accent}>
+        {/* Per-record time travel slider */}
+        <RecordTimeline
+          target={target}
+          onTimestampChange={setRecordTs}
+          onEventsLoaded={setRecordEvents}
+        />
         {permissions?.redacted_fields && permissions.redacted_fields.length > 0 ? (
           <div>
-            <FigureFields figure={data.figure} onNavigate={onNavigate} profileFields={profileFields} />
+            <FigureFields
+              figure={data.figure}
+              onNavigate={onNavigate}
+              profileFields={profileFields}
+              recordTs={recordTs}
+              allEvents={recordEvents}
+            />
             <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 4 }}>
               {permissions.redacted_fields.map(field => (
                 <div key={field} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -408,7 +425,13 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
             </div>
           </div>
         ) : (
-          <FigureFields figure={data.figure} onNavigate={onNavigate} profileFields={profileFields} />
+          <FigureFields
+            figure={data.figure}
+            onNavigate={onNavigate}
+            profileFields={profileFields}
+            recordTs={recordTs}
+            allEvents={recordEvents}
+          />
         )}
         {/* Governance chips — inline under fields when available */}
         {(initialGovernance ?? governance) && (initialGovernance ?? governance)!.length > 0 && (

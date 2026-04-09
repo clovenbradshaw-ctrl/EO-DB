@@ -50,7 +50,7 @@ import type { SliceType } from './slice-types';
 import { discoverSpacesFromMatrix, discoverPublicSpaces, type SpaceEntry } from '../matrix/space-discovery';
 import { SpaceBrowser } from './SpaceBrowser';
 import { Horizon } from './Horizon';
-import { type TimeScrubberFilter, type DateColumnOption, DEFAULT_FILTER, detectDateColumns } from './time-scrubber-utils';
+import { type TimeScrubberFilter, type DateColumnOption, DEFAULT_FILTER, detectDateColumns, computeDateRange, buildAdaptiveFormatter } from './time-scrubber-utils';
 import { hasFieldsSubObject, buildFieldNameMap } from './filter-types';
 import { useHashRoute, type View } from '../lib/router';
 import { type AccessRole, type UserTypeDefinition, type SpaceConfig, powerLevelToRole, legacyAccessToRole } from '../permissions/types';
@@ -766,6 +766,23 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     () => detectDateColumns(scopedRecords, useFieldsSub, scopeFieldNameMap),
     [scopedRecords, useFieldsSub, scopeFieldNameMap],
   );
+
+  // How far back the slider is: 0 = present, 1 = oldest data point
+  const pastDateRange = useMemo(
+    () => computeDateRange(scopedRecords, timeScrubberFilter.dateField, useFieldsSub),
+    [scopedRecords, timeScrubberFilter.dateField, useFieldsSub],
+  );
+  const pastnessFraction = useMemo(() => {
+    if (timeScrubberFilter.rangeMax == null || !pastDateRange) return 0;
+    const span = pastDateRange.max - pastDateRange.min;
+    if (span <= 0) return 0;
+    return Math.max(0, Math.min(1, (pastDateRange.max - timeScrubberFilter.rangeMax) / span));
+  }, [timeScrubberFilter.rangeMax, pastDateRange]);
+  const pastDateLabel = useMemo(() => {
+    if (timeScrubberFilter.rangeMax == null || !pastDateRange) return null;
+    const fmt = buildAdaptiveFormatter(pastDateRange.max - pastDateRange.min);
+    return fmt(timeScrubberFilter.rangeMax);
+  }, [timeScrubberFilter.rangeMax, pastDateRange]);
 
   const edgeCount = recentEvents.filter((e) => e.op === 'CON').length;
 
@@ -2114,6 +2131,23 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         </aside>
 
         <main style={s.main} key={selectedSpace ?? '__all__'}>
+          {/* Time-travel indicator — fades in when Horizon slider is in the past */}
+          {pastnessFraction > 0 && pastDateLabel && (
+            <div style={{
+              position: 'absolute', top: 10, right: 16, zIndex: 10,
+              display: 'flex', alignItems: 'center', gap: 5,
+              padding: '3px 10px', borderRadius: 20,
+              background: theme.bgCard, border: `1px solid ${theme.border}`,
+              fontSize: 11, fontFamily: "'JetBrains Mono', monospace",
+              color: theme.textSecondary,
+              opacity: Math.min(1, pastnessFraction * 1.5 + 0.25),
+              transition: 'opacity 0.3s ease',
+              pointerEvents: 'none', userSelect: 'none',
+            }}>
+              <span style={{ opacity: 0.6 }}>{'◷'}</span>
+              {pastDateLabel}
+            </div>
+          )}
           {/* Space members panel */}
           {showMembers && selectedSpace && (
             <div style={{ padding: '20px 28px', maxWidth: 480 }}>
@@ -2622,6 +2656,7 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       flexDirection: 'column' as const,
       background: t.bg,
       transition: 'background 0.25s ease',
+      position: 'relative' as const,
     },
 
     // Empty states — centered with icon
