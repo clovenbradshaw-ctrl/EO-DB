@@ -124,6 +124,11 @@ export class PeerSync {
     }
   }
 
+  /** Alias for stop() — satisfies the SyncManager.destroy() call site in Layout. */
+  destroy(): void {
+    this.stop();
+  }
+
   /**
    * Compute the store fingerprint for comparison with peers.
    */
