@@ -34,6 +34,8 @@ interface ColumnManagerPanelProps {
   onShowAll: () => void;
   onHideAll: () => void;
   onClose: () => void;
+  /** Open the "Add field" dialog */
+  onAddColumn?: () => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -49,6 +51,7 @@ export function ColumnManagerPanel({
   onShowAll,
   onHideAll,
   onClose,
+  onAddColumn,
 }: ColumnManagerPanelProps) {
   const { theme } = useTheme();
   const [search, setSearch] = useState('');
@@ -153,6 +156,11 @@ export function ColumnManagerPanel({
           <button onClick={onHideAll} style={{ ...s.footerBtn, color: theme.textMuted }}>
             Hide all
           </button>
+          {onAddColumn && (
+            <button onClick={onAddColumn} style={{ ...s.footerBtn, marginLeft: 'auto' }}>
+              + Add field
+            </button>
+          )}
         </div>
       </div>
     </>
