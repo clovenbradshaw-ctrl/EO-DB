@@ -142,9 +142,10 @@ export function ConstraintComposer({
   embedded,
 }: ConstraintComposerProps) {
   const { theme } = useTheme();
-  const s = makeStyles(theme);
+  const s = makeStyles(theme, embedded);
 
   const [activeCell, setActiveCell] = useState<string | null>(null);
+  const [hoverCell, setHoverCell] = useState<string | null>(null);
   const existingSet = new Set(existingConstraints.map(c => c.name));
 
   // ─── Config state for each cell ──
@@ -460,6 +461,12 @@ export function ConstraintComposer({
         </div>
       )}
 
+      {embedded && (
+        <div style={{ fontSize: 11, color: theme.textSecondary, marginBottom: 8 }}>
+          Click a cell to add or configure a constraint.
+        </div>
+      )}
+
       {/* Column headers */}
       <div style={s.gridContainer}>
         <div style={s.colHeaders}>
@@ -490,6 +497,7 @@ export function ConstraintComposer({
                 ? existingConstraints.find(c => c.name === cellDef.key)?.value
                 : null;
 
+              const isHovered = hoverCell === cellDef.key;
               return (
                 <button
                   key={cellDef.key}
@@ -500,15 +508,21 @@ export function ConstraintComposer({
                       ? `${cellDef.color}15`
                       : isConfigured
                         ? `${cellDef.color}08`
-                        : theme.bgCard,
+                        : isHovered
+                          ? theme.bgHover
+                          : theme.bgCard,
                     borderColor: isActive
                       ? cellDef.color
                       : isConfigured
                         ? `${cellDef.color}40`
-                        : theme.borderLight,
+                        : isHovered
+                          ? theme.border
+                          : theme.borderLight,
                     opacity: isDeferred && !existingDeferredValue ? 0.5 : 1,
                     cursor: isDeferred && !existingDeferredValue ? 'not-allowed' : 'pointer',
                   }}
+                  onMouseEnter={() => { if (!isDeferred || existingDeferredValue) setHoverCell(cellDef.key); }}
+                  onMouseLeave={() => setHoverCell(null)}
                   onClick={() => {
                     if (isDeferred && !existingDeferredValue) return;
                     setActiveCell(isActive ? null : cellDef.key);
@@ -549,7 +563,7 @@ export function ConstraintComposer({
       {activeCell && CONSTRAINT_CELLS.find(c => c.key === activeCell)?.phase === 1 && (
         <div style={s.configWrapper}>
           <div style={s.configHeader}>
-            Configure: {CONSTRAINT_CELLS.find(c => c.key === activeCell)?.name}
+            Configure {CONSTRAINT_CELLS.find(c => c.key === activeCell)?.name} — {fieldKey}
             {existingSet.has(activeCell) && (
               <button
                 style={s.removeBtn}
@@ -612,7 +626,8 @@ export function ConstraintComposer({
 
 // ─── Styles ─────────────────────────────────────────────────────────────
 
-function makeStyles(t: Theme): Record<string, React.CSSProperties> {
+function makeStyles(t: Theme, embedded?: boolean): Record<string, React.CSSProperties> {
+  const labelW = embedded ? 72 : 90;
   return {
     container: {
       padding: 16,
@@ -664,11 +679,11 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
     },
     colHeaders: {
       display: 'grid',
-      gridTemplateColumns: '90px 1fr 1fr 1fr',
+      gridTemplateColumns: `${labelW}px 1fr 1fr 1fr`,
       gap: 6,
       marginBottom: 2,
     },
-    rowLabelSpacer: { width: 90 },
+    rowLabelSpacer: { width: labelW },
     colHeader: {
       display: 'flex',
       flexDirection: 'column',
@@ -687,7 +702,7 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
     },
     gridRow: {
       display: 'grid',
-      gridTemplateColumns: '90px 1fr 1fr 1fr',
+      gridTemplateColumns: `${labelW}px 1fr 1fr 1fr`,
       gap: 6,
     },
     rowLabel: {
