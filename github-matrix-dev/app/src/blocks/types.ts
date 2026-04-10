@@ -223,6 +223,27 @@ export interface RecordBlockProps {
   binding?: DataBinding;
 }
 
+export interface CalendarBlockProps {
+  /** Fallback scope if binding is not set. */
+  scope?: string;
+  /** Data binding — replaces scope when present. */
+  binding?: DataBinding;
+  /** Field key on each record holding the event start (ISO string). */
+  dateField: string;
+  /** Optional field key for event end (ISO string). */
+  endDateField?: string;
+  /** Field key holding the event display title. */
+  titleField: string;
+  /** Optional field key providing a CSS color. */
+  colorField?: string;
+  /** Which sub-view to render. */
+  viewMode: 'month' | 'week' | 'day' | 'agenda';
+  /** 0 = Sunday-start, 1 = Monday-start. */
+  startDay?: 0 | 1;
+  /** Text to show when no events match. */
+  emptyText?: string;
+}
+
 export interface ButtonProps {
   label: string;
   style: 'primary' | 'secondary' | 'danger' | 'ghost';

@@ -142,6 +142,24 @@ register({
   acceptsSlots: null,
 });
 
+register({
+  type: 'calendar',
+  category: 'data',
+  label: 'Calendar',
+  icon: 'C',
+  defaultProps: () => ({
+    scope: '',
+    dateField: 'start',
+    endDateField: 'end',
+    titleField: 'summary',
+    viewMode: 'month',
+    startDay: 0,
+    emptyText: 'No events',
+  }),
+  acceptsChildren: false,
+  acceptsSlots: null,
+});
+
 // --- Record ---
 
 register({

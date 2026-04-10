@@ -10,6 +10,7 @@ import { GDriveStorageWidget } from './GDriveStorageWidget';
 import { OP_COLORS, TRIAD_LABELS } from './LogView';
 import { ArchivedSpacesSection } from './ArchivedSpaces';
 import { AirtableSettingsSection } from './AirtableSettings';
+import { GCalendarSettingsSection } from './GCalendarSettings';
 import { useGDriveStore } from '../google-drive/gdrive-store';
 import { clearTokens, startOAuthFlow, getAccessToken } from '../google-drive/gdrive-oauth';
 import { usePresencePrefs } from '../lib/presence-prefs';
@@ -512,6 +513,11 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
             )}
             {(gdriveSync || gdriveConnected) && <GDriveStorageWidget />}
           </div>
+        </Section>
+
+        {/* Google Calendar */}
+        <Section title="Google Calendar" theme={theme}>
+          <GCalendarSettingsSection />
         </Section>
 
         {/* Airtable Importer */}
