@@ -13,6 +13,7 @@ import {
   type ResolvedPermissions,
   type SpaceConfig,
   type UserTypeAssignment,
+  type UserTypeDefinition,
   type FieldTypeVisibility,
   powerLevelToRole,
   ROLE_POWER_LEVELS,
@@ -123,11 +124,12 @@ export function resolvePermissions(
 export function resolvePermissionsFromSharing(
   userId: string,
   owner: string,
-  sharing: Array<{ user_id: string; access: 'read' | 'write' | 'admin' }>,
+  sharing: Array<{ user_id: string; access: string }>,
   fieldAssignments?: FieldAssignment[],
   userTypeAssignments?: UserTypeAssignment[] | null,
   fieldTypeVisibility?: FieldTypeVisibility[] | null,
   activeUserType?: string | null,
+  typeDefinitions?: UserTypeDefinition[] | null,
 ): ResolvedPermissions {
   let pl: number;
 
@@ -142,11 +144,24 @@ export function resolvePermissionsFromSharing(
       pl = 25;
     } else {
       switch (entry.access) {
-        case 'admin': pl = 50; break;
-        case 'write': pl = 25; break;
-        default: pl = 0; break;
+        case 'admin':   pl = 50; break;
+        case 'editor':
+        case 'write':   pl = 25; break;  // 'write' = legacy backward compat
+        case 'creator': pl = 10; break;
+        case 'viewer':
+        case 'read':
+        default:        pl = 0;  break;  // 'read' = legacy backward compat
       }
     }
+  }
+
+  // Apply base_role cap from the user's active space-specific role.
+  // A named role (user type with base_role set) can restrict capabilities
+  // below the user's sharing access level, but never elevate them.
+  const effectiveActiveType = activeUserType ?? null;
+  const activeTypeDef = (typeDefinitions ?? []).find(t => t.id === effectiveActiveType);
+  if (activeTypeDef?.base_role) {
+    pl = Math.min(pl, ROLE_POWER_LEVELS[activeTypeDef.base_role]);
   }
 
   const role = powerLevelToRole(pl);
@@ -163,7 +178,6 @@ export function resolvePermissionsFromSharing(
   // Resolve user types
   const userTypes = userTypeAssignments
     ?.find(a => a.user_id === userId)?.type_ids ?? [];
-  const effectiveActiveType = activeUserType ?? null;
 
   // Admin+ (pl >= 50) bypasses type-based field hiding
   const typeHiddenFields = pl >= 50 ? [] : (fieldTypeVisibility ?? [])

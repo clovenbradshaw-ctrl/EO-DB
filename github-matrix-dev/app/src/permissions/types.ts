@@ -195,6 +195,13 @@ export interface UserTypeDefinition {
    * is enforced via Matrix room membership (restricted room).
    */
   visible_views?: string[];
+  /**
+   * Optional base capability tier for this user type.
+   * When set, users assigned to this type have their effective power level
+   * capped to this role (min of their sharing access and this value).
+   * Absent = organizational label only, does not affect capabilities.
+   */
+  base_role?: Exclude<AccessRole, 'owner'>;
 }
 
 /** A single headline metric card displayed above the table. */
