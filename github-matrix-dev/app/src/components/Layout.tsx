@@ -31,21 +31,12 @@ import { SyncProgress } from './SyncProgress';
 //
 // `lazyWithRetry` wraps React.lazy() so that when a dynamic import fails
 // because the chunk's content hash changed after a deploy (the old hashed
-// file has been deleted from GitHub Pages), we force a one-time hard reload
-// to fetch the fresh index.html. Without this, an open tab loaded from a
-// previous deploy shows "Failed to fetch dynamically imported module" the
-// moment the user navigates to any lazy view, and ErrorBoundary's "Try
-// again" button can't recover because the chunk is still missing.
-const CHUNK_RELOAD_KEY = 'eo-chunk-reload';
-function isChunkLoadError(err: unknown): boolean {
-  if (!err || typeof err !== 'object') return false;
-  const msg = (err as { message?: string }).message || '';
-  return (
-    msg.includes('Failed to fetch dynamically imported module') ||
-    msg.includes('error loading dynamically imported module') ||
-    msg.includes('Importing a module script failed')
-  );
-}
+// file has been deleted from GitHub Pages), we force-refresh index.html and
+// reload. Without this, an open tab loaded from a previous deploy shows
+// "Failed to fetch dynamically imported module" the moment the user
+// navigates to any lazy view, and ErrorBoundary's "Try again" button can't
+// recover because the chunk is still missing.
+import { isChunkLoadError, tryRecoverFromChunkError, clearChunkReloadGuard } from '../lib/chunk-reload';
 function lazyWithRetry<T extends ComponentType<any>>(
   factory: () => Promise<{ default: T }>,
 ): ReturnType<typeof lazy<T>> {
@@ -54,12 +45,10 @@ function lazyWithRetry<T extends ComponentType<any>>(
       const mod = await factory();
       // Successful load — clear the reload guard so a future stale-deploy
       // error in the same session can reload again.
-      sessionStorage.removeItem(CHUNK_RELOAD_KEY);
+      clearChunkReloadGuard();
       return mod;
     } catch (err) {
-      if (isChunkLoadError(err) && sessionStorage.getItem(CHUNK_RELOAD_KEY) !== '1') {
-        sessionStorage.setItem(CHUNK_RELOAD_KEY, '1');
-        window.location.reload();
+      if (isChunkLoadError(err) && tryRecoverFromChunkError()) {
         // Return a never-resolving promise so React's Suspense keeps showing
         // the fallback (not the error) while the page reloads.
         return new Promise<{ default: T }>(() => {});
