@@ -3,7 +3,7 @@ import { useEoStore } from '../../store/eo-store';
 import { useBuilderStore } from '../../store/builder-store';
 import { useTheme, type Theme } from '../../theme';
 import type { EoState } from '../../db/types';
-import type { ViewDefinition, PageType } from '../../blocks/types';
+import { type ViewDefinition, type PageType, isViewVisibleToPersona } from '../../blocks/types';
 import { ScopePicker } from '../ScopePicker';
 
 interface ViewListProps {
@@ -14,6 +14,7 @@ export function ViewList({ onSelectView }: ViewListProps) {
   const ready = useEoStore((s) => s.ready);
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
   const lastSeq = useEoStore((s) => s.lastSeq);
+  const activeUserType = useEoStore((s) => s.activeUserType);
   const loadView = useBuilderStore((s) => s.loadView);
   const newView = useBuilderStore((s) => s.newView);
   const { theme } = useTheme();
@@ -38,13 +39,24 @@ export function ViewList({ onSelectView }: ViewListProps) {
     });
   }, [ready, lastSeq, getStateByPrefix]);
 
+  // Filter views visible to the active persona. Builder is gated to admins
+  // at the nav level, so canManage=true here — admins always see all views
+  // so they can edit visibility. If the persona system later lets non-admins
+  // access the builder, the canManage flag should flow from permissions.
+  const visibleViews = useMemo(() => {
+    return views.filter(v => {
+      const def = v.value as ViewDefinition | null;
+      return isViewVisibleToPersona(def, activeUserType, /* canManage */ true);
+    });
+  }, [views, activeUserType]);
+
   // Collect existing record pages for the "link to record page" dropdown
   const recordPages = useMemo(() => {
-    return views.filter(v => {
+    return visibleViews.filter(v => {
       const def = v.value as ViewDefinition | null;
       return def?.pageType === 'record';
     });
-  }, [views]);
+  }, [visibleViews]);
 
   const handleCreate = () => {
     const name = newName.trim() || 'Untitled View';
@@ -140,15 +152,16 @@ export function ViewList({ onSelectView }: ViewListProps) {
         )}
       </div>
 
-      {views.length > 0 && (
+      {visibleViews.length > 0 && (
         <div style={s.list}>
           <div style={s.listHeader}>Existing Views</div>
-          {views.map((v) => {
+          {visibleViews.map((v) => {
             const def = v.value as ViewDefinition | null;
             const name = def?.name || v.target.replace(/^views\./, '');
             const blockCount = def?.blocks?.length || 0;
             const pt = def?.pageType || 'page';
             const scope = def?.recordSource?.scope;
+            const restricted = def?.visibleToTypes && def.visibleToTypes.length > 0;
             return (
               <div key={v.target} style={s.viewCard} onClick={() => handleOpen(v)}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -162,6 +175,21 @@ export function ViewList({ onSelectView }: ViewListProps) {
                     background: pt === 'record' ? '#E6F1FB' : pt === 'list' ? '#FFF3E0' : `${theme.border}80`,
                     color: pt === 'record' ? '#185FA5' : pt === 'list' ? '#E65100' : theme.textMuted,
                   }}>{pt}</span>
+                  {restricted && (
+                    <span
+                      title={`Visible to: ${def!.visibleToTypes!.join(', ')}`}
+                      style={{
+                        fontSize: 9,
+                        fontWeight: 600,
+                        padding: '2px 6px',
+                        borderRadius: 4,
+                        background: `${theme.accent}14`,
+                        color: theme.accent,
+                      }}
+                    >
+                      {def!.visibleToTypes!.length} persona{def!.visibleToTypes!.length !== 1 ? 's' : ''}
+                    </span>
+                  )}
                 </div>
                 <div style={s.viewMeta}>
                   {blockCount} block{blockCount !== 1 ? 's' : ''}
@@ -174,7 +202,7 @@ export function ViewList({ onSelectView }: ViewListProps) {
         </div>
       )}
 
-      {views.length === 0 && !creating && (
+      {visibleViews.length === 0 && !creating && (
         <div style={s.emptyState}>
           No views yet. Create your first view to get started.
         </div>

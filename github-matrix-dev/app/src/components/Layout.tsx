@@ -2775,6 +2775,7 @@ function RecordPageOrDrawer({ recordTarget, allStates, onClose, onNavigate, prof
 }) {
   const loadView = useBuilderStore((s) => s.loadView);
   const getState = useEoStore((s) => s.getState);
+  const activeUserType = useEoStore((s) => s.activeUserType);
   const [layoutType, setLayoutType] = useState<LayoutDisplayType>('drawer');
 
   // Read layout type from the detail layout DEF
@@ -2789,7 +2790,11 @@ function RecordPageOrDrawer({ recordTarget, allStates, onClose, onNavigate, prof
       .catch(() => {});
   }, [recordTarget, getState]);
 
-  // Find a record page view whose recordSource.scope matches this record's parent
+  // Find a record page view whose recordSource.scope matches this record's parent.
+  // Prefer a view scoped to the current persona (via visibleToTypes) so that
+  // different personas can see different record layouts for the same record.
+  // Views restricted to *other* personas are skipped; views with no restriction
+  // are used as a fallback when no persona-scoped match exists.
   const recordPageView = useMemo(() => {
     const parts = recordTarget.split('.');
     const possibleScopes: string[] = [];
@@ -2798,17 +2803,25 @@ function RecordPageOrDrawer({ recordTarget, allStates, onClose, onNavigate, prof
     }
 
     const viewStates = allStates.filter(s => s.target.startsWith('views.'));
+    type Candidate = { viewId: string; definition: ViewDefinition };
+    let personaMatch: Candidate | null = null;
+    let generalMatch: Candidate | null = null;
     for (const vs of viewStates) {
       const def = vs.value as ViewDefinition | null;
-      if (def?.pageType === 'record' && def.recordSource?.scope) {
-        if (possibleScopes.includes(def.recordSource.scope)) {
-          const viewId = vs.target.replace(/^views\./, '');
-          return { viewId, definition: def };
-        }
+      if (!def || def.pageType !== 'record' || !def.recordSource?.scope) continue;
+      if (!possibleScopes.includes(def.recordSource.scope)) continue;
+      const viewId = vs.target.replace(/^views\./, '');
+      const restriction = def.visibleToTypes;
+      if (!restriction || restriction.length === 0) {
+        if (!generalMatch) generalMatch = { viewId, definition: def };
+        continue;
+      }
+      if (activeUserType && restriction.includes(activeUserType)) {
+        if (!personaMatch) personaMatch = { viewId, definition: def };
       }
     }
-    return null;
-  }, [recordTarget, allStates]);
+    return personaMatch ?? generalMatch;
+  }, [recordTarget, allStates, activeUserType]);
 
   // Load the record page view into the builder store when found
   useEffect(() => {
