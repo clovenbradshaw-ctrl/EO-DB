@@ -1,7 +1,7 @@
 import { useState, useEffect, type FormEvent } from 'react';
 import { login, normalizeHomeserver, toMatrixUserId, type MatrixSession } from '../matrix/client';
 import { saveOfflineCredentials, verifyOfflineCredentials, listOfflineAccounts } from '../lib/offline-auth';
-import { startOAuthFlow, isConnected as gdriveIsConnected } from '../google-drive/gdrive-oauth';
+import { startOAuthFlow } from '../google-drive/gdrive-oauth';
 import { useTheme, type Theme } from '../theme';
 
 interface LoginProps {
@@ -80,13 +80,9 @@ export function Login({ onLogin, onLocalMode }: LoginProps) {
         }
       }
 
-      // Matrix login succeeded — if already connected to GDrive, skip the prompt
-      if (gdriveIsConnected()) {
-        onLogin(session);
-      } else {
-        setPendingSession(session);
-        setStep('gdrive');
-      }
+      // Matrix login succeeded — always show the GDrive step so user explicitly chooses
+      setPendingSession(session);
+      setStep('gdrive');
     } catch (err: any) {
       setError(err.message || 'Login failed');
     } finally {
