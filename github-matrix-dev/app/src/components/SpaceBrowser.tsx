@@ -36,6 +36,10 @@ interface SpaceBrowserProps {
   publicEntries?: SpaceEntry[];
   /** Send a knock request to join a public space */
   onRequestAccess?: (mainRoomId: string) => void;
+  /** Error message to display as an inline banner (e.g. archive permission failure) */
+  actionError?: string | null;
+  /** Callback to dismiss the actionError banner */
+  onDismissActionError?: () => void;
 }
 
 function relativeTime(ts: number): string {
@@ -60,7 +64,7 @@ function formatDate(ts: number): string {
   });
 }
 
-export function SpaceBrowser({ entries, loading, matrixReady = true, activeSpace, onSelect, onClose, onCreate, onDelete, onArchive, onOpenRecycleBin, deletedCount = 0, archivedCount = 0, publicEntries = [], onRequestAccess }: SpaceBrowserProps) {
+export function SpaceBrowser({ entries, loading, matrixReady = true, activeSpace, onSelect, onClose, onCreate, onDelete, onArchive, onOpenRecycleBin, deletedCount = 0, archivedCount = 0, publicEntries = [], onRequestAccess, actionError = null, onDismissActionError }: SpaceBrowserProps) {
   const { theme } = useTheme();
   const s = makeStyles(theme);
 
@@ -155,6 +159,31 @@ export function SpaceBrowser({ entries, loading, matrixReady = true, activeSpace
             <button style={s.closeButton} onClick={onClose}>{'\u2715'}</button>
           </div>
         </div>
+
+        {/* Action error banner */}
+        {actionError && (
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 8,
+            padding: '6px 12px',
+            background: theme.dangerBg,
+            borderBottom: `1px solid ${theme.dangerBorder}`,
+            fontSize: 11,
+            color: theme.danger,
+          }}>
+            <span>{actionError}</span>
+            {onDismissActionError && (
+              <button
+                onClick={onDismissActionError}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'inherit', padding: '0 2px', fontSize: 12 }}
+              >
+                {'\u2715'}
+              </button>
+            )}
+          </div>
+        )}
 
         {/* Column headers */}
         <div style={s.colHeaders}>

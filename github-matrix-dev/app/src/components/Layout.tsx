@@ -55,7 +55,7 @@ import { hasFieldsSubObject, buildFieldNameMap } from './filter-types';
 import { useHashRoute, type View } from '../lib/router';
 import { type AccessRole, type UserTypeDefinition, type SpaceConfig, powerLevelToRole, legacyAccessToRole } from '../permissions/types';
 import { UserTypeSwitcher } from './UserTypeSwitcher';
-import { resolvePermissionsFromSharing } from '../permissions/resolve';
+import { resolvePermissionsFromSharing, getUserPowerLevel } from '../permissions/resolve';
 import { MultiUserTestView } from './MultiUserTestView';
 import { RecycleBin, addDeletedSpace, isSpaceDeleted, removeDeletedSpace, getDeletedSpaces } from './RecycleBin';
 import { addArchivedSpace, isSpaceArchived, removeArchivedSpace, getArchivedSpaces } from './ArchivedSpaces';
@@ -511,6 +511,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   } | null>(null);
   const [connectionDetail, setConnectionDetail] = useState<string | null>(null);
   const [retryCount, setRetryCount] = useState(0);
+  const [spaceActionError, setSpaceActionError] = useState<string | null>(null);
   // Deferred loading flag — only show "Initializing store" after a short delay
   // so quick re-inits (cached stores) don't cause a visible blink.
   const [showStoreLoading, setShowStoreLoading] = useState(false);
@@ -563,15 +564,15 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   async function persistSpaceStatus(
     spaceTarget: string,
     status: 'active' | 'archived' | 'deleted',
-  ): Promise<void> {
+  ): Promise<boolean> {
     const client = matrixClientRef.current;
     const entry = mergedEntries.find((e) => e.spaceTarget === spaceTarget);
     const mainRoomId = spaceCacheRef.current.get(spaceTarget)?.mainRoomId || entry?.mainRoomId;
-    if (!client || !mainRoomId) return;
+    if (!client || !mainRoomId) return false;
 
     try {
       const currentConfig = getSpaceConfig(client as any, mainRoomId);
-      if (!currentConfig) return;
+      if (!currentConfig) return false;
 
       const updatedConfig = {
         ...currentConfig,
@@ -591,8 +592,10 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           // Best-effort mirror
         }
       }
+      return true;
     } catch (e) {
-      console.warn('[EO-DB] Failed to persist space status to Matrix — using localStorage fallback:', e);
+      console.warn('[EO-DB] Failed to persist space status to Matrix:', e);
+      return false;
     }
   }
 
@@ -634,8 +637,21 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   }
 
   // Archive a space: hide from browser, viewable in Settings
-  function handleArchiveSpace(spaceTarget: string) {
+  async function handleArchiveSpace(spaceTarget: string) {
+    const client = matrixClientRef.current;
     const entry = mergedEntries.find((e) => e.spaceTarget === spaceTarget);
+    const mainRoomId = spaceCacheRef.current.get(spaceTarget)?.mainRoomId || entry?.mainRoomId;
+
+    // Permission guard: only admins (pl >= 50) may archive a shared space
+    if (client && mainRoomId) {
+      const room = client.getRoom(mainRoomId);
+      if (room && getUserPowerLevel(room, session.userId) < 50) {
+        setSpaceActionError('Only admins (power level \u2265 50) can archive a space.');
+        return;
+      }
+    }
+
+    setSpaceActionError(null);
     addArchivedSpace({
       target: spaceTarget,
       name: entry?.displayName || formatSpaceName(spaceTarget.split('.').pop() || ''),
@@ -643,8 +659,17 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       archivedBy: session.userId,
       memberCount: entry?.memberCount || 0,
     });
-    // Persist to Matrix room state (async, best-effort)
-    persistSpaceStatus(spaceTarget, 'archived');
+
+    const ok = await persistSpaceStatus(spaceTarget, 'archived');
+    if (!ok) {
+      // Rollback optimistic localStorage write
+      removeArchivedSpace(spaceTarget);
+      setSpaceActionError('Could not archive space \u2014 insufficient permissions or connection error.');
+      setSpaces([...spaces]);
+      setSpaceEntries([...spaceEntries]);
+      return;
+    }
+
     if (selectedSpace === spaceTarget) {
       const remaining = mergedEntries.filter((e) => e.spaceTarget !== spaceTarget && !isSpaceDeleted(e.spaceTarget) && !isSpaceArchived(e.spaceTarget));
       if (remaining.length > 0) {
@@ -660,10 +685,26 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   }
 
   // Unarchive a space from settings
-  function handleUnarchiveSpace(target: string) {
+  async function handleUnarchiveSpace(target: string) {
+    setSpaceActionError(null);
     removeArchivedSpace(target);
-    // Persist to Matrix room state (async, best-effort)
-    persistSpaceStatus(target, 'active');
+
+    const ok = await persistSpaceStatus(target, 'active');
+    if (!ok) {
+      // Rollback optimistic localStorage write
+      addArchivedSpace({
+        target,
+        name: mergedEntries.find(e => e.spaceTarget === target)?.displayName || target,
+        archivedAt: Date.now(),
+        archivedBy: session.userId,
+        memberCount: mergedEntries.find(e => e.spaceTarget === target)?.memberCount || 0,
+      });
+      setSpaceActionError('Could not unarchive space \u2014 insufficient permissions or connection error.');
+      setSpaces([...spaces]);
+      setSpaceEntries([...spaceEntries]);
+      return;
+    }
+
     setSpaces([...spaces]);
     setSpaceEntries([...spaceEntries]);
     selectSpace(target);
@@ -935,6 +976,18 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
 
         setConnectionError(null);
         setConnectionDetail(null);
+
+        // Re-run space discovery whenever a space config state event changes so
+        // all connected clients reflect archive/unarchive/delete actions immediately.
+        const onSpaceConfigChange = (event: any) => {
+          if (event.getType?.() !== EO_SPACE_CONFIG_TYPE) return;
+          try {
+            const updated = discoverSpacesFromMatrix(client!);
+            setSpaceEntries(updated);
+          } catch { /* best effort */ }
+        };
+        client.on('RoomState.events' as any, onSpaceConfigChange);
+
         setMatrixReady(true);
       } catch (e) {
         console.warn('[EO-DB] startMatrix failed:', e);
@@ -972,6 +1025,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       window.removeEventListener('online', handleOnline);
       if (matrixClientRef.current) {
         matrixClientRef.current.removeAllListeners('sync' as any);
+        matrixClientRef.current.removeAllListeners('RoomState.events' as any);
         matrixClientRef.current.stopClient();
       }
       matrixClientRef.current = null;
@@ -1982,6 +2036,8 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                   console.warn('[EO-DB] knockRoom failed', e);
                 }
               }}
+              actionError={spaceActionError}
+              onDismissActionError={() => setSpaceActionError(null)}
             />
           )}
 

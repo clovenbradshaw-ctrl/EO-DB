@@ -43,6 +43,12 @@ export function isSpaceArchived(target: string): boolean {
 // ArchivedSpacesSection — inline component for SettingsView
 // ---------------------------------------------------------------------------
 
+function formatUserId(userId: string): string {
+  if (!userId) return 'Unknown';
+  const local = userId.startsWith('@') ? userId.slice(1).split(':')[0] : userId;
+  return local.charAt(0).toUpperCase() + local.slice(1);
+}
+
 function formatArchivedDate(ts: number): string {
   return new Date(ts).toLocaleDateString(undefined, {
     month: 'short',
@@ -93,6 +99,9 @@ export function ArchivedSpacesSection({ onUnarchive }: ArchivedSpacesSectionProp
                       <span style={s.metaTag}>{sp.memberCount} members</span>
                     )}
                     <span style={s.metaTag}>Archived {formatArchivedDate(sp.archivedAt)}</span>
+                    {sp.archivedBy && (
+                      <span style={s.metaTag}>by {formatUserId(sp.archivedBy)}</span>
+                    )}
                   </div>
                 </div>
                 <div style={s.actions}>
