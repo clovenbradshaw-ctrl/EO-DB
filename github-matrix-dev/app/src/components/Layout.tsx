@@ -1488,6 +1488,43 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           existing.gdriveSync.start().catch(e =>
             console.warn('[EO-DB] Google Drive sync restart failed for cached space', selectedSpace, e),
           );
+        } else if (selectedSpace && session.accessToken && matrixClientRef.current) {
+          // GDrive wasn't started on the first run (Matrix wasn't ready yet). Try now.
+          const gdriveState = useGDriveStore.getState();
+          if (!gdriveState.connected && gdriveState.syncMode === 'n8n') {
+            const capturedSpaceRoomId = spaceRoomId;
+            const capturedEntry = existing;
+            const spaceEntry = mergedEntries.find(e => e.spaceTarget === selectedSpace);
+            const spaceName = spaceEntry?.displayName ?? selectedSpace!;
+            gdriveState.connect(matrixClientRef.current, capturedSpaceRoomId ?? '', session.accessToken)
+              .then(() => {
+                if (isStale()) return;
+                const stateAfter = useGDriveStore.getState();
+                const effectiveToken = stateAfter.matrixAccessToken;
+                if (!effectiveToken) return;
+                useGDriveStore.getState().setCurrentSpace(selectedSpace!, spaceName, capturedSpaceRoomId ?? undefined);
+                const gs = new GDriveSyncService({
+                  store: useEoStore.getState().store!,
+                  spaceId: selectedSpace!,
+                  spaceName,
+                  userId: session.userId,
+                  sessionId: getSessionId(),
+                  accessToken: effectiveToken,
+                  spaceRoomId: capturedSpaceRoomId ?? undefined,
+                  onEvent: onFoldEvent,
+                  onHydrated: () => { init(capturedEntry.workerClient); },
+                });
+                capturedEntry.gdriveSync = gs;
+                useEoStore.getState().setGDriveSync(gs);
+                if (capturedEntry.peerSync) {
+                  const ps = capturedEntry.peerSync;
+                  gs.onOpSaved = (seq: number) => { ps.broadcastGDriveUpdate(seq).catch(() => {}); };
+                  ps.onGDriveUpdate = () => { gs.triggerImmediateCheck(); };
+                }
+                return gs.start();
+              })
+              .catch(e => console.warn('[EO-DB] GDrive lazy start failed for cached space', selectedSpace, e));
+          }
         }
 
         // Start a fresh presence instance for the cached space.
