@@ -226,14 +226,34 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     const { store } = get();
     if (!store) throw new Error('Store not initialized');
 
+    // Batch Zustand updates to avoid flooding React with one set() per event.
+    // With 3000+ imports, per-event set() triggers 3000+ re-render cycles on every
+    // lastSeq subscriber (TableView, HolonNav, Layout), freezing the browser and
+    // preventing the nav from settling to the correct final state.
+    const BATCH_SIZE = 50;
     const imported: EoEvent[] = [];
-    const lastSeq = await processEventsBulk(store, events, onProgress, (fullEvent) => {
+    let pendingBatch: EoEvent[] = [];
+
+    const flushBatch = () => {
+      if (pendingBatch.length === 0) return;
+      const toFlush = pendingBatch;
+      pendingBatch = [];
       set((state) => ({
-        recentEvents: [...state.recentEvents, fullEvent],
-        lastSeq: fullEvent.seq,
+        recentEvents: [...state.recentEvents, ...toFlush].slice(-100),
+        lastSeq: toFlush[toFlush.length - 1].seq,
       }));
+    };
+
+    const lastSeq = await processEventsBulk(store, events, onProgress, (fullEvent) => {
       imported.push(fullEvent);
+      pendingBatch.push(fullEvent);
+      if (pendingBatch.length >= BATCH_SIZE) flushBatch();
     });
+
+    // Drain any remaining events and do one final set() so HolonNav gets a clean
+    // lastSeq update after all events are committed — fixing nav auto-update.
+    flushBatch();
+    set((state) => ({ lastSeq: Math.max(state.lastSeq, lastSeq) }));
 
     const { gdriveSync } = get();
     if (gdriveSync && imported.length > 0) {
