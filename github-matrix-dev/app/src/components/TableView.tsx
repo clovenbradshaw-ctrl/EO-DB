@@ -2489,9 +2489,10 @@ function SortableColumnHeader({
 function makeStyles(t: Theme): Record<string, React.CSSProperties> {
   return {
     container: {
+      flex: 1,
+      minHeight: 0,
       display: 'flex',
       flexDirection: 'column',
-      height: '100%',
       background: t.bgCard,
     },
     toolbar: {

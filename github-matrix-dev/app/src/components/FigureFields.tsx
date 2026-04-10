@@ -43,6 +43,43 @@ export function FigureFields({ figure, onNavigate, profileFields, recordTs, allE
     return reconstructAt(value as Record<string, unknown>, allEvents, recordTs);
   }, [recordTs, allEvents, value]);
 
+  // Per-field history: walk DEF events oldest→newest, tracking every value each
+  // field has held. Used to render the compact "values over time" trail under
+  // each cell while time travel is active.
+  const fieldHistories = useMemo<Map<string, Array<{ ts: number; value: unknown }>>>(() => {
+    const out = new Map<string, Array<{ ts: number; value: unknown }>>();
+    if (!allEvents || allEvents.length === 0) return out;
+
+    const defs = allEvents
+      .filter((e) => e.op === 'DEF')
+      .slice()
+      .sort((a, b) => new Date(a.ts).getTime() - new Date(b.ts).getTime());
+
+    const push = (key: string, ts: number, v: unknown) => {
+      if (key.startsWith('_')) return;
+      const prior = out.get(key);
+      // Dedupe consecutive identical values so the trail stays compact.
+      if (prior && prior.length > 0 && JSON.stringify(prior[prior.length - 1].value) === JSON.stringify(v)) return;
+      if (!prior) out.set(key, [{ ts, value: v }]);
+      else prior.push({ ts, value: v });
+    };
+
+    for (const evt of defs) {
+      const ts = new Date(evt.ts).getTime();
+      const op = evt.operand as Record<string, unknown> | undefined;
+      if (!op || typeof op !== 'object') continue;
+      for (const [k, v] of Object.entries(op)) {
+        if (k === 'fields' && v && typeof v === 'object' && !Array.isArray(v)) {
+          // Flattened fields sub-object — treat each inner key as its own field
+          for (const [fk, fv] of Object.entries(v as Record<string, unknown>)) push(fk, ts, fv);
+        } else {
+          push(k, ts, v);
+        }
+      }
+    }
+    return out;
+  }, [allEvents]);
+
   const scopeRoot = figure.target.split('.')[0];
   const resolver = useIdResolver(scopeRoot);
 
@@ -484,6 +521,13 @@ export function FigureFields({ figure, onNavigate, profileFields, recordTs, allE
                 </>
               )}
             </div>
+            {isHistoric && (
+              <FieldHistoryTrail
+                history={fieldHistories.get(key) ?? []}
+                recordTs={recordTs ?? null}
+                theme={theme}
+              />
+            )}
           </div>
         );
       })}
@@ -628,6 +672,128 @@ function isObjectArray(val: unknown): val is Record<string, unknown>[] {
     Array.isArray(val) &&
     val.length > 0 &&
     val.every((v) => typeof v === 'object' && v !== null)
+  );
+}
+
+/**
+ * Render a compact "values over time" trail under a field cell while the
+ * per-record time-scrubber is active. Shows every distinct value the field
+ * has held with its timestamp; the entry at or just before `recordTs` is
+ * highlighted so the user can see which historical point they're looking at.
+ */
+function FieldHistoryTrail({
+  history,
+  recordTs,
+  theme: t,
+}: {
+  history: Array<{ ts: number; value: unknown }>;
+  recordTs: number | null;
+  theme: Theme;
+}) {
+  if (!history || history.length < 2) return null;
+
+  // Find the index of the entry whose ts is the latest <= recordTs
+  let activeIdx = -1;
+  if (recordTs != null) {
+    for (let i = 0; i < history.length; i++) {
+      if (history[i].ts <= recordTs) activeIdx = i;
+    }
+  }
+
+  const formatValue = (v: unknown): string => {
+    if (v === undefined) return '∅';
+    if (v === null) return 'null';
+    if (typeof v === 'string') return v;
+    if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+    try {
+      const s = JSON.stringify(v);
+      return s.length > 60 ? s.slice(0, 57) + '…' : s;
+    } catch {
+      return String(v);
+    }
+  };
+
+  const formatDate = (ts: number): string => {
+    const d = new Date(ts);
+    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: '2-digit' });
+  };
+
+  return (
+    <div
+      style={{
+        marginTop: 6,
+        paddingTop: 5,
+        borderTop: `1px dashed ${t.borderLight}`,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 2,
+      }}
+    >
+      <div
+        style={{
+          fontFamily: "'JetBrains Mono', monospace",
+          fontSize: 9,
+          letterSpacing: '0.06em',
+          textTransform: 'uppercase',
+          color: t.textMuted,
+          opacity: 0.7,
+          marginBottom: 1,
+        }}
+      >
+        values over time
+      </div>
+      {history.map((entry, i) => {
+        const isActive = i === activeIdx;
+        return (
+          <div
+            key={`${entry.ts}-${i}`}
+            style={{
+              display: 'flex',
+              alignItems: 'baseline',
+              gap: 6,
+              fontSize: 10,
+              fontFamily: "'JetBrains Mono', monospace",
+              color: isActive ? t.text : t.textMuted,
+              opacity: isActive ? 1 : 0.75,
+              lineHeight: 1.35,
+            }}
+          >
+            <span
+              style={{
+                width: 4,
+                height: 4,
+                borderRadius: '50%',
+                background: isActive ? t.accent : t.border,
+                flexShrink: 0,
+                alignSelf: 'center',
+              }}
+            />
+            <span
+              style={{
+                color: isActive ? t.accent : t.textMuted,
+                minWidth: 54,
+                flexShrink: 0,
+              }}
+            >
+              {formatDate(entry.ts)}
+            </span>
+            <span
+              style={{
+                flex: 1,
+                minWidth: 0,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+                fontWeight: isActive ? 500 : 400,
+              }}
+              title={formatValue(entry.value)}
+            >
+              {formatValue(entry.value)}
+            </span>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 

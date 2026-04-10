@@ -2454,7 +2454,11 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           })()}
         </aside>
 
-        <main style={s.main} key={selectedSpace ?? '__all__'}>
+        <main style={{
+          ...s.main,
+          background: roleTint ? roleTint.bg : themedBg.bg,
+          transition: 'background 0.5s cubic-bezier(.4,0,.2,1)',
+        }} key={selectedSpace ?? '__all__'}>
           {/* Time-travel indicator — fades in when Horizon slider is in the past */}
           {pastnessFraction > 0 && pastDateLabel && (
             <div style={{
@@ -2490,68 +2494,88 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                     onNavigate={(t) => navigate({ scope: t, record: null })}
                   />
                 ) : selectedScope ? (
-                  <>
-                    <SliceTabs
-                      openScopes={openScopes.length > 0 ? openScopes : [selectedScope]}
-                      activeScope={selectedScope}
-                      onSelectScope={(sc) => navigate({ view: 'records', scope: sc, record: null })}
-                      onCloseScope={(sc) => {
-                        sliceStore.closeScope(sc);
-                        if (sc === selectedScope) {
-                          const remaining = sliceStore.getOpenScopes();
-                          navigate({ scope: remaining[0] || null, record: null });
-                        }
-                      }}
-                      session={{ userId: session.userId }}
-                      activeUserType={activeUserType}
-                      userTypeDefinitions={spaceUserTypeDefinitions}
-                      canManageSlices={currentPermissions?.can_build_slices}
-                    />
-                    <ScopeBreadcrumb
-                      scope={selectedScope}
-                      allStates={allStates}
-                      theme={theme}
-                      onNavigate={(sc) => navigate({ view: 'records', scope: sc, record: null })}
-                    />
-                    {activeSliceType === 'schema' ? (
-                      <SchemaView
-                        scope={selectedScope}
-                      />
-                    ) : activeSliceType === 'graph' ? (
-                      <GraphView allStates={allStates} />
-                    ) : activeSliceType === 'grid' ? (
-                      <TableView
-                        scope={selectedScope}
-                        onSelectRecord={(rec) => navigate({ record: rec })}
-                        onEmptyScope={(parentScope) => navigate({ scope: parentScope, record: null })}
-                        activeRecord={selectedRecord}
+                  <div style={{
+                    flex: 1,
+                    minHeight: 0,
+                    minWidth: 0,
+                    display: 'flex',
+                    flexDirection: 'column' as const,
+                    padding: isMobile ? 0 : '14px 16px 16px',
+                  }}>
+                    <div style={{
+                      flex: 1,
+                      minHeight: 0,
+                      minWidth: 0,
+                      display: 'flex',
+                      flexDirection: 'column' as const,
+                      background: themedBg.bgCard,
+                      border: `1px solid ${themedBg.border}`,
+                      borderRadius: isMobile ? 0 : 10,
+                      overflow: 'hidden',
+                      boxShadow: isMobile ? 'none' : `0 1px 2px ${theme.shadow}, 0 4px 16px ${theme.shadow}`,
+                    }}>
+                      <SliceTabs
+                        openScopes={openScopes.length > 0 ? openScopes : [selectedScope]}
+                        activeScope={selectedScope}
+                        onSelectScope={(sc) => navigate({ view: 'records', scope: sc, record: null })}
+                        onCloseScope={(sc) => {
+                          sliceStore.closeScope(sc);
+                          if (sc === selectedScope) {
+                            const remaining = sliceStore.getOpenScopes();
+                            navigate({ scope: remaining[0] || null, record: null });
+                          }
+                        }}
                         session={{ userId: session.userId }}
-                        timeScrubberFilter={timeScrubberFilter}
-                        permissions={currentPermissions}
-                        onVisibleRecordTargets={setTableRecordTargets}
-                        sliceReadOnly={(() => {
-                          if (!activeUserType) return false;
-                          const sig = sliceSigs[selectedScope];
-                          if (!sig?.activeSliceId) return false;
-                          const sv = savedSlices[sig.activeSliceId];
-                          return sv?.readOnlyForTypes?.includes(activeUserType) ?? false;
-                        })()}
+                        activeUserType={activeUserType}
+                        userTypeDefinitions={spaceUserTypeDefinitions}
+                        canManageSlices={currentPermissions?.can_build_slices}
                       />
-                    ) : (
-                      <div style={{
-                        flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
-                        flexDirection: 'column' as const, gap: 8, color: theme.textMuted,
-                      }}>
-                        <div style={{ fontSize: 28, opacity: 0.3 }}>
-                          {activeSliceType === 'kanban' ? '\u25A5' : activeSliceType === 'calendar' ? '\u25F7' : '\u25A6'}
+                      <ScopeBreadcrumb
+                        scope={selectedScope}
+                        allStates={allStates}
+                        theme={theme}
+                        onNavigate={(sc) => navigate({ view: 'records', scope: sc, record: null })}
+                      />
+                      {activeSliceType === 'schema' ? (
+                        <SchemaView
+                          scope={selectedScope}
+                        />
+                      ) : activeSliceType === 'graph' ? (
+                        <GraphView allStates={allStates} />
+                      ) : activeSliceType === 'grid' ? (
+                        <TableView
+                          scope={selectedScope}
+                          onSelectRecord={(rec) => navigate({ record: rec })}
+                          onEmptyScope={(parentScope) => navigate({ scope: parentScope, record: null })}
+                          activeRecord={selectedRecord}
+                          session={{ userId: session.userId }}
+                          timeScrubberFilter={timeScrubberFilter}
+                          permissions={currentPermissions}
+                          onVisibleRecordTargets={setTableRecordTargets}
+                          sliceReadOnly={(() => {
+                            if (!activeUserType) return false;
+                            const sig = sliceSigs[selectedScope];
+                            if (!sig?.activeSliceId) return false;
+                            const sv = savedSlices[sig.activeSliceId];
+                            return sv?.readOnlyForTypes?.includes(activeUserType) ?? false;
+                          })()}
+                        />
+                      ) : (
+                        <div style={{
+                          flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          flexDirection: 'column' as const, gap: 8, color: theme.textMuted,
+                        }}>
+                          <div style={{ fontSize: 28, opacity: 0.3 }}>
+                            {activeSliceType === 'kanban' ? '\u25A5' : activeSliceType === 'calendar' ? '\u25F7' : '\u25A6'}
+                          </div>
+                          <div style={{ fontSize: 13, fontWeight: 500 }}>
+                            {activeSliceType.charAt(0).toUpperCase() + activeSliceType.slice(1)} slice
+                          </div>
+                          <div style={{ fontSize: 11, opacity: 0.7 }}>Coming soon</div>
                         </div>
-                        <div style={{ fontSize: 13, fontWeight: 500 }}>
-                          {activeSliceType.charAt(0).toUpperCase() + activeSliceType.slice(1)} slice
-                        </div>
-                        <div style={{ fontSize: 11, opacity: 0.7 }}>Coming soon</div>
-                      </div>
-                    )}
-                  </>
+                      )}
+                    </div>
+                  </div>
                 ) : (
                   <div style={s.empty}>
                     <div style={s.emptyIcon}>{'\u25A6'}</div>
