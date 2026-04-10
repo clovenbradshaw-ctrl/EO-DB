@@ -79,8 +79,9 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; target: string } | null>(null);
   const [typeSelector, setTypeSelector] = useState<{ x: number; y: number; target: string; currentType?: string } | null>(null);
   const [renaming, setRenaming] = useState<{ target: string; currentName: string } | null>(null);
-  /** When set, only this top-level entity type is shown (drill-down mode) */
-  const [focusedEntity, setFocusedEntity] = useState<string | null>(null);
+  /** Stack of table paths navigated into; last entry is the current focused table */
+  const [navStack, setNavStack] = useState<string[]>([]);
+  const focusedEntity = navStack.length > 0 ? navStack[navStack.length - 1] : null;
   const sliceStore = useSliceStore();
 
   // --- Inline record expansion state ---
@@ -188,7 +189,7 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
   // Reset expansion and drill-down when space changes; hydrate from cache
   useEffect(() => {
     setExpanded(new Set());
-    setFocusedEntity(null);
+    setNavStack([]);
     setShowCreateSlice(false);
     try {
       const raw = localStorage.getItem(navCacheKey(statePrefix));
@@ -405,7 +406,7 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
   }
 
 
-  function renderNode(node: TreeNode, depth: number, parentDisplayField?: string, isTopLevel?: boolean) {
+  function renderNode(node: TreeNode, depth: number, parentDisplayField?: string) {
     const isActive = selectedScope === node.fullPath;
     const isExpanded = expanded.has(node.fullPath);
     const hasChildren = node.children.length > 0;
@@ -423,10 +424,11 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
             // Default to grid view when clicking a collection
             sliceStore.resetToDefault(node.fullPath);
             sliceStore.openScope(node.fullPath);
-            // Drill-down: clicking a top-level entity focuses it
-            if (isTopLevel && !focusedEntity) {
-              setFocusedEntity(node.fullPath);
-            }
+            // Drill-down: navigate into this table
+            setNavStack(prev => {
+              if (prev[prev.length - 1] === node.fullPath) return prev;
+              return [...prev, node.fullPath];
+            });
           }}
           onContextMenu={(e) => handleContextMenu(e, node.fullPath)}
         >
@@ -517,14 +519,26 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
 
         {/* Children — pass this node's _displayField so children can resolve names */}
         {isExpanded && node.children.map(child =>
-          renderNode(child, depth + 1, node.state?.value?._displayField, false)
+          renderNode(child, depth + 1, node.state?.value?._displayField)
         )}
       </div>
     );
   }
 
-  // Find the focused top-level node
-  const focusedNode = focusedEntity ? tree.find(n => n.fullPath === focusedEntity) : null;
+  // Find a node at any depth in the tree
+  function findNodeInTree(nodes: TreeNode[], fullPath: string): TreeNode | null {
+    for (const n of nodes) {
+      if (n.fullPath === fullPath) return n;
+      if (fullPath.startsWith(n.fullPath + '.')) {
+        const found = findNodeInTree(n.children, fullPath);
+        if (found) return found;
+      }
+    }
+    return null;
+  }
+
+  // Find the focused node (may be at any depth)
+  const focusedNode = focusedEntity ? findNodeInTree(tree, focusedEntity) : null;
 
   // Partition top-level nodes into folders vs ungrouped
   const sortedFolders = useMemo(() =>
@@ -566,7 +580,7 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
           <span style={s.folderName}>{folder.name}</span>
           <span style={s.count}>{memberNodes.length}</span>
         </div>
-        {isFolderExpanded && memberNodes.map(node => renderNode(node, 1, undefined, true))}
+        {isFolderExpanded && memberNodes.map(node => renderNode(node, 1))}
       </div>
     );
   }
@@ -592,12 +606,12 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
                 fontSize: 11,
                 gap: 4,
               }}
-              onClick={() => setFocusedEntity(null)}
+              onClick={() => setNavStack(prev => prev.slice(0, -1))}
             >
               <span style={{ fontSize: 10 }}>{'\u2190'}</span>
-              <span>All records</span>
+              <span>{navStack.length > 1 ? 'Back' : 'All records'}</span>
             </div>
-            {renderNode(focusedNode, 0, undefined, false)}
+            {renderNode(focusedNode, 0)}
 
             {/* + New slice button / inline form */}
             {!showCreateSlice ? (
@@ -721,7 +735,7 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
             )}
 
             {/* Ungrouped tables */}
-            {ungroupedNodes.map(node => renderNode(node, 0, undefined, true))}
+            {ungroupedNodes.map(node => renderNode(node, 0))}
           </>
         )}
       </div>
