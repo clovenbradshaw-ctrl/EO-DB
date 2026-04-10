@@ -49,6 +49,7 @@ import {
   gdriveRetrieve,
   deriveSpaceFileGuid,
   setActiveSpaceRoomId,
+  clearFolderCacheForDataType,
 } from './gdrive-api';
 import type { GDriveListEntry } from './gdrive-api';
 import { processEvent } from '../db/fold';
@@ -270,6 +271,14 @@ export class GDriveSyncService {
   async start(): Promise<void> {
     if (this.timer) return;
     this.activateSpaceRoom();
+
+    // Always clear the Drive folder cache for this space on startup.
+    // This detects mid-session folder deletions: if the Drive folder was removed
+    // since last session, resolveDataFolder will re-find (or recreate) it rather
+    // than returning a stale cached ID that silently fails all writes.
+    clearFolderCacheForDataType(this.dataType);
+    const legacy = this.legacyDataType;
+    if (legacy) clearFolderCacheForDataType(legacy);
 
     // Derive stable GUIDs from spaceId so all space members use the same filenames.
     const [logGuid, recentGuid, manifestGuid, rLogGuid, rRecentGuid, aLogGuid, aRecentGuid] =
@@ -1090,6 +1099,18 @@ export class GDriveSyncService {
     console.log('[EO-DB] hydrateFromGDrive: starting, dataType =', dataType);
     const localSeq = await store.getCurrentSeq();
     let lastAppliedSeq = localSeq;
+
+    // ── 0. Quick folder scan — skip all downloads if the folder is empty ──────
+    // One Drive query costs ~2–3 n8n calls. Skipping 6 individual file-lookup
+    // attempts saves ~6 n8n calls when the folder is newly created or empty
+    // (e.g., after the user deleted the Drive folder and it was just recreated).
+    {
+      const { entries: quickScan } = await gdriveListByPrefix(accessToken, dataType, '').catch(() => ({ entries: [] as GDriveListEntry[] }));
+      if (quickScan.length === 0) {
+        console.log('[EO-DB] hydrateFromGDrive: folder is empty, skipping file downloads');
+        return lastAppliedSeq;
+      }
+    }
 
     const decrypt = async (raw: Uint8Array): Promise<Uint8Array> =>
       keyring ? decryptSnapshot(raw, keyring).catch(() => raw) : raw;
