@@ -1897,18 +1897,9 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                             ...(cellOverflow === 'clip'
                               ? { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', wordBreak: 'normal' as const }
                               : { whiteSpace: 'normal', wordBreak: 'break-word' as const }),
-                            ...(isEditableCol && !isEditingThis ? { cursor: 'text' } : {}),
                           }}
-                          title={
-                            isEditableCol && !isEditingThis ? 'Double-click to edit · right-click for options' :
-                            col.key === '_record' ? 'Click to open record' :
-                            undefined
-                          }
-                          onClick={isEditableCol ? (e) => e.stopPropagation() : undefined}
-                          onDoubleClick={isEditableCol ? (e) => {
-                            e.stopPropagation();
-                            handleCellDoubleClick(rec, col.key);
-                          } : col.key === '_record' ? (e) => {
+                          title={col.key === '_record' ? 'Click to open record' : undefined}
+                          onDoubleClick={col.key === '_record' ? (e) => {
                             e.stopPropagation();
                             onSelectRecord(rec.target);
                           } : undefined}
@@ -2028,14 +2019,25 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                             : isLocked
                             ? <LockedCell>{renderCell(getFieldValue(rec, col.key, useFieldsSub), col.key, onSelectRecord, theme, idResolver, col.type)}</LockedCell>
                             : isEditableCol
-                            ? <span style={{
-                                display: 'inline-block',
-                                background: theme.mode === 'dark' ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.03)',
-                                borderRadius: 3,
-                                padding: '1px 4px',
-                                margin: '-1px -4px',
-                                minWidth: 8,
-                              }}>{renderCell(getFieldValue(rec, col.key, useFieldsSub), col.key, onSelectRecord, theme, idResolver, col.type)}</span>
+                            ? <span
+                                style={{
+                                  display: 'inline-block',
+                                  background: theme.mode === 'dark' ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.05)',
+                                  borderRadius: 3,
+                                  padding: '2px 6px',
+                                  minWidth: 80,
+                                  minHeight: 20,
+                                  cursor: 'text',
+                                  boxSizing: 'border-box' as const,
+                                  verticalAlign: 'middle',
+                                }}
+                                title="Double-click to edit · right-click for options"
+                                onClick={(e) => e.stopPropagation()}
+                                onDoubleClick={(e) => {
+                                  e.stopPropagation();
+                                  handleCellDoubleClick(rec, col.key);
+                                }}
+                              >{renderCell(getFieldValue(rec, col.key, useFieldsSub), col.key, onSelectRecord, theme, idResolver, col.type)}</span>
                             : renderCell(getFieldValue(rec, col.key, useFieldsSub), col.key, onSelectRecord, theme, idResolver, col.type)
                           }
                         </td>
