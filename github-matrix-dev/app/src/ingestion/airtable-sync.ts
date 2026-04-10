@@ -488,8 +488,14 @@ async function syncTable(
   const tableState = await getState(store, tableTarget(baseId, tableId));
   const displayField: string | undefined = tableState?.value?._displayField;
 
-  const filterByFormula = cursorSince
-    ? `LAST_MODIFIED_TIME()>='${cursorSince}'`
+  // Subtract a 60-second overlap window from the cursor to catch records
+  // modified during clock skew or during the previous sync.
+  // Idempotency handles any re-fetched duplicates from the overlap.
+  const filterCursor = cursorSince
+    ? new Date(new Date(cursorSince).getTime() - 60_000).toISOString()
+    : undefined;
+  const filterByFormula = filterCursor
+    ? `LAST_MODIFIED_TIME()>='${filterCursor}'`
     : undefined;
 
   const useFieldIds = fieldMeta.size > 0;
