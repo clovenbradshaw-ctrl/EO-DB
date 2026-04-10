@@ -12,6 +12,7 @@ import { ArchivedSpacesSection } from './ArchivedSpaces';
 import { AirtableSettingsSection } from './AirtableSettings';
 import { useGDriveStore } from '../google-drive/gdrive-store';
 import { useEoServerStore } from '../store/eo-server-store';
+import { clearTokens } from '../google-drive/gdrive-oauth';
 
 interface SettingsViewProps {
   session: MatrixSession;
@@ -61,6 +62,8 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
   const [serverUrlInput, setServerUrlInput] = useState(serverUrl || '');
   const gdriveToken = useGDriveStore((s) => s.googleAccessToken);
   const gdriveOffline = useGDriveStore((s) => s.gdriveOffline);
+  const gdriveSyncMode = useGDriveStore((s) => s.syncMode);
+  const setGdriveSyncMode = useGDriveStore((s) => s.setSyncMode);
   const [gdriveTestStatus, setGdriveTestStatus] = useState<string | null>(null);
   const [gdriveTestLoading, setGdriveTestLoading] = useState(false);
 
@@ -74,29 +77,53 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
     }
   }
 
+  const matrixAccessToken = useGDriveStore((s) => s.matrixAccessToken);
+
   const handleTestGDrive = useCallback(async () => {
-    const token = gdriveToken;
-    if (!token) { setGdriveTestStatus('✗ Not connected to Google Drive'); return; }
     setGdriveTestLoading(true);
     setGdriveTestStatus(null);
     try {
-      const res = await fetch('https://www.googleapis.com/drive/v3/about?fields=user', {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (res.ok) {
-        const data = await res.json();
-        const email = data?.user?.emailAddress ?? 'unknown';
-        setGdriveTestStatus(`✓ Connected as ${email}`);
+      if (gdriveSyncMode === 'oauth') {
+        const token = gdriveToken;
+        if (!token) { setGdriveTestStatus('✗ Not connected (no OAuth token)'); return; }
+        const res = await fetch('https://www.googleapis.com/drive/v3/about?fields=user', {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (res.ok) {
+          const data = await res.json();
+          const email = data?.user?.emailAddress ?? 'unknown';
+          setGdriveTestStatus(`✓ Connected as ${email}`);
+        } else {
+          const text = await res.text().catch(() => String(res.status));
+          setGdriveTestStatus(`✗ Failed: ${text.slice(0, 120)}`);
+        }
       } else {
-        const text = await res.text().catch(() => String(res.status));
-        setGdriveTestStatus(`✗ Failed: ${text.slice(0, 120)}`);
+        // n8n mode — ping the proxy endpoint with the Matrix token
+        const token = matrixAccessToken;
+        if (!token) { setGdriveTestStatus('✗ Not connected (no Matrix token)'); return; }
+        const res = await fetch('https://n8n.intelechia.com/webhook/eo-store', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            matrix_token: token,
+            drive_url: 'https://www.googleapis.com/drive/v3/about?fields=user',
+            drive_method: 'GET',
+          }),
+        });
+        if (res.ok) {
+          const data = await res.json().catch(() => ({}));
+          const email = data?.user?.emailAddress ?? 'proxy';
+          setGdriveTestStatus(`✓ n8n proxy connected (${email})`);
+        } else {
+          setGdriveTestStatus(`✗ n8n proxy error: ${res.status}`);
+        }
       }
     } catch (e: any) {
       setGdriveTestStatus(`✗ Failed: ${e.message}`);
     } finally {
       setGdriveTestLoading(false);
     }
-  }, [gdriveToken]);
+  }, [gdriveToken, matrixAccessToken, gdriveSyncMode]);
 
 
 
@@ -374,6 +401,36 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
         {/* Google Drive Cloud Storage */}
         <Section title="Google Drive Storage" theme={theme}>
           <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 10 }}>
+            {/* Drive Sync Mode selector */}
+            <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 6 }}>
+              <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, fontWeight: 700, textTransform: 'uppercase' as const, letterSpacing: '0.06em', color: theme.textMuted }}>
+                Drive Sync Mode
+              </span>
+              <div style={{ display: 'flex', gap: 6 }}>
+                {(['n8n', 'oauth'] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    style={{
+                      ...s.actionBtn,
+                      background: gdriveSyncMode === mode ? theme.accent : 'transparent',
+                      color: gdriveSyncMode === mode ? '#fff' : theme.textMuted,
+                      borderColor: gdriveSyncMode === mode ? theme.accent : theme.border,
+                    }}
+                    onClick={() => {
+                      if (mode === 'oauth') clearTokens();
+                      setGdriveSyncMode(mode);
+                    }}
+                  >
+                    {mode === 'n8n' ? 'n8n Proxy' : 'Google OAuth'}
+                  </button>
+                ))}
+              </div>
+              <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, color: theme.textMuted }}>
+                {gdriveSyncMode === 'n8n'
+                  ? 'Drive requests are proxied through n8n using its own Google credentials — no Google account needed.'
+                  : 'Each user authenticates with their own Google account via OAuth2 (PKCE). Requires VITE_GOOGLE_CLIENT_ID.'}
+              </span>
+            </div>
             {gdriveOffline && (
               <div style={{
                 padding: '6px 10px',

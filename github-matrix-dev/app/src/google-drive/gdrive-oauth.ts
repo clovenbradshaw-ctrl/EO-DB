@@ -72,7 +72,10 @@ async function generateCodeChallenge(verifier: string): Promise<string> {
 // Auth URL
 // ──────────────────────────────────────────────────────────────
 
-async function buildAuthUrl(): Promise<{ url: string; verifier: string }> {
+async function buildAuthUrl(mode: 'popup' | 'redirect'): Promise<{ url: string; verifier: string }> {
+  if (!_clientId) {
+    throw new Error('[EO-DB] Google OAuth not initialised — call initGoogleOAuth() first');
+  }
   const verifier = await generateCodeVerifier();
   const challenge = await generateCodeChallenge(verifier);
   const params = new URLSearchParams({
@@ -84,6 +87,7 @@ async function buildAuthUrl(): Promise<{ url: string; verifier: string }> {
     code_challenge_method: 'S256',
     access_type: 'offline',
     prompt: 'consent',
+    state: mode,
   });
   return { url: `${GOOGLE_AUTH_ENDPOINT}?${params}`, verifier };
 }
@@ -211,12 +215,20 @@ export async function handleOAuthCallback(): Promise<boolean> {
     await exchangeCode(code, verifier);
     localStorage.removeItem(SS_CODE_VERIFIER);
 
-    // If we are inside a popup, signal the opener and close
-    if (window.opener && !window.opener.closed) {
-      window.opener.postMessage(
-        { type: 'eo-gdrive-oauth-success' },
-        window.location.origin,
-      );
+    // Use state param to reliably detect popup vs redirect flow.
+    // window.opener is cleared by many browsers after cross-origin navigation
+    // so it is NOT a reliable signal — state survives the round-trip.
+    const state = params.get('state');
+    const isPopup = state === 'popup';
+
+    if (isPopup) {
+      // Notify opener if it's still reachable, then always close.
+      if (window.opener && !window.opener.closed) {
+        window.opener.postMessage(
+          { type: 'eo-gdrive-oauth-success' },
+          window.location.origin,
+        );
+      }
       window.close();
       return true;
     }
@@ -253,7 +265,7 @@ export async function handleOAuthCallback(): Promise<boolean> {
 export async function startOAuthFlow(): Promise<void> {
   if (isConnected()) return;
 
-  const { url, verifier } = await buildAuthUrl();
+  const { url, verifier } = await buildAuthUrl('popup');
   localStorage.setItem(SS_CODE_VERIFIER, verifier);
 
   // ── Attempt popup ──────────────────────────────────────────
@@ -278,12 +290,14 @@ export async function startOAuthFlow(): Promise<void> {
       function onInterval() {
         if (!popup || popup.closed) {
           cleanup();
-          // If tokens were stored the user completed the flow
-          if (isConnected()) {
-            resolve();
-          } else {
-            reject(new Error('Google Drive sign-in was cancelled'));
-          }
+          if (isConnected()) resolve();
+          else reject(new Error('Google Drive sign-in was cancelled'));
+        } else if (isConnected()) {
+          // Tokens landed in localStorage (handleOAuthCallback ran in the popup).
+          // Close the popup and resolve — don't wait for popup.closed.
+          cleanup();
+          try { popup.close(); } catch { /* ignore */ }
+          resolve();
         }
       }
 
@@ -302,8 +316,11 @@ export async function startOAuthFlow(): Promise<void> {
   }
 
   // ── Popup blocked — fall back to redirect ─────────────────
+  // Regenerate URL with redirect state so handleOAuthCallback knows not to close.
+  const { url: redirectUrl, verifier: redirectVerifier } = await buildAuthUrl('redirect');
+  localStorage.setItem(SS_CODE_VERIFIER, redirectVerifier);
   sessionStorage.setItem(SS_PENDING_ROUTE, window.location.hash || '#/');
-  window.location.href = url;
+  window.location.href = redirectUrl;
   // Page navigates away — execution stops here.
   // handleOAuthCallback() will be called when the user returns.
   await new Promise<void>(() => { /* never resolves — page is navigating */ });

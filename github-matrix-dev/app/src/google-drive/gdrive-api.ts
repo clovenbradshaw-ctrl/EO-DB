@@ -20,16 +20,162 @@
 
 import type { MatrixClient } from 'matrix-js-sdk';
 import {
-  driveGet,
-  driveMutation,
-  driveUploadBinary,
-  driveUploadMultipart,
-  driveDownloadBinary,
+  driveGet as _driveGet,
+  driveMutation as _driveMutation,
+  driveUploadBinary as _driveUploadBinary,
+  driveUploadMultipart as _driveUploadMultipart,
+  driveDownloadBinary as _driveDownloadBinary,
   driveShareAnyone,
 } from './gdrive-direct';
 import { readFolderState, publishFolderState } from './gdrive-folder-state';
 
 const DRIVE_API = 'https://www.googleapis.com/drive/v3/files';
+const EO_STORE_WEBHOOK = 'https://n8n.intelechia.com/webhook/eo-store';
+
+// ──────────────────────────────────────────────────────────────
+// Sync-mode switching — n8n proxy (default) or direct OAuth
+// ──────────────────────────────────────────────────────────────
+
+let _syncMode: 'n8n' | 'oauth' = 'n8n';
+let _activeSpaceRoomId: string | undefined;
+
+/** Set the transport mode. Call whenever the user changes Drive Sync Mode in Settings. */
+export function setSyncMode(mode: 'n8n' | 'oauth'): void {
+  _syncMode = mode;
+}
+
+/**
+ * Set the current space's Matrix main room ID for n8n membership verification.
+ * Call whenever the user opens or switches spaces.
+ */
+export function setActiveSpaceRoomId(roomId: string | undefined): void {
+  _activeSpaceRoomId = roomId;
+}
+
+// ──────────────────────────────────────────────────────────────
+// n8n proxy helpers (base64 binary transport)
+// ──────────────────────────────────────────────────────────────
+
+function uint8ToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary);
+}
+
+function base64ToUint8(b64: string): Uint8Array {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+async function driveProxy(
+  matrixToken: string,
+  driveUrl: string,
+  driveMethod = 'GET',
+  driveBody?: Record<string, unknown> | null,
+  spaceRoomId?: string,
+): Promise<any> {
+  const res = await fetch(EO_STORE_WEBHOOK, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      matrix_token: matrixToken,
+      drive_url: driveUrl,
+      drive_method: driveMethod,
+      ...(spaceRoomId ? { space_room_id: spaceRoomId } : {}),
+      ...(driveBody ? { drive_body: driveBody } : {}),
+    }),
+  });
+  const text = await res.text();
+  if (res.status === 401) throw new Error('Unauthorized — Matrix token invalid or expired');
+  if (res.status === 403) throw new Error('Forbidden — not a member of this space');
+  if (!text) return {};
+  return JSON.parse(text);
+}
+
+// ──────────────────────────────────────────────────────────────
+// Mode-dispatching transport wrappers
+// ──────────────────────────────────────────────────────────────
+
+async function driveGet(token: string, url: string): Promise<any> {
+  if (_syncMode === 'n8n') return driveProxy(token, url, 'GET', null, _activeSpaceRoomId);
+  return _driveGet(token, url);
+}
+
+async function driveMutation(
+  token: string,
+  url: string,
+  method: string,
+  body?: Record<string, unknown> | null,
+): Promise<any> {
+  if (_syncMode === 'n8n') return driveProxy(token, url, method, body ?? null, _activeSpaceRoomId);
+  return _driveMutation(token, url, method, body ?? undefined);
+}
+
+async function driveUploadBinary(
+  token: string,
+  fileId: string,
+  binary: Uint8Array,
+  mimeType = 'application/octet-stream',
+): Promise<void> {
+  if (_syncMode === 'n8n') {
+    const uploadUrl = `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`;
+    await driveProxy(token, uploadUrl, 'PATCH', {
+      _raw_content_base64: uint8ToBase64(binary),
+      _content_type: mimeType,
+    }, _activeSpaceRoomId);
+    return;
+  }
+  return _driveUploadBinary(token, fileId, binary, mimeType);
+}
+
+async function driveUploadMultipart(
+  token: string,
+  metadata: Record<string, unknown>,
+  binary: Uint8Array,
+  mimeType = 'application/octet-stream',
+): Promise<{ id: string }> {
+  if (_syncMode === 'n8n') {
+    const created = await driveProxy(token, DRIVE_API, 'POST', metadata, _activeSpaceRoomId);
+    const uploadUrl = `https://www.googleapis.com/upload/drive/v3/files/${created.id}?uploadType=media`;
+    await driveProxy(token, uploadUrl, 'PATCH', {
+      _raw_content_base64: uint8ToBase64(binary),
+      _content_type: mimeType,
+    }, _activeSpaceRoomId);
+    return created;
+  }
+  return _driveUploadMultipart(token, metadata, binary, mimeType);
+}
+
+async function driveDownloadBinary(
+  token: string,
+  fileId: string,
+  rangeHeader?: string,
+): Promise<{ data: Uint8Array; contentRange?: string }> {
+  if (_syncMode === 'n8n') {
+    const downloadUrl = `${DRIVE_API}/${fileId}?alt=media`;
+    if (rangeHeader) {
+      const res = await fetch(EO_STORE_WEBHOOK, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Range': rangeHeader },
+        body: JSON.stringify({
+          matrix_token: token,
+          drive_url: downloadUrl,
+          drive_method: 'GET',
+        }),
+      });
+      if (!res.ok && res.status !== 206) throw new Error(`Range request failed: ${res.status}`);
+      const buffer = await res.arrayBuffer();
+      return { data: new Uint8Array(buffer), contentRange: res.headers.get('Content-Range') ?? undefined };
+    }
+    const content = await driveProxy(token, downloadUrl, 'GET', null, _activeSpaceRoomId);
+    const b64 = content._raw_content_base64 || content;
+    const data = typeof b64 === 'string' ? base64ToUint8(b64) : (b64 as Uint8Array);
+    return { data };
+  }
+  return _driveDownloadBinary(token, fileId, rangeHeader);
+}
 
 // ──────────────────────────────────────────────────────────────
 // Types
@@ -156,10 +302,12 @@ export async function resolveSpaceFolder(
     return fromRoomState;
   }
 
-  // First-time setup: create the folder, share it, publish to room state
+  // First-time setup: create the folder, share it (OAuth mode only), publish to room state
   const rootId = await ensureFolder(token, 'EO-DB');
   const folderId = await ensureFolder(token, dataType, rootId);
-  await driveShareAnyone(token, folderId);
+  // In n8n mode the proxy owns the Drive OAuth credentials, so sharing is
+  // already implicit — skip driveShareAnyone (which requires a Google token).
+  if (_syncMode === 'oauth') await driveShareAnyone(token, folderId);
   // Extract spaceId from dataType (convention: "eodb-{spaceId}")
   const spaceId = dataType.startsWith('eodb-') ? dataType.slice('eodb-'.length) : dataType;
   await publishFolderState(matrixClient, mainRoomId, spaceId, folderId).catch(e => {

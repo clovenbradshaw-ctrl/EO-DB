@@ -48,6 +48,7 @@ import {
   gdriveRetrieveRange,
   gdriveRetrieve,
   deriveSpaceFileGuid,
+  setActiveSpaceRoomId,
 } from './gdrive-api';
 import type { GDriveListEntry } from './gdrive-api';
 import { processEvent } from '../db/fold';
@@ -140,7 +141,7 @@ export class GDriveSyncService {
   private spaceName: string;
   private userId: string;
   private sessionId: string;
-  private googleAccessToken: string;
+  private accessToken: string;
   private keyring: LocalKeyring;
   /** Matrix main room ID for this space. */
   private spaceRoomId: string | undefined;
@@ -163,7 +164,7 @@ export class GDriveSyncService {
     spaceName: string;
     userId: string;
     sessionId?: string;
-    googleAccessToken: string;
+    accessToken: string;
     /** Matrix main room ID for this space. */
     spaceRoomId?: string;
     keyring?: LocalKeyring;
@@ -175,7 +176,7 @@ export class GDriveSyncService {
     this.spaceName = opts.spaceName;
     this.userId = opts.userId;
     this.sessionId = opts.sessionId ?? Math.random().toString(36).slice(2, 10);
-    this.googleAccessToken = opts.googleAccessToken;
+    this.accessToken = opts.accessToken;
     this.spaceRoomId = opts.spaceRoomId;
     this.keyring = opts.keyring || { keys: new Map() };
     this.onEvent = opts.onEvent;
@@ -248,10 +249,20 @@ export class GDriveSyncService {
     return decryptSnapshot(binary, this.keyring).catch(() => binary);
   }
 
+  /**
+   * Register this space's room ID as the active room for n8n membership checks.
+   * Must be called before any Drive API operation in n8n mode so the proxy can
+   * verify the authenticated user is a member of THIS space's room.
+   */
+  private activateSpaceRoom(): void {
+    setActiveSpaceRoomId(this.spaceRoomId);
+  }
+
   // ── Lifecycle ──────────────────────────────────────────────
 
   async start(): Promise<void> {
     if (this.timer) return;
+    this.activateSpaceRoom();
 
     // Derive stable GUIDs from spaceId so all space members use the same filenames.
     const [logGuid, recentGuid, manifestGuid, rLogGuid, rRecentGuid, aLogGuid, aRecentGuid] =
@@ -279,7 +290,7 @@ export class GDriveSyncService {
     try {
       this.onStatus?.('syncing');
       const hydratedSeq = await GDriveSyncService.hydrateFromGDrive(
-        this.store, this.googleAccessToken, dt, this.onEvent, this.keyring,
+        this.store, this.accessToken, dt, this.onEvent, this.keyring,
         {
           log: this.logFile,
           recent: this.recentFile,
@@ -299,7 +310,7 @@ export class GDriveSyncService {
       if (localSeq > 0) {
         let gdriveHasData = false;
         try {
-          const manifest = await gdriveReadJson(this.googleAccessToken, dt, this.manifestFile);
+          const manifest = await gdriveReadJson(this.accessToken, dt, this.manifestFile);
           gdriveHasData = !!manifest && (manifest as unknown as SyncManifest).head_seq > 0;
         } catch { /* manifest may not exist */ }
         if (!gdriveHasData) {
@@ -413,7 +424,7 @@ export class GDriveSyncService {
     ): Promise<{ lastSeq: number; fromSeq: number }> => {
       let remote: EoEvent[] = [];
       try {
-        const r = await gdriveRetrieveNamed(this.googleAccessToken, dt, remoteFile);
+        const r = await gdriveRetrieveNamed(this.accessToken, dt, remoteFile);
         if (r?.ok) remote = safeUnpackEvents(await this.decryptBinary(r.data));
       } catch { /* remote file may not exist yet */ }
 
@@ -438,7 +449,7 @@ export class GDriveSyncService {
           prev_snapshots: [],
         };
         const encrypted = await this.encryptBinaryForTier(packEodb(file), tier);
-        await gdriveStoreNamed(this.googleAccessToken, encrypted, dt, remoteFile);
+        await gdriveStoreNamed(this.accessToken, encrypted, dt, remoteFile);
       }
 
       return {
@@ -463,7 +474,7 @@ export class GDriveSyncService {
     let logSizeBytes = 0;
     let checkpoints: SyncManifest['checkpoints'] = [];
     try {
-      const existing = await gdriveReadJson(this.googleAccessToken, dt, this.manifestFile);
+      const existing = await gdriveReadJson(this.accessToken, dt, this.manifestFile);
       if (existing) {
         const m = existing as unknown as SyncManifest;
         logSizeBytes = m.log_size_bytes ?? 0;
@@ -480,7 +491,7 @@ export class GDriveSyncService {
       updated_at: new Date().toISOString(),
     };
     await gdriveStoreJson(
-      this.googleAccessToken, dt, this.manifestFile,
+      this.accessToken, dt, this.manifestFile,
       manifest as unknown as Record<string, unknown>,
     );
 
@@ -540,7 +551,7 @@ export class GDriveSyncService {
     const binary = packEodb(logFile);
     const encrypted = await this.encryptBinary(binary);
 
-    await gdriveStoreNamed(this.googleAccessToken, encrypted, dt, this.logFile);
+    await gdriveStoreNamed(this.accessToken, encrypted, dt, this.logFile);
     console.log(`[EO-DB] fullPushToGDrive: wrote ${this.logFile} (${events.length} events)`);
 
     // Write empty recent buffer
@@ -558,7 +569,7 @@ export class GDriveSyncService {
     };
     const emptyBinary = packEodb(emptyFile);
     const emptyEncrypted = await this.encryptBinary(emptyBinary);
-    await gdriveStoreNamed(this.googleAccessToken, emptyEncrypted, dt, this.recentFile);
+    await gdriveStoreNamed(this.accessToken, emptyEncrypted, dt, this.recentFile);
 
     // Update manifest
     const manifest: SyncManifest = {
@@ -570,7 +581,7 @@ export class GDriveSyncService {
       updated_at: new Date().toISOString(),
     };
     await gdriveStoreJson(
-      this.googleAccessToken, dt, this.manifestFile,
+      this.accessToken, dt, this.manifestFile,
       manifest as unknown as Record<string, unknown>,
     );
 
@@ -599,7 +610,7 @@ export class GDriveSyncService {
     const merged = new Map<string, EoEvent>();
     for (const { file } of tiers) {
       try {
-        const result = await gdriveRetrieveNamed(this.googleAccessToken, dt, file);
+        const result = await gdriveRetrieveNamed(this.accessToken, dt, file);
         if (!result?.ok) continue;
         const data = await this.decryptBinary(result.data);
         for (const e of safeUnpackEvents(data)) {
@@ -623,7 +634,7 @@ export class GDriveSyncService {
     const votedAt = new Date().toISOString();
 
     try {
-      await gdriveStoreJson(this.googleAccessToken, dt, intentFileName, {
+      await gdriveStoreJson(this.accessToken, dt, intentFileName, {
         voter: this.userId,
         voted_at: votedAt,
         op_count: this.opsBuffer.length,
@@ -631,13 +642,13 @@ export class GDriveSyncService {
       console.log('[EO-DB] GDrive bake hand raised');
       await sleep(BAKE_VOTE_GRACE_MS);
 
-      const { entries } = await gdriveListByPrefix(this.googleAccessToken, dt, 'bake-intent-');
+      const { entries } = await gdriveListByPrefix(this.accessToken, dt, 'bake-intent-');
       const now = Date.now();
       const validIntents: Array<{ voter: string; voted_at: string; fileId: string }> = [];
 
       for (const entry of entries) {
         try {
-          const result = await gdriveRetrieve(this.googleAccessToken, entry.content_hash);
+          const result = await gdriveRetrieve(this.accessToken, entry.content_hash);
           if (!result.ok || !result.envelope) continue;
           let parsed: Record<string, unknown>;
           if (result.envelope instanceof Uint8Array) {
@@ -671,7 +682,7 @@ export class GDriveSyncService {
         console.log(`[EO-DB] GDrive bake: ${winner.voter} won, standing down`);
         try {
           const myEntry = entries.find(e => e.name === intentFileName);
-          if (myEntry) await gdriveDeleteFile(this.googleAccessToken, myEntry.data_id);
+          if (myEntry) await gdriveDeleteFile(this.accessToken, myEntry.data_id);
         } catch { /* non-critical */ }
         this.opsBuffer = [];
         return;
@@ -708,7 +719,7 @@ export class GDriveSyncService {
       // Download all accessible logs (one pass — dedup across tiers below)
       const downloadLog = async (file: string): Promise<EoEvent[]> => {
         try {
-          const r = await gdriveRetrieveNamed(this.googleAccessToken, dt, file);
+          const r = await gdriveRetrieveNamed(this.accessToken, dt, file);
           if (!r?.ok) return [];
           return safeUnpackEvents(await this.decryptBinary(r.data));
         } catch { return []; }
@@ -778,12 +789,12 @@ export class GDriveSyncService {
 
         // Temp-write then overwrite (atomic-ish)
         const tempFile = `${this.logPendingPrefix}${tier}-${this.userId}.eodb`;
-        const tempResult = await gdriveStoreNamed(this.googleAccessToken, encrypted, dt, tempFile);
+        const tempResult = await gdriveStoreNamed(this.accessToken, encrypted, dt, tempFile);
         if (!tempResult.ok) {
           console.warn(`[EO-DB] GDrive bake: temp write failed for ${tier} tier, skipping`);
           return 0;
         }
-        await gdriveStoreNamed(this.googleAccessToken, encrypted, dt, logFile);
+        await gdriveStoreNamed(this.accessToken, encrypted, dt, logFile);
         console.log(`[EO-DB] GDrive bake: wrote ${logFile} (${events.length} events, seq ${tierFrom}→${tierTo})`);
 
         // Clear recent buffer for this tier
@@ -795,7 +806,7 @@ export class GDriveSyncService {
           events: [], prev_snapshots: [],
         };
         const emptyEncrypted = await this.encryptBinaryForTier(packEodb(emptyFile), tier);
-        await gdriveStoreNamed(this.googleAccessToken, emptyEncrypted, dt, recentFile);
+        await gdriveStoreNamed(this.accessToken, emptyEncrypted, dt, recentFile);
 
         return encrypted.length;
       };
@@ -829,22 +840,22 @@ export class GDriveSyncService {
         updated_at: new Date().toISOString(),
       };
       await gdriveStoreJson(
-        this.googleAccessToken, dt, this.manifestFile,
+        this.accessToken, dt, this.manifestFile,
         manifest as unknown as Record<string, unknown>,
       );
 
       // Delete temp files and intent files
       try {
         const { entries: tempEntries } = await gdriveListByPrefix(
-          this.googleAccessToken, dt, this.logPendingPrefix,
+          this.accessToken, dt, this.logPendingPrefix,
         );
         for (const e of tempEntries) {
-          await gdriveDeleteFile(this.googleAccessToken, e.data_id).catch(() => {});
+          await gdriveDeleteFile(this.accessToken, e.data_id).catch(() => {});
         }
       } catch { /* non-critical */ }
 
       for (const fileId of intentFileIds) {
-        await gdriveDeleteFile(this.googleAccessToken, fileId).catch(() => {});
+        await gdriveDeleteFile(this.accessToken, fileId).catch(() => {});
       }
 
       this.opsBuffer = [];
@@ -861,12 +872,12 @@ export class GDriveSyncService {
   private async cleanOrphanedTempFiles(): Promise<void> {
     try {
       const { entries } = await gdriveListByPrefix(
-        this.googleAccessToken, this.dataType, this.logPendingPrefix,
+        this.accessToken, this.dataType, this.logPendingPrefix,
       );
       const cutoff = Date.now() - BAKE_LOCK_TTL_MS;
       for (const e of entries) {
         if (e.stored_at && new Date(e.stored_at).getTime() < cutoff) {
-          await gdriveDeleteFile(this.googleAccessToken, e.data_id).catch(() => {});
+          await gdriveDeleteFile(this.accessToken, e.data_id).catch(() => {});
         }
       }
     } catch { /* non-critical */ }
@@ -903,7 +914,7 @@ export class GDriveSyncService {
     // Try manifest first
     let manifest: SyncManifest | null = null;
     try {
-      const raw = await gdriveReadJson(this.googleAccessToken, dt, this.manifestFile);
+      const raw = await gdriveReadJson(this.accessToken, dt, this.manifestFile);
       if (raw) manifest = raw as unknown as SyncManifest;
     } catch { /* manifest may not exist */ }
 
@@ -949,7 +960,7 @@ export class GDriveSyncService {
       if (checkpoint && checkpoint.byte_offset > 0) {
         try {
           const rangeResult = await gdriveRetrieveRange(
-            this.googleAccessToken, dt, this.logFile, checkpoint.byte_offset,
+            this.accessToken, dt, this.logFile, checkpoint.byte_offset,
           );
           if (rangeResult?.ok && rangeResult.data.length > 0) {
             const data = await this.decryptBinary(rangeResult.data);
@@ -977,7 +988,7 @@ export class GDriveSyncService {
 
     // Fallback: download full log
     try {
-      const logResult = await gdriveRetrieveNamed(this.googleAccessToken, dt, this.logFile);
+      const logResult = await gdriveRetrieveNamed(this.accessToken, dt, this.logFile);
       if (!logResult?.ok) return;
       const data = await this.decryptBinary(logResult.data);
       const events = safeUnpackEvents(data);
@@ -1017,7 +1028,7 @@ export class GDriveSyncService {
    */
   static async hydrateFromGDrive(
     store: EoStore,
-    googleAccessToken: string,
+    accessToken: string,
     dataType: string,
     onEvent?: (event: any) => void,
     keyring?: LocalKeyring,
@@ -1059,7 +1070,7 @@ export class GDriveSyncService {
 
     const tryDownloadLog = async (file: string): Promise<void> => {
       try {
-        const result = await gdriveRetrieveNamed(googleAccessToken, dataType, file);
+        const result = await gdriveRetrieveNamed(accessToken, dataType, file);
         if (!result?.ok) return;
         const data = await decrypt(result.data);
         for (const e of safeUnpackEvents(data)) {
@@ -1087,7 +1098,7 @@ export class GDriveSyncService {
     const allRecentEvents = new Map<string, EoEvent>();
     const tryDownloadRecent = async (file: string): Promise<void> => {
       try {
-        const result = await gdriveRetrieveNamed(googleAccessToken, dataType, file);
+        const result = await gdriveRetrieveNamed(accessToken, dataType, file);
         if (!result?.ok) return;
         const data = await decrypt(result.data);
         for (const e of safeUnpackEvents(data)) {
@@ -1116,7 +1127,7 @@ export class GDriveSyncService {
     // Collect ALL events from ALL slots (fixes bug where only best slot was applied)
     console.log('[EO-DB] hydrateFromGDrive: falling back to hydration-*.eodb');
     const { entries: hydrationEntries } = await gdriveListByPrefix(
-      googleAccessToken, dataType, 'hydration-',
+      accessToken, dataType, 'hydration-',
     ).catch(() => ({ entries: [] as GDriveListEntry[] }));
 
     const legacyEvents = new Map<string, EoEvent>();
@@ -1124,7 +1135,7 @@ export class GDriveSyncService {
     for (const entry of hydrationEntries) {
       try {
         console.log(`[EO-DB] hydrateFromGDrive: downloading ${entry.name}…`);
-        const result = await gdriveRetrieve(googleAccessToken, entry.content_hash);
+        const result = await gdriveRetrieve(accessToken, entry.content_hash);
         if (!result.ok || !(result.envelope instanceof Uint8Array)) continue;
         const data = await decrypt(result.envelope);
         const events = safeUnpackEvents(data);
@@ -1148,7 +1159,7 @@ export class GDriveSyncService {
 
     // ── 4. Apply op-*.eodb files newer than hydration point ──
     const { entries: opEntries } = await gdriveListByPrefix(
-      googleAccessToken, dataType, 'op-',
+      accessToken, dataType, 'op-',
     ).catch(() => ({ entries: [] as GDriveListEntry[] }));
 
     const newOps = opEntries
@@ -1157,7 +1168,7 @@ export class GDriveSyncService {
 
     for (const entry of newOps) {
       try {
-        const result = await gdriveRetrieve(googleAccessToken, entry.content_hash);
+        const result = await gdriveRetrieve(accessToken, entry.content_hash);
         if (!result.ok || !(result.envelope instanceof Uint8Array)) continue;
         const data = await decrypt(result.envelope);
         const events = safeUnpackEvents(data);

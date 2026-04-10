@@ -1538,20 +1538,24 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         }
       }
 
-      // Start Google Drive sync (direct OAuth2 — no proxy required)
+      // Start Google Drive sync (n8n proxy by default; direct OAuth2 if mode=oauth)
       let gdriveSync: GDriveSyncService | null = null;
 
       if (selectedSpace && session.accessToken && matrixClientRef.current) {
         try {
-          // Connect to Google Drive via the user's own Google OAuth2 account (PKCE)
+          // Connect to Google Drive — mode dispatched inside connect()
           const gdriveState = useGDriveStore.getState();
           if (!gdriveState.connected) {
-            await gdriveState.connect(matrixClientRef.current, spaceRoomId ?? '');
-            console.log('[EO-DB] Google Drive auto-connected via OAuth2');
+            await gdriveState.connect(matrixClientRef.current, spaceRoomId ?? '', session.accessToken);
+            console.log('[EO-DB] Google Drive auto-connected via', gdriveState.syncMode, 'mode');
           }
 
-          const googleAccessToken = useGDriveStore.getState().googleAccessToken;
-          if (!googleAccessToken) throw new Error('Google Drive token unavailable after connect');
+          // Resolve the effective token depending on active sync mode
+          const gdriveStateAfter = useGDriveStore.getState();
+          const effectiveToken = gdriveStateAfter.syncMode === 'n8n'
+            ? gdriveStateAfter.matrixAccessToken
+            : gdriveStateAfter.googleAccessToken;
+          if (!effectiveToken) throw new Error('Google Drive token unavailable after connect');
 
           // Find the space name
           const gdriveSpaceEntry = mergedEntries.find(e => {
@@ -1571,7 +1575,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             spaceName: gdriveSpaceName,
             userId: session.userId,
             sessionId: getSessionId(),
-            googleAccessToken,
+            accessToken: effectiveToken,
             spaceRoomId: spaceRoomId ?? undefined,
             onEvent: onFoldEvent,
             onHydrated: () => { init(workerClient); },
