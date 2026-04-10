@@ -126,6 +126,7 @@ interface SliceStoreState {
   setProfileFields: (scope: string, fields: string[] | undefined) => void;
   setDisplayField: (scope: string, field: string | undefined) => void;
   setShowFieldIds: (scope: string, show: boolean) => void;
+  setKanbanField: (scope: string, field: string | undefined) => void;
 
   // --- Slice lifecycle ---
 
@@ -281,6 +282,10 @@ export const useSliceStore = create<SliceStoreState>((set, get) => ({
 
   setShowFieldIds(scope, show) {
     _updateConfig(set, get, scope, { showFieldIds: show });
+  },
+
+  setKanbanField(scope, field) {
+    _updateConfig(set, get, scope, { kanbanField: field });
   },
 
   activateSlice(scope, slice) {
