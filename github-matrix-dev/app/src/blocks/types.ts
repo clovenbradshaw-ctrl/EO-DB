@@ -125,8 +125,44 @@ export interface ViewDefinition {
     scope: string;
     filters?: FilterRule[];
   };
+
+  /**
+   * Persona visibility — mirrors SavedSlice.visibleToTypes.
+   * Undefined or empty = visible to all personas.
+   * When set, only these user type IDs can see the view; admins (pl>=50)
+   * always bypass this restriction.
+   */
+  visibleToTypes?: string[];
+  /**
+   * Persona read-only marker — mirrors SavedSlice.readOnlyForTypes.
+   * User types listed here can see the view but not edit it.
+   */
+  readOnlyForTypes?: string[];
+
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * Helper — is this view visible to the given persona?
+ *
+ * - If the view has no visibleToTypes restriction → visible to everyone.
+ * - If the current user is an admin (canManage=true) → visible regardless.
+ * - Otherwise, the active persona must be in the visibleToTypes list.
+ *
+ * Mirrors the pattern used for SavedSlice in slice-store.ts.
+ */
+export function isViewVisibleToPersona(
+  def: Pick<ViewDefinition, 'visibleToTypes'> | null | undefined,
+  activePersona: string | null,
+  canManage: boolean,
+): boolean {
+  if (!def) return true;
+  if (canManage) return true;
+  const restriction = def.visibleToTypes;
+  if (!restriction || restriction.length === 0) return true;
+  if (!activePersona) return false;
+  return restriction.includes(activePersona);
 }
 
 // ---------------------------------------------------------------------------

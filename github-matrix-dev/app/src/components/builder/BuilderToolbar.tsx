@@ -1,10 +1,12 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useBuilderStore, type BuilderMode } from '../../store/builder-store';
 import { useEoStore } from '../../store/eo-store';
 import { useTheme, type Theme } from '../../theme';
 import { formatName } from '../scope-picker-utils';
 import { ScopePicker } from '../ScopePicker';
+import { useHashRoute } from '../../lib/router';
 import type { PageType } from '../../blocks/types';
+import type { UserTypeDefinition } from '../../permissions/types';
 
 interface BuilderToolbarProps {
   onBack: () => void;
@@ -18,14 +20,41 @@ export function BuilderToolbar({ onBack }: BuilderToolbarProps) {
   const pageType = useBuilderStore((s) => s.pageType);
   const recordSource = useBuilderStore((s) => s.recordSource);
   const previewRecordTarget = useBuilderStore((s) => s.previewRecordTarget);
+  const visibleToTypes = useBuilderStore((s) => s.visibleToTypes);
   const setMode = useBuilderStore((s) => s.setMode);
   const setPreviewRecordTarget = useBuilderStore((s) => s.setPreviewRecordTarget);
+  const setVisibleToTypes = useBuilderStore((s) => s.setVisibleToTypes);
   const getViewDefinition = useBuilderStore((s) => s.getViewDefinition);
   const markClean = useBuilderStore((s) => s.markClean);
   const dispatch = useEoStore((s) => s.dispatch);
+  const getState = useEoStore((s) => s.getState);
+  const lastSeq = useEoStore((s) => s.lastSeq);
+  const { route } = useHashRoute();
+  const selectedSpace = route.space;
   const { theme } = useTheme();
   const s = makeStyles(theme);
   const [showPreviewPicker, setShowPreviewPicker] = useState(false);
+  const [showVisibilityPicker, setShowVisibilityPicker] = useState(false);
+  const [typeDefs, setTypeDefs] = useState<UserTypeDefinition[]>([]);
+
+  // Load user type definitions from the current space state so the visibility
+  // picker can list them. Refetches whenever the space changes or a new event
+  // lands (lastSeq).
+  useEffect(() => {
+    let cancelled = false;
+    if (!selectedSpace) {
+      setTypeDefs([]);
+      return;
+    }
+    getState(selectedSpace).then((state) => {
+      if (cancelled) return;
+      const defs = (state?.value?._user_type_definitions as UserTypeDefinition[] | undefined) ?? [];
+      setTypeDefs(defs);
+    }).catch(() => {
+      if (!cancelled) setTypeDefs([]);
+    });
+    return () => { cancelled = true; };
+  }, [selectedSpace, getState, lastSeq]);
 
   const handleSave = async () => {
     if (!viewId) return;
@@ -117,6 +146,96 @@ export function BuilderToolbar({ onBack }: BuilderToolbarProps) {
                     setShowPreviewPicker(false);
                   }}
                 />
+              </div>
+            )}
+          </div>
+        )}
+
+        {typeDefs.length > 0 && (
+          <div style={{ position: 'relative' as const }}>
+            <button
+              onClick={() => setShowVisibilityPicker(!showVisibilityPicker)}
+              title="Which personas can see this view"
+              style={{
+                ...s.previewBtn,
+                ...(visibleToTypes && visibleToTypes.length > 0
+                  ? { borderColor: theme.accent, color: theme.accent }
+                  : {}),
+              }}
+            >
+              {visibleToTypes && visibleToTypes.length > 0
+                ? `${visibleToTypes.length} persona${visibleToTypes.length !== 1 ? 's' : ''}`
+                : 'All personas'}
+            </button>
+            {showVisibilityPicker && (
+              <div style={{
+                position: 'absolute' as const, top: '100%', right: 0,
+                marginTop: 4, zIndex: 50, minWidth: 220,
+                background: theme.bgCard,
+                border: `1px solid ${theme.border}`,
+                borderRadius: 6,
+                boxShadow: theme.shadow,
+                padding: 8,
+              }}>
+                <div style={{
+                  fontFamily: "'JetBrains Mono', monospace",
+                  fontSize: 10, fontWeight: 600, color: theme.textSecondary,
+                  marginBottom: 6,
+                }}>
+                  Visible to personas
+                </div>
+                <div style={{ fontSize: 10, color: theme.textMuted, marginBottom: 8 }}>
+                  Leave all unchecked = visible to everyone
+                </div>
+                {typeDefs.map((def) => {
+                  const checked = !!visibleToTypes && visibleToTypes.includes(def.id);
+                  return (
+                    <label key={def.id} style={{
+                      display: 'flex', alignItems: 'center', gap: 6,
+                      padding: '4px 6px', borderRadius: 4, cursor: 'pointer',
+                    }}>
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => {
+                          const current = visibleToTypes ?? [];
+                          const next = checked
+                            ? current.filter((id) => id !== def.id)
+                            : [...current, def.id];
+                          setVisibleToTypes(next.length > 0 ? next : undefined);
+                        }}
+                        style={{ accentColor: def.color || theme.accent }}
+                      />
+                      <span style={{
+                        fontSize: 11, color: theme.text,
+                        fontFamily: "'Outfit', sans-serif",
+                      }}>
+                        {def.label}
+                      </span>
+                      {def.color && (
+                        <span style={{
+                          width: 8, height: 8, borderRadius: '50%',
+                          background: def.color,
+                        }} />
+                      )}
+                    </label>
+                  );
+                })}
+                {visibleToTypes && visibleToTypes.length > 0 && (
+                  <button
+                    onClick={() => setVisibleToTypes(undefined)}
+                    style={{
+                      marginTop: 6, width: '100%',
+                      padding: '4px 8px', fontSize: 10,
+                      background: 'none', border: `1px solid ${theme.border}`,
+                      borderRadius: 4, cursor: 'pointer',
+                      color: theme.textMuted,
+                      fontFamily: "'JetBrains Mono', monospace",
+                    }}
+                  >
+                    clear restriction
+                  </button>
+                )}
               </div>
             )}
           </div>

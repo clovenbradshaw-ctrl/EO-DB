@@ -157,6 +157,8 @@ interface BuilderState {
   recordSource?: RecordSource;
   /** For record page preview: a sample record target to render with */
   previewRecordTarget?: string;
+  /** Persona visibility — which user type IDs can see this view. Empty/absent = all. */
+  visibleToTypes?: string[];
 
   // Actions
   newView: (name: string, pageType?: PageType) => string;
@@ -166,6 +168,7 @@ interface BuilderState {
   setPageType: (pageType: PageType) => void;
   setRecordSource: (source: RecordSource | undefined) => void;
   setPreviewRecordTarget: (target: string | undefined) => void;
+  setVisibleToTypes: (typeIds: string[] | undefined) => void;
 
   addBlock: (type: BlockType, parentId?: BlockId | null, slotKey?: string | null, index?: number) => BlockId;
   moveBlock: (blockId: BlockId, newParentId: BlockId | null, newSlotKey: string | null, newIndex: number) => void;
@@ -188,6 +191,7 @@ export const useBuilderStore = create<BuilderState>((set, get) => ({
   pageType: 'page' as PageType,
   recordSource: undefined,
   previewRecordTarget: undefined,
+  visibleToTypes: undefined,
 
   newView(name: string, pageType: PageType = 'page') {
     const viewId = crypto.randomUUID();
@@ -202,6 +206,7 @@ export const useBuilderStore = create<BuilderState>((set, get) => ({
       pageType,
       recordSource: undefined,
       previewRecordTarget: undefined,
+      visibleToTypes: undefined,
     });
     return viewId;
   },
@@ -218,6 +223,7 @@ export const useBuilderStore = create<BuilderState>((set, get) => ({
       pageType: definition.pageType || 'page',
       recordSource: definition.recordSource,
       previewRecordTarget: undefined,
+      visibleToTypes: definition.visibleToTypes,
     });
   },
 
@@ -239,6 +245,11 @@ export const useBuilderStore = create<BuilderState>((set, get) => ({
 
   setPreviewRecordTarget(target: string | undefined) {
     set({ previewRecordTarget: target });
+  },
+
+  setVisibleToTypes(typeIds: string[] | undefined) {
+    const next = typeIds && typeIds.length > 0 ? typeIds : undefined;
+    set({ visibleToTypes: next, isDirty: true });
   },
 
   addBlock(type: BlockType, parentId = null, slotKey = null, index?: number) {
@@ -277,8 +288,8 @@ export const useBuilderStore = create<BuilderState>((set, get) => ({
   },
 
   getViewDefinition(): ViewDefinition {
-    const { viewName, viewSlug, blocks, pageType, recordSource } = get();
-    return {
+    const { viewName, viewSlug, blocks, pageType, recordSource, visibleToTypes } = get();
+    const def: ViewDefinition = {
       name: viewName,
       slug: viewSlug || slugify(viewName),
       blocks,
@@ -287,6 +298,10 @@ export const useBuilderStore = create<BuilderState>((set, get) => ({
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
+    if (visibleToTypes && visibleToTypes.length > 0) {
+      def.visibleToTypes = visibleToTypes;
+    }
+    return def;
   },
 
   markClean() {
@@ -305,6 +320,7 @@ export const useBuilderStore = create<BuilderState>((set, get) => ({
       pageType: 'page' as PageType,
       recordSource: undefined,
       previewRecordTarget: undefined,
+      visibleToTypes: undefined,
     });
   },
 }));

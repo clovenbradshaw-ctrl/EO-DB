@@ -72,6 +72,7 @@ const RecordPageView = lazyWithRetry(() => import('./builder/RecordPageView').th
 import { PermissionBadge } from './PermissionBadge';
 import { ViewOnlyBanner } from './ViewOnlyBanner';
 import { HeadlineMetrics } from './HeadlineMetrics';
+import { PersonaQuickActions } from './PersonaQuickActions';
 import { useSliceStore } from '../store/slice-store';
 import { useBuilderStore } from '../store/builder-store';
 import { useSyncStore } from '../store/sync-store';
@@ -85,7 +86,8 @@ import { Horizon } from './Horizon';
 import { type TimeScrubberFilter, type DateColumnOption, DEFAULT_FILTER, detectDateColumns, computeDateRange, buildAdaptiveFormatter } from './time-scrubber-utils';
 import { hasFieldsSubObject, buildFieldNameMap } from './filter-types';
 import { useHashRoute, type View } from '../lib/router';
-import { type AccessRole, type UserTypeDefinition, type SpaceConfig, powerLevelToRole, legacyAccessToRole } from '../permissions/types';
+import { type AccessRole, type UserTypeDefinition, type SpaceConfig, type TerminologyKey, powerLevelToRole, legacyAccessToRole, resolveTerminology } from '../permissions/types';
+import { DEFAULT_LAW_FIRM_PERSONAS } from '../permissions/default-personas';
 import { UserTypeSwitcher } from './UserTypeSwitcher';
 import { resolvePermissionsFromSharing, getUserPowerLevel } from '../permissions/resolve';
 const MultiUserTestView = lazyWithRetry(() => import('./MultiUserTestView').then(m => ({ default: m.MultiUserTestView })));
@@ -2010,9 +2012,26 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     }
   }, [selectedSpace, currentUserAssignedTypes]);
 
-  // When the active role restricts nav views, redirect away from now-hidden views
+  // When the active persona changes, route to its home destination (if defined).
+  // Falls back to the visible_views redirect if no home is set but the current
+  // view is hidden by the persona's nav restriction.
   useEffect(() => {
-    if (activeTypeDef?.visible_views?.length && !activeTypeDef.visible_views.includes(activeView)) {
+    if (!activeTypeDef) return;
+    const home = activeTypeDef.home;
+    if (home) {
+      // Route to the persona's home destination. We only override fields the
+      // persona explicitly set, so the user stays on the same space.
+      navigate({
+        view: home.view,
+        scope: home.scope ?? null,
+        record: null,
+        builderViewId: home.builderViewId ?? null,
+        customPageId: home.customPageId ?? null,
+      });
+      return;
+    }
+    // No home set — fall back to hiding currently-active view if it's now restricted.
+    if (activeTypeDef.visible_views?.length && !activeTypeDef.visible_views.includes(activeView)) {
       navigate({ view: 'records' });
     }
   }, [activeUserType]);
@@ -2043,6 +2062,25 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   const sliceSigs = sliceStore.sigs;
   const savedSlices = sliceStore.savedSlices;
   const openScopes = sliceStore.openScopes;
+
+  // Apply the active persona's default slice for a scope when the scope is
+  // opened and no slice is currently active. Respects user overrides within
+  // a session — if the user has already picked a different slice, we leave
+  // it alone. Runs when scope or persona changes.
+  useEffect(() => {
+    if (!selectedScope || !activeTypeDef?.default_slices) return;
+    const defaultSliceId = activeTypeDef.default_slices[selectedScope];
+    if (!defaultSliceId) return;
+    const slice = savedSlices[defaultSliceId];
+    if (!slice || slice.scope !== selectedScope) return;
+    // Only apply if no slice is already active for this scope (respect user choice).
+    const sig = sliceSigs[selectedScope];
+    if (sig?.activeSliceId) return;
+    sliceStore.activateSlice(selectedScope, slice);
+    // We deliberately do NOT list sliceSigs in deps — that would re-apply
+    // after every SIG mutation, overwriting the user's manual slice picks.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedScope, activeUserType, activeTypeDef, savedSlices]);
   const activeSliceType: SliceType = useMemo(() => {
     if (!selectedScope) return 'grid';
     const sig = sliceSigs[selectedScope];
@@ -2185,6 +2223,24 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                   acquired_ts: new Date().toISOString(),
                 });
 
+                // Seed the default law-firm personas so a fresh space has
+                // sensible role segmentation out of the box. The admin can
+                // rename, delete, or extend any of these via UserTypeManager.
+                try {
+                  await dispatch({
+                    op: 'DEF',
+                    target: spaceTarget,
+                    operand: {
+                      _user_type_definitions: DEFAULT_LAW_FIRM_PERSONAS,
+                    },
+                    agent: session.userId,
+                    ts: new Date().toISOString(),
+                    acquired_ts: new Date().toISOString(),
+                  });
+                } catch (e) {
+                  console.warn('[EO-DB] Failed to seed default personas:', e);
+                }
+
                 // Add to spaces list with correct owner so permissions resolve
                 const now = new Date().toISOString();
                 const idbTarget = `space.${name.toLowerCase().replace(/\s+/g, '_')}`;
@@ -2267,13 +2323,19 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           {selectedSpace && !isMobile && (
             <PermissionBadge role={currentRole} displayName={displayName} />
           )}
-          {/* User type switcher */}
-          {selectedSpace && !isMobile && currentUserAssignedTypes.length > 0 && (
+          {/* User type switcher. Admins (can_manage_members) also get
+              "Preview as…" for personas they are not assigned to. Preview
+              selections skip localStorage so they clear on refresh. */}
+          {selectedSpace && !isMobile && (
+            currentUserAssignedTypes.length > 0 ||
+            (currentPermissions?.can_manage_members && spaceUserTypeDefinitions.length > 0)
+          ) && (
             <UserTypeSwitcher
               typeDefinitions={spaceUserTypeDefinitions}
               assignedTypeIds={currentUserAssignedTypes}
               activeTypeId={activeUserType}
-              onSelect={setActiveUserType}
+              canPreview={!!currentPermissions?.can_manage_members}
+              onSelect={(typeId, opts) => setActiveUserType(typeId, !opts?.preview)}
             />
           )}
           {/* Theme toggle */}
@@ -2371,6 +2433,16 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         );
       })()}
 
+      {/* Persona quick actions — shown when active persona has actions for the current scope */}
+      {activeView === 'records' && activeTypeDef?.quick_actions && selectedScope && (
+        <PersonaQuickActions
+          actions={activeTypeDef.quick_actions}
+          currentScope={selectedScope}
+          typeColor={activeTypeDef.color}
+          onRecordCreated={(target) => navigate({ record: target })}
+        />
+      )}
+
       {/* Body */}
       <div style={s.body}>
         {/* Mobile overlay backdrop */}
@@ -2425,6 +2497,10 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               if (!activeTypeDef?.visible_views?.length) return true;
               return activeTypeDef.visible_views.includes(view);
             }
+            // Helper: resolve a terminology label for the active persona, falling back to default.
+            function term(key: TerminologyKey): string {
+              return resolveTerminology(key, activeTypeDef);
+            }
             // Helper: nav item style, applying role color to active items
             function navItemStyle(view: View): React.CSSProperties {
               const active = activeView === view;
@@ -2453,7 +2529,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                 style={navItemStyle(view)}
               >
                 <span style={s.navIcon}>{NAV_ICONS[view]}</span>
-                {view === 'compose' ? '+ Compose' : view.charAt(0).toUpperCase() + view.slice(1)}
+                {view === 'compose' ? `+ ${term('compose')}` : term(view as TerminologyKey)}
               </button>
             ))}
             {isNavViewVisible('api') && (
@@ -2472,7 +2548,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                 style={navItemStyle('people')}
               >
                 <span style={s.navIcon}>{NAV_ICONS.people}</span>
-                People
+                {term('people')}
               </button>
             )}
             {isNavViewVisible('messages') && (
@@ -2481,7 +2557,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                 style={navItemStyle('messages')}
               >
                 <span style={s.navIcon}>{NAV_ICONS.messages}</span>
-                Messages
+                {term('messages')}
               </button>
             )}
             {isNavViewVisible('members') && (
@@ -2490,7 +2566,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                 style={navItemStyle('members')}
               >
                 <span style={s.navIcon}>{NAV_ICONS.members}</span>
-                Members &amp; Roles
+                {term('members')} &amp; Roles
               </button>
             )}
             <div style={s.navGroupLabel}>System</div>
@@ -2500,7 +2576,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                 style={navItemStyle('log')}
               >
                 <span style={s.navIcon}>{NAV_ICONS.log}</span>
-                Log
+                {term('log')}
               </button>
             )}
             {currentPermissions?.can_build_slices !== false && isNavViewVisible('builder') && (
@@ -2783,6 +2859,7 @@ function RecordPageOrDrawer({ recordTarget, allStates, onClose, onNavigate, prof
 }) {
   const loadView = useBuilderStore((s) => s.loadView);
   const getState = useEoStore((s) => s.getState);
+  const activeUserType = useEoStore((s) => s.activeUserType);
   const [layoutType, setLayoutType] = useState<LayoutDisplayType>('drawer');
 
   // ── Existence check ──────────────────────────────────────────────────────
@@ -2824,7 +2901,11 @@ function RecordPageOrDrawer({ recordTarget, allStates, onClose, onNavigate, prof
       .catch(() => {});
   }, [recordTarget, getState]);
 
-  // Find a record page view whose recordSource.scope matches this record's parent
+  // Find a record page view whose recordSource.scope matches this record's parent.
+  // Prefer a view scoped to the current persona (via visibleToTypes) so that
+  // different personas can see different record layouts for the same record.
+  // Views restricted to *other* personas are skipped; views with no restriction
+  // are used as a fallback when no persona-scoped match exists.
   const recordPageView = useMemo(() => {
     const parts = recordTarget.split('.');
     const possibleScopes: string[] = [];
@@ -2833,17 +2914,25 @@ function RecordPageOrDrawer({ recordTarget, allStates, onClose, onNavigate, prof
     }
 
     const viewStates = allStates.filter(s => s.target.startsWith('views.'));
+    type Candidate = { viewId: string; definition: ViewDefinition };
+    let personaMatch: Candidate | null = null;
+    let generalMatch: Candidate | null = null;
     for (const vs of viewStates) {
       const def = vs.value as ViewDefinition | null;
-      if (def?.pageType === 'record' && def.recordSource?.scope) {
-        if (possibleScopes.includes(def.recordSource.scope)) {
-          const viewId = vs.target.replace(/^views\./, '');
-          return { viewId, definition: def };
-        }
+      if (!def || def.pageType !== 'record' || !def.recordSource?.scope) continue;
+      if (!possibleScopes.includes(def.recordSource.scope)) continue;
+      const viewId = vs.target.replace(/^views\./, '');
+      const restriction = def.visibleToTypes;
+      if (!restriction || restriction.length === 0) {
+        if (!generalMatch) generalMatch = { viewId, definition: def };
+        continue;
+      }
+      if (activeUserType && restriction.includes(activeUserType)) {
+        if (!personaMatch) personaMatch = { viewId, definition: def };
       }
     }
-    return null;
-  }, [recordTarget, allStates]);
+    return personaMatch ?? generalMatch;
+  }, [recordTarget, allStates, activeUserType]);
 
   // Load the record page view into the builder store when found
   useEffect(() => {

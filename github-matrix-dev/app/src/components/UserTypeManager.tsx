@@ -5,11 +5,12 @@
  * Only visible to admin+ users.
  */
 
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { useTheme, type Theme } from '../theme';
-import type { AccessRole, UserTypeDefinition, HeadlineMetric } from '../permissions/types';
-import { ROLE_LABELS, ROLE_DESCRIPTIONS } from '../permissions/types';
+import type { AccessRole, UserTypeDefinition, HeadlineMetric, PersonaHome, QuickAction, TerminologyKey } from '../permissions/types';
+import { ROLE_LABELS, ROLE_DESCRIPTIONS, TERMINOLOGY_KEYS, TERMINOLOGY_DEFAULTS } from '../permissions/types';
 import { UserTypeBadge } from './UserTypeBadge';
+import { useSliceStore } from '../store/slice-store';
 
 interface UserTypeManagerProps {
   typeDefinitions: UserTypeDefinition[];
@@ -33,6 +34,21 @@ const CONFIGURABLE_VIEWS: { id: string; label: string }[] = [
   { id: 'members', label: 'Members & Roles' },
   { id: 'log', label: 'Log' },
   { id: 'builder', label: 'Builder' },
+  { id: 'settings', label: 'Settings' },
+];
+
+/** Views that a persona can land on as their home destination. */
+const HOME_VIEW_OPTIONS: { id: PersonaHome['view']; label: string }[] = [
+  { id: 'records', label: 'Records' },
+  { id: 'builder', label: 'Builder page' },
+  { id: 'graph', label: 'Graph' },
+  { id: 'log', label: 'Log' },
+  { id: 'messages', label: 'Messages' },
+  { id: 'people', label: 'People' },
+  { id: 'members', label: 'Members & Roles' },
+  { id: 'api', label: 'API Connections' },
+  { id: 'import', label: 'Import' },
+  { id: 'compose', label: 'Compose' },
   { id: 'settings', label: 'Settings' },
 ];
 
@@ -65,6 +81,22 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editMetrics, setEditMetrics] = useState<HeadlineMetric[]>([]);
   const [editingViewsId, setEditingViewsId] = useState<string | null>(null);
+  const [editingHomeId, setEditingHomeId] = useState<string | null>(null);
+  const [editingSlicesId, setEditingSlicesId] = useState<string | null>(null);
+  const [editingActionsId, setEditingActionsId] = useState<string | null>(null);
+  const [editingTermsId, setEditingTermsId] = useState<string | null>(null);
+
+  // Read saved slices for the default-slice editor. Group by scope.
+  const savedSlices = useSliceStore((s) => s.savedSlices);
+  const slicesByScope = useMemo(() => {
+    const map: Record<string, Array<{ id: string; name: string }>> = {};
+    for (const slice of Object.values(savedSlices)) {
+      if (!slice.scope) continue;
+      if (!map[slice.scope]) map[slice.scope] = [];
+      map[slice.scope].push({ id: slice.id, name: slice.name });
+    }
+    return map;
+  }, [savedSlices]);
 
   if (!canManage && typeDefinitions.length === 0) return null;
 
@@ -135,6 +167,73 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
         }
         return { ...t, visible_views: next };
       }
+    }));
+  }
+
+  function handleUpdateTerminology(typeId: string, key: TerminologyKey, value: string) {
+    onUpdate(typeDefinitions.map(t => {
+      if (t.id !== typeId) return t;
+      const current = { ...(t.terminology ?? {}) };
+      if (value.trim().length === 0) {
+        delete current[key];
+      } else {
+        current[key] = value;
+      }
+      if (Object.keys(current).length === 0) {
+        const { terminology: _tm, ...rest } = t;
+        void _tm;
+        return rest;
+      }
+      return { ...t, terminology: current };
+    }));
+  }
+
+  function handleUpdateQuickActions(typeId: string, actions: QuickAction[]) {
+    onUpdate(typeDefinitions.map(t => {
+      if (t.id !== typeId) return t;
+      if (actions.length === 0) {
+        const { quick_actions: _qa, ...rest } = t;
+        void _qa;
+        return rest;
+      }
+      return { ...t, quick_actions: actions };
+    }));
+  }
+
+  function handleUpdateDefaultSlice(typeId: string, scope: string, sliceId: string | null) {
+    onUpdate(typeDefinitions.map(t => {
+      if (t.id !== typeId) return t;
+      const current = { ...(t.default_slices ?? {}) };
+      if (sliceId === null) {
+        delete current[scope];
+      } else {
+        current[scope] = sliceId;
+      }
+      if (Object.keys(current).length === 0) {
+        const { default_slices: _ds, ...rest } = t;
+        void _ds;
+        return rest;
+      }
+      return { ...t, default_slices: current };
+    }));
+  }
+
+  function handleUpdateHome(typeId: string, patch: Partial<PersonaHome> | null) {
+    onUpdate(typeDefinitions.map(t => {
+      if (t.id !== typeId) return t;
+      if (patch === null) {
+        // Clear home entirely
+        const { home: _h, ...rest } = t;
+        void _h;
+        return rest;
+      }
+      const current: PersonaHome = t.home ?? { view: 'records' };
+      const next: PersonaHome = { ...current, ...patch };
+      // Normalize: trim empty strings to undefined so serialized state stays clean
+      if (!next.scope) delete next.scope;
+      if (!next.builderViewId) delete next.builderViewId;
+      if (!next.customPageId) delete next.customPageId;
+      return { ...t, home: next };
     }));
   }
 
@@ -231,6 +330,56 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
                     {def.visible_views.length} views
                   </span>
                 )}
+                {def.home && (
+                  <span
+                    title={`Lands on ${def.home.view}${def.home.scope ? ` / ${def.home.scope}` : ''}`}
+                    style={{
+                      fontFamily: mono, fontSize: 9, color: def.color || theme.textSecondary,
+                      background: def.color ? `${def.color}14` : theme.bgMuted,
+                      padding: '1px 5px', borderRadius: 4,
+                    }}
+                  >
+                    home: {def.home.view}
+                  </span>
+                )}
+                {def.default_slices && Object.keys(def.default_slices).length > 0 && (
+                  <span
+                    title={`Default slices: ${Object.entries(def.default_slices)
+                      .map(([scope, sliceId]) => `${scope} \u2192 ${savedSlices[sliceId]?.name ?? sliceId}`)
+                      .join(', ')}`}
+                    style={{
+                      fontFamily: mono, fontSize: 9, color: def.color || theme.textSecondary,
+                      background: def.color ? `${def.color}14` : theme.bgMuted,
+                      padding: '1px 5px', borderRadius: 4,
+                    }}
+                  >
+                    {Object.keys(def.default_slices).length} default slice{Object.keys(def.default_slices).length !== 1 ? 's' : ''}
+                  </span>
+                )}
+                {def.quick_actions && def.quick_actions.length > 0 && (
+                  <span
+                    title={`Quick actions: ${def.quick_actions.map(a => a.label).join(', ')}`}
+                    style={{
+                      fontFamily: mono, fontSize: 9, color: def.color || theme.textSecondary,
+                      background: def.color ? `${def.color}14` : theme.bgMuted,
+                      padding: '1px 5px', borderRadius: 4,
+                    }}
+                  >
+                    {def.quick_actions.length} quick action{def.quick_actions.length !== 1 ? 's' : ''}
+                  </span>
+                )}
+                {def.terminology && Object.keys(def.terminology).length > 0 && (
+                  <span
+                    title={`Terminology overrides: ${Object.entries(def.terminology).map(([k, v]) => `${k}\u2192${v}`).join(', ')}`}
+                    style={{
+                      fontFamily: mono, fontSize: 9, color: def.color || theme.textSecondary,
+                      background: def.color ? `${def.color}14` : theme.bgMuted,
+                      padding: '1px 5px', borderRadius: 4,
+                    }}
+                  >
+                    {Object.keys(def.terminology).length} term{Object.keys(def.terminology).length !== 1 ? 's' : ''}
+                  </span>
+                )}
               </div>
               {canManage && (
                 <div style={{ display: 'flex', gap: 4 }}>
@@ -281,6 +430,82 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
                     }}
                   >
                     views
+                  </button>
+                  <button
+                    onClick={() => setEditingHomeId(editingHomeId === def.id ? null : def.id)}
+                    title="Configure landing destination for this persona"
+                    style={{
+                      fontFamily: mono, fontSize: 9,
+                      color: editingHomeId === def.id ? '#fff' : (def.color || theme.textSecondary),
+                      background: editingHomeId === def.id ? (def.color || theme.accent) : 'none',
+                      border: 'none', cursor: 'pointer',
+                      padding: '2px 6px', borderRadius: 4,
+                    }}
+                    onMouseEnter={(e) => {
+                      if (editingHomeId !== def.id) e.currentTarget.style.background = theme.bgMuted;
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.background = editingHomeId === def.id ? (def.color || theme.accent) : 'none';
+                    }}
+                  >
+                    home
+                  </button>
+                  <button
+                    onClick={() => setEditingSlicesId(editingSlicesId === def.id ? null : def.id)}
+                    title="Configure default slices per scope"
+                    style={{
+                      fontFamily: mono, fontSize: 9,
+                      color: editingSlicesId === def.id ? '#fff' : (def.color || theme.textSecondary),
+                      background: editingSlicesId === def.id ? (def.color || theme.accent) : 'none',
+                      border: 'none', cursor: 'pointer',
+                      padding: '2px 6px', borderRadius: 4,
+                    }}
+                    onMouseEnter={(e) => {
+                      if (editingSlicesId !== def.id) e.currentTarget.style.background = theme.bgMuted;
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.background = editingSlicesId === def.id ? (def.color || theme.accent) : 'none';
+                    }}
+                  >
+                    slices
+                  </button>
+                  <button
+                    onClick={() => setEditingActionsId(editingActionsId === def.id ? null : def.id)}
+                    title="Configure quick-action buttons for this persona"
+                    style={{
+                      fontFamily: mono, fontSize: 9,
+                      color: editingActionsId === def.id ? '#fff' : (def.color || theme.textSecondary),
+                      background: editingActionsId === def.id ? (def.color || theme.accent) : 'none',
+                      border: 'none', cursor: 'pointer',
+                      padding: '2px 6px', borderRadius: 4,
+                    }}
+                    onMouseEnter={(e) => {
+                      if (editingActionsId !== def.id) e.currentTarget.style.background = theme.bgMuted;
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.background = editingActionsId === def.id ? (def.color || theme.accent) : 'none';
+                    }}
+                  >
+                    actions
+                  </button>
+                  <button
+                    onClick={() => setEditingTermsId(editingTermsId === def.id ? null : def.id)}
+                    title="Rename UI labels for this persona"
+                    style={{
+                      fontFamily: mono, fontSize: 9,
+                      color: editingTermsId === def.id ? '#fff' : (def.color || theme.textSecondary),
+                      background: editingTermsId === def.id ? (def.color || theme.accent) : 'none',
+                      border: 'none', cursor: 'pointer',
+                      padding: '2px 6px', borderRadius: 4,
+                    }}
+                    onMouseEnter={(e) => {
+                      if (editingTermsId !== def.id) e.currentTarget.style.background = theme.bgMuted;
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.background = editingTermsId === def.id ? (def.color || theme.accent) : 'none';
+                    }}
+                  >
+                    terms
                   </button>
                   <button
                     onClick={() => handleDelete(def.id)}
@@ -341,6 +566,283 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
                   <div style={{ fontFamily: mono, fontSize: 9, color: theme.textMuted, marginTop: 6 }}>
                     {def.visible_views ? `${def.visible_views.length} views enabled` : 'All views visible (no restriction)'}
                   </div>
+                </div>
+              )}
+              {/* Home config panel — inline, expands when "home" button is clicked */}
+              {canManage && editingHomeId === def.id && (
+                <div style={{
+                  padding: '10px 0 10px 8px',
+                  background: theme.bgMuted,
+                  borderRadius: 6,
+                  marginBottom: 6,
+                }}>
+                  <div style={{ fontFamily: mono, fontSize: 10, fontWeight: 600, color: theme.textSecondary, marginBottom: 8 }}>
+                    Landing destination for "{def.label}"
+                    <span style={{ fontWeight: 400, color: theme.textMuted, marginLeft: 6 }}>
+                      (where this persona lands on space open or persona switch)
+                    </span>
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <span style={{ fontFamily: mono, fontSize: 9, color: theme.textMuted, minWidth: 50 }}>view</span>
+                      <select
+                        value={def.home?.view ?? 'records'}
+                        onChange={(e) => handleUpdateHome(def.id, { view: e.target.value as PersonaHome['view'] })}
+                        style={{
+                          fontFamily: mono, fontSize: 10,
+                          padding: '4px 6px', background: theme.bgCard,
+                          border: `1px solid ${theme.border}`, borderRadius: 4,
+                          color: theme.text,
+                        }}
+                      >
+                        {HOME_VIEW_OPTIONS.map(v => (
+                          <option key={v.id} value={v.id}>{v.label}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <span style={{ fontFamily: mono, fontSize: 9, color: theme.textMuted, minWidth: 50 }}>scope</span>
+                      <input
+                        value={def.home?.scope ?? ''}
+                        onChange={(e) => handleUpdateHome(def.id, { scope: e.target.value })}
+                        placeholder="tblCases (optional)"
+                        style={{
+                          flex: 1, fontFamily: mono, fontSize: 10,
+                          padding: '4px 6px', background: theme.bgCard,
+                          border: `1px solid ${theme.border}`, borderRadius: 4,
+                          color: theme.text, outline: 'none',
+                        }}
+                      />
+                    </label>
+                    {(def.home?.view === 'builder' || !def.home) && (
+                      <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span style={{ fontFamily: mono, fontSize: 9, color: theme.textMuted, minWidth: 50 }}>page id</span>
+                        <input
+                          value={def.home?.builderViewId ?? ''}
+                          onChange={(e) => handleUpdateHome(def.id, { builderViewId: e.target.value })}
+                          placeholder="builder page id (optional)"
+                          style={{
+                            flex: 1, fontFamily: mono, fontSize: 10,
+                            padding: '4px 6px', background: theme.bgCard,
+                            border: `1px solid ${theme.border}`, borderRadius: 4,
+                            color: theme.text, outline: 'none',
+                          }}
+                        />
+                      </label>
+                    )}
+                  </div>
+                  <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+                    {def.home && (
+                      <button
+                        onClick={() => handleUpdateHome(def.id, null)}
+                        style={{
+                          fontFamily: mono, fontSize: 9, color: theme.danger,
+                          background: 'none', border: `1px solid ${theme.border}`,
+                          borderRadius: 4, padding: '3px 8px', cursor: 'pointer',
+                        }}
+                      >
+                        clear home
+                      </button>
+                    )}
+                    <span style={{ fontFamily: mono, fontSize: 9, color: theme.textMuted, alignSelf: 'center' }}>
+                      {def.home
+                        ? `Lands on ${def.home.view}${def.home.scope ? ` / ${def.home.scope}` : ''}`
+                        : 'No home set — falls back to Records'}
+                    </span>
+                  </div>
+                </div>
+              )}
+              {/* Quick actions panel — inline, expands when "actions" button is clicked */}
+              {canManage && editingActionsId === def.id && (
+                <div style={{
+                  padding: '10px 0 10px 8px',
+                  background: theme.bgMuted,
+                  borderRadius: 6,
+                  marginBottom: 6,
+                }}>
+                  <div style={{ fontFamily: mono, fontSize: 10, fontWeight: 600, color: theme.textSecondary, marginBottom: 8 }}>
+                    Quick actions for "{def.label}"
+                    <span style={{ fontWeight: 400, color: theme.textMuted, marginLeft: 6 }}>
+                      (buttons shown on the records view for matching scopes)
+                    </span>
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    {(def.quick_actions ?? []).map((action, idx) => (
+                      <div key={idx} style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                        <input
+                          value={action.label}
+                          onChange={(e) => {
+                            const next = [...(def.quick_actions ?? [])];
+                            next[idx] = { ...next[idx], label: e.target.value };
+                            handleUpdateQuickActions(def.id, next);
+                          }}
+                          placeholder="Label (e.g. File I-130)"
+                          style={{
+                            flex: 1, fontFamily: mono, fontSize: 10,
+                            padding: '4px 6px', background: theme.bgCard,
+                            border: `1px solid ${theme.border}`, borderRadius: 4,
+                            color: theme.text, outline: 'none',
+                          }}
+                        />
+                        <input
+                          value={action.scope}
+                          onChange={(e) => {
+                            const next = [...(def.quick_actions ?? [])];
+                            next[idx] = { ...next[idx], scope: e.target.value };
+                            handleUpdateQuickActions(def.id, next);
+                          }}
+                          placeholder="scope (e.g. tblCases)"
+                          style={{
+                            width: 140, fontFamily: mono, fontSize: 10,
+                            padding: '4px 6px', background: theme.bgCard,
+                            border: `1px solid ${theme.border}`, borderRadius: 4,
+                            color: theme.text, outline: 'none',
+                          }}
+                        />
+                        <input
+                          value={action.icon ?? ''}
+                          onChange={(e) => {
+                            const next = [...(def.quick_actions ?? [])];
+                            next[idx] = { ...next[idx], icon: e.target.value || undefined };
+                            handleUpdateQuickActions(def.id, next);
+                          }}
+                          placeholder="\u2605"
+                          style={{
+                            width: 36, fontFamily: mono, fontSize: 11, textAlign: 'center' as const,
+                            padding: '4px 4px', background: theme.bgCard,
+                            border: `1px solid ${theme.border}`, borderRadius: 4,
+                            color: theme.text, outline: 'none',
+                          }}
+                        />
+                        <button
+                          onClick={() => {
+                            const next = (def.quick_actions ?? []).filter((_, i) => i !== idx);
+                            handleUpdateQuickActions(def.id, next);
+                          }}
+                          title="Remove"
+                          style={{
+                            fontFamily: mono, fontSize: 11, color: theme.danger,
+                            background: 'none', border: 'none', cursor: 'pointer',
+                            padding: '0 4px',
+                          }}
+                        >&times;</button>
+                      </div>
+                    ))}
+                    <button
+                      onClick={() => {
+                        const next: QuickAction[] = [
+                          ...(def.quick_actions ?? []),
+                          { label: '', scope: '' },
+                        ];
+                        handleUpdateQuickActions(def.id, next);
+                      }}
+                      style={{
+                        fontFamily: mono, fontSize: 10, color: theme.accent,
+                        background: theme.accentBg, border: `1px solid ${theme.accentBorder}`,
+                        borderRadius: 4, padding: '3px 8px', cursor: 'pointer',
+                        alignSelf: 'flex-start' as const,
+                      }}
+                    >
+                      + Add quick action
+                    </button>
+                  </div>
+                  <div style={{ fontFamily: mono, fontSize: 9, color: theme.textMuted, marginTop: 6 }}>
+                    Template fields (prefilled when the button is clicked) are configured via JSON in a future iteration.
+                  </div>
+                </div>
+              )}
+              {/* Terminology panel — inline, expands when "terms" button is clicked */}
+              {canManage && editingTermsId === def.id && (
+                <div style={{
+                  padding: '10px 0 10px 8px',
+                  background: theme.bgMuted,
+                  borderRadius: 6,
+                  marginBottom: 6,
+                }}>
+                  <div style={{ fontFamily: mono, fontSize: 10, fontWeight: 600, color: theme.textSecondary, marginBottom: 8 }}>
+                    Terminology overrides for "{def.label}"
+                    <span style={{ fontWeight: 400, color: theme.textMuted, marginLeft: 6 }}>
+                      (leave blank to use the default label)
+                    </span>
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4 }}>
+                    {TERMINOLOGY_KEYS.map((key) => {
+                      const value = def.terminology?.[key] ?? '';
+                      return (
+                        <label key={key} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <span style={{
+                            fontFamily: mono, fontSize: 9, color: theme.textMuted,
+                            minWidth: 70,
+                          }}>
+                            {key}
+                          </span>
+                          <input
+                            value={value}
+                            onChange={(e) => handleUpdateTerminology(def.id, key, e.target.value)}
+                            placeholder={TERMINOLOGY_DEFAULTS[key]}
+                            style={{
+                              flex: 1, fontFamily: mono, fontSize: 10,
+                              padding: '3px 6px', background: theme.bgCard,
+                              border: `1px solid ${theme.border}`, borderRadius: 4,
+                              color: theme.text, outline: 'none',
+                            }}
+                          />
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+              {/* Default slices panel — inline, expands when "slices" button is clicked */}
+              {canManage && editingSlicesId === def.id && (
+                <div style={{
+                  padding: '10px 0 10px 8px',
+                  background: theme.bgMuted,
+                  borderRadius: 6,
+                  marginBottom: 6,
+                }}>
+                  <div style={{ fontFamily: mono, fontSize: 10, fontWeight: 600, color: theme.textSecondary, marginBottom: 8 }}>
+                    Default slices for "{def.label}"
+                    <span style={{ fontWeight: 400, color: theme.textMuted, marginLeft: 6 }}>
+                      (applied when opening a scope with no active slice)
+                    </span>
+                  </div>
+                  {Object.keys(slicesByScope).length === 0 ? (
+                    <div style={{ fontFamily: mono, fontSize: 9, color: theme.textMuted }}>
+                      No saved slices yet. Create a slice in a table to map it to this persona.
+                    </div>
+                  ) : (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                      {Object.entries(slicesByScope).map(([scope, options]) => {
+                        const current = def.default_slices?.[scope] ?? '';
+                        return (
+                          <label key={scope} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                            <span style={{
+                              fontFamily: mono, fontSize: 9, color: theme.textMuted,
+                              minWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis' as const, whiteSpace: 'nowrap' as const,
+                            }}>
+                              {scope}
+                            </span>
+                            <select
+                              value={current}
+                              onChange={(e) => handleUpdateDefaultSlice(def.id, scope, e.target.value || null)}
+                              style={{
+                                flex: 1, fontFamily: mono, fontSize: 10,
+                                padding: '3px 6px', background: theme.bgCard,
+                                border: `1px solid ${theme.border}`, borderRadius: 4,
+                                color: theme.text,
+                              }}
+                            >
+                              <option value="">(no default)</option>
+                              {options.map((opt) => (
+                                <option key={opt.id} value={opt.id}>{opt.name}</option>
+                              ))}
+                            </select>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
