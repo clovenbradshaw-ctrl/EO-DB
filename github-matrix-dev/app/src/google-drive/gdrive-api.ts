@@ -219,6 +219,19 @@ export function clearFolderIdCache(): void {
 }
 
 /**
+ * Clear cache entries for a specific dataType only.
+ * Call when a Drive folder may have been deleted mid-session so the next
+ * resolveDataFolder call performs a fresh lookup and recreates it if needed.
+ */
+export function clearFolderCacheForDataType(dataType: string): void {
+  for (const key of Array.from(folderIdCache.keys())) {
+    if (key.endsWith(`/${dataType}`) || key === `space/${dataType}`) {
+      folderIdCache.delete(key);
+    }
+  }
+}
+
+/**
  * Find a folder by name, optionally inside a parent. Returns ID or null.
  */
 async function findFolder(
@@ -477,26 +490,37 @@ export async function gdriveStoreNamed(
   dataType: string,
   fileName: string,
 ): Promise<{ ok: boolean; drive_file_id: string }> {
-  const folderId = await resolveDataFolder(googleAccessToken, dataType);
-  const existingId = await findFileInFolder(googleAccessToken, fileName, folderId);
+  const doStore = async (): Promise<{ ok: boolean; drive_file_id: string }> => {
+    const folderId = await resolveDataFolder(googleAccessToken, dataType);
+    const existingId = await findFileInFolder(googleAccessToken, fileName, folderId);
 
-  let fileId: string;
-  if (existingId) {
-    fileId = existingId;
-    console.log('[EO-DB] GDrive overwriting named file:', fileName);
-    await driveUploadBinary(googleAccessToken, fileId, binary);
-  } else {
-    const metadata: Record<string, unknown> = {
-      name: fileName,
-      parents: [folderId],
-      mimeType: 'application/octet-stream',
-    };
-    const created = await driveUploadMultipart(googleAccessToken, metadata, binary);
-    fileId = created.id;
-    console.log('[EO-DB] GDrive created named file:', fileName, fileId);
+    let fileId: string;
+    if (existingId) {
+      fileId = existingId;
+      console.log('[EO-DB] GDrive overwriting named file:', fileName);
+      await driveUploadBinary(googleAccessToken, fileId, binary);
+    } else {
+      const metadata: Record<string, unknown> = {
+        name: fileName,
+        parents: [folderId],
+        mimeType: 'application/octet-stream',
+      };
+      const created = await driveUploadMultipart(googleAccessToken, metadata, binary);
+      fileId = created.id;
+      console.log('[EO-DB] GDrive created named file:', fileName, fileId);
+    }
+    return { ok: true, drive_file_id: fileId };
+  };
+
+  try {
+    return await doStore();
+  } catch (e) {
+    // Drive folder may have been deleted (stale cache). Clear cache and retry once —
+    // resolveDataFolder will create a new folder automatically.
+    console.warn('[EO-DB] gdriveStoreNamed failed, clearing folder cache and retrying:', fileName, e);
+    clearFolderCacheForDataType(dataType);
+    return doStore();
   }
-
-  return { ok: true, drive_file_id: fileId };
 }
 
 /**
@@ -551,24 +575,35 @@ export async function gdriveStoreJson(
 ): Promise<{ ok: boolean; drive_file_id: string }> {
   const text = JSON.stringify(body);
   const bytes = new TextEncoder().encode(text);
-  const folderId = await resolveDataFolder(googleAccessToken, dataType);
-  const existingId = await findFileInFolder(googleAccessToken, fileName, folderId);
 
-  let fileId: string;
-  if (existingId) {
-    fileId = existingId;
-    await driveUploadBinary(googleAccessToken, fileId, bytes, 'application/json');
-  } else {
-    const metadata: Record<string, unknown> = {
-      name: fileName,
-      parents: [folderId],
-      mimeType: 'application/json',
-    };
-    const created = await driveUploadMultipart(googleAccessToken, metadata, bytes, 'application/json');
-    fileId = created.id;
+  const doStore = async (): Promise<{ ok: boolean; drive_file_id: string }> => {
+    const folderId = await resolveDataFolder(googleAccessToken, dataType);
+    const existingId = await findFileInFolder(googleAccessToken, fileName, folderId);
+
+    let fileId: string;
+    if (existingId) {
+      fileId = existingId;
+      await driveUploadBinary(googleAccessToken, fileId, bytes, 'application/json');
+    } else {
+      const metadata: Record<string, unknown> = {
+        name: fileName,
+        parents: [folderId],
+        mimeType: 'application/json',
+      };
+      const created = await driveUploadMultipart(googleAccessToken, metadata, bytes, 'application/json');
+      fileId = created.id;
+    }
+    return { ok: true, drive_file_id: fileId };
+  };
+
+  try {
+    return await doStore();
+  } catch (e) {
+    // Drive folder may have been deleted (stale cache). Clear cache and retry once.
+    console.warn('[EO-DB] gdriveStoreJson failed, clearing folder cache and retrying:', fileName, e);
+    clearFolderCacheForDataType(dataType);
+    return doStore();
   }
-
-  return { ok: true, drive_file_id: fileId };
 }
 
 /**
