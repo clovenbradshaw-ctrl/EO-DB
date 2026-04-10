@@ -7,8 +7,8 @@
 
 import { useState, useMemo } from 'react';
 import { useTheme, type Theme } from '../theme';
-import type { AccessRole, UserTypeDefinition, HeadlineMetric, PersonaHome, QuickAction } from '../permissions/types';
-import { ROLE_LABELS, ROLE_DESCRIPTIONS } from '../permissions/types';
+import type { AccessRole, UserTypeDefinition, HeadlineMetric, PersonaHome, QuickAction, TerminologyKey } from '../permissions/types';
+import { ROLE_LABELS, ROLE_DESCRIPTIONS, TERMINOLOGY_KEYS, TERMINOLOGY_DEFAULTS } from '../permissions/types';
 import { UserTypeBadge } from './UserTypeBadge';
 import { useSliceStore } from '../store/slice-store';
 
@@ -84,6 +84,7 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
   const [editingHomeId, setEditingHomeId] = useState<string | null>(null);
   const [editingSlicesId, setEditingSlicesId] = useState<string | null>(null);
   const [editingActionsId, setEditingActionsId] = useState<string | null>(null);
+  const [editingTermsId, setEditingTermsId] = useState<string | null>(null);
 
   // Read saved slices for the default-slice editor. Group by scope.
   const savedSlices = useSliceStore((s) => s.savedSlices);
@@ -166,6 +167,24 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
         }
         return { ...t, visible_views: next };
       }
+    }));
+  }
+
+  function handleUpdateTerminology(typeId: string, key: TerminologyKey, value: string) {
+    onUpdate(typeDefinitions.map(t => {
+      if (t.id !== typeId) return t;
+      const current = { ...(t.terminology ?? {}) };
+      if (value.trim().length === 0) {
+        delete current[key];
+      } else {
+        current[key] = value;
+      }
+      if (Object.keys(current).length === 0) {
+        const { terminology: _tm, ...rest } = t;
+        void _tm;
+        return rest;
+      }
+      return { ...t, terminology: current };
     }));
   }
 
@@ -349,6 +368,18 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
                     {def.quick_actions.length} quick action{def.quick_actions.length !== 1 ? 's' : ''}
                   </span>
                 )}
+                {def.terminology && Object.keys(def.terminology).length > 0 && (
+                  <span
+                    title={`Terminology overrides: ${Object.entries(def.terminology).map(([k, v]) => `${k}\u2192${v}`).join(', ')}`}
+                    style={{
+                      fontFamily: mono, fontSize: 9, color: def.color || theme.textSecondary,
+                      background: def.color ? `${def.color}14` : theme.bgMuted,
+                      padding: '1px 5px', borderRadius: 4,
+                    }}
+                  >
+                    {Object.keys(def.terminology).length} term{Object.keys(def.terminology).length !== 1 ? 's' : ''}
+                  </span>
+                )}
               </div>
               {canManage && (
                 <div style={{ display: 'flex', gap: 4 }}>
@@ -456,6 +487,25 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
                     }}
                   >
                     actions
+                  </button>
+                  <button
+                    onClick={() => setEditingTermsId(editingTermsId === def.id ? null : def.id)}
+                    title="Rename UI labels for this persona"
+                    style={{
+                      fontFamily: mono, fontSize: 9,
+                      color: editingTermsId === def.id ? '#fff' : (def.color || theme.textSecondary),
+                      background: editingTermsId === def.id ? (def.color || theme.accent) : 'none',
+                      border: 'none', cursor: 'pointer',
+                      padding: '2px 6px', borderRadius: 4,
+                    }}
+                    onMouseEnter={(e) => {
+                      if (editingTermsId !== def.id) e.currentTarget.style.background = theme.bgMuted;
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.background = editingTermsId === def.id ? (def.color || theme.accent) : 'none';
+                    }}
+                  >
+                    terms
                   </button>
                   <button
                     onClick={() => handleDelete(def.id)}
@@ -698,6 +748,48 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
                   </div>
                   <div style={{ fontFamily: mono, fontSize: 9, color: theme.textMuted, marginTop: 6 }}>
                     Template fields (prefilled when the button is clicked) are configured via JSON in a future iteration.
+                  </div>
+                </div>
+              )}
+              {/* Terminology panel — inline, expands when "terms" button is clicked */}
+              {canManage && editingTermsId === def.id && (
+                <div style={{
+                  padding: '10px 0 10px 8px',
+                  background: theme.bgMuted,
+                  borderRadius: 6,
+                  marginBottom: 6,
+                }}>
+                  <div style={{ fontFamily: mono, fontSize: 10, fontWeight: 600, color: theme.textSecondary, marginBottom: 8 }}>
+                    Terminology overrides for "{def.label}"
+                    <span style={{ fontWeight: 400, color: theme.textMuted, marginLeft: 6 }}>
+                      (leave blank to use the default label)
+                    </span>
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4 }}>
+                    {TERMINOLOGY_KEYS.map((key) => {
+                      const value = def.terminology?.[key] ?? '';
+                      return (
+                        <label key={key} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <span style={{
+                            fontFamily: mono, fontSize: 9, color: theme.textMuted,
+                            minWidth: 70,
+                          }}>
+                            {key}
+                          </span>
+                          <input
+                            value={value}
+                            onChange={(e) => handleUpdateTerminology(def.id, key, e.target.value)}
+                            placeholder={TERMINOLOGY_DEFAULTS[key]}
+                            style={{
+                              flex: 1, fontFamily: mono, fontSize: 10,
+                              padding: '3px 6px', background: theme.bgCard,
+                              border: `1px solid ${theme.border}`, borderRadius: 4,
+                              color: theme.text, outline: 'none',
+                            }}
+                          />
+                        </label>
+                      );
+                    })}
                   </div>
                 </div>
               )}

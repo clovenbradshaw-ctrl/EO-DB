@@ -240,6 +240,58 @@ export interface UserTypeDefinition {
    * Each action creates a prefilled record in its scope.
    */
   quick_actions?: QuickAction[];
+  /**
+   * Optional terminology overrides for canonical UI strings. Keys must
+   * come from TERMINOLOGY_KEYS; values are the label this persona sees
+   * instead of the default. Falls back to the canonical label when absent.
+   */
+  terminology?: Partial<Record<TerminologyKey, string>>;
+}
+
+/**
+ * Canonical terminology keys a persona can override. Kept small and
+ * descriptive — a persona only needs to override the few nouns that
+ * define its domain (e.g., "record" -> "case" for attorneys).
+ */
+export const TERMINOLOGY_KEYS = [
+  'record',        // singular
+  'records',       // plural + nav label
+  'compose',       // nav label
+  'import',        // nav label
+  'log',           // nav label
+  'people',        // nav label
+  'messages',      // nav label
+  'members',       // nav label
+  'graph',         // nav label
+  'new_record',    // button label
+] as const;
+
+export type TerminologyKey = typeof TERMINOLOGY_KEYS[number];
+
+/** Default (fallback) labels used when a persona has no override. */
+export const TERMINOLOGY_DEFAULTS: Record<TerminologyKey, string> = {
+  record: 'Record',
+  records: 'Records',
+  compose: 'Compose',
+  import: 'Import',
+  log: 'Log',
+  people: 'People',
+  messages: 'Messages',
+  members: 'Members',
+  graph: 'Graph',
+  new_record: 'New record',
+};
+
+/**
+ * Resolve a terminology label for the current persona. Pure function; use
+ * this from components that can't use React hooks, or via the hook below.
+ */
+export function resolveTerminology(
+  key: TerminologyKey,
+  activeType: UserTypeDefinition | null | undefined,
+): string {
+  const override = activeType?.terminology?.[key];
+  return override && override.trim().length > 0 ? override : TERMINOLOGY_DEFAULTS[key];
 }
 
 /** A single headline metric card displayed above the table. */

@@ -86,7 +86,7 @@ import { Horizon } from './Horizon';
 import { type TimeScrubberFilter, type DateColumnOption, DEFAULT_FILTER, detectDateColumns, computeDateRange, buildAdaptiveFormatter } from './time-scrubber-utils';
 import { hasFieldsSubObject, buildFieldNameMap } from './filter-types';
 import { useHashRoute, type View } from '../lib/router';
-import { type AccessRole, type UserTypeDefinition, type SpaceConfig, powerLevelToRole, legacyAccessToRole } from '../permissions/types';
+import { type AccessRole, type UserTypeDefinition, type SpaceConfig, type TerminologyKey, powerLevelToRole, legacyAccessToRole, resolveTerminology } from '../permissions/types';
 import { UserTypeSwitcher } from './UserTypeSwitcher';
 import { resolvePermissionsFromSharing, getUserPowerLevel } from '../permissions/resolve';
 const MultiUserTestView = lazyWithRetry(() => import('./MultiUserTestView').then(m => ({ default: m.MultiUserTestView })));
@@ -2464,6 +2464,10 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               if (!activeTypeDef?.visible_views?.length) return true;
               return activeTypeDef.visible_views.includes(view);
             }
+            // Helper: resolve a terminology label for the active persona, falling back to default.
+            function term(key: TerminologyKey): string {
+              return resolveTerminology(key, activeTypeDef);
+            }
             // Helper: nav item style, applying role color to active items
             function navItemStyle(view: View): React.CSSProperties {
               const active = activeView === view;
@@ -2492,7 +2496,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                 style={navItemStyle(view)}
               >
                 <span style={s.navIcon}>{NAV_ICONS[view]}</span>
-                {view === 'compose' ? '+ Compose' : view.charAt(0).toUpperCase() + view.slice(1)}
+                {view === 'compose' ? `+ ${term('compose')}` : term(view as TerminologyKey)}
               </button>
             ))}
             {isNavViewVisible('api') && (
@@ -2511,7 +2515,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                 style={navItemStyle('people')}
               >
                 <span style={s.navIcon}>{NAV_ICONS.people}</span>
-                People
+                {term('people')}
               </button>
             )}
             {isNavViewVisible('messages') && (
@@ -2520,7 +2524,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                 style={navItemStyle('messages')}
               >
                 <span style={s.navIcon}>{NAV_ICONS.messages}</span>
-                Messages
+                {term('messages')}
               </button>
             )}
             {isNavViewVisible('members') && (
@@ -2529,7 +2533,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                 style={navItemStyle('members')}
               >
                 <span style={s.navIcon}>{NAV_ICONS.members}</span>
-                Members &amp; Roles
+                {term('members')} &amp; Roles
               </button>
             )}
             <div style={s.navGroupLabel}>System</div>
@@ -2539,7 +2543,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                 style={navItemStyle('log')}
               >
                 <span style={s.navIcon}>{NAV_ICONS.log}</span>
-                Log
+                {term('log')}
               </button>
             )}
             {currentPermissions?.can_build_slices !== false && isNavViewVisible('builder') && (
