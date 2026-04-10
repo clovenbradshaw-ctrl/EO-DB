@@ -1,4 +1,4 @@
-import { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback, lazy, Suspense } from 'react';
+import { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback, lazy, Suspense, type ComponentType } from 'react';
 import { logout, createMatrixClient, type MatrixSession } from '../matrix/client';
 import { useEoStore } from '../store/eo-store';
 import { persistSpaceMeta, listSpaceMeta, clearAllSpaceMetas, saveSpaceMeta, removeSpaceMeta } from '../db/space-meta';
@@ -27,18 +27,58 @@ import { ErrorBoundary } from './ErrorBoundary';
 import { SyncProgress } from './SyncProgress';
 // Lazily-loaded views — split into separate chunks so the initial bundle
 // does not include code that users may never visit.
-const LogView = lazy(() => import('./LogView').then(m => ({ default: m.LogView })));
-const ComposeView = lazy(() => import('./ComposeView').then(m => ({ default: m.ComposeView })));
-const GraphView = lazy(() => import('./GraphView').then(m => ({ default: m.GraphView })));
-const SchemaView = lazy(() => import('./SchemaView').then(m => ({ default: m.SchemaView })));
-const SettingsView = lazy(() => import('./SettingsView').then(m => ({ default: m.SettingsView })));
-const SpaceMembers = lazy(() => import('./SpaceMembers').then(m => ({ default: m.SpaceMembers })));
-const ImportView = lazy(() => import('./ImportView').then(m => ({ default: m.ImportView })));
-const ApiConnectionsView = lazy(() => import('./ApiConnectionsView').then(m => ({ default: m.ApiConnectionsView })));
-const BuilderView = lazy(() => import('./builder/BuilderView').then(m => ({ default: m.BuilderView })));
-const MessagesView = lazy(() => import('./MessagesView').then(m => ({ default: m.MessagesView })));
-const PeopleView = lazy(() => import('./PeopleView').then(m => ({ default: m.PeopleView })));
-const RecordPageView = lazy(() => import('./builder/RecordPageView').then(m => ({ default: m.RecordPageView })));
+//
+// `lazyWithRetry` wraps React.lazy() so that when a dynamic import fails
+// because the chunk's content hash changed after a deploy (the old hashed
+// file has been deleted from GitHub Pages), we force a one-time hard reload
+// to fetch the fresh index.html. Without this, an open tab loaded from a
+// previous deploy shows "Failed to fetch dynamically imported module" the
+// moment the user navigates to any lazy view, and ErrorBoundary's "Try
+// again" button can't recover because the chunk is still missing.
+const CHUNK_RELOAD_KEY = 'eo-chunk-reload';
+function isChunkLoadError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const msg = (err as { message?: string }).message || '';
+  return (
+    msg.includes('Failed to fetch dynamically imported module') ||
+    msg.includes('error loading dynamically imported module') ||
+    msg.includes('Importing a module script failed')
+  );
+}
+function lazyWithRetry<T extends ComponentType<any>>(
+  factory: () => Promise<{ default: T }>,
+): ReturnType<typeof lazy<T>> {
+  return lazy(async () => {
+    try {
+      const mod = await factory();
+      // Successful load — clear the reload guard so a future stale-deploy
+      // error in the same session can reload again.
+      sessionStorage.removeItem(CHUNK_RELOAD_KEY);
+      return mod;
+    } catch (err) {
+      if (isChunkLoadError(err) && sessionStorage.getItem(CHUNK_RELOAD_KEY) !== '1') {
+        sessionStorage.setItem(CHUNK_RELOAD_KEY, '1');
+        window.location.reload();
+        // Return a never-resolving promise so React's Suspense keeps showing
+        // the fallback (not the error) while the page reloads.
+        return new Promise<{ default: T }>(() => {});
+      }
+      throw err;
+    }
+  });
+}
+const LogView = lazyWithRetry(() => import('./LogView').then(m => ({ default: m.LogView })));
+const ComposeView = lazyWithRetry(() => import('./ComposeView').then(m => ({ default: m.ComposeView })));
+const GraphView = lazyWithRetry(() => import('./GraphView').then(m => ({ default: m.GraphView })));
+const SchemaView = lazyWithRetry(() => import('./SchemaView').then(m => ({ default: m.SchemaView })));
+const SettingsView = lazyWithRetry(() => import('./SettingsView').then(m => ({ default: m.SettingsView })));
+const SpaceMembers = lazyWithRetry(() => import('./SpaceMembers').then(m => ({ default: m.SpaceMembers })));
+const ImportView = lazyWithRetry(() => import('./ImportView').then(m => ({ default: m.ImportView })));
+const ApiConnectionsView = lazyWithRetry(() => import('./ApiConnectionsView').then(m => ({ default: m.ApiConnectionsView })));
+const BuilderView = lazyWithRetry(() => import('./builder/BuilderView').then(m => ({ default: m.BuilderView })));
+const MessagesView = lazyWithRetry(() => import('./MessagesView').then(m => ({ default: m.MessagesView })));
+const PeopleView = lazyWithRetry(() => import('./PeopleView').then(m => ({ default: m.PeopleView })));
+const RecordPageView = lazyWithRetry(() => import('./builder/RecordPageView').then(m => ({ default: m.RecordPageView })));
 import { PermissionBadge } from './PermissionBadge';
 import { ViewOnlyBanner } from './ViewOnlyBanner';
 import { HeadlineMetrics } from './HeadlineMetrics';
@@ -58,7 +98,7 @@ import { useHashRoute, type View } from '../lib/router';
 import { type AccessRole, type UserTypeDefinition, type SpaceConfig, powerLevelToRole, legacyAccessToRole } from '../permissions/types';
 import { UserTypeSwitcher } from './UserTypeSwitcher';
 import { resolvePermissionsFromSharing, getUserPowerLevel } from '../permissions/resolve';
-const MultiUserTestView = lazy(() => import('./MultiUserTestView').then(m => ({ default: m.MultiUserTestView })));
+const MultiUserTestView = lazyWithRetry(() => import('./MultiUserTestView').then(m => ({ default: m.MultiUserTestView })));
 import { RecycleBin, addDeletedSpace, isSpaceDeleted, removeDeletedSpace, getDeletedSpaces } from './RecycleBin';
 import { addArchivedSpace, isSpaceArchived, removeArchivedSpace, getArchivedSpaces } from './ArchivedSpaces';
 import { setSpaceConfig, getSpaceConfig, applyEoPowerLevels, EO_SPACE_CONFIG_TYPE } from '../permissions/room-topology';
