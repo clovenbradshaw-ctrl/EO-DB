@@ -10,9 +10,10 @@ import {
   executeQuery,
 } from './query-engine';
 import { Modal } from './Modal';
+import { HolonSelector, expandHolonSelection } from './HolonSelector';
 
 const NODE_COLORS = ['#4ade80', '#38bdf8', '#a78bfa', '#34d399', '#fb923c', '#f472b6'];
-const MAX_DISPLAY_NODES = 200;
+const SOFT_NODE_WARNING = 500;
 const LANG_ORDER: QueryLanguage[] = ['target', 'sql', 'eo'];
 const LANG_LABELS: Record<string, string> = { target: 'Search', sql: 'SQL', eo: 'EO Path' };
 const LANG_PLACEHOLDERS: Record<string, string> = {
@@ -21,8 +22,29 @@ const LANG_PLACEHOLDERS: Record<string, string> = {
   eo: 'app.tableName[field=value]',
 };
 
+type LabelMode = 'all' | 'greedy' | 'hubs' | 'off';
+type CollisionMode = 'circle' | 'label' | 'strict';
+
 interface Edge { source: string; dest: string }
 interface NodePos { x: number; y: number }
+interface NodeBox { w: number; h: number }
+
+/* ── Dynamic canvas sizing ────────────────────────────────────── */
+
+function computeCanvasSize(nodeIds: string[], maxRadius: number, spacingMult: number): { w: number; h: number } {
+  const n = nodeIds.length;
+  if (n === 0) return { w: 800, h: 560 };
+  let totalChars = 0;
+  for (const id of nodeIds) {
+    const label = id.split('.').pop() ?? id;
+    totalChars += label.length;
+  }
+  const avgLabelChars = totalChars / n;
+  const labelPx = avgLabelChars * 4.5 + 8; // ~7px mono font
+  const slot = Math.max(labelPx, 2 * maxRadius + 14) * spacingMult;
+  const side = Math.ceil(Math.sqrt(n)) * slot * 1.35;
+  return { w: Math.max(800, side), h: Math.max(560, side * 0.72) };
+}
 
 /* ── Minimal force-directed layout ────────────────────────────── */
 
@@ -33,10 +55,12 @@ function forceLayout(
   edges: Edge[],
   width: number,
   height: number,
-  iterations = 300,
+  iterations = 500,
   repulsionMult = 1.0,
   attractionMult = 1.0,
   nodeRadii?: Record<string, number>,
+  nodeBoxes?: Record<string, NodeBox>,
+  collisionMode: CollisionMode = 'label',
 ): Record<string, NodePos> {
   const n = nodeIds.length;
   if (n === 0) return {};
@@ -65,10 +89,59 @@ function forceLayout(
   const idealDist = Math.max(60, Math.sqrt((width * height) / Math.max(n, 1)) * 1.2);
   const springLen = idealDist * 0.8;
 
+  const strictMult = collisionMode === 'strict' ? 1.25 : 1.0;
+
+  // Resolve node overlap once per call; supports circle AABB or label-aware AABB.
+  const resolveCollisions = () => {
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        const dx = nodes[j].x - nodes[i].x;
+        const dy = nodes[j].y - nodes[i].y;
+
+        if (collisionMode === 'circle' || !nodeBoxes) {
+          const dist = Math.sqrt(dx * dx + dy * dy) || 0.1;
+          const ri = nodeRadii?.[nodes[i].id] ?? 6;
+          const rj = nodeRadii?.[nodes[j].id] ?? 6;
+          const minDist = (ri + rj) * 1.8 * strictMult;
+          if (dist < minDist) {
+            const overlap = (minDist - dist) / dist * 0.5;
+            const fx = dx * overlap;
+            const fy = dy * overlap;
+            nodes[i].x -= fx;
+            nodes[i].y -= fy;
+            nodes[j].x += fx;
+            nodes[j].y += fy;
+          }
+        } else {
+          // Label-aware AABB separation. Resolve on the axis with less overlap.
+          const bi = nodeBoxes[nodes[i].id] ?? { w: 16, h: 16 };
+          const bj = nodeBoxes[nodes[j].id] ?? { w: 16, h: 16 };
+          const minX = (bi.w / 2 + bj.w / 2) * 1.05 * strictMult;
+          const minY = (bi.h / 2 + bj.h / 2) * 1.10 * strictMult;
+          const overlapX = minX - Math.abs(dx);
+          const overlapY = minY - Math.abs(dy);
+          if (overlapX > 0 && overlapY > 0) {
+            if (overlapX < overlapY) {
+              const push = (overlapX / 2) * (dx < 0 ? -1 : 1);
+              nodes[i].x -= push;
+              nodes[j].x += push;
+            } else {
+              const push = (overlapY / 2) * (dy < 0 ? -1 : 1);
+              nodes[i].y -= push;
+              nodes[j].y += push;
+            }
+          }
+        }
+      }
+    }
+  };
+
+  let stableTicks = 0;
+
   for (let iter = 0; iter < iterations; iter++) {
     const temp = 0.1 * (1 - iter / iterations); // cooling
 
-    // Repulsion (all pairs – O(n²) fine for ≤200 nodes)
+    // Repulsion (all pairs – O(n²) fine for ≲500 nodes)
     for (let i = 0; i < n; i++) {
       for (let j = i + 1; j < n; j++) {
         let dx = nodes[j].x - nodes[i].x;
@@ -104,30 +177,8 @@ function forceLayout(
       nd.vy += (height / 2 - nd.y) * 0.01 * temp;
     }
 
-    // Collision prevention (no overlap)
-    if (nodeRadii) {
-      for (let i = 0; i < n; i++) {
-        for (let j = i + 1; j < n; j++) {
-          const dx = nodes[j].x - nodes[i].x;
-          const dy = nodes[j].y - nodes[i].y;
-          const dist = Math.sqrt(dx * dx + dy * dy) || 0.1;
-          const ri = nodeRadii[nodes[i].id] || 6;
-          const rj = nodeRadii[nodes[j].id] || 6;
-          const minDist = (ri + rj) * 1.8;
-          if (dist < minDist) {
-            const overlap = (minDist - dist) / dist * 0.5;
-            const fx = dx * overlap;
-            const fy = dy * overlap;
-            nodes[i].x -= fx;
-            nodes[i].y -= fy;
-            nodes[j].x += fx;
-            nodes[j].y += fy;
-          }
-        }
-      }
-    }
-
     // Apply velocities with damping
+    let totalDisp = 0;
     for (const nd of nodes) {
       const speed = Math.sqrt(nd.vx * nd.vx + nd.vy * nd.vy);
       const maxSpeed = idealDist * temp * 10;
@@ -137,8 +188,22 @@ function forceLayout(
       }
       nd.x += nd.vx;
       nd.y += nd.vy;
+      totalDisp += Math.abs(nd.vx) + Math.abs(nd.vy);
       nd.vx *= 0.9;
       nd.vy *= 0.9;
+    }
+
+    // Collision pass — runs AFTER velocity integration so it has the last word.
+    // Double-pass during the final third for tight resolution.
+    resolveCollisions();
+    if (iter > iterations * 0.66) resolveCollisions();
+
+    // Early termination once the system settles.
+    if (totalDisp < 0.5) {
+      stableTicks++;
+      if (stableTicks >= 5) break;
+    } else {
+      stableTicks = 0;
     }
   }
 
@@ -275,15 +340,62 @@ function extractEdgesFromEvents(events: EoEvent[]): Edge[] {
   return edgeList;
 }
 
+interface GraphViewPrefs {
+  repulsionMult: number;
+  attractionMult: number;
+  spacingMult: number;
+  labelMode: LabelMode;
+  collisionMode: CollisionMode;
+}
+
+const DEFAULT_PREFS: GraphViewPrefs = {
+  repulsionMult: 1.0,
+  attractionMult: 1.0,
+  spacingMult: 1.0,
+  labelMode: 'greedy',
+  collisionMode: 'label',
+};
+
+const GRAPH_PREFS_KEY = 'eo-graph-view-prefs';
+
+function loadGraphPrefs(): GraphViewPrefs {
+  if (typeof localStorage === 'undefined') return DEFAULT_PREFS;
+  try {
+    const raw = localStorage.getItem(GRAPH_PREFS_KEY);
+    if (!raw) return DEFAULT_PREFS;
+    const parsed = JSON.parse(raw) as Partial<GraphViewPrefs>;
+    return { ...DEFAULT_PREFS, ...parsed };
+  } catch {
+    return DEFAULT_PREFS;
+  }
+}
+
 export function GraphView({ allStates }: { allStates?: EoState[] }) {
   const { theme } = useTheme();
   const recentEvents = useEoStore((s) => s.recentEvents);
   const store = useEoStore((s) => s.store);
   const [highlighted, setHighlighted] = useState<string | null>(null);
   const [modalNode, setModalNode] = useState<string | null>(null);
-  const [repulsionMult, setRepulsionMult] = useState(1.0);
-  const [attractionMult, setAttractionMult] = useState(1.0);
+  const initialPrefs = useRef<GraphViewPrefs>(loadGraphPrefs());
+  const [repulsionMult, setRepulsionMult] = useState(initialPrefs.current.repulsionMult);
+  const [attractionMult, setAttractionMult] = useState(initialPrefs.current.attractionMult);
+  const [spacingMult, setSpacingMult] = useState(initialPrefs.current.spacingMult);
+  const [labelMode, setLabelMode] = useState<LabelMode>(initialPrefs.current.labelMode);
+  const [collisionMode, setCollisionMode] = useState<CollisionMode>(initialPrefs.current.collisionMode);
   const s = styles(theme);
+
+  // Persist view prefs to localStorage
+  useEffect(() => {
+    if (typeof localStorage === 'undefined') return;
+    try {
+      localStorage.setItem(
+        GRAPH_PREFS_KEY,
+        JSON.stringify({ repulsionMult, attractionMult, spacingMult, labelMode, collisionMode }),
+      );
+    } catch {
+      /* ignore quota errors */
+    }
+  }, [repulsionMult, attractionMult, spacingMult, labelMode, collisionMode]);
 
   // Data source state
   const [dataSource, setDataSource] = useState<'recent' | 'full'>('recent');
@@ -294,6 +406,10 @@ export function GraphView({ allStates }: { allStates?: EoState[] }) {
   const [query, setQuery] = useState('');
   const [lang, setLang] = useState<QueryLanguage>('target');
   const [queryTargets, setQueryTargets] = useState<Set<string> | null>(null);
+
+  // Holon nav selection — tri-state tree in the node detail modal.
+  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
+  const [selectionTargets, setSelectionTargets] = useState<Set<string> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [focused, setFocused] = useState(false);
   const [selectedIdx, setSelectedIdx] = useState(0);
@@ -465,27 +581,30 @@ export function GraphView({ allStates }: { allStates?: EoState[] }) {
     return set;
   }, [allEdges]);
 
-  // Apply query filter
+  // Compose query filter AND holon selection filter (intersection semantics).
+  const effectiveTargets = useMemo<Set<string> | null>(() => {
+    if (!queryTargets && !selectionTargets) return null;
+    if (!queryTargets) return selectionTargets;
+    if (!selectionTargets) return queryTargets;
+    const inter = new Set<string>();
+    for (const t of queryTargets) if (selectionTargets.has(t)) inter.add(t);
+    return inter;
+  }, [queryTargets, selectionTargets]);
+
+  // Apply combined filter
   const { nodes, edges } = useMemo(() => {
-    const filtered = queryTargets
-      ? allEdges.filter((e) => queryTargets.has(e.source) || queryTargets.has(e.dest))
+    const filtered = effectiveTargets
+      ? allEdges.filter((e) => effectiveTargets.has(e.source) || effectiveTargets.has(e.dest))
       : allEdges;
 
     const nodesSet = new Set<string>();
     filtered.forEach((e) => { nodesSet.add(e.source); nodesSet.add(e.dest); });
 
-    const nodeArr = Array.from(nodesSet);
-    const capped = nodeArr.length > MAX_DISPLAY_NODES;
     return {
-      nodes: capped ? nodeArr.slice(0, MAX_DISPLAY_NODES) : nodeArr,
-      edges: capped
-        ? filtered.filter((e) => {
-            const cappedSet = new Set(nodeArr.slice(0, MAX_DISPLAY_NODES));
-            return cappedSet.has(e.source) && cappedSet.has(e.dest);
-          })
-        : filtered,
+      nodes: Array.from(nodesSet),
+      edges: filtered,
     };
-  }, [allEdges, queryTargets]);
+  }, [allEdges, effectiveTargets]);
 
   // Precompute node metadata for modal + layout
   const nodeInfo = useMemo(() => {
@@ -537,20 +656,85 @@ export function GraphView({ allStates }: { allStates?: EoState[] }) {
   // SVG ref for zoom/pan
   const { transform, resetZoom, zoomIn, zoomOut, svgCallbackRef } = useZoomPan();
 
+  // Node bounding boxes (used for label-aware collision + greedy label layout)
+  const nodeBoxes = useMemo(() => {
+    const boxes: Record<string, NodeBox> = {};
+    for (const id of nodes) {
+      const label = id.split('.').pop() || id;
+      const r = nodeRadii[id] ?? 6;
+      boxes[id] = {
+        w: Math.max(2 * r, label.length * 4.5 + 6),
+        h: 2 * r + 9 + 4,
+      };
+    }
+    return boxes;
+  }, [nodes, nodeRadii]);
+
+  // Dynamic canvas sizing: scales with node count and spacing preference.
+  const { w: VW, h: VH } = useMemo(
+    () => computeCanvasSize(nodes, 12, spacingMult),
+    [nodes, spacingMult],
+  );
+
   // Layout: force-directed
-  const VW = 800, VH = 560;
   const positions = useMemo(() => {
-    return forceLayout(nodes, edges, VW, VH, 300, repulsionMult, attractionMult, nodeRadii);
-  }, [nodes, edges, repulsionMult, attractionMult, nodeRadii]);
+    return forceLayout(nodes, edges, VW, VH, 500, repulsionMult, attractionMult, nodeRadii, nodeBoxes, collisionMode);
+  }, [nodes, edges, repulsionMult, attractionMult, nodeRadii, nodeBoxes, collisionMode, VW, VH]);
+
+  // Greedy label placement: which nodes should render their label?
+  const visibleLabels = useMemo(() => {
+    const visible = new Set<string>();
+    if (labelMode === 'off') return visible;
+    if (labelMode === 'all') {
+      for (const id of nodes) visible.add(id);
+      return visible;
+    }
+    if (labelMode === 'hubs') {
+      for (const id of nodes) {
+        if (nodeInfo[id]?.role === 'hub') visible.add(id);
+      }
+      return visible;
+    }
+    // 'greedy' — place labels in descending-degree order; drop collisions.
+    const sorted = [...nodes].sort(
+      (a, b) => (nodeInfo[b]?.degree ?? 0) - (nodeInfo[a]?.degree ?? 0),
+    );
+    const placed: { cx: number; cy: number; w: number; h: number }[] = [];
+    for (const id of sorted) {
+      const p = positions[id];
+      const box = nodeBoxes[id];
+      if (!p || !box) continue;
+      const r = nodeRadii[id] ?? 6;
+      // Label sits below the node center; approximate its centroid.
+      const cy = p.y + r + 10;
+      const lw = box.w;
+      const lh = 10;
+      let collides = false;
+      for (const q of placed) {
+        if (
+          Math.abs(p.x - q.cx) < (lw + q.w) / 2 &&
+          Math.abs(cy - q.cy) < (lh + q.h) / 2
+        ) {
+          collides = true;
+          break;
+        }
+      }
+      if (!collides) {
+        placed.push({ cx: p.x, cy, w: lw, h: lh });
+        visible.add(id);
+      }
+    }
+    return visible;
+  }, [labelMode, nodes, nodeInfo, positions, nodeBoxes, nodeRadii]);
 
   // Status line
-  const isFiltered = queryTargets !== null;
+  const isFiltered = effectiveTargets !== null;
   const totalNodes = allNodesSet.size;
   const totalEdges = allEdges.length;
   const statusText = isFiltered
     ? `${nodes.length} of ${totalNodes} nodes · ${edges.length} of ${totalEdges} edges (filtered)`
     : `${nodes.length} nodes · ${edges.length} edges`;
-  const showCappedWarning = nodes.length >= MAX_DISPLAY_NODES && totalNodes > MAX_DISPLAY_NODES;
+  const showCappedWarning = nodes.length >= SOFT_NODE_WARNING;
 
   const showDropdown = focused && suggestions.length > 0;
 
@@ -634,15 +818,83 @@ export function GraphView({ allStates }: { allStates?: EoState[] }) {
                 />
                 <span style={s.sliderValue}>{attractionMult.toFixed(1)}x</span>
               </label>
-              {(repulsionMult !== 1.0 || attractionMult !== 1.0) && (
-                <button
-                  onClick={() => { setRepulsionMult(1.0); setAttractionMult(1.0); }}
-                  style={s.physicsResetBtn}
-                >
-                  Reset
-                </button>
-              )}
+              <label style={s.sliderLabel}>
+                Spacing
+                <input
+                  type="range"
+                  min={0.5} max={3.0} step={0.1}
+                  value={spacingMult}
+                  onChange={(e) => setSpacingMult(parseFloat(e.target.value))}
+                  style={s.slider}
+                />
+                <span style={s.sliderValue}>{spacingMult.toFixed(1)}x</span>
+              </label>
             </div>
+          </div>
+
+          {/* Label + collision controls */}
+          <div style={s.toolbarRow}>
+            <div style={s.segmentGroup} title="How labels are drawn. Greedy hides collisions.">
+              <span style={s.segmentLabel}>Labels</span>
+              {(['all', 'greedy', 'hubs', 'off'] as LabelMode[]).map((m) => (
+                <button
+                  key={m}
+                  onClick={() => setLabelMode(m)}
+                  style={labelMode === m ? s.segmentBtnActive : s.segmentBtn}
+                >
+                  {m}
+                </button>
+              ))}
+            </div>
+            <div style={s.segmentGroup} title="How node overlap is prevented during layout.">
+              <span style={s.segmentLabel}>Collision</span>
+              {(['circle', 'label', 'strict'] as CollisionMode[]).map((m) => (
+                <button
+                  key={m}
+                  onClick={() => setCollisionMode(m)}
+                  style={collisionMode === m ? s.segmentBtnActive : s.segmentBtn}
+                >
+                  {m}
+                </button>
+              ))}
+            </div>
+            {(
+              repulsionMult !== DEFAULT_PREFS.repulsionMult ||
+              attractionMult !== DEFAULT_PREFS.attractionMult ||
+              spacingMult !== DEFAULT_PREFS.spacingMult ||
+              labelMode !== DEFAULT_PREFS.labelMode ||
+              collisionMode !== DEFAULT_PREFS.collisionMode
+            ) && (
+              <button
+                onClick={() => {
+                  setRepulsionMult(DEFAULT_PREFS.repulsionMult);
+                  setAttractionMult(DEFAULT_PREFS.attractionMult);
+                  setSpacingMult(DEFAULT_PREFS.spacingMult);
+                  setLabelMode(DEFAULT_PREFS.labelMode);
+                  setCollisionMode(DEFAULT_PREFS.collisionMode);
+                }}
+                style={s.physicsResetBtn}
+              >
+                Reset view
+              </button>
+            )}
+            {selectionTargets !== null && (
+              <div style={s.selectionChip}>
+                <span>
+                  Holon selection · {selectionTargets.size} node{selectionTargets.size === 1 ? '' : 's'}
+                </span>
+                <button
+                  onClick={() => {
+                    setSelectionTargets(null);
+                    setSelectedPaths(new Set());
+                  }}
+                  style={s.selectionChipClear}
+                  aria-label="Clear holon selection"
+                >
+                  &times;
+                </button>
+              </div>
+            )}
           </div>
 
           {/* Query bar */}
@@ -781,6 +1033,7 @@ export function GraphView({ allStates }: { allStates?: EoState[] }) {
                     const r = isSelected ? 9 : nodeRadii[n] || 6;
                     const roleColor = info.color;
 
+                    const showLabel = visibleLabels.has(n) || isSelected || n === highlighted;
                     return (
                       <g
                         key={n}
@@ -797,20 +1050,22 @@ export function GraphView({ allStates }: { allStates?: EoState[] }) {
                           strokeWidth={isSelected ? 2 : 1}
                           strokeOpacity={opacity}
                         />
-                        {/* Label — offset below node */}
-                        <text
-                          x={p.x} y={p.y + r + 10}
-                          textAnchor="middle"
-                          fill={roleColor}
-                          fontFamily="JetBrains Mono, monospace"
-                          fontSize={isSelected ? 9 : 7}
-                          fontWeight={isSelected ? '700' : '500'}
-                          fillOpacity={opacity * 0.9}
-                        >
-                          {label}
-                        </text>
-                        {/* Role badge for hubs */}
-                        {info.role === 'hub' && (
+                        {/* Label — offset below node. Hidden by label-mode unless selected/hovered. */}
+                        {showLabel && (
+                          <text
+                            x={p.x} y={p.y + r + 10}
+                            textAnchor="middle"
+                            fill={roleColor}
+                            fontFamily="JetBrains Mono, monospace"
+                            fontSize={isSelected ? 9 : 7}
+                            fontWeight={isSelected ? '700' : '500'}
+                            fillOpacity={opacity * 0.9}
+                          >
+                            {label}
+                          </text>
+                        )}
+                        {/* Role badge for hubs — follows the same label-visibility rule. */}
+                        {info.role === 'hub' && showLabel && (
                           <text
                             x={p.x} y={p.y - r - 3}
                             textAnchor="middle"
@@ -838,7 +1093,7 @@ export function GraphView({ allStates }: { allStates?: EoState[] }) {
                   fillOpacity={0.7}
                 >
                   {statusText}
-                  {showCappedWarning ? ` (capped at ${MAX_DISPLAY_NODES})` : ''}
+                  {showCappedWarning ? ` (dense graph — consider filtering)` : ''}
                   {' · scroll to zoom · drag to pan'}
                 </text>
               </svg>
@@ -863,74 +1118,116 @@ export function GraphView({ allStates }: { allStates?: EoState[] }) {
         open={modalNode !== null}
         onClose={() => setModalNode(null)}
         title={modalNode ? (modalNode.split('.').pop() || modalNode) : ''}
-        width={480}
+        width={820}
       >
         {modalNode && nodeInfo[modalNode] && (() => {
           const info = nodeInfo[modalNode];
+          const navRoot = modalNode.split('.').slice(0, -1).join('.') || modalNode;
+          const allNodesArr = Array.from(allNodesSet);
           return (
-            <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11 }}>
-              <div style={s.modalRow}>
-                <span style={{ color: theme.textMuted }}>Target </span>
-                <span style={{ color: theme.text }}>{modalNode}</span>
-              </div>
-              <div style={s.modalRow}>
-                <span style={{ color: theme.textMuted }}>Role </span>
-                <span style={{
-                  color: info.role === 'hub' ? '#a855f7' : info.role === 'bridge' ? '#eab308' : theme.text,
-                  fontWeight: 600,
-                }}>
-                  {info.role.toUpperCase()}
-                </span>
-              </div>
-              <div style={{ ...s.modalRow, marginBottom: 14 }}>
-                <span style={{ color: theme.textMuted }}>Degree </span>
-                <span style={{ color: theme.text }}>{info.degree}</span>
-                <span style={{ color: theme.textMuted, marginLeft: 6 }}>
-                  ({info.inEdges.length} in, {info.outEdges.length} out)
-                </span>
-              </div>
-
-              {info.outEdges.length > 0 && (
-                <>
-                  <div style={s.modalSectionTitle}>Outgoing ({info.outEdges.length})</div>
-                  {info.outEdges.map((e, i) => (
-                    <button
-                      key={`out-${i}`}
-                      onClick={() => { setModalNode(null); setHighlighted(e.dest); }}
-                      style={s.modalEdgeBtn}
-                    >
-                      <span style={{ color: info.color }}>{modalNode.split('.').pop()}</span>
-                      <span style={{ color: theme.textMuted }}>&rarr;</span>
-                      <span style={{ color: theme.accent }}>{e.dest.split('.').pop()}</span>
-                    </button>
-                  ))}
-                </>
-              )}
-
-              {info.inEdges.length > 0 && (
-                <>
-                  <div style={{ ...s.modalSectionTitle, marginTop: info.outEdges.length > 0 ? 10 : 0 }}>
-                    Incoming ({info.inEdges.length})
-                  </div>
-                  {info.inEdges.map((e, i) => (
-                    <button
-                      key={`in-${i}`}
-                      onClick={() => { setModalNode(null); setHighlighted(e.source); }}
-                      style={s.modalEdgeBtn}
-                    >
-                      <span style={{ color: theme.accent }}>{e.source.split('.').pop()}</span>
-                      <span style={{ color: theme.textMuted }}>&rarr;</span>
-                      <span style={{ color: info.color }}>{modalNode.split('.').pop()}</span>
-                    </button>
-                  ))}
-                </>
-              )}
-
-              {info.degree === 0 && (
-                <div style={{ color: theme.textMuted, fontStyle: 'italic', marginTop: 8 }}>
-                  No connected edges
+            <div style={{ display: 'flex', gap: 16, fontFamily: "'JetBrains Mono', monospace", fontSize: 11 }}>
+              {/* Left: node details */}
+              <div style={{ flex: '1 1 auto', minWidth: 0 }}>
+                <div style={s.modalRow}>
+                  <span style={{ color: theme.textMuted }}>Target </span>
+                  <span style={{ color: theme.text }}>{modalNode}</span>
                 </div>
-              )}
+                <div style={s.modalRow}>
+                  <span style={{ color: theme.textMuted }}>Role </span>
+                  <span style={{
+                    color: info.role === 'hub' ? '#a855f7' : info.role === 'bridge' ? '#eab308' : theme.text,
+                    fontWeight: 600,
+                  }}>
+                    {info.role.toUpperCase()}
+                  </span>
+                </div>
+                <div style={{ ...s.modalRow, marginBottom: 14 }}>
+                  <span style={{ color: theme.textMuted }}>Degree </span>
+                  <span style={{ color: theme.text }}>{info.degree}</span>
+                  <span style={{ color: theme.textMuted, marginLeft: 6 }}>
+                    ({info.inEdges.length} in, {info.outEdges.length} out)
+                  </span>
+                </div>
+
+                {info.outEdges.length > 0 && (
+                  <>
+                    <div style={s.modalSectionTitle}>Outgoing ({info.outEdges.length})</div>
+                    {info.outEdges.map((e, i) => (
+                      <button
+                        key={`out-${i}`}
+                        onClick={() => { setModalNode(null); setHighlighted(e.dest); }}
+                        style={s.modalEdgeBtn}
+                      >
+                        <span style={{ color: info.color }}>{modalNode.split('.').pop()}</span>
+                        <span style={{ color: theme.textMuted }}>&rarr;</span>
+                        <span style={{ color: theme.accent }}>{e.dest.split('.').pop()}</span>
+                      </button>
+                    ))}
+                  </>
+                )}
+
+                {info.inEdges.length > 0 && (
+                  <>
+                    <div style={{ ...s.modalSectionTitle, marginTop: info.outEdges.length > 0 ? 10 : 0 }}>
+                      Incoming ({info.inEdges.length})
+                    </div>
+                    {info.inEdges.map((e, i) => (
+                      <button
+                        key={`in-${i}`}
+                        onClick={() => { setModalNode(null); setHighlighted(e.source); }}
+                        style={s.modalEdgeBtn}
+                      >
+                        <span style={{ color: theme.accent }}>{e.source.split('.').pop()}</span>
+                        <span style={{ color: theme.textMuted }}>&rarr;</span>
+                        <span style={{ color: info.color }}>{modalNode.split('.').pop()}</span>
+                      </button>
+                    ))}
+                  </>
+                )}
+
+                {info.degree === 0 && (
+                  <div style={{ color: theme.textMuted, fontStyle: 'italic', marginTop: 8 }}>
+                    No connected edges
+                  </div>
+                )}
+              </div>
+
+              {/* Right: holon nav / multi-level selection */}
+              <div style={{ flex: '0 0 320px', display: 'flex', flexDirection: 'column', gap: 8, minWidth: 0 }}>
+                <HolonSelector
+                  rootScope={navRoot}
+                  nodes={allNodesArr}
+                  selectedPaths={selectedPaths}
+                  onChange={setSelectedPaths}
+                />
+                <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
+                  <button
+                    onClick={() => {
+                      setSelectionTargets(null);
+                      setSelectedPaths(new Set());
+                    }}
+                    style={s.physicsResetBtn}
+                  >
+                    Clear selection
+                  </button>
+                  <button
+                    onClick={() => {
+                      setSelectionTargets(expandHolonSelection(selectedPaths, allNodesArr));
+                      setModalNode(null);
+                    }}
+                    disabled={selectedPaths.size === 0}
+                    style={{
+                      ...s.segmentBtnActive,
+                      padding: '4px 12px',
+                      borderRight: `1px solid ${theme.accent}`,
+                      borderRadius: 3,
+                      opacity: selectedPaths.size === 0 ? 0.4 : 1,
+                    }}
+                  >
+                    Apply filter
+                  </button>
+                </div>
+              </div>
             </div>
           );
         })()}
@@ -1224,6 +1521,72 @@ function styles(t: Theme): Record<string, React.CSSProperties> {
       cursor: 'pointer',
       textTransform: 'uppercase' as const,
       letterSpacing: '0.04em',
+    },
+    segmentGroup: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 0,
+      marginRight: 8,
+    },
+    segmentLabel: {
+      fontSize: 9,
+      fontWeight: 600,
+      fontFamily: "'JetBrains Mono', monospace",
+      color: t.textMuted,
+      textTransform: 'uppercase' as const,
+      letterSpacing: '0.04em',
+      marginRight: 6,
+    },
+    segmentBtn: {
+      padding: '3px 8px',
+      fontSize: 9,
+      fontWeight: 600,
+      fontFamily: "'JetBrains Mono', monospace",
+      letterSpacing: '0.04em',
+      background: 'transparent',
+      color: t.textMuted,
+      border: `1px solid ${t.border}`,
+      borderRight: 'none',
+      cursor: 'pointer',
+      textTransform: 'uppercase' as const,
+    },
+    segmentBtnActive: {
+      padding: '3px 8px',
+      fontSize: 9,
+      fontWeight: 600,
+      fontFamily: "'JetBrains Mono', monospace",
+      letterSpacing: '0.04em',
+      background: t.accent,
+      color: '#fff',
+      border: `1px solid ${t.accent}`,
+      borderRight: 'none',
+      cursor: 'pointer',
+      textTransform: 'uppercase' as const,
+    },
+    selectionChip: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6,
+      padding: '3px 6px 3px 10px',
+      marginLeft: 'auto',
+      fontSize: 9,
+      fontWeight: 600,
+      fontFamily: "'JetBrains Mono', monospace",
+      letterSpacing: '0.04em',
+      textTransform: 'uppercase' as const,
+      color: t.accent,
+      background: t.bgHover,
+      border: `1px solid ${t.accent}`,
+      borderRadius: 999,
+    },
+    selectionChipClear: {
+      background: 'none',
+      border: 'none',
+      color: t.accent,
+      fontSize: 14,
+      cursor: 'pointer',
+      padding: '0 2px',
+      lineHeight: 1,
     },
     modalRow: {
       marginBottom: 6,

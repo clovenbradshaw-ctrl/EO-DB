@@ -85,7 +85,7 @@ const NAME_LIKE_KEYS = [
   'subject',
 ];
 
-function resolveRecordName(rec: EoState): string | null {
+export function resolveRecordName(rec: EoState): string | null {
   const v = rec.value;
   if (!v || typeof v !== 'object') return null;
 
