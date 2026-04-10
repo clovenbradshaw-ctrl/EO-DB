@@ -6,7 +6,8 @@ import { createFoldWorkerClient, initFoldWorker, type FoldWorkerClient } from '.
 import { SyncManager } from '../matrix/sync-manager';
 import { PeerSync } from '../matrix/peer-sync';
 import { WebRTCPeer } from '../matrix/webrtc-peer';
-import { Presence } from '../matrix/presence';
+import { Presence, type PresenceUser } from '../matrix/presence';
+import { usePresencePrefs } from '../lib/presence-prefs';
 import { OnlineUsers } from './OnlineUsers';
 import { GDriveSyncService } from '../google-drive/gdrive-sync';
 import { useGDriveStore } from '../google-drive/gdrive-store';
@@ -507,6 +508,8 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   const [syncToastStatus, syncToastSeq, onSyncStatus] = useSyncToast();
   const [matrixReady, setMatrixReady] = useState(false);
   const [presence, setPresence] = useState<Presence | null>(null);
+  const [presencePeers, setPresencePeers] = useState<PresenceUser[]>([]);
+  const [presencePrefs] = usePresencePrefs();
   // Reactive room ID for the current space — drives SettingsView, MultiUserTestView, etc.
   // Updated by setupSpaceStore when room resolution completes (including retries).
   const [spaceRoomId, setSpaceRoomId] = useState<string | null>(null);
@@ -535,6 +538,56 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     setMatrixReady(false);
     setRetryCount(c => c + 1);
   }, []);
+
+  // --- Presence peer subscription ---------------------------------------
+  // Mirror the active Presence instance's peer list into React state so we
+  // can render subtle "user X is here" indicators throughout the UI.
+  useEffect(() => {
+    if (!presence) {
+      setPresencePeers([]);
+      return;
+    }
+    return presence.subscribe(setPresencePeers);
+  }, [presence]);
+
+  // Keep the current user's share-location preference in sync with the
+  // Presence broadcaster. When the user switches to "discrete" mode, the
+  // next ping immediately clears their location on all peers.
+  useEffect(() => {
+    if (!presence) return;
+    presence.setShareLocation(presencePrefs.shareLocation);
+  }, [presence, presencePrefs.shareLocation]);
+
+  // Broadcast our current in-app location whenever the route changes. The
+  // Presence instance debounces rapid updates, so this is safe to fire on
+  // every navigation.
+  useEffect(() => {
+    if (!presence) return;
+    presence.setLocation({
+      view: route.view,
+      space: selectedSpace,
+      scope: route.scope,
+      record: route.record,
+    });
+  }, [presence, route.view, route.scope, route.record, selectedSpace]);
+
+  // --- Peer location derivations ----------------------------------------
+  // Group visible peers by the scope they're looking at, so HolonNav can
+  // render a small indicator next to each scope that has observers.
+  // Respects `showPeers` — when the viewer has opted out, the map is empty.
+  const peersByScope = useMemo(() => {
+    const m = new Map<string, PresenceUser[]>();
+    if (!presencePrefs.showPeers) return m;
+    for (const u of presencePeers) {
+      if (u.userId === session.userId) continue;
+      const scope = u.location?.scope;
+      if (!scope) continue;
+      const arr = m.get(scope);
+      if (arr) arr.push(u);
+      else m.set(scope, [u]);
+    }
+    return m;
+  }, [presencePeers, presencePrefs.showPeers, session.userId]);
   const connectionState: ConnectionState = !navigator.onLine
     ? 'offline'
     : (!MATRIX_ENABLED || localMode)
@@ -2163,6 +2216,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               presence={presence}
               selfUserId={session.userId}
               selfDisplayName={displayName}
+              showPeers={presencePrefs.showPeers}
             />
           )}
           <ConnectionStatus
@@ -2323,6 +2377,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                 userId={session.userId}
                 selectedRecord={selectedRecord}
                 onSelectRecord={(rec) => { setRecordOpenedViaNav(true); navigate({ record: rec }); }}
+                peersByScope={peersByScope}
               />
             </>
           )}

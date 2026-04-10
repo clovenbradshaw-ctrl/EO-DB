@@ -2,6 +2,7 @@ import { useEffect, useState, useMemo, useRef, useCallback } from 'react';
 import type { EoState } from '../db/types';
 import { useEoStore } from '../store/eo-store';
 import type { FilterDefinition } from './filter-types';
+import type { PresenceUser } from '../matrix/presence';
 import { useTheme, type Theme } from '../theme';
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 import { TypeSelector, TypeBadge } from './TypeSelector';
@@ -60,9 +61,15 @@ interface HolonNavProps {
   selectedRecord?: string | null;
   /** Called when the user clicks an inline record leaf. */
   onSelectRecord?: (target: string) => void;
+  /**
+   * Map of scope fullPath → peers currently viewing that scope. Used to
+   * render subtle indicators beside scope nodes. When omitted or empty,
+   * no indicators are shown (the viewer has opted out or no peers are live).
+   */
+  peersByScope?: Map<string, PresenceUser[]>;
 }
 
-export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, statePrefix = '', userId, selectedRecord, onSelectRecord }: HolonNavProps) {
+export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, statePrefix = '', userId, selectedRecord, onSelectRecord, peersByScope }: HolonNavProps) {
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
   const getState = useEoStore((s) => s.getState);
   const dispatch = useEoStore((s) => s.dispatch);
@@ -455,6 +462,13 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
           <span style={s.name}>
             {resolveDisplayName(node, parentDisplayField)}
           </span>
+
+          {/* Presence indicator — subtle dot + initials stack when peers are viewing this scope */}
+          {(() => {
+            const here = peersByScope?.get(node.fullPath);
+            if (!here || here.length === 0) return null;
+            return <PeerPresenceMark peers={here} theme={theme} />;
+          })()}
 
           {/* Type badge */}
           {(() => {
@@ -1180,4 +1194,78 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       borderRadius: 6,
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// PeerPresenceMark — minimal colored dot + initial stack beside a scope node
+// ---------------------------------------------------------------------------
+
+const MAX_PRESENCE_INITIALS = 2;
+
+function PeerPresenceMark({ peers, theme }: { peers: PresenceUser[]; theme: Theme }) {
+  if (peers.length === 0) return null;
+  // Stable order so initials don't reshuffle on every ping.
+  const sorted = [...peers].sort((a, b) => a.userId.localeCompare(b.userId));
+  const visible = sorted.slice(0, MAX_PRESENCE_INITIALS);
+  const overflow = sorted.length - visible.length;
+  const title = sorted
+    .map((p) => p.displayName || p.userId)
+    .join(', ') + (peers.length === 1 ? ' is here' : ' are here');
+
+  return (
+    <span
+      title={title}
+      aria-label={title}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 2,
+        marginLeft: 6,
+        flexShrink: 0,
+      }}
+    >
+      {visible.map((p, i) => (
+        <span
+          key={p.userId}
+          style={{
+            width: 12,
+            height: 12,
+            borderRadius: '50%',
+            background: presenceHue(p.userId),
+            border: `1.5px solid ${theme.bgCard}`,
+            color: '#fff',
+            fontSize: 8,
+            fontWeight: 700,
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            marginLeft: i === 0 ? 0 : -4,
+            boxShadow: '0 0 0 1px rgba(0,0,0,0.08)',
+            fontFamily: "'JetBrains Mono', monospace",
+          }}
+        >
+          {(p.displayName || p.userId).replace(/^@/, '').charAt(0).toUpperCase()}
+        </span>
+      ))}
+      {overflow > 0 && (
+        <span
+          style={{
+            marginLeft: 2,
+            fontSize: 9,
+            color: theme.textMuted,
+            fontFamily: "'JetBrains Mono', monospace",
+          }}
+        >
+          +{overflow}
+        </span>
+      )}
+    </span>
+  );
+}
+
+/** Stable pastel hue derived from a userId — matches OnlineUsers' scheme. */
+function presenceHue(userId: string): string {
+  let h = 0;
+  for (let i = 0; i < userId.length; i++) h = (h * 31 + userId.charCodeAt(i)) >>> 0;
+  return `hsl(${h % 360}, 55%, 55%)`;
 }

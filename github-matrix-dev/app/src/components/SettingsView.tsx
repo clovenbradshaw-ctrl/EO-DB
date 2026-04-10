@@ -12,6 +12,7 @@ import { ArchivedSpacesSection } from './ArchivedSpaces';
 import { AirtableSettingsSection } from './AirtableSettings';
 import { useGDriveStore } from '../google-drive/gdrive-store';
 import { clearTokens, startOAuthFlow, getAccessToken } from '../google-drive/gdrive-oauth';
+import { usePresencePrefs } from '../lib/presence-prefs';
 
 interface SettingsViewProps {
   session: MatrixSession;
@@ -47,6 +48,7 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
   const [showRoomData, setShowRoomData] = useState(false);
   const [showAllRooms, setShowAllRooms] = useState(false);
   const [showRoomsBySpaces, setShowRoomsBySpaces] = useState(false);
+  const [presencePrefs, setPresencePrefs] = usePresencePrefs();
   const s = styles(theme);
 
   const [eventCount, setEventCount] = useState<number | null>(null);
@@ -330,6 +332,26 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
             <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, color: theme.textMuted }}>
               Field edits are signaled to all devices in this space via Matrix to-device messages. No separate server required.
             </span>
+          </div>
+        </Section>
+
+        {/* Presence & Activity Indicators */}
+        <Section title="Presence" theme={theme}>
+          <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 10 }}>
+            <ToggleRow
+              theme={theme}
+              label="Show other users"
+              detail="Display who else is online and which tables they're viewing. When off, peer avatars and activity dots are hidden."
+              checked={presencePrefs.showPeers}
+              onChange={(v) => setPresencePrefs({ showPeers: v })}
+            />
+            <ToggleRow
+              theme={theme}
+              label="Share my activity"
+              detail="Broadcast which view and table you're looking at. When off, you stay online to peers but move discretely — nobody sees where you are."
+              checked={presencePrefs.shareLocation}
+              onChange={(v) => setPresencePrefs({ shareLocation: v })}
+            />
           </div>
         </Section>
 
@@ -619,6 +641,62 @@ function Field({ label, value, theme }: { label: string; value: string; theme: T
     <div style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0' }}>
       <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: theme.textMuted }}>{label}</span>
       <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: theme.text }}>{value}</span>
+    </div>
+  );
+}
+
+function ToggleRow({ theme, label, detail, checked, onChange }: {
+  theme: Theme;
+  label: string;
+  detail: string;
+  checked: boolean;
+  onChange: (next: boolean) => void;
+}) {
+  const trackBg = checked ? theme.accent : theme.bgMuted;
+  const knobColor = checked ? '#fff' : theme.textMuted;
+  return (
+    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        aria-label={label}
+        onClick={() => onChange(!checked)}
+        style={{
+          width: 30,
+          height: 16,
+          borderRadius: 999,
+          background: trackBg,
+          border: `1px solid ${checked ? theme.accent : theme.border}`,
+          position: 'relative' as const,
+          cursor: 'pointer',
+          flexShrink: 0,
+          marginTop: 3,
+          padding: 0,
+          transition: 'background 0.15s, border-color 0.15s',
+        }}
+      >
+        <span
+          style={{
+            position: 'absolute' as const,
+            top: 1,
+            left: checked ? 15 : 1,
+            width: 12,
+            height: 12,
+            borderRadius: '50%',
+            background: knobColor,
+            transition: 'left 0.15s',
+          }}
+        />
+      </button>
+      <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 1, minWidth: 0 }}>
+        <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, fontWeight: 600, color: theme.text }}>
+          {label}
+        </span>
+        <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: theme.textMuted, wordBreak: 'break-word' as const }}>
+          {detail}
+        </span>
+      </div>
     </div>
   );
 }
