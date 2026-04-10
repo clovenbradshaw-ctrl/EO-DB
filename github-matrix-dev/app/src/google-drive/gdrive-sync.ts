@@ -60,7 +60,7 @@ import { useGDriveStore } from './gdrive-store';
 // ──────────────────────────────────────────────────────────────
 
 const SYNC_INTERVAL_MS = 15_000;
-const OPS_PER_BAKE = 256;
+const OPS_PER_BAKE = 32;
 const RECENT_BUFFER_MAX = 256;
 const BAKE_VOTE_GRACE_MS = 2_000;
 const BAKE_LOCK_TTL_MS = 60_000;
@@ -238,7 +238,14 @@ export class GDriveSyncService {
   }
 
   private get dataType(): string {
-    return `eodb-${this.spaceRoomId || this.spaceId}`;
+    return `eodb-${this.spaceId}`;
+  }
+
+  /** Legacy dataType used when spaceRoomId was the folder identifier. */
+  private get legacyDataType(): string | null {
+    return this.spaceRoomId && this.spaceRoomId !== this.spaceId
+      ? `eodb-${this.spaceRoomId}`
+      : null;
   }
 
   private async encryptBinary(binary: Uint8Array): Promise<Uint8Array> {
@@ -289,6 +296,7 @@ export class GDriveSyncService {
     const dt = this.dataType;
     try {
       this.onStatus?.('syncing');
+      useGDriveStore.getState().setHydrating(true);
       const hydratedSeq = await GDriveSyncService.hydrateFromGDrive(
         this.store, this.accessToken, dt, this.onEvent, this.keyring,
         {
@@ -303,6 +311,33 @@ export class GDriveSyncService {
       if (hydratedSeq > 0) {
         this.onHydrated?.();
         console.log(`[EO-DB] GDrive startup hydration: reached seq ${hydratedSeq}`);
+      }
+
+      // If no data found in the spaceId-based folder, check if data exists in the
+      // legacy spaceRoomId-based folder (from before the stable-dataType fix) and
+      // migrate it into the new folder in one push.
+      const localSeqAfterHydrate = await this.store.getCurrentSeq();
+      if (hydratedSeq === 0 && localSeqAfterHydrate === 0) {
+        const legacy = this.legacyDataType;
+        if (legacy) {
+          console.log('[EO-DB] Checking legacy folder for migration:', legacy);
+          const migratedSeq = await GDriveSyncService.hydrateFromGDrive(
+            this.store, this.accessToken, legacy, this.onEvent, this.keyring,
+            {
+              log: this.logFile,
+              recent: this.recentFile,
+              restrictedLog: this.restrictedLogFile,
+              restrictedRecent: this.restrictedRecentFile,
+              adminLog: this.adminLogFile,
+              adminRecent: this.adminRecentFile,
+            },
+          );
+          if (migratedSeq > 0) {
+            console.log(`[EO-DB] Migrated ${migratedSeq} events from legacy folder — pushing to new folder`);
+            await this.fullPushToGDrive();
+            this.onHydrated?.();
+          }
+        }
       }
 
       // If local store has data but GDrive has none, push everything up now.
@@ -321,10 +356,12 @@ export class GDriveSyncService {
 
       this.onStatus?.('synced');
       useGDriveStore.getState().setGDriveOffline(false);
+      useGDriveStore.getState().setHydrating(false);
     } catch (e) {
       console.warn('[EO-DB] GDrive startup hydration failed:', e);
       this.onStatus?.('error', e instanceof Error ? e.message : String(e));
       useGDriveStore.getState().setGDriveOffline(true);
+      useGDriveStore.getState().setHydrating(false);
     }
 
     // Clean up any orphaned temp files from crashed bakes
