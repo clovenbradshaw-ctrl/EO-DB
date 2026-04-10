@@ -1431,5 +1431,22 @@ export async function replayFromLog(
       await updateFoldCache(store, fullEvent);
       onProgress?.(i + 1, events.length);
     }
+
+    // Post-replay: re-evaluate all fold-mode EVA formulas so that _computed
+    // reflects the final dependency values rather than values at EVA-registration
+    // time. During replay, recomputeDependents is not called after each event,
+    // so any DEF on a dependency that fires after the EVA was registered leaves
+    // _computed stale. One pass here corrects all fold-mode formulas atomically.
+    const evaEntries = await store.iterator('eva:');
+    for (const [, reg] of evaEntries) {
+      const r = reg as EvaRegistration;
+      if (r && r.mode === 'fold' && r.dependencies && r.dependencies.length > 0) {
+        try {
+          await evaluateFormula(store, r);
+        } catch {
+          // Ignore — formula may reference targets not yet fully hydrated.
+        }
+      }
+    }
   });
 }
