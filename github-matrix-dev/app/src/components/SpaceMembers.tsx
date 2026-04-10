@@ -13,8 +13,6 @@ import {
   ROLE_DESCRIPTIONS,
   ROLE_POWER_LEVELS,
   powerLevelToRole,
-  legacyAccessToRole,
-  roleToLegacyAccess,
 } from '../permissions/types';
 import { resolvePermissionsFromSharing } from '../permissions/resolve';
 import { FieldPermissions } from './FieldPermissions';
@@ -23,11 +21,9 @@ import { inviteToRoom } from '../permissions/room-topology';
 import { UserTypeManager } from './UserTypeManager';
 import { UserTypeBadge } from './UserTypeBadge';
 
-type AccessLevel = 'read' | 'write' | 'admin';
-
 interface ShareEntry {
   user_id: string;
-  access: AccessLevel;
+  access: Exclude<AccessRole, 'owner'>;
   added_by: string;
   added_at: string;
 }
@@ -42,26 +38,13 @@ interface SpaceMembersProps {
   mainRoomId?: string | null;
 }
 
-const ROLE_OPTIONS_5: { value: AccessRole; label: string; desc: string; pl: number }[] = [
-  { value: 'owner', label: 'Owner', desc: 'Full control (PL 100)', pl: 100 },
-  { value: 'admin', label: 'Full access', desc: 'Manage people (PL 50)', pl: 50 },
-  { value: 'editor', label: 'Can edit', desc: 'Edit any record (PL 25)', pl: 25 },
-  { value: 'creator', label: 'Can add', desc: 'Add & edit own (PL 10)', pl: 10 },
-  { value: 'viewer', label: 'Can view', desc: 'View data only (PL 0)', pl: 0 },
+/** All non-owner roles available in the role picker. */
+const ROLE_OPTIONS_5: { value: Exclude<AccessRole, 'owner'>; label: string; desc: string; pl: number }[] = [
+  { value: 'admin',   label: 'Full access', desc: 'Manage people (PL 50)', pl: 50 },
+  { value: 'editor',  label: 'Can edit',    desc: 'Edit any record (PL 25)', pl: 25 },
+  { value: 'creator', label: 'Can add',     desc: 'Add & edit own (PL 10)', pl: 10 },
+  { value: 'viewer',  label: 'Can view',    desc: 'View data only (PL 0)', pl: 0 },
 ];
-
-// Legacy 3-tier options (kept for backward-compat with _sharing DEF dispatch)
-const ROLE_OPTIONS: { value: AccessLevel; label: string; desc: string }[] = [
-  { value: 'read', label: 'Can view', desc: 'View data only' },
-  { value: 'write', label: 'Can edit', desc: 'View and edit data' },
-  { value: 'admin', label: 'Full access', desc: 'Edit data and manage people' },
-];
-
-const LEGACY_ROLE_LABELS: Record<AccessLevel, string> = {
-  read: 'Can view',
-  write: 'Can edit',
-  admin: 'Full access',
-};
 
 export function SpaceMembers({ spaceTarget, currentUserId, onClose, matrixClient, mainRoomId }: SpaceMembersProps) {
   const { theme } = useTheme();
@@ -77,7 +60,7 @@ export function SpaceMembers({ spaceTarget, currentUserId, onClose, matrixClient
 
   // Add member form
   const [newMatrixId, setNewMatrixId] = useState('');
-  const [newAccess, setNewAccess] = useState<AccessLevel>('read');
+  const [newAccess, setNewAccess] = useState<Exclude<AccessRole, 'owner'>>('viewer');
   const [addError, setAddError] = useState('');
   const [addSuccess, setAddSuccess] = useState('');
   const [inviting, setInviting] = useState(false);
@@ -141,13 +124,16 @@ export function SpaceMembers({ spaceTarget, currentUserId, onClose, matrixClient
   const [userTypeAssignments, setUserTypeAssignments] = useState<UserTypeAssignment[]>([]);
   const [fieldTypeVisibility, setFieldTypeVisibility] = useState<FieldTypeVisibility[]>([]);
 
-  const currentUserAccess = getAccessLevel(currentUserId);
   const currentUserRole = getCurrentUserRole();
   const currentPermissions = resolvePermissionsFromSharing(
     currentUserId,
     owner,
     members,
     fieldAssignments,
+    userTypeAssignments,
+    fieldTypeVisibility,
+    null,
+    userTypeDefinitions,
   );
 
   // Load field assignments and user types from space state
@@ -169,21 +155,13 @@ export function SpaceMembers({ spaceTarget, currentUserId, onClose, matrixClient
   function getCurrentUserRole(): AccessRole {
     if (currentUserId === owner) return 'owner';
     const entry = members.find(m => m.user_id === currentUserId);
-    if (!entry) return 'viewer';
-    return legacyAccessToRole(entry.access);
+    return entry?.access ?? 'viewer';
   }
 
   function getUserRole(userId: string): AccessRole {
     if (userId === owner) return 'owner';
     const entry = members.find(m => m.user_id === userId);
-    if (!entry) return 'viewer';
-    return legacyAccessToRole(entry.access);
-  }
-
-  function getAccessLevel(userId: string): AccessLevel | 'owner' {
-    if (userId === owner) return 'owner';
-    const entry = members.find((m) => m.user_id === userId);
-    return entry?.access || 'read';
+    return entry?.access ?? 'viewer';
   }
 
   function canManageMembers(): boolean {
@@ -332,7 +310,7 @@ export function SpaceMembers({ spaceTarget, currentUserId, onClose, matrixClient
   }
 
   /** Add a member by Matrix user ID — dispatches EO sharing + Matrix room invite */
-  async function addMemberById(targetId: string, access: AccessLevel = newAccess) {
+  async function addMemberById(targetId: string, access: Exclude<AccessRole, 'owner'> = newAccess) {
     setAddError('');
     setAddSuccess('');
     setInviting(true);
@@ -379,9 +357,9 @@ export function SpaceMembers({ spaceTarget, currentUserId, onClose, matrixClient
     }
   }
 
-  async function handleChangeAccess(userId: string, newLevel: AccessLevel) {
+  async function handleChangeAccess(userId: string, newRole: Exclude<AccessRole, 'owner'>) {
     const updated = members.map((m) =>
-      m.user_id === userId ? { ...m, access: newLevel } : m
+      m.user_id === userId ? { ...m, access: newRole } : m
     );
 
     try {
@@ -580,8 +558,8 @@ function RolePicker({
   compact,
 }: {
   theme: Theme;
-  value: AccessLevel;
-  onChange: (v: AccessLevel) => void;
+  value: Exclude<AccessRole, 'owner'>;
+  onChange: (v: Exclude<AccessRole, 'owner'>) => void;
   compact?: boolean;
 }) {
   const [open, setOpen] = useState(false);
@@ -617,7 +595,7 @@ function RolePicker({
           whiteSpace: 'nowrap' as const,
         }}
       >
-        {LEGACY_ROLE_LABELS[value]}
+        {ROLE_LABELS[value]}
         <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
           <path d="M2.5 4L5 6.5L7.5 4" stroke={theme.textMuted} strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
         </svg>
@@ -633,12 +611,12 @@ function RolePicker({
           border: `1px solid ${theme.border}`,
           borderRadius: 8,
           boxShadow: `0 8px 24px ${theme.shadow}`,
-          minWidth: 180,
+          minWidth: 200,
           zIndex: 100,
           overflow: 'hidden',
           padding: '4px 0',
         }}>
-          {ROLE_OPTIONS.map((opt) => (
+          {ROLE_OPTIONS_5.map((opt) => (
             <button
               key={opt.value}
               onClick={() => { onChange(opt.value); setOpen(false); }}
@@ -705,9 +683,9 @@ function PersonRow({
   canManage?: boolean;
   isOpen?: boolean;
   onToggle?: () => void;
-  onChangeAccess?: (level: AccessLevel) => void;
+  onChangeAccess?: (role: Exclude<AccessRole, 'owner'>) => void;
   onRemove?: () => void;
-  currentAccess?: AccessLevel;
+  currentAccess?: Exclude<AccessRole, 'owner'>;
   userTypeIds?: string[];
   userTypeDefinitions?: UserTypeDefinition[];
   onChangeTypes?: (typeIds: string[]) => void;
@@ -767,7 +745,15 @@ function PersonRow({
               {userTypeIds.map(typeId => {
                 const def = userTypeDefinitions.find(d => d.id === typeId);
                 if (!def) return null;
-                return <UserTypeBadge key={typeId} label={def.label} color={def.color} compact />;
+                const capHint = def.base_role ? ` · ${ROLE_LABELS[def.base_role]}` : '';
+                return (
+                  <UserTypeBadge
+                    key={typeId}
+                    label={def.label + capHint}
+                    color={def.color}
+                    compact
+                  />
+                );
               })}
             </div>
           )}
@@ -827,13 +813,12 @@ function PersonRow({
             overflow: 'hidden',
             padding: '4px 0',
           }}>
-            {ROLE_OPTIONS_5.filter(opt => opt.value !== 'owner').map((opt) => {
-              const legacyAccess = roleToLegacyAccess(opt.value);
-              const isActive = currentAccess === legacyAccess;
+            {ROLE_OPTIONS_5.map((opt) => {
+              const isActive = currentAccess === opt.value;
               return (
                 <button
                   key={opt.value}
-                  onClick={() => onChangeAccess(legacyAccess)}
+                  onClick={() => onChangeAccess(opt.value)}
                   style={{
                     display: 'block',
                     width: '100%',

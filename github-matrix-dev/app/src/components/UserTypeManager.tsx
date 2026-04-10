@@ -7,7 +7,8 @@
 
 import { useState } from 'react';
 import { useTheme, type Theme } from '../theme';
-import type { UserTypeDefinition, HeadlineMetric } from '../permissions/types';
+import type { AccessRole, UserTypeDefinition, HeadlineMetric } from '../permissions/types';
+import { ROLE_LABELS, ROLE_DESCRIPTIONS } from '../permissions/types';
 import { UserTypeBadge } from './UserTypeBadge';
 
 interface UserTypeManagerProps {
@@ -60,6 +61,7 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
   const [newLabel, setNewLabel] = useState('');
   const [newColor, setNewColor] = useState(DEFAULT_COLORS[0]);
   const [newDescription, setNewDescription] = useState('');
+  const [newBaseRole, setNewBaseRole] = useState<Exclude<AccessRole, 'owner'> | ''>('');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editMetrics, setEditMetrics] = useState<HeadlineMetric[]>([]);
   const [editingViewsId, setEditingViewsId] = useState<string | null>(null);
@@ -75,12 +77,20 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
       label: newLabel.trim(),
       color: newColor,
       description: newDescription.trim() || undefined,
+      base_role: newBaseRole || undefined,
     };
     onUpdate([...typeDefinitions, newDef]);
     setNewLabel('');
     setNewDescription('');
     setNewColor(DEFAULT_COLORS[(typeDefinitions.length + 1) % DEFAULT_COLORS.length]);
+    setNewBaseRole('');
     setAdding(false);
+  }
+
+  function handleSetBaseRole(typeId: string, role: Exclude<AccessRole, 'owner'> | '') {
+    onUpdate(typeDefinitions.map(t =>
+      t.id === typeId ? { ...t, base_role: role || undefined } : t
+    ));
   }
 
   function handleDelete(id: string) {
@@ -187,11 +197,21 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
                 justifyContent: 'space-between',
                 padding: '6px 0',
               }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' as const }}>
                 <UserTypeBadge label={def.label} color={def.color} />
                 {def.description && (
                   <span style={{ fontFamily: mono, fontSize: 9, color: theme.textMuted }}>
                     {def.description}
+                  </span>
+                )}
+                {def.base_role && (
+                  <span style={{
+                    fontFamily: mono, fontSize: 9,
+                    color: def.color || theme.textSecondary,
+                    background: def.color ? `${def.color}14` : theme.bgMuted,
+                    padding: '1px 5px', borderRadius: 4,
+                  }}>
+                    {ROLE_LABELS[def.base_role]}
                   </span>
                 )}
                 {def.headline_metrics && def.headline_metrics.length > 0 && (
@@ -226,6 +246,24 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
                   >
                     metrics
                   </button>
+                  <select
+                    value={def.base_role ?? ''}
+                    onChange={(e) => handleSetBaseRole(def.id, e.target.value as Exclude<AccessRole, 'owner'> | '')}
+                    title="Base capability tier for this role"
+                    style={{
+                      fontFamily: mono, fontSize: 9,
+                      color: def.base_role ? (def.color || theme.textSecondary) : theme.textMuted,
+                      background: def.base_role ? (def.color ? `${def.color}14` : theme.bgMuted) : theme.bgCard,
+                      border: `1px solid ${def.base_role ? (def.color ? `${def.color}30` : theme.border) : theme.border}`,
+                      borderRadius: 4, padding: '1px 4px', cursor: 'pointer',
+                    }}
+                  >
+                    <option value="">capability…</option>
+                    <option value="admin">Full access</option>
+                    <option value="editor">Can edit</option>
+                    <option value="creator">Can add</option>
+                    <option value="viewer">Can view</option>
+                  </select>
                   <button
                     onClick={() => setEditingViewsId(editingViewsId === def.id ? null : def.id)}
                     style={{
@@ -467,6 +505,28 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
                     }}
                   />
                 ))}
+              </div>
+              {/* Base capability picker */}
+              <div style={{ marginBottom: 8 }}>
+                <div style={{ fontFamily: mono, fontSize: 9, color: theme.textMuted, marginBottom: 4 }}>
+                  Base capability (optional)
+                </div>
+                <select
+                  value={newBaseRole}
+                  onChange={(e) => setNewBaseRole(e.target.value as Exclude<AccessRole, 'owner'> | '')}
+                  style={{
+                    fontFamily: mono, fontSize: 10,
+                    padding: '4px 6px', background: theme.bgCard,
+                    border: `1px solid ${theme.border}`, borderRadius: 4,
+                    color: theme.text,
+                  }}
+                >
+                  <option value="">Organizational only — no capability change</option>
+                  <option value="admin">{ROLE_LABELS.admin} — {ROLE_DESCRIPTIONS.admin}</option>
+                  <option value="editor">{ROLE_LABELS.editor} — {ROLE_DESCRIPTIONS.editor}</option>
+                  <option value="creator">{ROLE_LABELS.creator} — {ROLE_DESCRIPTIONS.creator}</option>
+                  <option value="viewer">{ROLE_LABELS.viewer} — {ROLE_DESCRIPTIONS.viewer}</option>
+                </select>
               </div>
               {newLabel.trim() && (
                 <div style={{ marginBottom: 8 }}>

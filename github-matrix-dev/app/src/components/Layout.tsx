@@ -1827,8 +1827,9 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     return resolvePermissionsFromSharing(
       session.userId, owner, sharing, fieldAssignments,
       spaceUserTypeAssignments, spaceFieldTypeVisibility, activeUserType,
+      spaceUserTypeDefinitions,
     );
-  }, [currentSpaceState, session.userId, selectedSpace, spaceUserTypeAssignments, spaceFieldTypeVisibility, activeUserType]);
+  }, [currentSpaceState, session.userId, selectedSpace, spaceUserTypeAssignments, spaceFieldTypeVisibility, activeUserType, spaceUserTypeDefinitions]);
   const currentRole: AccessRole = currentPermissions?.role ?? 'viewer';
   const isViewer = currentRole === 'viewer';
 
