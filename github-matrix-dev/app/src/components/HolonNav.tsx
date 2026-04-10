@@ -487,29 +487,8 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
           </div>
         ))}
 
-        {/* Built-in Grid view — only shown in drill-down mode */}
-        {isExpanded && focusedEntity && (() => {
-          const sig = sliceStore.getSig(node.fullPath);
-          const isGridActive = sig.activeSliceId === null && selectedScope === node.fullPath;
-          return (
-            <div
-              style={{
-                ...s.segItem,
-                paddingLeft: 28 + depth * 16,
-                ...(isGridActive ? { color: theme.accent, fontWeight: 600 } : {}),
-              }}
-              onClick={() => {
-                sliceStore.resetToDefault(node.fullPath);
-                onSelectScope(node.fullPath);
-              }}
-            >
-              <span style={{ marginRight: 4, fontSize: 10, opacity: 0.6 }}>{SLICE_TYPE_META.grid.icon}</span>
-              <span style={s.segName}>Grid view</span>
-            </div>
-          );
-        })()}
 
-        {/* Saved slices — only shown in drill-down mode */}
+{/* Saved slices — only shown in drill-down mode */}
         {isExpanded && focusedEntity && (() => {
           const slices = sliceStore.getSlicesForScope(node.fullPath);
           if (slices.length === 0) return null;
