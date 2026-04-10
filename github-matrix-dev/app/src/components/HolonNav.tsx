@@ -410,6 +410,7 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
     const isActive = selectedScope === node.fullPath;
     const isExpanded = expanded.has(node.fullPath);
     const hasChildren = node.children.length > 0;
+    const isTopLevel = depth === 0;
 
     // For top-level nodes, use content-visibility:auto so the browser can skip
     // rendering/layout for items outside the scroll viewport, keeping the sidebar
