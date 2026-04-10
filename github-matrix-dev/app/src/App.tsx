@@ -82,6 +82,15 @@ function AppMain() {
     localStorage.removeItem('eo-local-mode');
   }
 
+  // Guard: if this is the OAuth popup callback, show a minimal placeholder
+  // until handleOAuthCallback() (running in useEffect) calls window.close().
+  // Without this guard the popup renders the full app, including another
+  // "Connect Google Drive" button, which re-triggers the OAuth flow (loop).
+  const searchParams = new URLSearchParams(window.location.search);
+  if (searchParams.get('state') === 'popup' && searchParams.has('code')) {
+    return <div style={{ padding: 40, textAlign: 'center', color: theme.textSecondary }}>Completing Google sign-in…</div>;
+  }
+
   if (loading) {
     return <div style={{ padding: 40, textAlign: 'center', color: theme.textSecondary }}>Loading...</div>;
   }

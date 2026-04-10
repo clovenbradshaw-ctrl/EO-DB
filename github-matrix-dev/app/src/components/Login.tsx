@@ -2,6 +2,7 @@ import { useState, useEffect, type FormEvent } from 'react';
 import { login, normalizeHomeserver, toMatrixUserId, type MatrixSession } from '../matrix/client';
 import { saveOfflineCredentials, verifyOfflineCredentials, listOfflineAccounts } from '../lib/offline-auth';
 import { startOAuthFlow } from '../google-drive/gdrive-oauth';
+import { useGDriveStore } from '../google-drive/gdrive-store';
 import { useTheme, type Theme } from '../theme';
 
 interface LoginProps {
@@ -80,7 +81,13 @@ export function Login({ onLogin, onLocalMode }: LoginProps) {
         }
       }
 
-      // Matrix login succeeded — always show the GDrive step so user explicitly chooses
+      // In n8n mode no Google account is needed — skip the OAuth step.
+      // In oauth mode, always show the GDrive step so the user explicitly connects.
+      const syncMode = useGDriveStore.getState().syncMode;
+      if (syncMode === 'n8n') {
+        onLogin(session);
+        return;
+      }
       setPendingSession(session);
       setStep('gdrive');
     } catch (err: any) {
@@ -114,8 +121,8 @@ export function Login({ onLogin, onLocalMode }: LoginProps) {
           <h1 style={s.title}>EO///DB</h1>
           <p style={s.subtitle}>Sync with Google Drive?</p>
           <p style={{ ...s.hint, marginBottom: 24 }}>
-            Connect Google Drive to sync encrypted backups across devices.
-            You can also connect later from Settings.
+            Connect your Google account to sync encrypted backups across devices.
+            You can switch to the n8n proxy mode (no Google account needed) in Settings → Drive Sync Mode.
           </p>
           {error && <div style={s.error} role="alert">{error}</div>}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
