@@ -60,6 +60,8 @@ export interface GDriveStoreState {
   mainRoomId: string | null;
   /** Currently active spaceId. */
   currentSpaceId: string | null;
+  /** Matrix room ID for the currently active space (used as Drive folder identifier). */
+  currentSpaceRoomId: string | null;
   /** Space display names: spaceId -> name. */
   spaceDisplayNames: Record<string, string>;
   /** Last successful sync timestamp per space. */
@@ -90,7 +92,7 @@ export interface GDriveStoreState {
   /** Disconnect (clear in-memory state). */
   disconnect: () => void;
   /** Set the current space. */
-  setCurrentSpace: (spaceId: string, spaceName: string) => void;
+  setCurrentSpace: (spaceId: string, spaceName: string, spaceRoomId?: string) => void;
   /** Record a successful sync for a space. */
   recordSync: (spaceId: string) => void;
   /** Refresh cached file list for a data_type. */
@@ -113,6 +115,7 @@ export const useGDriveStore = create<GDriveStoreState>((set, get) => ({
   matrixClient: null,
   mainRoomId: null,
   currentSpaceId: null,
+  currentSpaceRoomId: null,
   spaceDisplayNames: {},
   lastSyncAt: {},
   cachedEntries: {},
@@ -174,15 +177,17 @@ export const useGDriveStore = create<GDriveStoreState>((set, get) => ({
       matrixClient: null,
       mainRoomId: null,
       currentSpaceId: null,
+      currentSpaceRoomId: null,
       spaceDisplayNames: {},
       lastSyncAt: {},
       cachedEntries: {},
     });
   },
 
-  setCurrentSpace(spaceId, spaceName) {
+  setCurrentSpace(spaceId, spaceName, spaceRoomId) {
     set({
       currentSpaceId: spaceId,
+      currentSpaceRoomId: spaceRoomId ?? null,
       spaceDisplayNames: { ...get().spaceDisplayNames, [spaceId]: spaceName },
       cachedEntries: {},
     });

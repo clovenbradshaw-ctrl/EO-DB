@@ -238,7 +238,7 @@ export class GDriveSyncService {
   }
 
   private get dataType(): string {
-    return `eodb-${this.spaceId}`;
+    return `eodb-${this.spaceRoomId || this.spaceId}`;
   }
 
   private async encryptBinary(binary: Uint8Array): Promise<Uint8Array> {
