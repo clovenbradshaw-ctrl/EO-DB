@@ -34,6 +34,11 @@ const SS_CODE_VERIFIER = 'eo-gdrive-code-verifier';
 const SS_PENDING_ROUTE = 'eo-gdrive-pending-route';
 const SS_POPUP_RESOLVE = 'eo-gdrive-popup-pending';
 
+// BroadcastChannel used to signal OAuth completion from the popup back to the
+// opener. Needed because COOP on Google's OAuth pages severs the browsing
+// context group — once severed, `window.opener.postMessage` silently no-ops.
+const OAUTH_BROADCAST_CHANNEL = 'eo-gdrive-oauth';
+
 // ──────────────────────────────────────────────────────────────
 // Module state
 // ──────────────────────────────────────────────────────────────
@@ -222,6 +227,20 @@ export async function handleOAuthCallback(): Promise<boolean> {
     await exchangeCode(code, verifier);
     localStorage.removeItem(SS_CODE_VERIFIER);
 
+    // Broadcast completion over BroadcastChannel. This is the primary
+    // popup→opener signal because COOP from accounts.google.com severs the
+    // browsing-context group, which nulls out window.opener and makes
+    // cross-window postMessage unreliable. BroadcastChannel bypasses COOP
+    // — any same-origin context listening on the channel receives the
+    // message regardless of BC-group membership.
+    try {
+      const channel = new BroadcastChannel(OAUTH_BROADCAST_CHANNEL);
+      channel.postMessage({ type: 'eo-gdrive-oauth-success' });
+      channel.close();
+    } catch {
+      /* BroadcastChannel unsupported — parent falls back to storage-event + polling */
+    }
+
     // Use state param to reliably detect popup vs redirect flow.
     // window.opener is cleared by many browsers after cross-origin navigation
     // so it is NOT a reliable signal — state survives the round-trip.
@@ -229,14 +248,24 @@ export async function handleOAuthCallback(): Promise<boolean> {
     const isPopup = state === 'popup';
 
     if (isPopup) {
-      // Notify opener if it's still reachable, then always close.
+      // Best-effort notify opener via legacy postMessage in case the BC group
+      // wasn't severed (e.g. user re-consenting while still on our origin).
       if (window.opener && !window.opener.closed) {
-        window.opener.postMessage(
-          { type: 'eo-gdrive-oauth-success' },
-          window.location.origin,
-        );
+        try {
+          window.opener.postMessage(
+            { type: 'eo-gdrive-oauth-success' },
+            window.location.origin,
+          );
+        } catch {
+          /* cross-origin / COOP — ignore */
+        }
       }
-      window.close();
+      // Try to self-close. Under Chrome COOP this may silently fail because
+      // the "closeable by script" flag was reset when the BC group was severed
+      // during the round-trip through accounts.google.com. When that happens
+      // the caller (App.tsx popup placeholder) shows a "you may close this
+      // window" hint so the user has an explicit action.
+      try { window.close(); } catch { /* ignore */ }
       return true;
     }
 
@@ -286,25 +315,55 @@ export async function startOAuthFlow(): Promise<void> {
         reject(new Error('Google Drive sign-in timed out'));
       }, 300_000); // 5 min
 
-      function onMessage(event: MessageEvent) {
-        if (event.origin !== window.location.origin) return;
-        if (event.data?.type === 'eo-gdrive-oauth-success') {
-          cleanup();
-          resolve();
+      // ── BroadcastChannel: primary signal path ─────────────────
+      // Works across COOP boundaries, which window.opener.postMessage
+      // does not.
+      let channel: BroadcastChannel | null = null;
+      try {
+        channel = new BroadcastChannel(OAUTH_BROADCAST_CHANNEL);
+        channel.onmessage = (ev: MessageEvent) => {
+          if (ev.data?.type === 'eo-gdrive-oauth-success') {
+            completeSuccess();
+          }
+        };
+      } catch {
+        /* BroadcastChannel unsupported — fall back to storage + polling */
+      }
+
+      // ── storage event: fires in OTHER windows when popup writes tokens ─
+      function onStorage(ev: StorageEvent) {
+        if (ev.key === LS_ACCESS_TOKEN && isConnected()) {
+          completeSuccess();
         }
       }
 
+      // ── Legacy postMessage path (COOP-vulnerable, kept as fallback) ──
+      function onMessage(event: MessageEvent) {
+        if (event.origin !== window.location.origin) return;
+        if (event.data?.type === 'eo-gdrive-oauth-success') {
+          completeSuccess();
+        }
+      }
+
+      function completeSuccess() {
+        cleanup();
+        // Best-effort close from the opener side. Under COOP this may no-op,
+        // in which case the popup's placeholder UI will instruct the user to
+        // close the window manually.
+        try { popup?.close(); } catch { /* ignore */ }
+        resolve();
+      }
+
       function onInterval() {
+        // Check tokens FIRST — prioritise success over cancellation in the
+        // race where the popup wrote tokens then closed in the same tick.
+        if (isConnected()) {
+          completeSuccess();
+          return;
+        }
         if (!popup || popup.closed) {
           cleanup();
-          if (isConnected()) resolve();
-          else reject(new Error('Google Drive sign-in was cancelled'));
-        } else if (isConnected()) {
-          // Tokens landed in localStorage (handleOAuthCallback ran in the popup).
-          // Close the popup and resolve — don't wait for popup.closed.
-          cleanup();
-          try { popup.close(); } catch { /* ignore */ }
-          resolve();
+          reject(new Error('Google Drive sign-in was cancelled'));
         }
       }
 
@@ -314,10 +373,13 @@ export async function startOAuthFlow(): Promise<void> {
         clearTimeout(timeout);
         clearInterval(pollInterval);
         window.removeEventListener('message', onMessage);
+        window.removeEventListener('storage', onStorage);
+        try { channel?.close(); } catch { /* ignore */ }
         sessionStorage.removeItem(SS_POPUP_RESOLVE);
       }
 
       window.addEventListener('message', onMessage);
+      window.addEventListener('storage', onStorage);
     });
     return;
   }
