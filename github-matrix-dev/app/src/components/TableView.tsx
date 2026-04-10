@@ -468,6 +468,7 @@ function renderCell(value: any, key: string, onNavigate: (t: string) => void, t:
 
 export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, activeRecord, session, timeScrubberFilter, permissions, sliceReadOnly, onVisibleRecordTargets }: TableViewProps) {
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
+  const getStateByPrefixPage = useEoStore((s) => s.getStateByPrefixPage);
   const getState = useEoStore((s) => s.getState);
   const dispatch = useEoStore((s) => s.dispatch);
   const ready = useEoStore((s) => s.ready);
@@ -475,6 +476,16 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
 
   const scopeRoot = scope.split('.')[0];
   const idResolver = useIdResolver(scopeRoot);
+
+  // --- Virtual scrolling constants ---
+  const ROW_HEIGHT_PX: Record<string, number> = { compact: 32, default: 44, tall: 60 };
+  const VIRTUAL_BUFFER = 8;
+  const LARGE_DATASET_THRESHOLD = 200;
+
+  // --- Virtual scroll state ---
+  const tableWrapRef = useRef<HTMLDivElement>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [containerHeight, setContainerHeight] = useState(600);
 
   const [records, setRecords] = useState<EoState[]>([]);
   const [recordsLoaded, setRecordsLoaded] = useState(false);
@@ -570,6 +581,16 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     };
   }, [resizing, scope, sliceStore]);
 
+  // --- Virtual scroll: track container height ---
+  useEffect(() => {
+    const el = tableWrapRef.current;
+    if (!el) return;
+    setContainerHeight(el.clientHeight);
+    const ro = new ResizeObserver(() => setContainerHeight(el.clientHeight));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
   // --- Column drag handlers ---
   function handleColumnDragStart(event: DragStartEvent) {
     setActiveDragId(event.active.id as string);
@@ -590,27 +611,63 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   useEffect(() => {
     if (!ready) return;
     const gen = ++fetchGenRef.current;
-    getStateByPrefix(scope + '.').then((states) => {
-      // Skip stale fetch results (a newer load has already started)
-      if (gen !== fetchGenRef.current) return;
-      const direct = states
-        .filter((st) => {
-          const parts = st.target.split('.');
-          if (parts.length !== scopeDepth + 1 || st.value?._alias) return false;
-          // Hide internal entities (e.g. _schema)
-          const segment = parts[parts.length - 1];
-          if (segment.startsWith('_')) return false;
-          return true;
-        })
-;
-      // Only update state if records actually changed (avoids flicker from lastSeq)
-      const key = direct.map(r => r.target + ':' + r.last_seq).join('|');
-      if (key !== prevRecordsKeyRef.current) {
-        prevRecordsKeyRef.current = key;
+
+    // Helper to filter raw states down to visible direct-child records
+    function filterDirect(states: EoState[]): EoState[] {
+      return states.filter((st) => {
+        const parts = st.target.split('.');
+        if (parts.length !== scopeDepth + 1 || st.value?._alias) return false;
+        const segment = parts[parts.length - 1];
+        if (segment.startsWith('_')) return false;
+        return true;
+      });
+    }
+
+    // For re-fetches triggered by lastSeq (sync updates), use the non-paged path so
+    // we always see a consistent view of the full collection. The fingerprint check
+    // below prevents unnecessary React re-renders when nothing changed.
+    const isInitialLoad = prevRecordsKeyRef.current === '';
+
+    if (isInitialLoad) {
+      // Phase 1: load first 200 records immediately for a fast first paint
+      const INITIAL_PAGE = 200;
+      const BATCH_SIZE = 500;
+      getStateByPrefixPage(scope + '.', INITIAL_PAGE).then(async ({ rows, nextCursor }) => {
+        if (gen !== fetchGenRef.current) return;
+        const direct = filterDirect(rows);
+        prevRecordsKeyRef.current = 'loading'; // mark as started
         setRecords(direct);
-      }
-      setRecordsLoaded(true);
-    });
+        setRecordsLoaded(true);
+
+        // Phase 2: stream remaining records in background batches
+        let cursor = nextCursor;
+        let accumulated = direct;
+        while (cursor !== null) {
+          if (gen !== fetchGenRef.current) return;
+          const { rows: more, nextCursor: next } = await getStateByPrefixPage(scope + '.', BATCH_SIZE, cursor);
+          if (gen !== fetchGenRef.current) return;
+          const moreDirect = filterDirect(more);
+          accumulated = [...accumulated, ...moreDirect];
+          setRecords(accumulated);
+          cursor = next;
+        }
+        // Final fingerprint for future sync-triggered re-fetches
+        prevRecordsKeyRef.current = accumulated.map(r => r.target + ':' + r.last_seq).join('|');
+      });
+    } else {
+      // Sync-triggered re-fetch: reload full set but only re-render if something changed
+      getStateByPrefix(scope + '.').then((states) => {
+        if (gen !== fetchGenRef.current) return;
+        const direct = filterDirect(states);
+        const key = direct.map(r => r.target + ':' + r.last_seq).join('|');
+        if (key !== prevRecordsKeyRef.current) {
+          prevRecordsKeyRef.current = key;
+          setRecords(direct);
+        }
+        setRecordsLoaded(true);
+      });
+    }
+
     // Fetch field metadata: prefer per-field schema entities, fall back to array on table state
     getStateByPrefix(scope + '._schema.').then((allSchemaStates) => {
       if (gen !== fetchGenRef.current) return;
@@ -654,7 +711,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
       }
       setAuditableDisplayField(scopeState?.value?._displayField ?? null);
     });
-  }, [ready, lastSeq, getStateByPrefix, getState, scope, scopeDepth]);
+  }, [ready, lastSeq, getStateByPrefix, getStateByPrefixPage, getState, scope, scopeDepth]);
 
   // When scope has no records and no state of its own, navigate up to parent scope.
   // Only check on the FIRST successful load after a scope change — not on every
@@ -806,6 +863,19 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   useEffect(() => {
     onVisibleRecordTargets?.(filtered.map((r) => r.target));
   }, [filtered, onVisibleRecordTargets]);
+
+  // --- Virtual scroll window ---
+  const rowPx = ROW_HEIGHT_PX[rowHeight] ?? 44;
+  const useVirtual = filtered.length > LARGE_DATASET_THRESHOLD;
+  const virtualStart = useVirtual
+    ? Math.max(0, Math.floor(scrollTop / rowPx) - VIRTUAL_BUFFER)
+    : 0;
+  const virtualEnd = useVirtual
+    ? Math.min(filtered.length, Math.ceil((scrollTop + containerHeight) / rowPx) + VIRTUAL_BUFFER)
+    : filtered.length;
+  const virtualRows = useVirtual ? filtered.slice(virtualStart, virtualEnd) : filtered;
+  const spacerTop = virtualStart * rowPx;
+  const spacerBottom = (filtered.length - virtualEnd) * rowPx;
 
   function handleColumnContextMenu(e: React.MouseEvent, col: ColumnDef) {
     e.preventDefault();
@@ -1701,9 +1771,13 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
       </div>
 
       {/* Table */}
-      <div style={s.tableWrap}>
+      <div
+        ref={tableWrapRef}
+        style={s.tableWrap}
+        onScroll={(e) => setScrollTop((e.currentTarget as HTMLDivElement).scrollTop)}
+      >
         <DndContext sensors={sensors} collisionDetection={closestCenter} onDragStart={handleColumnDragStart} onDragEnd={handleColumnDragEnd} onDragCancel={() => setActiveDragId(null)}>
-          <table ref={tableRef} style={{ ...s.table, tableLayout: 'fixed' }}>
+          <table ref={tableRef} style={{ ...s.table, tableLayout: 'fixed', contain: 'layout style' as React.CSSProperties['contain'] }}>
             <colgroup>
               <col style={{ width: 40 }} />
               {orderedColumns.map((col) => (
@@ -1761,8 +1835,10 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                   </td>
                 </tr>
               )}
-              {filtered.map((rec, rowIndex) => {
-                void rowIndex;
+              {useVirtual && spacerTop > 0 && (
+                <tr aria-hidden="true"><td colSpan={orderedColumns.length + 1} style={{ height: spacerTop, padding: 0, border: 'none' }} /></tr>
+              )}
+              {virtualRows.map((rec, rowIndex) => {
                 const isActive = rec.target === activeRecord;
                 return (
                   <tr
@@ -1787,7 +1863,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                       color: theme.textMuted,
                       userSelect: 'none',
                       background: 'inherit',
-                    }}>{rowIndex + 1}</td>
+                    }}>{virtualStart + rowIndex + 1}</td>
                     {orderedColumns.map((col, colIndex) => {
                       const isRedacted = permissions?.redacted_fields?.includes(col.key);
                       const isLocked = permissions?.locked_fields?.includes(col.key);
@@ -1941,6 +2017,9 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                   </tr>
                 );
               })}
+              {useVirtual && spacerBottom > 0 && (
+                <tr aria-hidden="true"><td colSpan={orderedColumns.length + 1} style={{ height: spacerBottom, padding: 0, border: 'none' }} /></tr>
+              )}
             </tbody>
           </table>
           <DragOverlay dropAnimation={null}>
@@ -2470,6 +2549,8 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       flex: 1,
       overflowX: 'auto',
       overflowY: 'auto',
+      willChange: 'scroll-position',
+      contain: 'layout style paint' as React.CSSProperties['contain'],
     },
     table: {
       width: '100%',
