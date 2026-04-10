@@ -7,7 +7,7 @@
 
 import { useState, useMemo } from 'react';
 import { useTheme, type Theme } from '../theme';
-import type { AccessRole, UserTypeDefinition, HeadlineMetric, PersonaHome } from '../permissions/types';
+import type { AccessRole, UserTypeDefinition, HeadlineMetric, PersonaHome, QuickAction } from '../permissions/types';
 import { ROLE_LABELS, ROLE_DESCRIPTIONS } from '../permissions/types';
 import { UserTypeBadge } from './UserTypeBadge';
 import { useSliceStore } from '../store/slice-store';
@@ -83,6 +83,7 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
   const [editingViewsId, setEditingViewsId] = useState<string | null>(null);
   const [editingHomeId, setEditingHomeId] = useState<string | null>(null);
   const [editingSlicesId, setEditingSlicesId] = useState<string | null>(null);
+  const [editingActionsId, setEditingActionsId] = useState<string | null>(null);
 
   // Read saved slices for the default-slice editor. Group by scope.
   const savedSlices = useSliceStore((s) => s.savedSlices);
@@ -165,6 +166,18 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
         }
         return { ...t, visible_views: next };
       }
+    }));
+  }
+
+  function handleUpdateQuickActions(typeId: string, actions: QuickAction[]) {
+    onUpdate(typeDefinitions.map(t => {
+      if (t.id !== typeId) return t;
+      if (actions.length === 0) {
+        const { quick_actions: _qa, ...rest } = t;
+        void _qa;
+        return rest;
+      }
+      return { ...t, quick_actions: actions };
     }));
   }
 
@@ -324,6 +337,18 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
                     {Object.keys(def.default_slices).length} default slice{Object.keys(def.default_slices).length !== 1 ? 's' : ''}
                   </span>
                 )}
+                {def.quick_actions && def.quick_actions.length > 0 && (
+                  <span
+                    title={`Quick actions: ${def.quick_actions.map(a => a.label).join(', ')}`}
+                    style={{
+                      fontFamily: mono, fontSize: 9, color: def.color || theme.textSecondary,
+                      background: def.color ? `${def.color}14` : theme.bgMuted,
+                      padding: '1px 5px', borderRadius: 4,
+                    }}
+                  >
+                    {def.quick_actions.length} quick action{def.quick_actions.length !== 1 ? 's' : ''}
+                  </span>
+                )}
               </div>
               {canManage && (
                 <div style={{ display: 'flex', gap: 4 }}>
@@ -412,6 +437,25 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
                     }}
                   >
                     slices
+                  </button>
+                  <button
+                    onClick={() => setEditingActionsId(editingActionsId === def.id ? null : def.id)}
+                    title="Configure quick-action buttons for this persona"
+                    style={{
+                      fontFamily: mono, fontSize: 9,
+                      color: editingActionsId === def.id ? '#fff' : (def.color || theme.textSecondary),
+                      background: editingActionsId === def.id ? (def.color || theme.accent) : 'none',
+                      border: 'none', cursor: 'pointer',
+                      padding: '2px 6px', borderRadius: 4,
+                    }}
+                    onMouseEnter={(e) => {
+                      if (editingActionsId !== def.id) e.currentTarget.style.background = theme.bgMuted;
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.background = editingActionsId === def.id ? (def.color || theme.accent) : 'none';
+                    }}
+                  >
+                    actions
                   </button>
                   <button
                     onClick={() => handleDelete(def.id)}
@@ -555,6 +599,105 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
                         ? `Lands on ${def.home.view}${def.home.scope ? ` / ${def.home.scope}` : ''}`
                         : 'No home set — falls back to Records'}
                     </span>
+                  </div>
+                </div>
+              )}
+              {/* Quick actions panel — inline, expands when "actions" button is clicked */}
+              {canManage && editingActionsId === def.id && (
+                <div style={{
+                  padding: '10px 0 10px 8px',
+                  background: theme.bgMuted,
+                  borderRadius: 6,
+                  marginBottom: 6,
+                }}>
+                  <div style={{ fontFamily: mono, fontSize: 10, fontWeight: 600, color: theme.textSecondary, marginBottom: 8 }}>
+                    Quick actions for "{def.label}"
+                    <span style={{ fontWeight: 400, color: theme.textMuted, marginLeft: 6 }}>
+                      (buttons shown on the records view for matching scopes)
+                    </span>
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    {(def.quick_actions ?? []).map((action, idx) => (
+                      <div key={idx} style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                        <input
+                          value={action.label}
+                          onChange={(e) => {
+                            const next = [...(def.quick_actions ?? [])];
+                            next[idx] = { ...next[idx], label: e.target.value };
+                            handleUpdateQuickActions(def.id, next);
+                          }}
+                          placeholder="Label (e.g. File I-130)"
+                          style={{
+                            flex: 1, fontFamily: mono, fontSize: 10,
+                            padding: '4px 6px', background: theme.bgCard,
+                            border: `1px solid ${theme.border}`, borderRadius: 4,
+                            color: theme.text, outline: 'none',
+                          }}
+                        />
+                        <input
+                          value={action.scope}
+                          onChange={(e) => {
+                            const next = [...(def.quick_actions ?? [])];
+                            next[idx] = { ...next[idx], scope: e.target.value };
+                            handleUpdateQuickActions(def.id, next);
+                          }}
+                          placeholder="scope (e.g. tblCases)"
+                          style={{
+                            width: 140, fontFamily: mono, fontSize: 10,
+                            padding: '4px 6px', background: theme.bgCard,
+                            border: `1px solid ${theme.border}`, borderRadius: 4,
+                            color: theme.text, outline: 'none',
+                          }}
+                        />
+                        <input
+                          value={action.icon ?? ''}
+                          onChange={(e) => {
+                            const next = [...(def.quick_actions ?? [])];
+                            next[idx] = { ...next[idx], icon: e.target.value || undefined };
+                            handleUpdateQuickActions(def.id, next);
+                          }}
+                          placeholder="\u2605"
+                          style={{
+                            width: 36, fontFamily: mono, fontSize: 11, textAlign: 'center' as const,
+                            padding: '4px 4px', background: theme.bgCard,
+                            border: `1px solid ${theme.border}`, borderRadius: 4,
+                            color: theme.text, outline: 'none',
+                          }}
+                        />
+                        <button
+                          onClick={() => {
+                            const next = (def.quick_actions ?? []).filter((_, i) => i !== idx);
+                            handleUpdateQuickActions(def.id, next);
+                          }}
+                          title="Remove"
+                          style={{
+                            fontFamily: mono, fontSize: 11, color: theme.danger,
+                            background: 'none', border: 'none', cursor: 'pointer',
+                            padding: '0 4px',
+                          }}
+                        >&times;</button>
+                      </div>
+                    ))}
+                    <button
+                      onClick={() => {
+                        const next: QuickAction[] = [
+                          ...(def.quick_actions ?? []),
+                          { label: '', scope: '' },
+                        ];
+                        handleUpdateQuickActions(def.id, next);
+                      }}
+                      style={{
+                        fontFamily: mono, fontSize: 10, color: theme.accent,
+                        background: theme.accentBg, border: `1px solid ${theme.accentBorder}`,
+                        borderRadius: 4, padding: '3px 8px', cursor: 'pointer',
+                        alignSelf: 'flex-start' as const,
+                      }}
+                    >
+                      + Add quick action
+                    </button>
+                  </div>
+                  <div style={{ fontFamily: mono, fontSize: 9, color: theme.textMuted, marginTop: 6 }}>
+                    Template fields (prefilled when the button is clicked) are configured via JSON in a future iteration.
                   </div>
                 </div>
               )}

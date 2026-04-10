@@ -234,6 +234,12 @@ export interface UserTypeDefinition {
    * within the same session — it only applies when the SIG is fresh.
    */
   default_slices?: Record<string, string>;
+  /**
+   * Optional quick-action buttons shown on the records view when this
+   * persona is active and the user is viewing one of the action's scopes.
+   * Each action creates a prefilled record in its scope.
+   */
+  quick_actions?: QuickAction[];
 }
 
 /** A single headline metric card displayed above the table. */
@@ -247,6 +253,26 @@ export interface HeadlineMetric {
   /** Optional filter — only count records where this field matches */
   filter_field?: string;
   filter_value?: string;
+}
+
+/**
+ * A persona quick-action button. Rendered on the records view when the
+ * active persona has actions whose `scope` matches the currently open scope.
+ * Clicking emits a prefilled INS event via the existing fold pipeline.
+ */
+export interface QuickAction {
+  /** Display label, e.g. "Start Intake", "File I-130" */
+  label: string;
+  /** Optional short icon/emoji, e.g. "\u2605" */
+  icon?: string;
+  /** Scope (table full path) where this action applies, e.g. "tblCases" */
+  scope: string;
+  /**
+   * Optional template of field values to seed the new record with.
+   * Keys are field names, values are literals. Empty template creates a
+   * blank record at the scope.
+   */
+  template?: Record<string, unknown>;
 }
 
 /** Assignment of user types to a specific member. */

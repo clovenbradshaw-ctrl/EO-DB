@@ -72,6 +72,7 @@ const RecordPageView = lazyWithRetry(() => import('./builder/RecordPageView').th
 import { PermissionBadge } from './PermissionBadge';
 import { ViewOnlyBanner } from './ViewOnlyBanner';
 import { HeadlineMetrics } from './HeadlineMetrics';
+import { PersonaQuickActions } from './PersonaQuickActions';
 import { useSliceStore } from '../store/slice-store';
 import { useBuilderStore } from '../store/builder-store';
 import { useSyncStore } from '../store/sync-store';
@@ -2398,6 +2399,16 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           />
         );
       })()}
+
+      {/* Persona quick actions — shown when active persona has actions for the current scope */}
+      {activeView === 'records' && activeTypeDef?.quick_actions && selectedScope && (
+        <PersonaQuickActions
+          actions={activeTypeDef.quick_actions}
+          currentScope={selectedScope}
+          typeColor={activeTypeDef.color}
+          onRecordCreated={(target) => navigate({ record: target })}
+        />
+      )}
 
       {/* Body */}
       <div style={s.body}>
