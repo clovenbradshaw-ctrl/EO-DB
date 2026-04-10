@@ -6,6 +6,7 @@ import { restoreSession, type MatrixSession } from './matrix/client';
 import { useEoStore } from './store/eo-store';
 import { ThemeProvider, useTheme } from './theme';
 import { initGoogleOAuth, handleOAuthCallback } from './google-drive/gdrive-oauth';
+import { startWriteBackListener } from './google-calendar/gcalendar-sync';
 
 /** Synthetic session used for local-only mode (no Matrix server). */
 const LOCAL_SESSION: MatrixSession = {
@@ -44,6 +45,11 @@ function AppMain() {
       // handleOAuthCallback clears the query string and closes the popup or
       // restores the pending route. We still continue with normal app startup.
     }
+
+    // Install the Google Calendar write-back listener. Idempotent — claims
+    // the single onDispatch slot on useEoStore so cell edits under
+    // google_calendar.* scopes debounce-PATCH to Google.
+    startWriteBackListener();
 
     const saved = restoreSession();
     if (saved) {

@@ -235,6 +235,92 @@ function ConfigForm({ block, update, theme }: ConfigFormProps) {
         </>
       );
 
+    case 'calendar':
+      return (
+        <>
+          <DataSourceField
+            label="Data Source"
+            binding={block.props.binding}
+            onChange={(binding: DataBinding) => {
+              update('binding', binding);
+              if (binding.mode === 'hierarchy' && binding.target) {
+                update('scope', binding.target);
+              }
+            }}
+            theme={theme}
+          />
+          <Field label="Scope (legacy)" s={s}>
+            <input
+              style={s.input}
+              placeholder="e.g. google_calendar.primary_user_gmail_com"
+              value={block.props.scope || ''}
+              onChange={(e) => update('scope', e.target.value)}
+            />
+          </Field>
+          <Field label="Date Field" s={s}>
+            <input
+              style={s.input}
+              placeholder="e.g. start"
+              value={block.props.dateField || 'start'}
+              onChange={(e) => update('dateField', e.target.value)}
+            />
+          </Field>
+          <Field label="End Date Field" s={s}>
+            <input
+              style={s.input}
+              placeholder="e.g. end"
+              value={block.props.endDateField || 'end'}
+              onChange={(e) => update('endDateField', e.target.value)}
+            />
+          </Field>
+          <Field label="Title Field" s={s}>
+            <input
+              style={s.input}
+              placeholder="e.g. summary"
+              value={block.props.titleField || 'summary'}
+              onChange={(e) => update('titleField', e.target.value)}
+            />
+          </Field>
+          <Field label="Color Field (optional)" s={s}>
+            <input
+              style={s.input}
+              placeholder="Field holding CSS color"
+              value={block.props.colorField || ''}
+              onChange={(e) => update('colorField', e.target.value)}
+            />
+          </Field>
+          <Field label="Initial View" s={s}>
+            <select
+              style={s.select}
+              value={block.props.viewMode || 'month'}
+              onChange={(e) => update('viewMode', e.target.value)}
+            >
+              <option value="month">Month</option>
+              <option value="week">Week</option>
+              <option value="day">Day</option>
+              <option value="agenda">Agenda</option>
+            </select>
+          </Field>
+          <Field label="Week Starts On" s={s}>
+            <select
+              style={s.select}
+              value={block.props.startDay ?? 0}
+              onChange={(e) => update('startDay', Number(e.target.value))}
+            >
+              <option value={0}>Sunday</option>
+              <option value={1}>Monday</option>
+            </select>
+          </Field>
+          <Field label="Empty Text" s={s}>
+            <input
+              style={s.input}
+              value={block.props.emptyText || ''}
+              onChange={(e) => update('emptyText', e.target.value)}
+            />
+          </Field>
+        </>
+      );
+
     case 'record':
       return (
         <>

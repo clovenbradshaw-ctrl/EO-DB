@@ -17,7 +17,14 @@
 
 const GOOGLE_AUTH_ENDPOINT = 'https://accounts.google.com/o/oauth2/v2/auth';
 const GOOGLE_TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token';
-const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
+// Scopes requested by the single PKCE flow. Drive (drive.file) + Calendar
+// (calendar + calendar.events) are issued on one access token so both the
+// gdrive-* and gcalendar-* modules share the same Bearer token.
+const SCOPES = [
+  'https://www.googleapis.com/auth/drive.file',
+  'https://www.googleapis.com/auth/calendar',
+  'https://www.googleapis.com/auth/calendar.events',
+].join(' ');
 
 // localStorage / sessionStorage keys
 const LS_ACCESS_TOKEN = 'eo-gdrive-access-token';
@@ -82,7 +89,7 @@ async function buildAuthUrl(mode: 'popup' | 'redirect'): Promise<{ url: string; 
     client_id: _clientId,
     redirect_uri: _redirectUri,
     response_type: 'code',
-    scope: DRIVE_SCOPE,
+    scope: SCOPES,
     code_challenge: challenge,
     code_challenge_method: 'S256',
     access_type: 'offline',

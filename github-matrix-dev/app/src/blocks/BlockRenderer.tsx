@@ -15,6 +15,7 @@ import { TableBlock } from './data/TableBlock';
 import { MetricBlock } from './data/MetricBlock';
 import { ListBlock } from './data/ListBlock';
 import { RecordBlock } from './data/RecordBlock';
+import { CalendarBlock } from './data/CalendarBlock';
 import { ButtonBlock } from './form/ButtonBlock';
 
 // ---------------------------------------------------------------------------
@@ -32,6 +33,7 @@ const BLOCK_COMPONENTS: Record<string, React.ComponentType<{ block: BlockNode; m
   metric: MetricBlock,
   list: ListBlock,
   record: RecordBlock,
+  calendar: CalendarBlock,
   button: ButtonBlock,
 };
 
