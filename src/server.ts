@@ -23,6 +23,7 @@ import { loadN8nConfig, configureN8nWebhook } from './n8n/config.js';
 import { registerN8nRoutes } from './api/n8n-store.js';
 import { registerCrystallizeRoutes } from './api/crystallize.js';
 import { registerHealRoutes } from './api/heal.js';
+import { invalidateHorizonCache } from './api/query.js';
 
 const PORT = parseInt(process.env.EO_PORT || '3000', 10);
 const DATA_DIR = process.env.EO_DATA_DIR || './data';
@@ -69,6 +70,9 @@ async function start(): Promise<void> {
 
   // Auth proxy routes (login/whoami/profile — no EO auth required)
   registerAuthRoutes(app, HOMESERVER, DATA_DIR);
+
+  // Invalidate horizon cache on any event so cached results don't go stale.
+  feed.subscribe('**', (event) => invalidateHorizonCache(event.target));
 
   // Chat feed — real-time pub/sub for space-agnostic chat messages
   const chatFeed = new ChatFeed();

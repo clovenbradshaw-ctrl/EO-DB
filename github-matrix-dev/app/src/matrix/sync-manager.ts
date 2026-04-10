@@ -14,6 +14,7 @@
  * idempotency hashing on the receiver side handles duplicates naturally.
  */
 
+import { openDB } from 'idb';
 import type { MatrixClient, MatrixEvent } from 'matrix-js-sdk';
 import type { EoStore } from '../db/encrypted-store';
 import type { EoEventInput } from '../db/types';
@@ -27,6 +28,56 @@ import { isTransientError } from './connection-resilience';
 
 /** Mutex protecting the offline queue from concurrent read-modify-write. */
 const queueMutex = new AsyncMutex();
+
+// ─── IndexedDB offline queue persistence ─────────────────────────────────────
+// The in-memory EoStore does not persist arbitrary key-value pairs across page
+// reloads (only log events go to OPFS). We use IDB directly so queued offline
+// events survive refreshes.
+
+const IDB_QUEUE_NAME = 'eo-offline-queue';
+const IDB_QUEUE_VERSION = 1;
+const IDB_QUEUE_STORE = 'queue';
+
+type QueueEntry = { event: EoEventInput; attempts: number };
+
+async function openQueueDb() {
+  return openDB(IDB_QUEUE_NAME, IDB_QUEUE_VERSION, {
+    upgrade(db) {
+      if (!db.objectStoreNames.contains(IDB_QUEUE_STORE)) {
+        db.createObjectStore(IDB_QUEUE_STORE);
+      }
+    },
+  });
+}
+
+async function loadQueueFromIdb(roomId: string): Promise<QueueEntry[]> {
+  try {
+    const db = await openQueueDb();
+    return (await db.get(IDB_QUEUE_STORE, roomId)) ?? [];
+  } catch {
+    return [];
+  }
+}
+
+async function saveQueueToIdb(roomId: string, queue: QueueEntry[]): Promise<void> {
+  try {
+    const db = await openQueueDb();
+    await db.put(IDB_QUEUE_STORE, queue, roomId);
+  } catch (e) {
+    console.warn('[EO-DB] Failed to persist offline queue to IDB:', e);
+  }
+}
+
+// ─── Hydration timeout helper ─────────────────────────────────────────────────
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(`[EO-DB] ${label} timed out after ${ms} ms`)), ms),
+    ),
+  ]);
+}
 
 export interface RoomDataSnapshot {
   roomId: string;
@@ -215,7 +266,7 @@ export class SyncManager {
       const currentSeq = await this.store.getCurrentSeq();
       if (currentSeq === 0) {
         try {
-          await this.hydrateFromSnapshot();
+          await withTimeout(this.hydrateFromSnapshot(), 30_000, 'Late snapshot hydration');
         } catch (e) {
           console.warn('[EO-DB] Late snapshot hydration failed:', e);
         }
@@ -246,11 +297,14 @@ export class SyncManager {
     // timeline replay will still pick up events from the room.
     if (currentSeq === 0) {
       try {
-        await this.hydrateFromSnapshot();
+        await withTimeout(this.hydrateFromSnapshot(), 30_000, 'Snapshot hydration');
       } catch (e) {
         console.warn('[EO-DB] Snapshot hydration failed, continuing with timeline replay:', e);
       }
     }
+
+    // Restore any offline-queued events that survived a page reload from IDB.
+    await this.restoreQueueFromIdb();
 
     // Replay EO events already in the room timeline (from initial sync).
     // The snapshot may not exist or may be stale — the room timeline is the
@@ -551,6 +605,31 @@ export class SyncManager {
   }
 
   /**
+   * On init, merge any IDB-persisted offline queue from a previous session into
+   * the in-memory store queue, then clear IDB (will be re-saved on next flush).
+   */
+  private async restoreQueueFromIdb(): Promise<void> {
+    const saved = await loadQueueFromIdb(this.roomId);
+    if (saved.length === 0) return;
+    await queueMutex.run(async () => {
+      const existing: QueueEntry[] =
+        (await this.store.get('meta:offline_queue')) || [];
+      // Merge, avoiding duplicates by client_event_id
+      const seenIds = new Set(existing.map(e => e.event.client_event_id));
+      const merged = [...existing];
+      for (const entry of saved) {
+        if (!entry.event.client_event_id || !seenIds.has(entry.event.client_event_id)) {
+          merged.push(entry);
+          if (entry.event.client_event_id) seenIds.add(entry.event.client_event_id);
+        }
+      }
+      await this.store.put('meta:offline_queue', merged);
+    });
+    // Clear IDB — will be re-populated by the next enqueue or flush
+    await saveQueueToIdb(this.roomId, []);
+  }
+
+  /**
    * Append an event to the offline queue atomically.
    * The mutex ensures two concurrent send-failures don't race on the queue.
    */
@@ -560,6 +639,7 @@ export class SyncManager {
         (await this.store.get('meta:offline_queue')) || [];
       queue.push({ event, attempts: 0 });
       await this.store.put('meta:offline_queue', queue);
+      await saveQueueToIdb(this.roomId, queue);
     });
   }
 
@@ -593,12 +673,22 @@ export class SyncManager {
 
       const remaining: Array<{ event: EoEventInput; attempts: number }> = [];
       let dropped = 0;
-      for (const entry of queue) {
-        try {
-          await sendEoEvent(this.client, this.roomId, entry.event);
-        } catch (err) {
+
+      // Send up to FLUSH_BATCH_SIZE events concurrently for faster drain.
+      // Each batch completes (with success or failure recorded) before
+      // the next starts, which keeps memory usage bounded.
+      const FLUSH_BATCH_SIZE = 20;
+      for (let i = 0; i < queue.length; i += FLUSH_BATCH_SIZE) {
+        const batch = queue.slice(i, i + FLUSH_BATCH_SIZE);
+        const results = await Promise.allSettled(
+          batch.map(entry => sendEoEvent(this.client, this.roomId, entry.event)),
+        );
+        for (let j = 0; j < batch.length; j++) {
+          const result = results[j];
+          const entry = batch[j];
+          if (result.status === 'fulfilled') continue; // sent OK
+          const err = result.reason;
           if (!isTransientError(err)) {
-            // Permanent failure (4xx) — drop immediately
             console.warn(
               '[EO-DB] Dropping queued event due to permanent error:',
               entry.event.client_event_id,
@@ -617,9 +707,6 @@ export class SyncManager {
               dropped++;
             }
           }
-          // Don't break — try the rest. Individual event failures
-          // (e.g., size limit) shouldn't block other events.
-          // If we're fully offline, they'll all fail fast anyway.
         }
       }
 
@@ -627,6 +714,7 @@ export class SyncManager {
         this.onEventDropped?.(dropped, `${dropped} events failed permanently or exceeded retry limit`);
       }
       await this.store.put('meta:offline_queue', remaining);
+      await saveQueueToIdb(this.roomId, remaining);
     });
   }
 }

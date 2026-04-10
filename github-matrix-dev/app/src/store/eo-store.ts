@@ -141,11 +141,13 @@ export const useEoStore = create<EoDbState>((set, get) => ({
 
     const lastSeq = await memStore.getCurrentSeq();
 
-    // Hydrate recentEvents from the in-memory log.
+    // Hydrate recentEvents — cap at the last 2 000 events to avoid loading
+    // a large array into Zustand state on init.  LogView loads older pages on demand.
+    const RECENT_EVENT_LIMIT = 2_000;
     let hydrated: EoEvent[] = [];
     try {
-      const all = await readLogSince(memStore, 0);
-      hydrated = all;
+      const fromSeq = Math.max(0, lastSeq - RECENT_EVENT_LIMIT);
+      hydrated = await readLogSince(memStore, fromSeq);
     } catch {
       // Brand-new store — nothing to hydrate.
     }

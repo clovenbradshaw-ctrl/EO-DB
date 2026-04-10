@@ -79,7 +79,9 @@ export function registerSyncRoute(
   coordinator?: RoomSyncCoordinator,
   chatFeed?: ChatFeed,
 ): void {
-  app.register(websocketPlugin);
+  app.register(websocketPlugin, {
+    options: { perMessageDeflate: true },
+  });
 
   // Map of socketId → raw WebSocket for broadcasting
   const activeSockets = new Map<string, any>();
@@ -154,11 +156,19 @@ export function registerSyncRoute(
             if (msg.type === 'sync') {
               const since = msg.since ?? 0;
               const events = await readLogSince(db, since);
-              // Yield to the event loop every 50 events to avoid blocking
+              // Adaptive batch: start at 50 events per yield, double every 5 batches
+              // up to 500 — small batches early keep the socket responsive, large
+              // batches later maximise throughput during bulk catch-up.
+              let batchSize = 50;
+              let batchCount = 0;
               for (let i = 0; i < events.length; i++) {
                 socket.send(JSON.stringify({ type: 'event', event: events[i] }));
-                if (i > 0 && i % 50 === 0) {
+                if (i > 0 && i % batchSize === 0) {
                   await new Promise(resolve => setImmediate(resolve));
+                  batchCount++;
+                  if (batchCount % 5 === 0 && batchSize < 500) {
+                    batchSize = Math.min(batchSize * 2, 500);
+                  }
                 }
               }
               const throughSeq = await getCurrentSeq(db);

@@ -7,6 +7,9 @@ export function createDb(path: string): EoDb {
   return new ClassicLevel<string, Buffer>(path, {
     keyEncoding: 'utf8',
     valueEncoding: 'buffer',
+    blockSize: 16 * 1024,           // 16 KB blocks — better fit for msgpack values
+    cacheSize: 64 * 1024 * 1024,   // 64 MB read block cache
+    writeBufferSize: 32 * 1024 * 1024, // 32 MB write buffer before compaction
   });
 }
 

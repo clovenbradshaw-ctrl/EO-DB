@@ -13,7 +13,15 @@ export default defineConfig({
       output: {
         manualChunks: {
           'matrix-sdk': ['matrix-js-sdk'],
+          'matrix-crypto': ['@matrix-org/matrix-sdk-crypto-wasm'],
           'react-vendor': ['react', 'react-dom'],
+          'collab-editor': [
+            'yjs',
+            '@tiptap/core',
+            '@tiptap/starter-kit',
+            '@tiptap/extension-collaboration',
+            '@tiptap/extension-collaboration-cursor',
+          ],
         },
       },
     },

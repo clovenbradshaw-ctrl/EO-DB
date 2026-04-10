@@ -487,12 +487,16 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   // --- Virtual scrolling constants ---
   const ROW_HEIGHT_PX: Record<string, number> = { compact: 32, default: 44, tall: 60 };
   const VIRTUAL_BUFFER = 8;
-  const LARGE_DATASET_THRESHOLD = 200;
+  // Start virtualizing at 50 rows — keeps DOM small and scrolling smooth even
+  // for medium-sized scopes.  Below this threshold all rows render as-is.
+  const LARGE_DATASET_THRESHOLD = 50;
 
   // --- Virtual scroll state ---
   const tableWrapRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [containerHeight, setContainerHeight] = useState(600);
+  // rAF token — ensures scroll handler fires at most once per frame.
+  const scrollRafRef = useRef<number | null>(null);
 
   const [records, setRecords] = useState<EoState[]>([]);
   const [recordsLoaded, setRecordsLoaded] = useState(false);
@@ -1781,7 +1785,14 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
       <div
         ref={tableWrapRef}
         style={s.tableWrap}
-        onScroll={(e) => setScrollTop((e.currentTarget as HTMLDivElement).scrollTop)}
+        onScroll={(e) => {
+          const top = (e.currentTarget as HTMLDivElement).scrollTop;
+          if (scrollRafRef.current !== null) return; // already scheduled
+          scrollRafRef.current = requestAnimationFrame(() => {
+            scrollRafRef.current = null;
+            setScrollTop(top);
+          });
+        }}
       >
         <DndContext sensors={sensors} collisionDetection={closestCenter} onDragStart={handleColumnDragStart} onDragEnd={handleColumnDragEnd} onDragCancel={() => setActiveDragId(null)}>
           <table ref={tableRef} style={{ ...s.table, tableLayout: 'fixed', contain: 'layout style' as React.CSSProperties['contain'] }}>

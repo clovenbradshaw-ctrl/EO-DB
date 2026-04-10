@@ -18,16 +18,33 @@ export async function setState(db: EoDb, state: EoState): Promise<void> {
   const oldHash = oldState?.hash;
   const newHash = state.hash;
 
-  await db.put(`state:${state.target}`, encode(state));
+  // Collect all writes and flush in a single LevelDB batch to reduce round-trips.
+  type BatchOp =
+    | { type: 'put'; key: string; value: Buffer }
+    | { type: 'del'; key: string };
+  const ops: BatchOp[] = [{ type: 'put', key: `state:${state.target}`, value: encode(state) }];
 
   if (newHash && oldHash !== newHash) {
-    // Remove from old cohort
     if (oldHash) {
-      await removeFromCohort(db, oldHash, state.target);
+      const oldCohort = await getHashCohort(db, oldHash);
+      const idx = oldCohort.indexOf(state.target);
+      if (idx >= 0) {
+        oldCohort.splice(idx, 1);
+        if (oldCohort.length === 0) {
+          ops.push({ type: 'del', key: `hash-cohort:${oldHash}` });
+        } else {
+          ops.push({ type: 'put', key: `hash-cohort:${oldHash}`, value: encode(oldCohort) });
+        }
+      }
     }
-    // Add to new cohort
-    await addToCohort(db, newHash, state.target);
+    const newCohort = await getHashCohort(db, newHash);
+    if (!newCohort.includes(state.target)) {
+      newCohort.push(state.target);
+      ops.push({ type: 'put', key: `hash-cohort:${newHash}`, value: encode(newCohort) });
+    }
   }
+
+  await db.batch(ops as any);
 }
 
 // ─── Hash Cohort Index ────────────────────────────────────────────────
@@ -46,26 +63,6 @@ export async function getHashCohort(db: EoDb, hash: string): Promise<string[]> {
   }
 }
 
-async function addToCohort(db: EoDb, hash: string, target: string): Promise<void> {
-  const cohort = await getHashCohort(db, hash);
-  if (!cohort.includes(target)) {
-    cohort.push(target);
-    await db.put(`hash-cohort:${hash}`, encode(cohort));
-  }
-}
-
-async function removeFromCohort(db: EoDb, hash: string, target: string): Promise<void> {
-  const cohort = await getHashCohort(db, hash);
-  const idx = cohort.indexOf(target);
-  if (idx >= 0) {
-    cohort.splice(idx, 1);
-    if (cohort.length === 0) {
-      try { await db.del(`hash-cohort:${hash}`); } catch {}
-    } else {
-      await db.put(`hash-cohort:${hash}`, encode(cohort));
-    }
-  }
-}
 
 export async function getStateByPrefix(db: EoDb, prefix: string, limit?: number): Promise<EoState[]> {
   const states: EoState[] = [];
