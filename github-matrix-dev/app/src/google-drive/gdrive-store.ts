@@ -103,6 +103,10 @@ export interface GDriveStoreState {
   setGDriveOffline: (offline: boolean) => void;
   /** Store the computed file GUIDs for a space. */
   setSpaceFileGuids: (spaceId: string, guids: SpaceFileGuids) => void;
+  /** True while initial hydration (downloading events from Drive) is in progress. */
+  hydrating: boolean;
+  /** Set the hydrating flag. */
+  setHydrating: (hydrating: boolean) => void;
 }
 
 export const useGDriveStore = create<GDriveStoreState>((set, get) => ({
@@ -122,6 +126,7 @@ export const useGDriveStore = create<GDriveStoreState>((set, get) => ({
   hydrationSlot: 0,
   gdriveOffline: false,
   spaceFileGuids: {},
+  hydrating: false,
 
   setSyncMode(mode) {
     localStorage.setItem(LS_SYNC_MODE, mode);
@@ -226,5 +231,9 @@ export const useGDriveStore = create<GDriveStoreState>((set, get) => ({
 
   setSpaceFileGuids(spaceId, guids) {
     set({ spaceFileGuids: { ...get().spaceFileGuids, [spaceId]: guids } });
+  },
+
+  setHydrating(hydrating) {
+    set({ hydrating });
   },
 }));

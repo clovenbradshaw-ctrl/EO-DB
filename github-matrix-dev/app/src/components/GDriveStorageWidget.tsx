@@ -71,7 +71,7 @@ export function GDriveStorageWidget() {
 
   const {
     connected, syncMode, googleAccessToken, matrixAccessToken, currentSpaceId,
-    currentSpaceRoomId, spaceDisplayNames, lastSyncAt,
+    spaceDisplayNames, lastSyncAt, hydrating,
   } = useGDriveStore();
 
   // Use the active-mode token: Matrix token for n8n proxy, Google token for direct OAuth
@@ -88,8 +88,7 @@ export function GDriveStorageWidget() {
 
   const spaceName = currentSpaceId ? (spaceDisplayNames[currentSpaceId] || currentSpaceId) : null;
   const lastSync = currentSpaceId ? lastSyncAt[currentSpaceId] : null;
-  const folderId = currentSpaceRoomId || currentSpaceId;
-  const dataType = folderId ? `eodb-${folderId}` : null;
+  const dataType = currentSpaceId ? `eodb-${currentSpaceId}` : null;
 
   const handleDownload = useCallback(async (entry: GDriveListEntry) => {
     if (!effectiveToken || !store) return;
@@ -176,11 +175,15 @@ export function GDriveStorageWidget() {
           <div style={s.connDot} />
           <span style={s.connLabel}>Connected via {syncMode === 'n8n' ? 'n8n Proxy' : 'Google OAuth'}</span>
         </div>
-        {lastSync && (
+        {hydrating ? (
+          <span style={{ ...s.syncTime, fontStyle: 'italic' }}>
+            Loading from Drive\u2026
+          </span>
+        ) : lastSync ? (
           <span style={s.syncTime}>
             Last sync: {new Date(lastSync).toLocaleTimeString()}
           </span>
-        )}
+        ) : null}
       </div>
 
       {/* Toolbar */}

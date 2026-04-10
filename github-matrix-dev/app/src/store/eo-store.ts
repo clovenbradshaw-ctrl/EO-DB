@@ -257,8 +257,11 @@ export const useEoStore = create<EoDbState>((set, get) => ({
 
     const { gdriveSync } = get();
     if (gdriveSync && imported.length > 0) {
-      gdriveSync.saveBulkOps(imported).catch((e) =>
-        console.warn('[EO-DB] Google Drive bulk upload after import failed:', e),
+      // Write the full log immediately so the log file is up-to-date on Drive
+      // (not just the recent buffer). This ensures a reload from a cleared OPFS
+      // always finds the imported data in the log file.
+      gdriveSync.fullPushToGDrive().catch((e) =>
+        console.warn('[EO-DB] Google Drive full push after import failed:', e),
       );
     }
 
