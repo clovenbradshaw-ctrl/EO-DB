@@ -43,8 +43,6 @@ import { HeadlineMetrics } from './HeadlineMetrics';
 import { useSliceStore } from '../store/slice-store';
 import { useBuilderStore } from '../store/builder-store';
 import { useSyncStore } from '../store/sync-store';
-import { useEoServerStore } from '../store/eo-server-store';
-import { processEvent } from '../db/fold';
 import { useTheme, spaceBackgroundTint, roleBackgroundTint, type Theme } from '../theme';
 import type { EoState } from '../db/types';
 import type { ViewDefinition } from '../blocks/types';
@@ -1484,32 +1482,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       if (isStale()) return;
 
       await init(workerClient);
-
-      // ── EO-DB server real-time sync ──────────────────────────────────────────
-      // If the user has configured a server URL, open a WebSocket to receive
-      // field changes from other users in real-time. Each incoming event is
-      // folded into the local store and bumps lastSeq so components re-render.
-      {
-        const { serverUrl, connect: connectServer, disconnect: disconnectServer } = useEoServerStore.getState();
-        if (serverUrl && session.accessToken) {
-          const storeNow = useEoStore.getState().store;
-          const currentSeq = storeNow ? await storeNow.getCurrentSeq() : 0;
-
-          const handleServerEvent = async (event: any) => {
-            const s = useEoStore.getState().store;
-            if (!s) return;
-            await processEvent(s, event, onFoldEvent);
-          };
-
-          connectServer(currentSeq, session.accessToken, handleServerEvent);
-          useEoStore.getState().setOnDispatch((event) => useEoServerStore.getState().sendEvent(event));
-
-          cleanupFns.push(() => {
-            disconnectServer();
-            useEoStore.getState().setOnDispatch(null);
-          });
-        }
-      }
 
       // If Matrix is ready but we couldn't get a room, surface the error.
       // Only show this when matrixReady=true — if Matrix hasn't connected yet,

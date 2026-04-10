@@ -11,7 +11,6 @@ import { OP_COLORS, TRIAD_LABELS } from './LogView';
 import { ArchivedSpacesSection } from './ArchivedSpaces';
 import { AirtableSettingsSection } from './AirtableSettings';
 import { useGDriveStore } from '../google-drive/gdrive-store';
-import { useEoServerStore } from '../store/eo-server-store';
 import { clearTokens, startOAuthFlow, getAccessToken } from '../google-drive/gdrive-oauth';
 
 interface SettingsViewProps {
@@ -56,10 +55,6 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
   const [deleteError, setDeleteError] = useState('');
   const [showEraseConfirm, setShowEraseConfirm] = useState(false);
 
-  const serverUrl = useEoServerStore((s) => s.serverUrl);
-  const serverConnected = useEoServerStore((s) => s.connected);
-  const setServerUrl = useEoServerStore((s) => s.setServerUrl);
-  const [serverUrlInput, setServerUrlInput] = useState(serverUrl || '');
   const gdriveToken = useGDriveStore((s) => s.googleAccessToken);
   const gdriveOffline = useGDriveStore((s) => s.gdriveOffline);
   const gdriveSyncMode = useGDriveStore((s) => s.syncMode);
@@ -67,16 +62,6 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
   const [gdriveTestStatus, setGdriveTestStatus] = useState<string | null>(null);
   const [gdriveTestLoading, setGdriveTestLoading] = useState(false);
   const [oauthLoading, setOauthLoading] = useState(false);
-
-  function handleSaveServerUrl() {
-    const trimmed = serverUrlInput.trim();
-    setServerUrl(trimmed || null);
-    // Connection will be established on next space load (Layout.tsx effect)
-    // Reload to pick up new URL immediately
-    if (trimmed !== (serverUrl || '')) {
-      window.location.reload();
-    }
-  }
 
   const matrixAccessToken = useGDriveStore((s) => s.matrixAccessToken);
 
@@ -329,44 +314,21 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
           </div>
         </Section>
 
-        {/* Real-Time Sync Server */}
-        <Section title="Real-Time Sync Server" theme={theme}>
+        {/* Matrix Device Sync */}
+        <Section title="Matrix Device Sync" theme={theme}>
           <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 10 }}>
             <StatusRow
               theme={theme}
-              label="EO-DB Server"
-              status={serverUrl ? (serverConnected ? 'ok' : 'pending') : 'off'}
+              label="Peer Sync"
+              status={syncManager ? 'ok' : 'off'}
               detail={
-                serverUrl
-                  ? serverConnected
-                    ? `Connected — ${serverUrl}`
-                    : `Connecting to ${serverUrl}…`
-                  : 'Not configured — field changes are local only'
+                syncManager
+                  ? 'Active — field edits are broadcast to all devices via Matrix'
+                  : 'Inactive — connect to a Matrix space to enable real-time sync'
               }
             />
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-              <input
-                style={{ ...s.input, flex: 1 }}
-                type="text"
-                placeholder="http://localhost:3000"
-                value={serverUrlInput}
-                onChange={(e) => setServerUrlInput(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter') handleSaveServerUrl(); }}
-              />
-              <button style={s.actionBtn} onClick={handleSaveServerUrl}>
-                Save
-              </button>
-              {serverUrl && (
-                <button
-                  style={{ ...s.actionBtn, background: 'transparent', color: theme.danger, borderColor: theme.danger }}
-                  onClick={() => { setServerUrlInput(''); setServerUrl(null); }}
-                >
-                  Clear
-                </button>
-              )}
-            </div>
             <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, color: theme.textMuted }}>
-              When set, field edits are broadcast to all users connected to the same server in real-time. Uses your Matrix session token for auth.
+              Field edits are signaled to all devices in this space via Matrix to-device messages. No separate server required.
             </span>
           </div>
         </Section>
