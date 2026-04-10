@@ -87,6 +87,7 @@ import { type TimeScrubberFilter, type DateColumnOption, DEFAULT_FILTER, detectD
 import { hasFieldsSubObject, buildFieldNameMap } from './filter-types';
 import { useHashRoute, type View } from '../lib/router';
 import { type AccessRole, type UserTypeDefinition, type SpaceConfig, type TerminologyKey, powerLevelToRole, legacyAccessToRole, resolveTerminology } from '../permissions/types';
+import { DEFAULT_LAW_FIRM_PERSONAS } from '../permissions/default-personas';
 import { UserTypeSwitcher } from './UserTypeSwitcher';
 import { resolvePermissionsFromSharing, getUserPowerLevel } from '../permissions/resolve';
 const MultiUserTestView = lazyWithRetry(() => import('./MultiUserTestView').then(m => ({ default: m.MultiUserTestView })));
@@ -2212,6 +2213,24 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                   ts: new Date().toISOString(),
                   acquired_ts: new Date().toISOString(),
                 });
+
+                // Seed the default law-firm personas so a fresh space has
+                // sensible role segmentation out of the box. The admin can
+                // rename, delete, or extend any of these via UserTypeManager.
+                try {
+                  await dispatch({
+                    op: 'DEF',
+                    target: spaceTarget,
+                    operand: {
+                      _user_type_definitions: DEFAULT_LAW_FIRM_PERSONAS,
+                    },
+                    agent: session.userId,
+                    ts: new Date().toISOString(),
+                    acquired_ts: new Date().toISOString(),
+                  });
+                } catch (e) {
+                  console.warn('[EO-DB] Failed to seed default personas:', e);
+                }
 
                 // Add to spaces list with correct owner so permissions resolve
                 const now = new Date().toISOString();
