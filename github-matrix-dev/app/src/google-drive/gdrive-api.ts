@@ -30,7 +30,7 @@ import {
 import { readFolderState, publishFolderState } from './gdrive-folder-state';
 
 const DRIVE_API = 'https://www.googleapis.com/drive/v3/files';
-const EO_STORE_WEBHOOK = 'https://n8n.intelechia.com/webhook/eo-store';
+export const EO_STORE_WEBHOOK = 'https://n8n.intelechia.com/webhook/eo-store';
 
 // ──────────────────────────────────────────────────────────────
 // Sync-mode switching — n8n proxy (default) or direct OAuth
