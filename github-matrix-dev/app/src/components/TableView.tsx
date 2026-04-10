@@ -2079,7 +2079,13 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                   setColumnTypeSelector(null);
                   setLinkedRecordPicker({ x: columnTypeSelector.x, y: columnTypeSelector.y, key: columnTypeSelector.key, tables, mode: type as 'linkedRecord' | 'link' | 'relationship' });
                 } else if (type === 'select' || type === 'multiSelect') {
-                  handleSetColumnType(columnTypeSelector.key, type, undefined, true);
+                  const key = columnTypeSelector.key;
+                  const hasEnumConstraint = !!fieldSchemas.get(key)?.constraints.find(c => c.name === 'enum');
+                  const existingOptions = entityColumns.find(c => c.key === key)?.selectOptions ?? [];
+                  handleSetColumnType(key, type, undefined, true);
+                  if (!hasEnumConstraint && existingOptions.length > 0) {
+                    await handleAddConstraint(key, 'enum', { choices: existingOptions });
+                  }
                 } else {
                   handleSetColumnType(columnTypeSelector.key, type);
                 }

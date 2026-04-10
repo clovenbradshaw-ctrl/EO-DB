@@ -90,6 +90,19 @@ export const COLUMN_TYPE_ICON_MAP = new Map<ColumnType, ColumnTypeInfo>(
 
 const GROUP_ORDER = ['Basic', 'Numeric', 'Select', 'Date & Time', 'Other', 'Computed', 'Metadata'];
 
+// ─── Select option chip colors ───────────────────────────────────────────────
+
+const OPTION_COLORS: Array<{ bg: string; color: string; dot: string }> = [
+  { bg: '#e8f0fe', color: '#1a56b0', dot: '#4285f4' }, // blue
+  { bg: '#fce8f3', color: '#9b2c70', dot: '#e91e8c' }, // pink
+  { bg: '#e6f4ea', color: '#1a6632', dot: '#34a853' }, // green
+  { bg: '#fef3e2', color: '#8a5a00', dot: '#fbbc04' }, // yellow
+  { bg: '#f3e8fd', color: '#6b21a8', dot: '#9b59b6' }, // purple
+  { bg: '#fde8e8', color: '#9b1c1c', dot: '#ef4444' }, // red
+  { bg: '#e8fdf5', color: '#065f46', dot: '#10b981' }, // teal
+  { bg: '#fff3e0', color: '#7c3900', dot: '#f97316' }, // orange
+];
+
 function groupedTypes(): Array<{ group: string; items: ColumnTypeInfo[] }> {
   const map = new Map<string, ColumnTypeInfo[]>();
   for (const def of COLUMN_TYPE_DEFS) {
@@ -178,19 +191,26 @@ export function ColumnTypeSelector({
       {isSelectType && onSaveOptions && (
         <div style={s.optionsSection}>
           <div style={s.optionsSectionTitle}>OPTIONS</div>
-          {localOptions.map((opt, i) => (
-            <div key={i} style={s.optionRow}>
-              <span style={s.optionLabel}>{opt}</span>
-              <button
-                style={s.optionDeleteBtn}
-                onClick={() => {
-                  const next = localOptions.filter((_, j) => j !== i);
-                  setLocalOptions(next);
-                  onSaveOptions(next);
-                }}
-              >&times;</button>
-            </div>
-          ))}
+          {localOptions.map((opt, i) => {
+            const chip = OPTION_COLORS[i % OPTION_COLORS.length];
+            return (
+              <div key={i} style={s.optionRow}>
+                <div style={{ ...s.optionChip, background: chip.bg, color: chip.color }}>
+                  <span style={{ ...s.optionDot, background: chip.dot }} />
+                  <span style={s.optionChipText}>{opt}</span>
+                </div>
+                <button
+                  style={s.optionDeleteBtn}
+                  onClick={() => {
+                    const next = localOptions.filter((_, j) => j !== i);
+                    setLocalOptions(next);
+                    onSaveOptions(next);
+                  }}
+                  title={`Remove "${opt}"`}
+                >&times;</button>
+              </div>
+            );
+          })}
           <div style={s.addOptionRow}>
             <input
               style={{ ...s.addOptionInput, color: theme.text }}
@@ -326,18 +346,33 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       textTransform: 'uppercase' as const,
       color: t.textMuted,
       fontFamily: "'JetBrains Mono', monospace",
-      padding: '0 10px 4px',
+      padding: '4px 10px 6px',
     },
     optionRow: {
       display: 'flex',
       alignItems: 'center',
-      padding: '2px 10px',
-      gap: 4,
+      padding: '3px 10px',
+      gap: 6,
     },
-    optionLabel: {
+    optionChip: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 5,
       flex: 1,
-      fontSize: 12,
-      color: t.text,
+      minWidth: 0,
+      padding: '2px 7px 2px 5px',
+      borderRadius: 10,
+      fontSize: 11,
+      fontWeight: 500,
+      overflow: 'hidden',
+    },
+    optionDot: {
+      width: 8,
+      height: 8,
+      borderRadius: '50%',
+      flexShrink: 0,
+    },
+    optionChipText: {
       overflow: 'hidden',
       textOverflow: 'ellipsis',
       whiteSpace: 'nowrap' as const,
@@ -351,6 +386,7 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       padding: '0 2px',
       lineHeight: 1,
       flexShrink: 0,
+      opacity: 0.6,
     },
     addOptionRow: {
       display: 'flex',
