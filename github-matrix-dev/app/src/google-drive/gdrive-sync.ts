@@ -340,16 +340,18 @@ export class GDriveSyncService {
         }
       }
 
-      // If local store has data but GDrive has none, push everything up now.
+      // Push to GDrive whenever local is ahead — events only ever accumulate,
+      // so local can never have fewer events than GDrive has published.
+      // This covers both "GDrive is empty" and "GDrive missed some events since last session".
       const localSeq = await this.store.getCurrentSeq();
       if (localSeq > 0) {
-        let gdriveHasData = false;
+        let gdriveHeadSeq = 0;
         try {
           const manifest = await gdriveReadJson(this.accessToken, dt, this.manifestFile);
-          gdriveHasData = !!manifest && (manifest as unknown as SyncManifest).head_seq > 0;
+          if (manifest) gdriveHeadSeq = (manifest as unknown as SyncManifest).head_seq ?? 0;
         } catch { /* manifest may not exist */ }
-        if (!gdriveHasData) {
-          console.log('[EO-DB] GDrive empty but local has data — pushing full backup on start');
+        if (localSeq > gdriveHeadSeq) {
+          console.log(`[EO-DB] Local ahead of GDrive (local=${localSeq}, gdrive=${gdriveHeadSeq}) — pushing now`);
           await this.fullPushToGDrive();
         }
       }
