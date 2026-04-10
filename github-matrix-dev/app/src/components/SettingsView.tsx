@@ -85,7 +85,7 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
         }
       } else {
         // n8n mode — ping the proxy endpoint with the Matrix token
-        const token = matrixAccessToken;
+        const token = matrixAccessToken ?? session.accessToken;
         if (!token) { setGdriveTestStatus('✗ Not connected (no Matrix token)'); return; }
         const res = await fetch('https://n8n.intelechia.com/webhook/eo-store', {
           method: 'POST',
@@ -109,7 +109,7 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
     } finally {
       setGdriveTestLoading(false);
     }
-  }, [gdriveToken, matrixAccessToken, gdriveSyncMode]);
+  }, [gdriveToken, matrixAccessToken, gdriveSyncMode, session.accessToken]);
 
 
 
