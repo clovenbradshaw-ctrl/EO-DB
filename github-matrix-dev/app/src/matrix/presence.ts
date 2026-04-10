@@ -30,12 +30,30 @@ export interface PresenceDevice {
   lastSeen: number;
 }
 
+/**
+ * Where a user is currently focused in the app. All fields are optional so
+ * clients can broadcast only the parts they know. `null` as a whole user
+ * location means the user has opted out of sharing location ("discrete" mode).
+ */
+export interface PresenceLocation {
+  /** View id from the hash router ('records', 'graph', 'log', …) */
+  view?: string | null;
+  /** Selected space target (e.g. 'space_amino'). */
+  space?: string | null;
+  /** Scope dot-path (e.g. 'tblClients'). */
+  scope?: string | null;
+  /** Record dot-path (e.g. 'tblClients.rec123'). */
+  record?: string | null;
+}
+
 export interface PresenceUser {
   userId: string;
   displayName: string | null;
   devices: PresenceDevice[];
   /** Most-recent lastSeen across all devices. */
   lastSeen: number;
+  /** Most-recent known location for this user, or null if they're discrete. */
+  location: PresenceLocation | null;
 }
 
 /** Build the Map<userId, Map<deviceId, content>> structure for sendToDevice. */
@@ -56,6 +74,8 @@ export class Presence {
 
   /** userId -> deviceId -> lastSeen (ms) */
   private seen = new Map<string, Map<string, number>>();
+  /** userId -> most-recent location reported by any device (null = discrete). */
+  private locations = new Map<string, PresenceLocation | null>();
   private subscribers = new Set<(users: PresenceUser[]) => void>();
 
   private pingTimer: ReturnType<typeof setInterval> | null = null;
@@ -63,6 +83,15 @@ export class Presence {
   private toDeviceHandler: ((event: MatrixEvent) => void) | null = null;
   private membershipHandler: ((event: any, member: any, oldMembership: string | null) => void) | null = null;
   private stopped = false;
+
+  /** Local location broadcast on the next ping. */
+  private myLocation: PresenceLocation | null = null;
+  /** When false, pings carry `location: null` so peers treat us as discrete. */
+  private shareLocation = true;
+  /** Timestamp of the last ping, used to throttle immediate broadcasts. */
+  private lastPingAt = 0;
+  /** Pending debounce timer for location-change broadcasts. */
+  private locationBroadcastTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** Cached snapshot to avoid rebuilding when nothing changed. */
   private cachedSnapshot: PresenceUser[] | null = null;
@@ -130,6 +159,10 @@ export class Presence {
       clearInterval(this.sweepTimer);
       this.sweepTimer = null;
     }
+    if (this.locationBroadcastTimer) {
+      clearTimeout(this.locationBroadcastTimer);
+      this.locationBroadcastTimer = null;
+    }
     if (this.toDeviceHandler) {
       this.client.removeListener('toDeviceEvent' as any, this.toDeviceHandler);
       this.toDeviceHandler = null;
@@ -139,9 +172,54 @@ export class Presence {
       this.membershipHandler = null;
     }
     this.seen.clear();
+    this.locations.clear();
     this.subscribers.clear();
     this.cachedSnapshot = null;
     this.dirty = false;
+  }
+
+  /**
+   * Update the local user's in-app location. The next heartbeat (or a
+   * debounced immediate ping) will carry this payload so peers can render
+   * subtle "user X is here" indicators.
+   */
+  setLocation(loc: PresenceLocation | null): void {
+    // Shallow equality — avoid ping-storms when route effects re-fire with
+    // identical values.
+    if (samePresenceLocation(this.myLocation, loc)) return;
+    this.myLocation = loc;
+    this.scheduleLocationBroadcast();
+  }
+
+  /**
+   * Toggle whether the local user shares their location. When disabled,
+   * pings still keep the user marked online but carry `location: null` so
+   * peers drop any previously-known location ("move discretely" mode).
+   */
+  setShareLocation(enabled: boolean): void {
+    if (this.shareLocation === enabled) return;
+    this.shareLocation = enabled;
+    this.scheduleLocationBroadcast();
+  }
+
+  /** Current share-location flag — used by tests and inspection. */
+  isSharingLocation(): boolean {
+    return this.shareLocation;
+  }
+
+  /**
+   * Debounce rapid location changes into at most one broadcast per 400ms to
+   * prevent bursts when the user is clicking through the navigation tree.
+   */
+  private scheduleLocationBroadcast(): void {
+    if (this.stopped) return;
+    if (this.locationBroadcastTimer) return;
+    const sinceLast = Date.now() - this.lastPingAt;
+    const delay = sinceLast < 400 ? 400 - sinceLast : 0;
+    this.locationBroadcastTimer = setTimeout(() => {
+      this.locationBroadcastTimer = null;
+      void this.broadcastPing();
+    }, delay);
   }
 
   /** Subscribe to online-user list changes. Returns unsubscribe fn. */
@@ -175,6 +253,7 @@ export class Presence {
         displayName: member?.name ?? null,
         devices: live,
         lastSeen: latest,
+        location: this.locations.get(userId) ?? null,
       });
     }
     users.sort((a, b) => b.lastSeen - a.lastSeen);
@@ -195,10 +274,15 @@ export class Presence {
     const myUserId = this.client.getUserId();
     if (!myUserId) return;
 
-    const content = {
+    this.lastPingAt = Date.now();
+    const content: Record<string, unknown> = {
       room_id: this.roomId,
       device: this.client.getDeviceId(),
-      ts: Date.now(),
+      ts: this.lastPingAt,
+      // Always include `location` so peers can actively clear a previous
+      // value when the user switches to discrete mode. `null` means "no
+      // location shared", an object means "here".
+      location: this.shareLocation ? (this.myLocation ?? null) : null,
     };
 
     const members = room.getJoinedMembers();
@@ -220,7 +304,11 @@ export class Presence {
 
   private handleToDeviceEvent(event: MatrixEvent): void {
     if (event.getType() !== PING_TYPE) return;
-    const content = event.getContent() as { room_id?: string; device?: string };
+    const content = event.getContent() as {
+      room_id?: string;
+      device?: string;
+      location?: PresenceLocation | null;
+    };
     // Scope to this space (accept from any room belonging to the same space).
     if (content.room_id && !this.spaceRoomIds.has(content.room_id)) return;
 
@@ -234,6 +322,18 @@ export class Presence {
       this.seen.set(sender, devices);
     }
     devices.set(deviceId, Date.now());
+
+    // Location is explicit: `null` means the peer opted out, an object
+    // means "here". Missing `location` key (legacy clients) is treated as
+    // a no-op so we keep whatever we had before.
+    if ('location' in content) {
+      const loc = sanitizeLocation(content.location ?? null);
+      const prev = this.locations.get(sender) ?? null;
+      if (!samePresenceLocation(prev, loc)) {
+        this.locations.set(sender, loc);
+      }
+    }
+
     this.dirty = true;
     this.notify();
   }
@@ -251,6 +351,7 @@ export class Presence {
       }
       if (devices.size === 0) {
         this.seen.delete(userId);
+        this.locations.delete(userId);
         changed = true;
       }
     }
@@ -264,4 +365,36 @@ export class Presence {
     const users = this.snapshot();
     for (const cb of this.subscribers) cb(users);
   }
+}
+
+/**
+ * Accept only the known string fields from an incoming location payload so
+ * a peer can't inject arbitrary keys (and so snapshot comparisons remain
+ * predictable).
+ */
+function sanitizeLocation(loc: PresenceLocation | null): PresenceLocation | null {
+  if (!loc || typeof loc !== 'object') return null;
+  const out: PresenceLocation = {};
+  if (typeof loc.view === 'string') out.view = loc.view;
+  if (typeof loc.space === 'string') out.space = loc.space;
+  if (typeof loc.scope === 'string') out.scope = loc.scope;
+  if (typeof loc.record === 'string') out.record = loc.record;
+  // An object with no recognised keys is equivalent to null.
+  if (Object.keys(out).length === 0) return null;
+  return out;
+}
+
+/** Structural equality for PresenceLocation (null included). */
+function samePresenceLocation(
+  a: PresenceLocation | null,
+  b: PresenceLocation | null,
+): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return (
+    (a.view ?? null) === (b.view ?? null) &&
+    (a.space ?? null) === (b.space ?? null) &&
+    (a.scope ?? null) === (b.scope ?? null) &&
+    (a.record ?? null) === (b.record ?? null)
+  );
 }

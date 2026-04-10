@@ -6,7 +6,7 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
-import type { Presence, PresenceUser } from '../matrix/presence';
+import type { Presence, PresenceUser, PresenceLocation } from '../matrix/presence';
 import { useTheme, type Theme } from '../theme';
 
 interface OnlineUsersProps {
@@ -14,11 +14,17 @@ interface OnlineUsersProps {
   /** The current user's ID — rendered inline so the viewer can see themselves. */
   selfUserId?: string | null;
   selfDisplayName?: string | null;
+  /**
+   * When false, peers are hidden entirely — only the current user is shown
+   * and the popover says "you're the only one here". Lets a user opt out of
+   * seeing other people's presence without logging out.
+   */
+  showPeers?: boolean;
 }
 
 const MAX_VISIBLE_AVATARS = 4;
 
-export function OnlineUsers({ presence, selfUserId, selfDisplayName }: OnlineUsersProps) {
+export function OnlineUsers({ presence, selfUserId, selfDisplayName, showPeers = true }: OnlineUsersProps) {
   const { theme } = useTheme();
   const [peers, setPeers] = useState<PresenceUser[]>([]);
   const [open, setOpen] = useState(false);
@@ -45,7 +51,8 @@ export function OnlineUsers({ presence, selfUserId, selfDisplayName }: OnlineUse
     return () => window.removeEventListener('mousedown', onDown);
   }, [open]);
 
-  // Build the rendered list: self first, then peers.
+  // Build the rendered list: self first, then peers (unless peers are hidden
+  // by the viewer's "show other users" preference).
   const all: PresenceUser[] = [];
   if (selfUserId) {
     all.push({
@@ -53,9 +60,12 @@ export function OnlineUsers({ presence, selfUserId, selfDisplayName }: OnlineUse
       displayName: selfDisplayName ?? selfUserId,
       devices: [],
       lastSeen: Date.now(),
+      location: null,
     });
   }
-  all.push(...peers);
+  if (showPeers) {
+    all.push(...peers.filter((p) => p.userId !== selfUserId));
+  }
 
   const total = all.length;
   const visible = all.slice(0, MAX_VISIBLE_AVATARS);
@@ -101,7 +111,9 @@ export function OnlineUsers({ presence, selfUserId, selfDisplayName }: OnlineUse
       {open && (
         <div style={s.popover}>
           <div style={s.popoverHeader}>
-            {total} {total === 1 ? 'person' : 'people'} here
+            {showPeers
+              ? `${total} ${total === 1 ? 'person' : 'people'} here`
+              : 'peer presence hidden'}
           </div>
           <div style={s.popoverList}>
             {all.map((u) => (
@@ -125,6 +137,9 @@ export function OnlineUsers({ presence, selfUserId, selfDisplayName }: OnlineUse
                       ? 'this device'
                       : `${u.devices.length} ${u.devices.length === 1 ? 'device' : 'devices'} \u00B7 ${relative(u.lastSeen)}`}
                   </div>
+                  {u.userId !== selfUserId && u.location && (
+                    <div style={s.rowLocation}>{formatLocation(u.location)}</div>
+                  )}
                 </div>
                 <span style={s.greenDot} title="online" />
               </div>
@@ -141,6 +156,26 @@ export function OnlineUsers({ presence, selfUserId, selfDisplayName }: OnlineUse
 function initial(name: string): string {
   const stripped = name.startsWith('@') ? name.slice(1) : name;
   return (stripped.charAt(0) || '?').toUpperCase();
+}
+
+/**
+ * Render a peer location as a discreet one-liner. We intentionally show
+ * only the most specific segment the peer has shared — a scope is more
+ * informative than a view, a record is more informative than a scope.
+ */
+function formatLocation(loc: PresenceLocation): string {
+  if (loc.record) {
+    const leaf = loc.record.split('.').pop() || loc.record;
+    return `on ${leaf}`;
+  }
+  if (loc.scope) {
+    const leaf = loc.scope.split('.').pop() || loc.scope;
+    return `in ${leaf}`;
+  }
+  if (loc.view) {
+    return `viewing ${loc.view}`;
+  }
+  return '';
 }
 
 function relative(ts: number): string {
@@ -266,6 +301,13 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       fontSize: 10,
       color: t.textSecondary,
       fontFamily: "'JetBrains Mono', monospace",
+    },
+    rowLocation: {
+      fontSize: 10,
+      color: t.accent,
+      fontFamily: "'JetBrains Mono', monospace",
+      opacity: 0.8,
+      marginTop: 1,
     },
     youTag: { color: t.accent, fontSize: 10, marginLeft: 4 },
     greenDot: {
