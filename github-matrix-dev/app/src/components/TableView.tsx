@@ -602,19 +602,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
           if (segment.startsWith('_')) return false;
           return true;
         })
-        .map((st) => {
-          // When fields is an array of DEFs ({id,name,type}), flatten into
-          // a fields object keyed by name so each field renders as a column.
-          const f = st.value?.fields;
-          if (Array.isArray(f) && f.length > 0 && f[0]?.name) {
-            const expanded: Record<string, any> = {};
-            for (const field of f) {
-              expanded[field.name] = field.type ?? '';
-            }
-            return { ...st, value: { ...st.value, fields: expanded } };
-          }
-          return st;
-        });
+;
       // Only update state if records actually changed (avoids flicker from lastSeq)
       const key = direct.map(r => r.target + ':' + r.last_seq).join('|');
       if (key !== prevRecordsKeyRef.current) {
