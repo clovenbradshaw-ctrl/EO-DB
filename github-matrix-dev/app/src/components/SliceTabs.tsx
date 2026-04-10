@@ -28,6 +28,11 @@ interface SliceTabsProps {
 
 export function SliceTabs({ openScopes, activeScope, onSelectScope, onCloseScope, session, activeUserType, userTypeDefinitions, canManageSlices }: SliceTabsProps) {
   const sliceStore = useSliceStore();
+  // Stable selector for the loader effect — using `sliceStore` directly in
+  // useEffect deps causes an infinite loop after a slice is created, because
+  // calling registerSavedSlices() inside the effect triggers a store update,
+  // which produces a new sliceStore reference, which retriggers the effect.
+  const registerSavedSlices = useSliceStore((s) => s.registerSavedSlices);
   const dispatch = useEoStore((s) => s.dispatch);
   const getStateByPrefix = useEoStore((s) => s.getStateByPrefix);
   const ready = useEoStore((s) => s.ready);
@@ -83,10 +88,10 @@ export function SliceTabs({ openScopes, activeScope, onSelectScope, onCloseScope
             visibleToTypes: st.value.visibleToTypes,
             readOnlyForTypes: st.value.readOnlyForTypes,
           }));
-        if (slices.length > 0) sliceStore.registerSavedSlices(slices);
+        if (slices.length > 0) registerSavedSlices(slices);
       });
     }
-  }, [ready, lastSeq, getStateByPrefix, openScopes, sliceStore]);
+  }, [ready, lastSeq, getStateByPrefix, openScopes, registerSavedSlices]);
 
   // Derive available columns for kanban field selection
   useEffect(() => {
