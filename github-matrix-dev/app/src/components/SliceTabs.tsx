@@ -8,6 +8,16 @@ import { deriveColumns, type ColumnDef } from './filter-types';
 import { formatName } from './scope-picker-utils';
 import type { UserTypeDefinition } from '../permissions/types';
 
+// Hide webkit scrollbar for the horizontal tab strip (SliceTabs container uses
+// `eo-slice-tabs-strip` className). Injected once, idempotent.
+const SLICE_TABS_STYLE_ID = 'eo-slice-tabs-style';
+if (typeof document !== 'undefined' && !document.getElementById(SLICE_TABS_STYLE_ID)) {
+  const el = document.createElement('style');
+  el.id = SLICE_TABS_STYLE_ID;
+  el.textContent = `.eo-slice-tabs-strip::-webkit-scrollbar { display: none; }`;
+  document.head.appendChild(el);
+}
+
 interface SliceTabsProps {
   /** All scopes that have open tabs */
   openScopes: string[];
@@ -335,7 +345,7 @@ export function SliceTabs({ openScopes, activeScope, onSelectScope, onCloseScope
 
   return (
     <div style={s.wrapper}>
-      <div style={s.container}>
+      <div className="eo-slice-tabs-strip" style={s.container}>
         {openScopes.map((sc, idx) => {
           const scSig = sliceStore.getSig(sc);
           const scSavedSlices = sliceStore.getSlicesForScope(sc);
@@ -479,7 +489,9 @@ export function SliceTabs({ openScopes, activeScope, onSelectScope, onCloseScope
             />
             {/* Slice type selector */}
             <div style={{ display: 'flex', gap: 4, marginTop: 8, flexWrap: 'wrap' as const }}>
-              {(Object.keys(SLICE_TYPE_META) as SliceType[]).map((vt) => {
+              {(Object.keys(SLICE_TYPE_META) as SliceType[])
+                .filter((vt) => vt !== 'record') /* record slices are created via the detail panel's Pin button, not here */
+                .map((vt) => {
                 const meta = SLICE_TYPE_META[vt];
                 const active = newSliceType === vt;
                 return (
@@ -686,7 +698,11 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       borderBottom: `0.5px solid ${t.border}`,
       background: t.bgCard,
       overflowX: 'auto',
+      overflowY: 'hidden',
       flexShrink: 0,
+      flexWrap: 'nowrap',
+      scrollbarWidth: 'none',
+      msOverflowStyle: 'none',
     },
     tab: tabBase,
     tabActive: {

@@ -2,8 +2,10 @@ import { useEffect, useRef, useState } from 'react';
 import { RecordView } from './RecordView';
 import { formatName } from './scope-picker-utils';
 import { useEoStore } from '../store/eo-store';
+import { useSliceStore } from '../store/slice-store';
 import { useTheme, type Theme } from '../theme';
 import type { LayoutDisplayType } from './detail-layout';
+import type { TableSliceConfig, SavedSlice } from './slice-types';
 
 interface RecordDetailDrawerProps {
   target: string;
@@ -14,6 +16,8 @@ interface RecordDetailDrawerProps {
   layoutType?: LayoutDisplayType;
   /** Ordered list of record targets from the current table view, for prev/next pager. */
   tableRecordTargets?: string[];
+  /** Current user ID (needed to attribute a pinned-record slice to its creator) */
+  userId?: string;
 }
 
 /** Extract initials from a display name (e.g. "Priya Chandrasekaran" -> "PC") */
@@ -57,14 +61,98 @@ const TYPE_COLORS: Record<string, string> = {
   note: '#7c5cbf',
 };
 
-export function RecordDetailDrawer({ target, onClose, onNavigate, profileFields, isMobile, layoutType, tableRecordTargets }: RecordDetailDrawerProps) {
+const DRAWER_WIDTH_KEY = 'eo-record-drawer-width';
+const DRAWER_DEFAULT_WIDTH = 640;
+const DRAWER_MIN_WIDTH = 360;
+const DRAWER_MAX_WIDTH = 1200;
+
+function loadSavedDrawerWidth(): number {
+  if (typeof window === 'undefined') return DRAWER_DEFAULT_WIDTH;
+  try {
+    const raw = window.localStorage.getItem(DRAWER_WIDTH_KEY);
+    if (!raw) return DRAWER_DEFAULT_WIDTH;
+    const n = parseInt(raw, 10);
+    if (!Number.isFinite(n)) return DRAWER_DEFAULT_WIDTH;
+    return n;
+  } catch {
+    return DRAWER_DEFAULT_WIDTH;
+  }
+}
+
+function clampDrawerWidth(w: number): number {
+  const maxByViewport = typeof window !== 'undefined'
+    ? Math.min(DRAWER_MAX_WIDTH, Math.max(DRAWER_MIN_WIDTH, window.innerWidth - 240))
+    : DRAWER_MAX_WIDTH;
+  return Math.max(DRAWER_MIN_WIDTH, Math.min(maxByViewport, w));
+}
+
+export function RecordDetailDrawer({ target, onClose, onNavigate, profileFields, isMobile, layoutType, tableRecordTargets, userId }: RecordDetailDrawerProps) {
   const { theme } = useTheme();
   const s = makeStyles(theme);
   const horizon = useEoStore((s) => s.horizon);
   const getState = useEoStore((s) => s.getState);
   const ready = useEoStore((s) => s.ready);
+  const dispatch = useEoStore((st) => st.dispatch);
+  const sliceStore = useSliceStore();
+  const registerSavedSlices = useSliceStore((st) => st.registerSavedSlices);
+  const [pinning, setPinning] = useState(false);
   const [recordName, setRecordName] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
+
+  // ── Drag-to-resize width ─────────────────────────────────────────────────
+  const [drawerWidth, setDrawerWidth] = useState<number>(() => clampDrawerWidth(loadSavedDrawerWidth()));
+  const [isResizing, setIsResizing] = useState(false);
+  const resizeStartRef = useRef<{ startX: number; startWidth: number } | null>(null);
+
+  // Re-clamp width when viewport resizes (e.g., user shrinks browser)
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handler = () => {
+      setDrawerWidth((w) => {
+        const next = clampDrawerWidth(w);
+        return next === w ? w : next;
+      });
+    };
+    window.addEventListener('resize', handler);
+    return () => window.removeEventListener('resize', handler);
+  }, []);
+
+  const handleResizeStart = (clientX: number) => {
+    resizeStartRef.current = { startX: clientX, startWidth: drawerWidth };
+    setIsResizing(true);
+  };
+
+  useEffect(() => {
+    if (!isResizing) return;
+    const onMove = (e: MouseEvent | TouchEvent) => {
+      const st = resizeStartRef.current;
+      if (!st) return;
+      const clientX = 'touches' in e ? e.touches[0]?.clientX : e.clientX;
+      if (clientX == null) return;
+      // Drawer is on the right — moving handle LEFT should widen it.
+      const delta = st.startX - clientX;
+      const next = clampDrawerWidth(st.startWidth + delta);
+      setDrawerWidth(next);
+    };
+    const onUp = () => {
+      setIsResizing(false);
+      resizeStartRef.current = null;
+      try { window.localStorage.setItem(DRAWER_WIDTH_KEY, String(drawerWidth)); } catch { /* ignore */ }
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    window.addEventListener('touchmove', onMove, { passive: false });
+    window.addEventListener('touchend', onUp);
+    const prevUserSelect = document.body.style.userSelect;
+    document.body.style.userSelect = 'none';
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      window.removeEventListener('touchmove', onMove);
+      window.removeEventListener('touchend', onUp);
+      document.body.style.userSelect = prevUserSelect;
+    };
+  }, [isResizing, drawerWidth]);
 
   // ── Breadcrumb history (drill-down trail within the drawer) ──────────────
   const [history, setHistory] = useState<string[]>([target]);
@@ -170,6 +258,67 @@ export function RecordDetailDrawer({ target, onClose, onNavigate, profileFields,
   const displayName = recordName || formatName(target.split('.').pop() || '');
   const entityType = getEntityType(target);
   const entityId = getEntityId(target);
+
+  // ── Pin to tabs ──────────────────────────────────────────────────────────
+  // Promote the currently-open record to a persistent 'record' slice tab in
+  // the main tabs area, so it sits next to grid/schema tabs.
+  async function handlePinToTabs() {
+    if (pinning) return;
+    const parentScope = target.split('.').slice(0, -1).join('.');
+    if (!parentScope) return;
+    setPinning(true);
+    try {
+      const sliceId = crypto.randomUUID().replace(/-/g, '').slice(0, 12);
+      const now = new Date().toISOString();
+      const config: TableSliceConfig = {
+        columnOrder: [],
+        columnWidths: {},
+        hiddenColumns: [],
+        sorts: [],
+        filters: [],
+        filterConjunction: 'AND',
+        showLastUpdated: false,
+        recordTarget: target,
+      };
+      const createdBy = userId ?? 'user';
+      const sliceName = displayName || formatName(entityId);
+      await dispatch({
+        op: 'INS',
+        target: `${parentScope}._slices.${sliceId}`,
+        operand: {
+          name: sliceName,
+          sliceType: 'record',
+          config,
+          visibility: 'private',
+          createdBy,
+          createdAt: now,
+          updatedAt: now,
+        },
+        agent: `user:${createdBy}`,
+        ts: now,
+        acquired_ts: now,
+        client_event_id: crypto.randomUUID(),
+      });
+      const saved: SavedSlice = {
+        id: sliceId,
+        name: sliceName,
+        scope: parentScope,
+        sliceType: 'record',
+        config,
+        visibility: 'private',
+        createdBy,
+        createdAt: now,
+        updatedAt: now,
+      };
+      registerSavedSlices([saved]);
+      sliceStore.activateSlice(parentScope, saved);
+      onClose();
+    } catch (err) {
+      console.error('[RecordDetailDrawer] pin to tabs failed', err);
+    } finally {
+      setPinning(false);
+    }
+  }
   const initials = getInitials(displayName);
   const typeColor = TYPE_COLORS[entityType] || '#7a756d';
   const isFullModal = !isMobile && layoutType === 'modal';
@@ -211,8 +360,13 @@ export function RecordDetailDrawer({ target, onClose, onNavigate, profileFields,
           width: '100vw', maxWidth: '100vw',
           position: 'fixed' as const, inset: 0, zIndex: 1000,
           borderLeft: 'none',
-        } : {}),
+        } : {
+          width: drawerWidth,
+          maxWidth: 'none',
+          position: 'relative' as const,
+        }),
       };
+  const showResizeHandle = !isMobile && !isFullModal && !isExpandedDrawer;
 
   return (
     <>
@@ -228,6 +382,28 @@ export function RecordDetailDrawer({ target, onClose, onNavigate, profileFields,
         />
       )}
       <div style={panelStyle}>
+        {showResizeHandle && (
+          <div
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize detail panel"
+            onMouseDown={(e) => { e.preventDefault(); handleResizeStart(e.clientX); }}
+            onTouchStart={(e) => { if (e.touches[0]) handleResizeStart(e.touches[0].clientX); }}
+            style={{
+              position: 'absolute',
+              left: 0,
+              top: 0,
+              bottom: 0,
+              width: 6,
+              cursor: 'col-resize',
+              zIndex: 5,
+              background: isResizing ? `${theme.accent}40` : 'transparent',
+              transition: 'background 0.15s',
+            }}
+            onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = `${theme.accent}25`; }}
+            onMouseLeave={(e) => { if (!isResizing) (e.currentTarget as HTMLDivElement).style.background = 'transparent'; }}
+          />
+        )}
         <div style={s.header}>
           {isMobile && (
             <button onClick={onClose} style={s.backBtn}>{'\u2190'} Back</button>
@@ -269,6 +445,19 @@ export function RecordDetailDrawer({ target, onClose, onNavigate, profileFields,
               </button>
             </div>
           )}
+          <button
+            onClick={handlePinToTabs}
+            disabled={pinning}
+            style={{
+              ...s.expandBtn,
+              opacity: pinning ? 0.4 : 1,
+              cursor: pinning ? 'default' : 'pointer',
+            }}
+            title="Pin as a tab in the main area"
+            aria-label="Pin to tabs"
+          >
+            {'\u{1F4CC}'}
+          </button>
           {!isMobile && !isFullModal && (
             <button
               onClick={() => setExpanded(e => !e)}

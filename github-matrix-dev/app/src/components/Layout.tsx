@@ -525,7 +525,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   const allStatesFetchGenRef = useRef(0);
   const [timeScrubberFilter, setTimeScrubberFilter] = useState<TimeScrubberFilter>(DEFAULT_FILTER);
   const [tableRecordTargets, setTableRecordTargets] = useState<string[]>([]);
-  const [recordOpenedViaNav, setRecordOpenedViaNav] = useState(false);
   const [scopedRecords, setScopedRecords] = useState<EoState[]>([]);
   const prevScopedRecordsKeyRef = useRef<string>('');
   const scopedRecordsFetchGenRef = useRef(0);
@@ -2054,6 +2053,15 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     return sv?.sliceType || 'grid';
   }, [selectedScope, sliceSigs, savedSlices]);
 
+  // Target of the record pinned in the active slice (only when sliceType === 'record')
+  const activeRecordSliceTarget: string | null = useMemo(() => {
+    if (activeSliceType !== 'record' || !selectedScope) return null;
+    const sig = sliceSigs[selectedScope];
+    if (!sig?.activeSliceId) return null;
+    const sv = savedSlices[sig.activeSliceId];
+    return sv?.config?.recordTarget ?? null;
+  }, [activeSliceType, selectedScope, sliceSigs, savedSlices]);
+
   const mono = "'JetBrains Mono', monospace";
 
   return (
@@ -2072,6 +2080,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           : s.topBar.boxShadow ?? 'none',
         transition: 'background 0.4s, border-color 0.4s, box-shadow 0.4s',
       }}>
+        <div style={s.topBarRow}>
         <div style={s.topBarLeft}>
           {isMobile && (
             <button
@@ -2291,6 +2300,19 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             ...(isMobile ? { padding: '4px 8px', fontSize: 10 } : {}),
           }}>Log out</button>
         </div>
+        </div>
+
+        {/* Horizon — integrated as a second row of the header */}
+        {activeView === 'records' && (
+          <div style={s.topBarHorizon}>
+            <Horizon
+              records={scopedRecords}
+              dateColumns={dateColumns}
+              filter={timeScrubberFilter}
+              onFilterChange={setTimeScrubberFilter}
+            />
+          </div>
+        )}
       </header>
 
       {/* Role banner — appears when an active user type (role) is selected */}
@@ -2334,20 +2356,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
 
       {/* View-only banner for Viewer role */}
       {selectedSpace && isViewer && <ViewOnlyBanner />}
-
-      {/* Horizon — center 1/3, under header */}
-      {activeView === 'records' && (
-        <div style={{ display: 'flex', justifyContent: 'center' }}>
-          <div style={{ width: '33.333%' }}>
-            <Horizon
-              records={scopedRecords}
-              dateColumns={dateColumns}
-              filter={timeScrubberFilter}
-              onFilterChange={setTimeScrubberFilter}
-            />
-          </div>
-        </div>
-      )}
 
       {/* Headline metrics — type-scoped, under Horizon */}
       {activeView === 'records' && activeUserType && (() => {
@@ -2405,7 +2413,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                 onSelectSegment={(_scope, _seg) => { navigate({ view: 'records', scope: _scope }); }}
                 userId={session.userId}
                 selectedRecord={selectedRecord}
-                onSelectRecord={(rec) => { setRecordOpenedViaNav(true); navigate({ record: rec }); }}
+                onSelectRecord={(rec) => { navigate({ record: rec }); }}
                 peersByScope={peersByScope}
               />
             </>
@@ -2626,6 +2634,23 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                         />
                       ) : activeSliceType === 'graph' ? (
                         <GraphView allStates={allStates} />
+                      ) : activeSliceType === 'record' ? (
+                        activeRecordSliceTarget ? (
+                          <div style={{ flex: 1, overflow: 'auto', padding: isMobile ? 12 : 20 }}>
+                            <RecordView
+                              target={activeRecordSliceTarget}
+                              onNavigate={(t) => navigate({ record: t })}
+                            />
+                          </div>
+                        ) : (
+                          <div style={{
+                            flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                            flexDirection: 'column' as const, gap: 8, color: theme.textMuted,
+                          }}>
+                            <div style={{ fontSize: 28, opacity: 0.3 }}>{'\u25C9'}</div>
+                            <div style={{ fontSize: 13, fontWeight: 500 }}>No record pinned</div>
+                          </div>
+                        )
                       ) : activeSliceType === 'grid' ? (
                         <TableView
                           scope={selectedScope}
@@ -2728,12 +2753,12 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           <RecordPageOrDrawer
             recordTarget={selectedRecord}
             allStates={allStates}
-            onClose={() => { setRecordOpenedViaNav(false); navigate({ record: null }); }}
-            onNavigate={(t) => { setRecordOpenedViaNav(false); navigate({ record: t }); }}
+            onClose={() => { navigate({ record: null }); }}
+            onNavigate={(t) => { navigate({ record: t }); }}
             profileFields={selectedScope ? sliceStore.getConfig(selectedScope).profileFields : undefined}
             isMobile={isMobile}
             tableRecordTargets={tableRecordTargets}
-            layoutOverride={recordOpenedViaNav ? 'modal' : undefined}
+            userId={session.userId}
           />
         )}
       </div>
@@ -2746,7 +2771,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
  * record page view for the record's collection. If yes, render RecordPageView
  * in a drawer. If no, fall back to the default RecordDetailDrawer.
  */
-function RecordPageOrDrawer({ recordTarget, allStates, onClose, onNavigate, profileFields, isMobile, tableRecordTargets, layoutOverride }: {
+function RecordPageOrDrawer({ recordTarget, allStates, onClose, onNavigate, profileFields, isMobile, tableRecordTargets, userId }: {
   recordTarget: string;
   allStates: EoState[];
   onClose: () => void;
@@ -2754,11 +2779,38 @@ function RecordPageOrDrawer({ recordTarget, allStates, onClose, onNavigate, prof
   profileFields?: string[];
   isMobile?: boolean;
   tableRecordTargets?: string[];
-  layoutOverride?: LayoutDisplayType;
+  userId?: string;
 }) {
   const loadView = useBuilderStore((s) => s.loadView);
   const getState = useEoStore((s) => s.getState);
   const [layoutType, setLayoutType] = useState<LayoutDisplayType>('drawer');
+
+  // ── Existence check ──────────────────────────────────────────────────────
+  // Avoid the "drawer flashes Record not found" bug: if the record doesn't
+  // exist in the current store (e.g., stale route param after a scope switch),
+  // close once and render nothing instead of showing a useless drawer.
+  // 'checking' = initial load, 'exists' = render, 'missing' = auto-closed.
+  const [existence, setExistence] = useState<'checking' | 'exists' | 'missing'>('checking');
+  useEffect(() => {
+    let cancelled = false;
+    setExistence('checking');
+    getState(recordTarget)
+      .then((state) => {
+        if (cancelled) return;
+        if (state && state.value != null) {
+          setExistence('exists');
+        } else {
+          setExistence('missing');
+          onClose();
+        }
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setExistence('missing');
+        onClose();
+      });
+    return () => { cancelled = true; };
+  }, [recordTarget, getState, onClose]);
 
   // Read layout type from the detail layout DEF
   useEffect(() => {
@@ -2800,6 +2852,10 @@ function RecordPageOrDrawer({ recordTarget, allStates, onClose, onNavigate, prof
     }
   }, [recordPageView, loadView]);
 
+  // Don't render anything while we're still checking, or once we've decided
+  // the record is missing (we've already called onClose to clear the route).
+  if (existence !== 'exists') return null;
+
   // If we have a matching record page, render RecordPageView in an inline panel
   if (recordPageView) {
     return (
@@ -2828,8 +2884,9 @@ function RecordPageOrDrawer({ recordTarget, allStates, onClose, onNavigate, prof
       onNavigate={onNavigate}
       profileFields={profileFields}
       isMobile={isMobile}
-      layoutType={layoutOverride ?? layoutType}
+      layoutType={layoutType}
       tableRecordTargets={tableRecordTargets}
+      userId={userId}
     />
   );
 }
@@ -2924,18 +2981,25 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       transition: 'background 0.25s ease',
     },
 
-    // Top bar — taller, cleaner, less dense
+    // Top bar — taller, cleaner, less dense; column layout so Horizon can sit as a sub-row
     topBar: {
+      display: 'flex',
+      flexDirection: 'column',
+      borderBottom: `1px solid ${t.border}`,
+      background: t.bgCard,
+      flexShrink: 0,
+      transition: 'background 0.25s ease',
+    },
+    topBarRow: {
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'space-between',
       padding: '0 12px',
       height: 48,
-      borderBottom: `1px solid ${t.border}`,
-      background: t.bgCard,
-      flexShrink: 0,
-      transition: 'background 0.25s ease',
       gap: 8,
+    },
+    topBarHorizon: {
+      borderTop: `0.5px solid ${t.borderLight ?? t.border}`,
     },
     topBarLeft: { display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, overflow: 'hidden', flexShrink: 1 },
     topBarRight: { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flexShrink: 1 },
