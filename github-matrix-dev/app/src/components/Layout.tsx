@@ -1566,8 +1566,8 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           const gdriveSpaceEntry = mergedEntries.find(e => e.spaceTarget === selectedSpace);
           const gdriveSpaceName = gdriveSpaceEntry?.displayName ?? selectedSpace!;
 
-          // Set current space in GDrive store
-          useGDriveStore.getState().setCurrentSpace(selectedSpace, gdriveSpaceName);
+          // Set current space in GDrive store (pass room ID so folder lookup uses it)
+          useGDriveStore.getState().setCurrentSpace(selectedSpace, gdriveSpaceName, spaceRoomId ?? undefined);
 
           // GDriveSyncService.start() handles initial hydration immediately.
           // setGDriveSync BEFORE start() so dispatches during hydration are saved.
