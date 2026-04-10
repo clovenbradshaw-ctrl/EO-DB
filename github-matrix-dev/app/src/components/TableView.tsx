@@ -1901,7 +1901,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                           }}
                           title={
                             isEditableCol && !isEditingThis ? 'Double-click to edit · right-click for options' :
-                            col.key === '_record' ? 'Click to open record · double-click to open' :
+                            col.key === '_record' ? 'Click to open record' :
                             undefined
                           }
                           onClick={isEditableCol ? (e) => e.stopPropagation() : undefined}
@@ -1919,7 +1919,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                           } : undefined}
                           onMouseLeave={col.key === '_record' ? (e) => {
                             const icon = (e.currentTarget as HTMLElement).querySelector('[data-open-icon]') as HTMLElement | null;
-                            if (icon) icon.style.opacity = '0';
+                            if (icon) icon.style.opacity = '0.2';
                           } : undefined}
                         >
                           {isEditingThis && col.type === 'select' && (col.selectOptions?.length ?? 0) > 0
@@ -2011,9 +2011,9 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                                 <span
                                   data-open-icon=""
                                   style={{
-                                    opacity: 0,
+                                    opacity: 0.2,
                                     fontSize: 9,
-                                    color: theme.textMuted,
+                                    color: theme.accent,
                                     transition: 'opacity 0.12s',
                                     userSelect: 'none' as const,
                                     lineHeight: 1,
@@ -2027,6 +2027,15 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                               }}>{rec.last_ts ? formatRelativeTime(rec.last_ts) : <AbsentCell t={theme} />}</span>
                             : isLocked
                             ? <LockedCell>{renderCell(getFieldValue(rec, col.key, useFieldsSub), col.key, onSelectRecord, theme, idResolver, col.type)}</LockedCell>
+                            : isEditableCol
+                            ? <span style={{
+                                display: 'inline-block',
+                                background: theme.mode === 'dark' ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.03)',
+                                borderRadius: 3,
+                                padding: '1px 4px',
+                                margin: '-1px -4px',
+                                minWidth: 8,
+                              }}>{renderCell(getFieldValue(rec, col.key, useFieldsSub), col.key, onSelectRecord, theme, idResolver, col.type)}</span>
                             : renderCell(getFieldValue(rec, col.key, useFieldsSub), col.key, onSelectRecord, theme, idResolver, col.type)
                           }
                         </td>
