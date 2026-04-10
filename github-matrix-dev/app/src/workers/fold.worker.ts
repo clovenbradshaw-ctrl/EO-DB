@@ -9,6 +9,7 @@
  * Message protocol: see FoldWorkerRequest / FoldWorkerResponse in lazy-fold.ts
  */
 
+import { pack, unpack } from 'msgpackr';
 import { openLog, appendEvent, readEventAt, scanLog } from '../db/log-opfs';
 import type { OPFSLog } from '../db/log-opfs';
 import { buildIndex, updateIndex, getIntersection, trieQuery } from '../db/log-index';
@@ -758,6 +759,44 @@ function buildFoldEntry(target: string): FoldEntry {
           }
         }
         post({ id: req.id, type: 'result', value: null });
+        break;
+      }
+
+      case 'saveKvSnapshot': {
+        if (!opfsDir) throw new Error('Worker not initialized');
+        const payload = pack({ version: 1, seq: req.seq, entries: req.entries }) as Uint8Array;
+        const exactBuf = payload.buffer.slice(
+          payload.byteOffset,
+          payload.byteOffset + payload.byteLength,
+        ) as ArrayBuffer;
+        const tmpHandle = await opfsDir.getFileHandle('kv-snapshot.tmp', { create: true });
+        const writable = await tmpHandle.createWritable();
+        await writable.write(new Blob([exactBuf]));
+        await writable.close();
+        await (tmpHandle as FileSystemFileHandle & {
+          move(dest: FileSystemDirectoryHandle, name: string): Promise<void>;
+        }).move(opfsDir, 'kv-snapshot.bin');
+        post({ id: req.id, type: 'result', value: null });
+        break;
+      }
+
+      case 'loadKvSnapshot': {
+        if (!opfsDir) { post({ id: req.id, type: 'result', value: null }); break; }
+        try {
+          const fileHandle = await opfsDir.getFileHandle('kv-snapshot.bin');
+          const file = await fileHandle.getFile();
+          if (file.size === 0) { post({ id: req.id, type: 'result', value: null }); break; }
+          const buf = await file.arrayBuffer();
+          const data = unpack(new Uint8Array(buf)) as {
+            version: number;
+            seq: number;
+            entries: [string, unknown][];
+          };
+          if (data.version !== 1) { post({ id: req.id, type: 'result', value: null }); break; }
+          post({ id: req.id, type: 'result', value: { seq: data.seq, entries: data.entries } });
+        } catch {
+          post({ id: req.id, type: 'result', value: null });
+        }
         break;
       }
 

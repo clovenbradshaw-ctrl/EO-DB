@@ -78,7 +78,18 @@ export type FoldWorkerPayload =
    * scanLog — stream all events whose seq > `since` back to the main
    * thread for replay into a fresh MemoryStore on page load.
    */
-  | { type: 'scanLog'; since: number };
+  | { type: 'scanLog'; since: number }
+  /**
+   * saveKvSnapshot — serialize and write the MemoryStore kv map to
+   * 'kv-snapshot.bin' in the space's OPFS directory for fast restore
+   * on next page load.
+   */
+  | { type: 'saveKvSnapshot'; entries: [string, unknown][]; seq: number }
+  /**
+   * loadKvSnapshot — read 'kv-snapshot.bin' and return its entries,
+   * or null if no snapshot exists.
+   */
+  | { type: 'loadKvSnapshot' };
 
 export type FoldWorkerRequest = FoldWorkerPayload & { id: number };
 
@@ -270,6 +281,33 @@ export function scanLog(
   since = 0,
 ): Promise<EoEvent[]> {
   return send<EoEvent[]>(client, { type: 'scanLog', since });
+}
+
+// ─── kv snapshot ─────────────────────────────────────────────────────────────
+
+/**
+ * Serialize the MemoryStore kv map to 'kv-snapshot.bin' in OPFS so the next
+ * page load can restore state without replaying the full event log.
+ */
+export function saveKvSnapshot(
+  client: FoldWorkerClient,
+  entries: [string, unknown][],
+  seq: number,
+): Promise<void> {
+  return send(client, { type: 'saveKvSnapshot', entries, seq });
+}
+
+/**
+ * Load a previously saved kv snapshot from OPFS. Returns null if no snapshot
+ * exists yet (first load) or if the file is corrupt.
+ */
+export function loadKvSnapshot(
+  client: FoldWorkerClient,
+): Promise<{ entries: [string, unknown][]; seq: number } | null> {
+  return send<{ entries: [string, unknown][]; seq: number } | null>(
+    client,
+    { type: 'loadKvSnapshot' },
+  );
 }
 
 // ─── getField ─────────────────────────────────────────────────────────────────

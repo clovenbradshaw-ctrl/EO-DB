@@ -10,6 +10,8 @@ import {
   initFoldWorker,
   appendRaw,
   scanLog,
+  saveKvSnapshot,
+  loadKvSnapshot,
   type FoldWorkerClient,
 } from '../db/lazy-fold';
 import type { EoEvent, EoEventInput, EoState, HorizonResponse } from '../db/types';
@@ -104,12 +106,25 @@ export const useEoStore = create<EoDbState>((set, get) => ({
       set({ store: null, workerClient, ready: false, recentEvents: [], lastSeq: 0 });
     }
 
-    // Create a fresh in-memory store (no persistence hook yet).
-    const memStore = createMemoryStore();
-
-    // Replay the entire OPFS log into the memory store.
+    // ── Try restoring from OPFS kv snapshot for fast page-load ───────────────
+    // On the first load there's no snapshot yet; fall back to full log replay.
+    let snapshotSeq = 0;
+    let memStore: ReturnType<typeof createMemoryStore>;
     try {
-      const events = await scanLog(workerClient, 0);
+      const snapshot = await loadKvSnapshot(workerClient);
+      if (snapshot) {
+        memStore = createMemoryStore({ initialKv: snapshot.entries, initialSeq: snapshot.seq });
+        snapshotSeq = snapshot.seq;
+      } else {
+        memStore = createMemoryStore();
+      }
+    } catch {
+      memStore = createMemoryStore();
+    }
+
+    // Replay only events that arrived after the snapshot was written.
+    try {
+      const events = await scanLog(workerClient, snapshotSeq);
       if (events.length > 0) {
         await replayFromLog(memStore, events);
       }
@@ -136,6 +151,13 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     }
 
     set({ store: memStore, workerClient, lastSeq, ready: true, recentEvents: hydrated });
+
+    // ── Persist an updated snapshot for the next page refresh ────────────────
+    // Fire-and-forget: snapshot save happens after ready=true so the UI
+    // is unblocked immediately. Failures are non-fatal (full replay as fallback).
+    saveKvSnapshot(workerClient, memStore.getKvEntries(), lastSeq).catch((e) =>
+      console.warn('[EO-DB] kv snapshot save failed:', e),
+    );
   },
 
   async initLocal(dbName = 'local') {
