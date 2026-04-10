@@ -32,7 +32,7 @@ function AppMain() {
 
   useEffect(() => {
     // Initialise Google OAuth module
-    const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID ?? '871214509438-ei206mo0835gr0n47d2lg4ujv7hnn2in.apps.googleusercontent.com';
+    const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID || '871214509438-ei206mo0835gr0n47d2lg4ujv7hnn2in.apps.googleusercontent.com';
     const redirectUri = window.location.origin + window.location.pathname;
     initGoogleOAuth(clientId, redirectUri);
 
