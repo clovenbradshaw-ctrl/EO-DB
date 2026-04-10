@@ -425,6 +425,7 @@ export function FigureFields({ figure, onNavigate, profileFields, recordTs, allE
                     >
                       {Array.isArray(parsedVal) && (parsedVal as string[]).map((id: string) => {
                         const resolved = resolver.resolve(id);
+                        const chipTitle = resolved?.name ? `${id} ${resolved.name}` : id;
                         return (
                           <span key={id} style={{
                             display: 'inline-flex',
@@ -437,10 +438,20 @@ export function FigureFields({ figure, onNavigate, profileFields, recordTs, allE
                             border: `1px solid ${theme.borderLight}`,
                             fontFamily: "'JetBrains Mono', monospace",
                             color: resolved ? theme.purple : theme.textSecondary,
+                            maxWidth: 240,
+                            minWidth: 0,
                           }}>
                             <span
                               onClick={e => { e.stopPropagation(); if (resolved) onNavigate(resolved.target); }}
-                              style={{ cursor: resolved ? 'pointer' : 'default' }}
+                              title={chipTitle}
+                              style={{
+                                cursor: resolved ? 'pointer' : 'default',
+                                display: 'block',
+                                minWidth: 0,
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                                whiteSpace: 'nowrap',
+                              }}
                             >
                               {id}
                               {resolved?.name && (
@@ -867,14 +878,14 @@ function renderFieldValue(
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
         {val.map((id: string) => {
           const resolved = resolver.resolve(id);
+          const chipTitle = resolved?.name ? `${id} · ${resolved.name}` : id;
           return (
             <span
               key={id}
               onClick={resolved ? () => onNavigate(resolved.target) : undefined}
+              title={chipTitle}
               style={{
-                display: 'inline-flex',
-                alignItems: 'baseline',
-                gap: 4,
+                display: 'inline-block',
                 padding: '2px 8px',
                 borderRadius: 4,
                 fontSize: 12,
@@ -883,6 +894,12 @@ function renderFieldValue(
                 color: resolved ? t.purple : t.textSecondary,
                 cursor: resolved ? 'pointer' : 'default',
                 fontFamily: "'JetBrains Mono', monospace",
+                maxWidth: 240,
+                minWidth: 0,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+                verticalAlign: 'top',
               }}
             >
               {id}
@@ -1009,23 +1026,33 @@ function renderFieldValue(
     }
     return (
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-        {val.map((item: unknown, i: number) => (
-          <span
-            key={i}
-            style={{
-              display: 'inline-flex',
-              padding: '2px 8px',
-              borderRadius: 4,
-              fontSize: 12,
-              background: t.bgMuted,
-              border: `1px solid ${t.borderLight}`,
-              color: t.textSecondary,
-              fontFamily: "'JetBrains Mono', monospace",
-            }}
-          >
-            {String(item)}
-          </span>
-        ))}
+        {val.map((item: unknown, i: number) => {
+          const text = String(item);
+          return (
+            <span
+              key={i}
+              title={text}
+              style={{
+                display: 'inline-block',
+                padding: '2px 8px',
+                borderRadius: 4,
+                fontSize: 12,
+                background: t.bgMuted,
+                border: `1px solid ${t.borderLight}`,
+                color: t.textSecondary,
+                fontFamily: "'JetBrains Mono', monospace",
+                maxWidth: 240,
+                minWidth: 0,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+                verticalAlign: 'top',
+              }}
+            >
+              {text}
+            </span>
+          );
+        })}
       </div>
     );
   }
