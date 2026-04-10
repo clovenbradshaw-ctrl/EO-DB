@@ -361,10 +361,23 @@ export async function processEventBatch(
       await executeOperator(db, fullEvent, branchId);
 
       // Queue log entry (write-only — never read back during the batch)
+      const p = padSeq(seq);
       batchOps.push({
         type: 'put',
-        key: `log:${padSeq(seq)}`,
+        key: `log:${p}`,
         value: encode(fullEvent),
+      });
+
+      // Queue secondary log indexes (log-target + branch-log)
+      batchOps.push({
+        type: 'put',
+        key: `log-target:${fullEvent.target}:${p}`,
+        value: encode(seq),
+      });
+      batchOps.push({
+        type: 'put',
+        key: `branch-log:${fullEvent.branch ?? 'main'}:${p}`,
+        value: encode(seq),
       });
 
       // Queue idempotency key
@@ -427,10 +440,8 @@ export async function processEventBatch(
   }
 
   // ── Phase 6: batch feed notifications ──────────────────────────────
-  if (feed) {
-    for (const ev of fullEvents) {
-      feed.notify(ev);
-    }
+  if (feed && fullEvents.length > 0) {
+    feed.notifyBatch(fullEvents);
   }
 
   return { seqs, errors };

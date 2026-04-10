@@ -410,8 +410,16 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
     const isExpanded = expanded.has(node.fullPath);
     const hasChildren = node.children.length > 0;
 
+    // For top-level nodes, use content-visibility:auto so the browser can skip
+    // rendering/layout for items outside the scroll viewport, keeping the sidebar
+    // fast even with hundreds of top-level entities.
+    const topLevelStyle: React.CSSProperties = isTopLevel && !isActive ? {
+      contentVisibility: 'auto' as any,
+      containIntrinsicSize: 'auto 32px' as any,
+    } : {};
+
     return (
-      <div key={node.fullPath}>
+      <div key={node.fullPath} style={topLevelStyle}>
         <div
           style={{
             ...s.item,

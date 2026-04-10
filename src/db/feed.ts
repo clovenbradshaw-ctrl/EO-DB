@@ -22,6 +22,21 @@ export class Feed {
     }
   }
 
+  /**
+   * Deliver multiple events to subscribers in a single pass over the subscription map.
+   * Avoids the overhead of calling notify() N times for batch imports.
+   */
+  notifyBatch(events: EoEvent[]): void {
+    if (events.length === 0) return;
+    for (const sub of this.subscriptions.values()) {
+      for (const event of events) {
+        if (this.matches(sub, event)) {
+          sub.callback(event);
+        }
+      }
+    }
+  }
+
   private matches(sub: Subscription, event: EoEvent): boolean {
     if (sub.ops && sub.ops.length > 0 && !sub.ops.includes(event.op)) {
       return false;

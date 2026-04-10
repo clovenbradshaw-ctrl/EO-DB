@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import { useState, useEffect, useRef, useMemo, useCallback, lazy, Suspense } from 'react';
 import { logout, createMatrixClient, type MatrixSession } from '../matrix/client';
 import { useEoStore } from '../store/eo-store';
 import { persistSpaceMeta, listSpaceMeta, clearAllSpaceMetas, saveSpaceMeta, removeSpaceMeta } from '../db/space-meta';
@@ -25,18 +25,20 @@ import { ConnectionStatus, useConnectionState, type ConnectionState } from './Co
 import { SyncToast, useSyncToast } from './SyncToast';
 import { ErrorBoundary } from './ErrorBoundary';
 import { SyncProgress } from './SyncProgress';
-import { LogView } from './LogView';
-import { ComposeView } from './ComposeView';
-import { GraphView } from './GraphView';
-import { SchemaView } from './SchemaView';
-import { SettingsView } from './SettingsView';
-import { SpaceMembers } from './SpaceMembers';
-import { ImportView } from './ImportView';
-import { ApiConnectionsView } from './ApiConnectionsView';
-import { BuilderView } from './builder/BuilderView';
-import { MessagesView } from './MessagesView';
-import { PeopleView } from './PeopleView';
-import { RecordPageView } from './builder/RecordPageView';
+// Lazily-loaded views — split into separate chunks so the initial bundle
+// does not include code that users may never visit.
+const LogView = lazy(() => import('./LogView').then(m => ({ default: m.LogView })));
+const ComposeView = lazy(() => import('./ComposeView').then(m => ({ default: m.ComposeView })));
+const GraphView = lazy(() => import('./GraphView').then(m => ({ default: m.GraphView })));
+const SchemaView = lazy(() => import('./SchemaView').then(m => ({ default: m.SchemaView })));
+const SettingsView = lazy(() => import('./SettingsView').then(m => ({ default: m.SettingsView })));
+const SpaceMembers = lazy(() => import('./SpaceMembers').then(m => ({ default: m.SpaceMembers })));
+const ImportView = lazy(() => import('./ImportView').then(m => ({ default: m.ImportView })));
+const ApiConnectionsView = lazy(() => import('./ApiConnectionsView').then(m => ({ default: m.ApiConnectionsView })));
+const BuilderView = lazy(() => import('./builder/BuilderView').then(m => ({ default: m.BuilderView })));
+const MessagesView = lazy(() => import('./MessagesView').then(m => ({ default: m.MessagesView })));
+const PeopleView = lazy(() => import('./PeopleView').then(m => ({ default: m.PeopleView })));
+const RecordPageView = lazy(() => import('./builder/RecordPageView').then(m => ({ default: m.RecordPageView })));
 import { PermissionBadge } from './PermissionBadge';
 import { ViewOnlyBanner } from './ViewOnlyBanner';
 import { HeadlineMetrics } from './HeadlineMetrics';
@@ -56,7 +58,7 @@ import { useHashRoute, type View } from '../lib/router';
 import { type AccessRole, type UserTypeDefinition, type SpaceConfig, powerLevelToRole, legacyAccessToRole } from '../permissions/types';
 import { UserTypeSwitcher } from './UserTypeSwitcher';
 import { resolvePermissionsFromSharing, getUserPowerLevel } from '../permissions/resolve';
-import { MultiUserTestView } from './MultiUserTestView';
+const MultiUserTestView = lazy(() => import('./MultiUserTestView').then(m => ({ default: m.MultiUserTestView })));
 import { RecycleBin, addDeletedSpace, isSpaceDeleted, removeDeletedSpace, getDeletedSpaces } from './RecycleBin';
 import { addArchivedSpace, isSpaceArchived, removeArchivedSpace, getArchivedSpaces } from './ArchivedSpaces';
 import { setSpaceConfig, getSpaceConfig, applyEoPowerLevels, EO_SPACE_CONFIG_TYPE } from '../permissions/room-topology';
@@ -2433,6 +2435,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           )}
 
           {!showRecycleBin && <ErrorBoundary>
+            <Suspense fallback={<div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#888', fontSize: 13 }}>Loading…</div>}>
             {activeView === 'records' ? (
               <>
                 {selectedScope && isLeafScope ? (
@@ -2563,6 +2566,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             ) : activeView === 'api' ? (
               <ApiConnectionsView />
             ) : null}
+            </Suspense>
           </ErrorBoundary>}
         </main>
 
@@ -2651,11 +2655,13 @@ function RecordPageOrDrawer({ recordTarget, allStates, onClose, onNavigate, prof
         background: 'var(--bg, #fff)', display: 'flex', flexDirection: 'column',
         ...(isMobile ? { position: 'fixed' as const, inset: 0, zIndex: 1000 } : {}),
       }}>
-        <RecordPageView
-          recordTarget={recordTarget}
-          onNavigate={onNavigate}
-          onBack={onClose}
-        />
+        <Suspense fallback={null}>
+          <RecordPageView
+            recordTarget={recordTarget}
+            onNavigate={onNavigate}
+            onBack={onClose}
+          />
+        </Suspense>
       </div>
     );
   }
