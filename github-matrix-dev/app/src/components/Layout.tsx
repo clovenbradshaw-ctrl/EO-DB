@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo, useCallback, lazy, Suspense } from 'react';
+import { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback, lazy, Suspense } from 'react';
 import { logout, createMatrixClient, type MatrixSession } from '../matrix/client';
 import { useEoStore } from '../store/eo-store';
 import { persistSpaceMeta, listSpaceMeta, clearAllSpaceMetas, saveSpaceMeta, removeSpaceMeta } from '../db/space-meta';
@@ -1202,6 +1202,24 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   // --- Cached space stores (survive space switches, avoid re-init) ---
   const spaceCacheRef = useRef<Map<string, CachedSpace>>(new Map());
 
+  // Pre-warm the OPFS fold worker before the first paint so the browser can
+  // parse the Worker module and acquire the OPFS file handle in parallel with
+  // React rendering the initial frame. useLayoutEffect fires synchronously
+  // before paint — ~one full frame (~16 ms) ahead of useEffect, and worker
+  // startup (~100–400 ms) overlaps with the paint instead of following it.
+  const eagerWorkerRef = useRef<{
+    client: FoldWorkerClient;
+    initPromise: Promise<void>;
+    spaceId: string;
+  } | null>(null);
+  useLayoutEffect(() => {
+    if (!selectedSpace || localMode || eagerWorkerRef.current) return;
+    const client = createFoldWorkerClient();
+    // Swallow errors — setupSpaceStore will retry on failure.
+    const initPromise = initFoldWorker(client, selectedSpace).catch(() => {});
+    eagerWorkerRef.current = { client, initPromise, spaceId: selectedSpace };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps — intentionally runs once before first paint
+
   // Generation counter: increments each time setupSpaceStore starts. Stale
   // async completions compare their generation to the current value and bail
   // if a newer run has started, preventing race conditions when the effect
@@ -1557,20 +1575,35 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       // Cache the entry BEFORE initFoldWorker so that any concurrent run that
       // starts during the await finds the entry and takes the reuse path above,
       // preventing two workers from racing to open the same OPFS file.
-      const workerClient = createFoldWorkerClient();
+      //
+      // Prefer the pre-warmed worker started by useLayoutEffect (before first
+      // paint) for the initial space load — it may already be fully initialized
+      // by the time we reach this point, making the await below instant.
+      const eager = eagerWorkerRef.current;
+      const usingEager = eager !== null && eager.spaceId === selectedSpace!;
+      const workerClient = usingEager ? eager.client : createFoldWorkerClient();
       cache.set(selectedSpace!, { workerClient, syncManager: null, peerSync: null, webrtcPeer: null, gdriveSync: null, mainRoomId: null, presence: null, spaceRooms: null });
 
-      // Retry up to 3 times — the previous worker may still hold the
-      // SyncAccessHandle for a brief window after termination.
       let initError: unknown;
-      for (let attempt = 0; attempt < 3; attempt++) {
+      if (usingEager) {
+        // Await the pre-warmed init — often already resolved, so no wait.
         try {
-          if (attempt > 0) await new Promise(r => setTimeout(r, attempt * 600));
-          await initFoldWorker(workerClient, selectedSpace!);
-          initError = undefined;
-          break;
+          await eager.initPromise;
         } catch (e) {
           initError = e;
+        }
+      } else {
+        // Retry up to 3 times — the previous worker may still hold the
+        // SyncAccessHandle for a brief window after termination.
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            if (attempt > 0) await new Promise(r => setTimeout(r, attempt * 600));
+            await initFoldWorker(workerClient, selectedSpace!);
+            initError = undefined;
+            break;
+          } catch (e) {
+            initError = e;
+          }
         }
       }
       if (initError) {
