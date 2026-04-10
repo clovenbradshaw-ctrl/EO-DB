@@ -98,7 +98,8 @@ export interface SyncCustomization {
    * When true, never overwrite field values that already exist in EO-DB.
    * New records are always added. For existing records, only fields that
    * don't yet have a value in EO-DB are written.
-   * Default: true (safe mode — EO-DB is source of truth once populated).
+   * Default: false — Airtable values overwrite EO-DB values on every sync.
+   * Field-level provenance history is always preserved in the event log.
    */
   preserveExisting?: boolean;
 
@@ -326,7 +327,7 @@ async function ingestRecord(
   agent: string,
   fieldMeta: Map<string, FieldMeta>,
   exclusions: SyncExclusions = EMPTY_EXCLUSIONS,
-  preserveExisting: boolean = true,
+  preserveExisting: boolean = false,
   onEvent?: (event: any) => void,
   displayField?: string,
 ): Promise<'ingested' | 'skipped_no_change' | 'skipped_duplicate'> {
@@ -469,7 +470,7 @@ async function syncTable(
   agent: string,
   cursorSince: string | null,
   exclusions: SyncExclusions = EMPTY_EXCLUSIONS,
-  preserveExisting: boolean = true,
+  preserveExisting: boolean = false,
   onEvent?: (event: any) => void,
   onProgress?: (progress: SyncProgress) => void,
   recordLimit?: number,
@@ -541,7 +542,7 @@ export async function hydrationSync(
   },
 ): Promise<HydrationResult> {
   const start = Date.now();
-  const preserveExisting = opts?.customization?.preserveExisting ?? true;
+  const preserveExisting = opts?.customization?.preserveExisting ?? false;
   const selectedTables = opts?.customization?.selectedTables;
   const fieldExclusions = opts?.customization?.fieldExclusions;
   const recordLimit = opts?.customization?.recordLimit;
@@ -702,7 +703,7 @@ export async function updateSync(
   },
 ): Promise<UpdateSyncResult> {
   const start = Date.now();
-  const preserveExisting = opts?.customization?.preserveExisting ?? true;
+  const preserveExisting = opts?.customization?.preserveExisting ?? false;
   const selectedTables = opts?.customization?.selectedTables;
   const fieldExclusions = opts?.customization?.fieldExclusions;
   const recordLimit = opts?.customization?.recordLimit;

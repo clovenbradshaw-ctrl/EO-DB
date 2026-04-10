@@ -103,7 +103,8 @@ export interface SyncCustomization {
    * When true, never overwrite field values that already exist in EO-DB.
    * New records are always added. For existing records, only fields that
    * don't yet have a value in EO-DB are written.
-   * Default: true (safe mode — EO-DB is source of truth once populated).
+   * Default: false — Airtable values overwrite EO-DB values on every sync.
+   * Field-level provenance history is always preserved in the event log.
    */
   preserveExisting?: boolean;
 
@@ -542,7 +543,7 @@ async function ingestRecord(
   agent: string,
   fieldMeta: Map<string, FieldMeta>,
   exclusions: SyncExclusions = EMPTY_EXCLUSIONS,
-  preserveExisting: boolean = true,
+  preserveExisting: boolean = false,
   displayField?: string,
   sink?: EventSink,
 ): Promise<'ingested' | 'skipped_no_change' | 'skipped_duplicate'> {
@@ -712,7 +713,7 @@ export async function hydrationSync(
   },
 ): Promise<HydrationResult> {
   const start = Date.now();
-  const preserveExisting = opts?.customization?.preserveExisting ?? true;
+  const preserveExisting = opts?.customization?.preserveExisting ?? false;
   const selectedTables = opts?.customization?.selectedTables;
   const fieldExclusions = opts?.customization?.fieldExclusions;
   const displayFields = opts?.customization?.displayFields;
@@ -976,7 +977,7 @@ export async function updateSync(
   },
 ): Promise<UpdateSyncResult> {
   const start = Date.now();
-  const preserveExisting = opts?.customization?.preserveExisting ?? true;
+  const preserveExisting = opts?.customization?.preserveExisting ?? false;
   const selectedTables = opts?.customization?.selectedTables;
   const fieldExclusions = opts?.customization?.fieldExclusions;
   const syncResults: SyncResult[] = [];
@@ -1043,7 +1044,7 @@ async function syncTable(
   agent: string,
   cursorSince: string | null,
   exclusions: SyncExclusions = EMPTY_EXCLUSIONS,
-  preserveExisting: boolean = true,
+  preserveExisting: boolean = false,
   sink?: EventSink,
 ): Promise<SyncResult> {
   let fetched = 0;
