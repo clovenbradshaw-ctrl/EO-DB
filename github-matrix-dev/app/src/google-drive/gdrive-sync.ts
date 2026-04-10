@@ -239,13 +239,16 @@ export class GDriveSyncService {
   }
 
   private get dataType(): string {
-    return `eodb-${this.spaceId}`;
+    // Drive data is keyed on the Matrix room ID so all members of the room
+    // agree on the folder regardless of the local spaceId / display name.
+    // Falls back to spaceId only if the room hasn't been resolved yet.
+    return `eodb-${this.spaceRoomId ?? this.spaceId}`;
   }
 
-  /** Legacy dataType used when spaceRoomId was the folder identifier. */
+  /** Legacy dataType used when spaceId was the folder identifier. */
   private get legacyDataType(): string | null {
     return this.spaceRoomId && this.spaceRoomId !== this.spaceId
-      ? `eodb-${this.spaceRoomId}`
+      ? `eodb-${this.spaceId}`
       : null;
   }
 

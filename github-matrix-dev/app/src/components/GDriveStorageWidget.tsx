@@ -71,7 +71,7 @@ export function GDriveStorageWidget() {
 
   const {
     connected, syncMode, googleAccessToken, matrixAccessToken, currentSpaceId,
-    spaceDisplayNames, lastSyncAt, hydrating,
+    currentSpaceRoomId, lastSyncAt, hydrating,
   } = useGDriveStore();
 
   // Use the active-mode token: Matrix token for n8n proxy, Google token for direct OAuth
@@ -86,9 +86,11 @@ export function GDriveStorageWidget() {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [dl, setDl] = useState<DownloadState>(INITIAL_DOWNLOAD);
 
-  const spaceName = currentSpaceId ? (spaceDisplayNames[currentSpaceId] || currentSpaceId) : null;
+  // Drive data is keyed on the Matrix room ID, not the space display name,
+  // so all members of the room look up the same folder regardless of how
+  // their local client labels the space.
   const lastSync = currentSpaceId ? lastSyncAt[currentSpaceId] : null;
-  const dataType = currentSpaceId ? `eodb-${currentSpaceId}` : null;
+  const dataType = currentSpaceRoomId ? `eodb-${currentSpaceRoomId}` : null;
 
   const handleDownload = useCallback(async (entry: GDriveListEntry) => {
     if (!effectiveToken || !store) return;
@@ -175,7 +177,9 @@ export function GDriveStorageWidget() {
 
   if (!connected) return null;
 
-  const pathLabel = spaceName ? `Google Drive / EO-DB / ${spaceName}` : 'Google Drive / EO-DB';
+  const pathLabel = currentSpaceRoomId
+    ? `Google Drive / EO-DB / ${currentSpaceRoomId}`
+    : 'Google Drive / EO-DB';
 
   return (
     <div style={s.browser}>
