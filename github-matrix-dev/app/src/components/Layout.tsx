@@ -1456,13 +1456,24 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       const workerClient = createFoldWorkerClient();
       cache.set(selectedSpace!, { workerClient, syncManager: null, peerSync: null, webrtcPeer: null, gdriveSync: null, mainRoomId: spaceRoomId, presence: null, spaceRooms: resolvedSpaceRooms });
 
-      try {
-        await initFoldWorker(workerClient, selectedSpace!);
-      } catch (e) {
-        // Init failed — remove the cache entry so the next run retries cleanly.
+      // Retry up to 3 times — the previous worker may still hold the
+      // SyncAccessHandle for a brief window after termination.
+      let initError: unknown;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          if (attempt > 0) await new Promise(r => setTimeout(r, attempt * 600));
+          await initFoldWorker(workerClient, selectedSpace!);
+          initError = undefined;
+          break;
+        } catch (e) {
+          initError = e;
+        }
+      }
+      if (initError) {
+        // All retries failed — remove the cache entry so the next run retries cleanly.
         cache.delete(selectedSpace!);
         workerClient.worker.terminate();
-        console.error('[EO-DB] initFoldWorker failed for', selectedSpace, e);
+        console.error('[EO-DB] initFoldWorker failed for', selectedSpace, initError);
         return;
       }
 

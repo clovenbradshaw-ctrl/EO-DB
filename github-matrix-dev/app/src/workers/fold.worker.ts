@@ -586,6 +586,13 @@ function buildFoldEntry(target: string): FoldEntry {
   try {
     switch (req.type) {
       case 'init': {
+        // Release any previously held SyncAccessHandle before re-opening.
+        // This prevents "Access Handles cannot be created" errors on re-init
+        // (e.g. hot reload within the same Worker lifetime).
+        if (log?.syncHandle) {
+          try { log.syncHandle.close(); } catch { /* best-effort */ }
+          log = null;
+        }
         const rootOpfsDir = await navigator.storage.getDirectory();
         // Each space gets its own OPFS subdirectory for isolation.
         opfsDir = req.spaceId
@@ -763,10 +770,15 @@ function buildFoldEntry(target: string): FoldEntry {
   }
 };
 
-// On close: checkpoint synchronously if possible
+// On close: checkpoint and release the SyncAccessHandle so other tabs/workers
+// can acquire it promptly instead of hitting "Access Handles cannot be created".
 (self as unknown as DedicatedWorkerGlobalScope).addEventListener('beforeunload', () => {
   if (position && opfsDir) {
     // Synchronous checkpoint on close — best-effort
     saveCheckpoint(position, opfsDir).catch(() => {});
+  }
+  if (log?.syncHandle) {
+    try { log.syncHandle.close(); } catch { /* best-effort */ }
+    log = null;
   }
 });
