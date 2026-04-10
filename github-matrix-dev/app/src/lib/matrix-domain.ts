@@ -44,6 +44,8 @@ export function peerSyncEventTypes(prefix?: string) {
     events: `${p}.sync.events`,
     /** Notification that new ops were written to GDrive — triggers immediate pull. */
     gdrive: `${p}.sync.gdrive`,
+    /** Live op broadcast — sent immediately when a local field edit is dispatched. */
+    live: `${p}.sync.live`,
   } as const;
 }
 
