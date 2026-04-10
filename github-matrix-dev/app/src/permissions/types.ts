@@ -175,6 +175,22 @@ export interface SchemaManifest {
 
 // --- User Types (organizational/functional roles) ---
 
+/**
+ * A persona's landing destination — where the user is routed when they open
+ * the space or switch into this persona. If absent, the app falls back to
+ * the default 'records' view.
+ */
+export interface PersonaHome {
+  /** Which top-level view to land on. */
+  view: 'records' | 'builder' | 'graph' | 'log' | 'messages' | 'people' | 'members' | 'api' | 'import' | 'compose' | 'settings';
+  /** Optional default scope (table full path) when landing. */
+  scope?: string;
+  /** If view === 'builder', the specific builder page to open. */
+  builderViewId?: string;
+  /** If view === 'builder' and using a slug-addressable custom page. */
+  customPageId?: string;
+}
+
 /** A user type definition, created by admins per-space. */
 export interface UserTypeDefinition {
   /** Unique slug identifier, e.g. "hr_manager", "finance" */
@@ -202,6 +218,12 @@ export interface UserTypeDefinition {
    * Absent = organizational label only, does not affect capabilities.
    */
   base_role?: Exclude<AccessRole, 'owner'>;
+  /**
+   * Optional landing destination when the user opens the space or switches
+   * into this persona. Falls back to the default 'records' view if absent.
+   * See PersonaHome for the shape.
+   */
+  home?: PersonaHome;
 }
 
 /** A single headline metric card displayed above the table. */

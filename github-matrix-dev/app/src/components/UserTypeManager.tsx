@@ -7,7 +7,7 @@
 
 import { useState } from 'react';
 import { useTheme, type Theme } from '../theme';
-import type { AccessRole, UserTypeDefinition, HeadlineMetric } from '../permissions/types';
+import type { AccessRole, UserTypeDefinition, HeadlineMetric, PersonaHome } from '../permissions/types';
 import { ROLE_LABELS, ROLE_DESCRIPTIONS } from '../permissions/types';
 import { UserTypeBadge } from './UserTypeBadge';
 
@@ -33,6 +33,21 @@ const CONFIGURABLE_VIEWS: { id: string; label: string }[] = [
   { id: 'members', label: 'Members & Roles' },
   { id: 'log', label: 'Log' },
   { id: 'builder', label: 'Builder' },
+  { id: 'settings', label: 'Settings' },
+];
+
+/** Views that a persona can land on as their home destination. */
+const HOME_VIEW_OPTIONS: { id: PersonaHome['view']; label: string }[] = [
+  { id: 'records', label: 'Records' },
+  { id: 'builder', label: 'Builder page' },
+  { id: 'graph', label: 'Graph' },
+  { id: 'log', label: 'Log' },
+  { id: 'messages', label: 'Messages' },
+  { id: 'people', label: 'People' },
+  { id: 'members', label: 'Members & Roles' },
+  { id: 'api', label: 'API Connections' },
+  { id: 'import', label: 'Import' },
+  { id: 'compose', label: 'Compose' },
   { id: 'settings', label: 'Settings' },
 ];
 
@@ -65,6 +80,7 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editMetrics, setEditMetrics] = useState<HeadlineMetric[]>([]);
   const [editingViewsId, setEditingViewsId] = useState<string | null>(null);
+  const [editingHomeId, setEditingHomeId] = useState<string | null>(null);
 
   if (!canManage && typeDefinitions.length === 0) return null;
 
@@ -135,6 +151,25 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
         }
         return { ...t, visible_views: next };
       }
+    }));
+  }
+
+  function handleUpdateHome(typeId: string, patch: Partial<PersonaHome> | null) {
+    onUpdate(typeDefinitions.map(t => {
+      if (t.id !== typeId) return t;
+      if (patch === null) {
+        // Clear home entirely
+        const { home: _h, ...rest } = t;
+        void _h;
+        return rest;
+      }
+      const current: PersonaHome = t.home ?? { view: 'records' };
+      const next: PersonaHome = { ...current, ...patch };
+      // Normalize: trim empty strings to undefined so serialized state stays clean
+      if (!next.scope) delete next.scope;
+      if (!next.builderViewId) delete next.builderViewId;
+      if (!next.customPageId) delete next.customPageId;
+      return { ...t, home: next };
     }));
   }
 
@@ -231,6 +266,18 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
                     {def.visible_views.length} views
                   </span>
                 )}
+                {def.home && (
+                  <span
+                    title={`Lands on ${def.home.view}${def.home.scope ? ` / ${def.home.scope}` : ''}`}
+                    style={{
+                      fontFamily: mono, fontSize: 9, color: def.color || theme.textSecondary,
+                      background: def.color ? `${def.color}14` : theme.bgMuted,
+                      padding: '1px 5px', borderRadius: 4,
+                    }}
+                  >
+                    home: {def.home.view}
+                  </span>
+                )}
               </div>
               {canManage && (
                 <div style={{ display: 'flex', gap: 4 }}>
@@ -281,6 +328,25 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
                     }}
                   >
                     views
+                  </button>
+                  <button
+                    onClick={() => setEditingHomeId(editingHomeId === def.id ? null : def.id)}
+                    title="Configure landing destination for this persona"
+                    style={{
+                      fontFamily: mono, fontSize: 9,
+                      color: editingHomeId === def.id ? '#fff' : (def.color || theme.textSecondary),
+                      background: editingHomeId === def.id ? (def.color || theme.accent) : 'none',
+                      border: 'none', cursor: 'pointer',
+                      padding: '2px 6px', borderRadius: 4,
+                    }}
+                    onMouseEnter={(e) => {
+                      if (editingHomeId !== def.id) e.currentTarget.style.background = theme.bgMuted;
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.background = editingHomeId === def.id ? (def.color || theme.accent) : 'none';
+                    }}
+                  >
+                    home
                   </button>
                   <button
                     onClick={() => handleDelete(def.id)}
@@ -340,6 +406,90 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
                   </div>
                   <div style={{ fontFamily: mono, fontSize: 9, color: theme.textMuted, marginTop: 6 }}>
                     {def.visible_views ? `${def.visible_views.length} views enabled` : 'All views visible (no restriction)'}
+                  </div>
+                </div>
+              )}
+              {/* Home config panel — inline, expands when "home" button is clicked */}
+              {canManage && editingHomeId === def.id && (
+                <div style={{
+                  padding: '10px 0 10px 8px',
+                  background: theme.bgMuted,
+                  borderRadius: 6,
+                  marginBottom: 6,
+                }}>
+                  <div style={{ fontFamily: mono, fontSize: 10, fontWeight: 600, color: theme.textSecondary, marginBottom: 8 }}>
+                    Landing destination for "{def.label}"
+                    <span style={{ fontWeight: 400, color: theme.textMuted, marginLeft: 6 }}>
+                      (where this persona lands on space open or persona switch)
+                    </span>
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <span style={{ fontFamily: mono, fontSize: 9, color: theme.textMuted, minWidth: 50 }}>view</span>
+                      <select
+                        value={def.home?.view ?? 'records'}
+                        onChange={(e) => handleUpdateHome(def.id, { view: e.target.value as PersonaHome['view'] })}
+                        style={{
+                          fontFamily: mono, fontSize: 10,
+                          padding: '4px 6px', background: theme.bgCard,
+                          border: `1px solid ${theme.border}`, borderRadius: 4,
+                          color: theme.text,
+                        }}
+                      >
+                        {HOME_VIEW_OPTIONS.map(v => (
+                          <option key={v.id} value={v.id}>{v.label}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <span style={{ fontFamily: mono, fontSize: 9, color: theme.textMuted, minWidth: 50 }}>scope</span>
+                      <input
+                        value={def.home?.scope ?? ''}
+                        onChange={(e) => handleUpdateHome(def.id, { scope: e.target.value })}
+                        placeholder="tblCases (optional)"
+                        style={{
+                          flex: 1, fontFamily: mono, fontSize: 10,
+                          padding: '4px 6px', background: theme.bgCard,
+                          border: `1px solid ${theme.border}`, borderRadius: 4,
+                          color: theme.text, outline: 'none',
+                        }}
+                      />
+                    </label>
+                    {(def.home?.view === 'builder' || !def.home) && (
+                      <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span style={{ fontFamily: mono, fontSize: 9, color: theme.textMuted, minWidth: 50 }}>page id</span>
+                        <input
+                          value={def.home?.builderViewId ?? ''}
+                          onChange={(e) => handleUpdateHome(def.id, { builderViewId: e.target.value })}
+                          placeholder="builder page id (optional)"
+                          style={{
+                            flex: 1, fontFamily: mono, fontSize: 10,
+                            padding: '4px 6px', background: theme.bgCard,
+                            border: `1px solid ${theme.border}`, borderRadius: 4,
+                            color: theme.text, outline: 'none',
+                          }}
+                        />
+                      </label>
+                    )}
+                  </div>
+                  <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+                    {def.home && (
+                      <button
+                        onClick={() => handleUpdateHome(def.id, null)}
+                        style={{
+                          fontFamily: mono, fontSize: 9, color: theme.danger,
+                          background: 'none', border: `1px solid ${theme.border}`,
+                          borderRadius: 4, padding: '3px 8px', cursor: 'pointer',
+                        }}
+                      >
+                        clear home
+                      </button>
+                    )}
+                    <span style={{ fontFamily: mono, fontSize: 9, color: theme.textMuted, alignSelf: 'center' }}>
+                      {def.home
+                        ? `Lands on ${def.home.view}${def.home.scope ? ` / ${def.home.scope}` : ''}`
+                        : 'No home set — falls back to Records'}
+                    </span>
                   </div>
                 </div>
               )}

@@ -2011,9 +2011,26 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     }
   }, [selectedSpace, currentUserAssignedTypes]);
 
-  // When the active role restricts nav views, redirect away from now-hidden views
+  // When the active persona changes, route to its home destination (if defined).
+  // Falls back to the visible_views redirect if no home is set but the current
+  // view is hidden by the persona's nav restriction.
   useEffect(() => {
-    if (activeTypeDef?.visible_views?.length && !activeTypeDef.visible_views.includes(activeView)) {
+    if (!activeTypeDef) return;
+    const home = activeTypeDef.home;
+    if (home) {
+      // Route to the persona's home destination. We only override fields the
+      // persona explicitly set, so the user stays on the same space.
+      navigate({
+        view: home.view,
+        scope: home.scope ?? null,
+        record: null,
+        builderViewId: home.builderViewId ?? null,
+        customPageId: home.customPageId ?? null,
+      });
+      return;
+    }
+    // No home set — fall back to hiding currently-active view if it's now restricted.
+    if (activeTypeDef.visible_views?.length && !activeTypeDef.visible_views.includes(activeView)) {
       navigate({ view: 'records' });
     }
   }, [activeUserType]);
