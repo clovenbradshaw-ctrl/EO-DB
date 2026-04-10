@@ -512,13 +512,13 @@ async function syncTable(
 
   // Subtract a 60-second overlap window from the cursor to catch records
   // modified during clock skew or at the tail of the previous sync.
-  // Idempotency deduplicates any re-fetched records from the overlap.
-  // Use IS_AFTER() — the correct Airtable datetime comparison function.
+  // Use IS_AFTER+DATETIME_PARSE — the correct Airtable datetime comparison
+  // form. Idempotency deduplicates any re-fetched records from the overlap.
   const filterCursor = cursorSince
     ? new Date(new Date(cursorSince).getTime() - 60_000).toISOString()
     : undefined;
   const filterByFormula = filterCursor
-    ? `IS_AFTER(LAST_MODIFIED_TIME(), '${filterCursor}')`
+    ? `IS_AFTER(LAST_MODIFIED_TIME(), DATETIME_PARSE('${filterCursor}'))`
     : undefined;
 
   const useFieldIds = fieldMeta.size > 0;

@@ -25,7 +25,7 @@ import {
   type HydrationManifest,
   type SyncCustomization,
 } from '../ingestion/airtable-sync';
-import { useAirtableStore, DEFAULT_SYNC_SETTINGS } from '../ingestion/airtable-store';
+import { useAirtableStore, DEFAULT_SYNC_SETTINGS, type SyncLogEntry } from '../ingestion/airtable-store';
 import { AirtableSyncService } from '../ingestion/airtable-sync-service';
 import { useTheme, type Theme } from '../theme';
 
@@ -101,6 +101,7 @@ export function AirtableSettingsSection({
   const continuousSyncEnabled = useAirtableStore((st) => st.continuousSyncEnabled);
   const syncSettings = useAirtableStore((st) => st.syncSettings);
   const manifest = useAirtableStore((st) => st.manifest);
+  const syncLog = useAirtableStore((st) => st.syncLog);
 
   // ── Sync state ──
   const [syncStatus, setSyncStatus] = useState<Record<string, SyncStatus>>({});
@@ -287,6 +288,14 @@ export function AirtableSettingsSection({
         setSyncStatus((prev) => ({ ...prev, [statusKey]: { state: 'syncing', message: msg } }));
       };
 
+      useAirtableStore.getState().addSyncLogEntry({
+        ts: Date.now(),
+        type: 'sync_start',
+        source: 'local',
+        syncer: session.userId,
+        detail: modeLabel,
+      });
+
       const result = mode === 'hydrate'
         ? await hydrationSync(store, client, session.userId, { onProgress, customization })
         : await updateSync(store, client, session.userId, { onProgress, customization });
@@ -297,6 +306,13 @@ export function AirtableSettingsSection({
 
       useAirtableStore.getState().setLastSyncResult(result);
       useAirtableStore.getState().setLastSyncAt(new Date().toISOString());
+      useAirtableStore.getState().addSyncLogEntry({
+        ts: Date.now(),
+        type: mode === 'hydrate' ? 'hydration_complete' : 'sync_complete',
+        source: 'local',
+        syncer: session.userId,
+        detail: `${ingested} ingested, ${skipped} unchanged, ${duration}`,
+      });
 
       setSyncStatus((prev) => ({
         ...prev,
@@ -307,6 +323,13 @@ export function AirtableSettingsSection({
         },
       }));
     } catch (e: any) {
+      useAirtableStore.getState().addSyncLogEntry({
+        ts: Date.now(),
+        type: 'sync_error',
+        source: 'local',
+        syncer: session.userId,
+        detail: e.message || 'Sync failed',
+      });
       setSyncStatus((prev) => ({
         ...prev,
         [statusKey]: { state: 'error', message: e.message || 'Sync failed' },
@@ -752,11 +775,88 @@ export function AirtableSettingsSection({
                     </div>
                   )}
                 </div>
+
+                {/* ── Sync Activity Log ── */}
+                {syncLog.length > 0 && (
+                  <div style={s.syncLogSection}>
+                    <div style={s.syncLogHeader}>
+                      <span style={s.syncLogTitle}>Sync Activity</span>
+                      <button
+                        style={s.syncLogClear}
+                        onClick={() => useAirtableStore.getState().clearSyncLog()}
+                      >
+                        Clear
+                      </button>
+                    </div>
+                    <div style={s.syncLogList}>
+                      {syncLog.map((entry, i) => (
+                        <SyncLogRow key={`${entry.ts}-${i}`} entry={entry} userId={session.userId} />
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+// ─── Sync log row ────────────────────────────────────────────────────────────
+
+function SyncLogRow({ entry, userId }: { entry: SyncLogEntry; userId: string }) {
+  const { theme } = useTheme();
+  const s = makeStyles(theme);
+
+  const isLocal = entry.source === 'local';
+  const isMe = entry.syncer === userId;
+
+  const icon: Record<SyncLogEntry['type'], string> = {
+    lock_acquired:     '🔒',
+    lock_released:     '🔓',
+    sync_complete:     '✓',
+    hydration_complete:'✓',
+    sync_error:        '✗',
+    sync_start:        '▶',
+  };
+
+  const label: Record<SyncLogEntry['type'], string> = {
+    lock_acquired:     'acquired lock',
+    lock_released:     'released lock',
+    sync_complete:     'sync complete',
+    hydration_complete:'full sync complete',
+    sync_error:        'sync error',
+    sync_start:        'started sync',
+  };
+
+  const color: Partial<Record<SyncLogEntry['type'], string>> = {
+    sync_complete:     theme.successText,
+    hydration_complete:theme.successText,
+    sync_error:        theme.dangerText,
+  };
+
+  const shortId = isMe ? 'you' : entry.syncer.split(':')[1]?.split('.')[0] ?? entry.syncer;
+  const ago = Math.round((Date.now() - entry.ts) / 1000);
+  const agoStr = ago < 60 ? `${ago}s ago` : ago < 3600 ? `${Math.round(ago / 60)}m ago` : `${Math.round(ago / 3600)}h ago`;
+
+  return (
+    <div style={s.syncLogRow}>
+      <span style={{ ...s.syncLogIcon, color: color[entry.type] ?? theme.textSecondary }}>
+        {icon[entry.type]}
+      </span>
+      <span style={s.syncLogBody}>
+        <span style={{ ...s.syncLogSyncer, fontWeight: isLocal ? 600 : 400 }}>
+          {isLocal ? (isMe ? 'this device' : `local`) : shortId}
+        </span>
+        {' '}
+        <span style={{ color: color[entry.type] ?? theme.text }}>{label[entry.type]}</span>
+        {entry.detail && (
+          <span style={s.syncLogDetail}> — {entry.detail}</span>
+        )}
+      </span>
+      <span style={s.syncLogAgo}>{agoStr}</span>
     </div>
   );
 }
@@ -1225,6 +1325,73 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
     lastSyncAgo: {
       fontSize: 10,
       color: t.textMuted,
+    },
+
+    // ── Sync activity log ──
+    syncLogSection: {
+      marginTop: 16,
+      padding: '10px 0 0',
+      borderTop: `1px solid ${t.borderLight}`,
+    },
+    syncLogHeader: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      marginBottom: 6,
+    },
+    syncLogTitle: {
+      fontSize: 11,
+      fontWeight: 600,
+      textTransform: 'uppercase' as const,
+      letterSpacing: '0.06em',
+      color: t.textMuted,
+    },
+    syncLogClear: {
+      fontSize: 10,
+      padding: '2px 7px',
+      border: `1px solid ${t.borderLight}`,
+      borderRadius: 4,
+      background: 'none',
+      color: t.textMuted,
+      cursor: 'pointer',
+    },
+    syncLogList: {
+      display: 'flex',
+      flexDirection: 'column' as const,
+      gap: 1,
+      maxHeight: 200,
+      overflowY: 'auto' as const,
+      fontFamily: "'JetBrains Mono', monospace",
+    },
+    syncLogRow: {
+      display: 'flex',
+      alignItems: 'flex-start',
+      gap: 6,
+      padding: '3px 0',
+      borderBottom: `1px solid ${t.borderLight}`,
+      fontSize: 10,
+    },
+    syncLogIcon: {
+      width: 14,
+      flexShrink: 0,
+      textAlign: 'center' as const,
+    },
+    syncLogBody: {
+      flex: 1,
+      lineHeight: 1.4,
+      color: t.text,
+    },
+    syncLogSyncer: {
+      color: t.textSecondary,
+    },
+    syncLogDetail: {
+      color: t.textMuted,
+    },
+    syncLogAgo: {
+      flexShrink: 0,
+      color: t.textMuted,
+      fontSize: 9,
+      paddingTop: 1,
     },
   };
 }
