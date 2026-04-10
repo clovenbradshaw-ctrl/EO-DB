@@ -1066,7 +1066,7 @@ async function syncTable(
     ? new Date(new Date(cursorSince).getTime() - 60_000).toISOString()
     : undefined;
   const filterByFormula = filterCursor
-    ? `LAST_MODIFIED_TIME()>='${filterCursor}'`
+    ? `IS_AFTER(LAST_MODIFIED_TIME(), '${filterCursor}')`
     : undefined;
 
   // Request records keyed by field ID (not name) so they align with schema metadata.
