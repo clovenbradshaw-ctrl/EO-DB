@@ -60,7 +60,12 @@ interface EoDbState {
   setGDriveSync: (gdriveSync: GDriveSyncService) => void;
   setPermissions: (permissions: ResolvedPermissions | null) => void;
   setUserManifest: (manifest: UserManifest | null) => void;
-  setActiveUserType: (typeId: string | null) => void;
+  /**
+   * Set the active persona. When `persist` is false (admin "preview as"),
+   * the selection is NOT written to localStorage, so on refresh the user
+   * falls back to their real assigned persona.
+   */
+  setActiveUserType: (typeId: string | null, persist?: boolean) => void;
 
   dispatch: (event: EoEventInput) => Promise<number>;
   batchImport: (events: EoEventInput[], onProgress?: (current: number, total: number) => void) => Promise<number>;
@@ -188,8 +193,9 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     set({ userManifest: manifest });
   },
 
-  setActiveUserType(typeId: string | null) {
+  setActiveUserType(typeId: string | null, persist: boolean = true) {
     set({ activeUserType: typeId });
+    if (!persist) return;
     try {
       if (typeId) {
         localStorage.setItem('eo-active-user-type', typeId);

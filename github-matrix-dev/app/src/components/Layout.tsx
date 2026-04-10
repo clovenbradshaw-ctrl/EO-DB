@@ -2295,13 +2295,19 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           {selectedSpace && !isMobile && (
             <PermissionBadge role={currentRole} displayName={displayName} />
           )}
-          {/* User type switcher */}
-          {selectedSpace && !isMobile && currentUserAssignedTypes.length > 0 && (
+          {/* User type switcher. Admins (can_manage_members) also get
+              "Preview as…" for personas they are not assigned to. Preview
+              selections skip localStorage so they clear on refresh. */}
+          {selectedSpace && !isMobile && (
+            currentUserAssignedTypes.length > 0 ||
+            (currentPermissions?.can_manage_members && spaceUserTypeDefinitions.length > 0)
+          ) && (
             <UserTypeSwitcher
               typeDefinitions={spaceUserTypeDefinitions}
               assignedTypeIds={currentUserAssignedTypes}
               activeTypeId={activeUserType}
-              onSelect={setActiveUserType}
+              canPreview={!!currentPermissions?.can_manage_members}
+              onSelect={(typeId, opts) => setActiveUserType(typeId, !opts?.preview)}
             />
           )}
           {/* Theme toggle */}
