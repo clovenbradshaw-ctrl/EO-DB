@@ -157,13 +157,16 @@ describe('Fold engine (browser port)', () => {
       await processEvent(store, fixture);
     }
 
-    // Verify all seq numbers assigned
+    // Verify all seq numbers assigned.
+    // The 10 fixture events trigger 5 system INS auto-promotions via checkAndPromote
+    // (for app.tblClients.rec001.fldCases, app.tblCases.rec101.fldStatus,
+    //  app.tblClients.rec001.fldEmail, app.tblClients, app), giving 15 total.
     const currentSeq = await store.getCurrentSeq();
-    expect(currentSeq).toBe(10);
+    expect(currentSeq).toBe(15);
 
-    // Verify log has all events
+    // Verify log has all events (10 user-submitted + 5 system INS promotions)
     const events = await readLogSince(store, 0);
-    expect(events.length).toBe(10);
+    expect(events.length).toBe(15);
 
     // Verify key states
     const rec001 = await getState(store, 'app.tblClients.rec001');

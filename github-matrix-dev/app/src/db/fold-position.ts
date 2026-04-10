@@ -101,8 +101,21 @@ export function applyEvent(pos: FoldPosition, event: EoEvent): void {
     }
 
     case 'CON': {
-      const dest = event.operand as string;
-      if (dest && typeof dest === 'string') {
+      // Handle both the simplified string operand used in tests and the real
+      // { added: [...], removed: [...] } format used by processEvent/handleCON.
+      const operand = event.operand;
+      const addedDests: string[] = typeof operand === 'string'
+        ? [operand]
+        : ((operand as any)?.added ?? []).map((item: any) =>
+            typeof item === 'string' ? item : (item as any)?.dest,
+          ).filter(Boolean) as string[];
+      const removedDests: string[] = typeof operand === 'string'
+        ? []
+        : ((operand as any)?.removed ?? []).filter(
+            (d: any): d is string => typeof d === 'string',
+          );
+
+      for (const dest of addedDests) {
         if (!pos.conAdjacency.has(event.target)) {
           pos.conAdjacency.set(event.target, new Set());
         }
@@ -112,6 +125,11 @@ export function applyEvent(pos: FoldPosition, event: EoEvent): void {
           pos.conReverse.set(dest, new Set());
         }
         pos.conReverse.get(dest)!.add(event.target);
+      }
+
+      for (const dest of removedDests) {
+        pos.conAdjacency.get(event.target)?.delete(dest);
+        pos.conReverse.get(dest)?.delete(event.target);
       }
       break;
     }
