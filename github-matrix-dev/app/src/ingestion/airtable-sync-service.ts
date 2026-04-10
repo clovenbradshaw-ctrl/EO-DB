@@ -31,7 +31,7 @@ import {
   type HydrationResult,
   type UpdateSyncResult,
 } from './airtable-sync';
-import { useAirtableStore, DEFAULT_SYNC_SETTINGS, type AirtableSyncSettings } from './airtable-store';
+import { useAirtableStore, DEFAULT_SYNC_SETTINGS, type AirtableSyncSettings, type SyncLogEntry } from './airtable-store';
 import { airtableSyncEventTypes } from '../lib/matrix-domain';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
@@ -147,16 +147,38 @@ export class AirtableSyncService {
     if (content.room_id !== this.roomId) return;
 
     if (type === SIGNAL_TYPE) {
-      // Another device completed a sync — update local UI
+      // Another device completed a sync — update local UI and log
       useAirtableStore.getState().setLastSyncAt(content.synced_at);
+      const logEntry: SyncLogEntry = {
+        ts: Date.now(),
+        type: content.type === 'hydration_complete' ? 'hydration_complete' : 'sync_complete',
+        source: 'remote',
+        syncer: content.syncer,
+        detail: `${content.records_ingested} ingested, ${content.records_skipped} unchanged`,
+      };
+      useAirtableStore.getState().addSyncLogEntry(logEntry);
     } else if (type === LOCK_TYPE) {
       // Another device acquired/released sync lock
       if (content.action === 'acquired') {
         this.remoteLockHeld = true;
         useAirtableStore.getState().setRemoteLockHeld(true);
+        useAirtableStore.getState().addSyncLogEntry({
+          ts: Date.now(),
+          type: 'lock_acquired',
+          source: 'remote',
+          syncer: content.syncer,
+          device: content.device,
+        });
       } else if (content.action === 'released') {
         this.remoteLockHeld = false;
         useAirtableStore.getState().setRemoteLockHeld(false);
+        useAirtableStore.getState().addSyncLogEntry({
+          ts: Date.now(),
+          type: 'lock_released',
+          source: 'remote',
+          syncer: content.syncer,
+          device: content.device,
+        });
       }
     }
   };
@@ -368,6 +390,13 @@ export class AirtableSyncService {
       device: this.deviceId,
       ts: Date.now(),
     });
+    useAirtableStore.getState().addSyncLogEntry({
+      ts: Date.now(),
+      type: 'lock_acquired',
+      source: 'local',
+      syncer: this.agent,
+      device: this.deviceId,
+    });
 
     // Mark syncing in room state
     const headBefore = this.readHead();
@@ -419,6 +448,14 @@ export class AirtableSyncService {
     } catch (e: any) {
       console.error('[EO-DB] Airtable sync failed:', e);
       useAirtableStore.getState().setError(e.message);
+      useAirtableStore.getState().addSyncLogEntry({
+        ts: Date.now(),
+        type: 'sync_error',
+        source: 'local',
+        syncer: this.agent,
+        device: this.deviceId,
+        detail: e.message,
+      });
 
       // Update head to reflect sync failure (not syncing anymore)
       const headAfter = this.readHead();
@@ -442,6 +479,13 @@ export class AirtableSyncService {
         device: this.deviceId,
         ts: Date.now(),
       });
+      useAirtableStore.getState().addSyncLogEntry({
+        ts: Date.now(),
+        type: 'lock_released',
+        source: 'local',
+        syncer: this.agent,
+        device: this.deviceId,
+      });
     }
   }
 
@@ -452,6 +496,14 @@ export class AirtableSyncService {
     const now = new Date().toISOString();
 
     useAirtableStore.getState().setLastSyncAt(now);
+    useAirtableStore.getState().addSyncLogEntry({
+      ts: Date.now(),
+      type: wasHydration ? 'hydration_complete' : 'sync_complete',
+      source: 'local',
+      syncer: this.agent,
+      device: this.deviceId,
+      detail: `${result.total_records_ingested} ingested, ${result.total_records_skipped} unchanged`,
+    });
 
     // Update head state event (deduplicated, not spam)
     try {

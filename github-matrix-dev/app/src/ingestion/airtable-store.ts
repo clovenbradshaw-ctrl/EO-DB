@@ -10,6 +10,30 @@ import { create } from 'zustand';
 import { AirtableClient } from './airtable-client';
 import type { HydrationManifest, HydrationResult, UpdateSyncResult } from './airtable-sync';
 
+// ─── Sync activity log ──────────────────────────────────────────────────────
+
+export type SyncLogEventType =
+  | 'lock_acquired'
+  | 'lock_released'
+  | 'sync_complete'
+  | 'hydration_complete'
+  | 'sync_error'
+  | 'sync_start';
+
+export interface SyncLogEntry {
+  /** Unix ms timestamp. */
+  ts: number;
+  type: SyncLogEventType;
+  /** 'local' = this device, 'remote' = another device via to-device message. */
+  source: 'local' | 'remote';
+  /** Matrix user ID of the device that generated the event. */
+  syncer: string;
+  /** Device / tab ID (optional). */
+  device?: string;
+  /** Human-readable summary, e.g. "12 ingested, 3 unchanged". */
+  detail?: string;
+}
+
 /**
  * Configurable sync settings — persisted to Matrix room state
  * (`eo.airtable.config`) so all devices in the room share them.
@@ -57,6 +81,10 @@ export interface AirtableSyncState {
   /** Whether a remote device currently holds the sync lock (via to-device signal). */
   remoteLockHeld: boolean;
 
+  // ── Sync activity log (in-memory, newest first, capped at 100) ──
+  /** Ring-buffer of recent sync coordination events for all devices. */
+  syncLog: SyncLogEntry[];
+
   // ── Sync settings (shared across room via Matrix state) ──
   /** Configurable sync parameters. */
   syncSettings: AirtableSyncSettings;
@@ -81,6 +109,8 @@ export interface AirtableSyncState {
   setRemoteLockHeld: (v: boolean) => void;
   setSyncSettings: (s: Partial<AirtableSyncSettings>) => void;
   setError: (e: string | null) => void;
+  addSyncLogEntry: (entry: SyncLogEntry) => void;
+  clearSyncLog: () => void;
 }
 
 export const useAirtableStore = create<AirtableSyncState>((set, get) => ({
@@ -96,6 +126,7 @@ export const useAirtableStore = create<AirtableSyncState>((set, get) => ({
   remoteLockHeld: false,
   syncSettings: { ...DEFAULT_SYNC_SETTINGS },
   manifest: null,
+  syncLog: [],
 
   async connectFromWebhook(matrixAccessToken: string): Promise<void> {
     set({ connecting: true, error: null });
@@ -163,4 +194,8 @@ export const useAirtableStore = create<AirtableSyncState>((set, get) => ({
     }));
   },
   setError(e) { set({ error: e }); },
+  addSyncLogEntry(entry) {
+    set((state) => ({ syncLog: [entry, ...state.syncLog].slice(0, 100) }));
+  },
+  clearSyncLog() { set({ syncLog: [] }); },
 }));

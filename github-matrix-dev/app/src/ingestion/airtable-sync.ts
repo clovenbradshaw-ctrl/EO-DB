@@ -488,14 +488,16 @@ async function syncTable(
   const tableState = await getState(store, tableTarget(baseId, tableId));
   const displayField: string | undefined = tableState?.value?._displayField;
 
-  // Subtract a 60-second overlap window from the cursor to catch records
-  // modified during clock skew or during the previous sync.
+  // Subtract a 60-second overlap window from the cursor to guard against
+  // clock skew between the browser and Airtable's servers.
+  // Use IS_AFTER+DATETIME_PARSE — the >= string comparison does not work
+  // reliably with ISO timestamps in Airtable's formula engine.
   // Idempotency handles any re-fetched duplicates from the overlap.
   const filterCursor = cursorSince
     ? new Date(new Date(cursorSince).getTime() - 60_000).toISOString()
     : undefined;
   const filterByFormula = filterCursor
-    ? `LAST_MODIFIED_TIME()>='${filterCursor}'`
+    ? `IS_AFTER(LAST_MODIFIED_TIME(), DATETIME_PARSE('${filterCursor}'))`
     : undefined;
 
   const useFieldIds = fieldMeta.size > 0;
