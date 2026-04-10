@@ -1,4 +1,4 @@
-import { useState, useMemo, Fragment } from 'react';
+import { useState, useMemo, useEffect, Fragment } from 'react';
 import { useEoStore } from '../store/eo-store';
 import { useTheme } from '../theme';
 import type { EoEvent, LoggableOperator, NulState } from '../db/types';
@@ -654,6 +654,21 @@ export function LogView({ targetFilter }: { targetFilter?: string | null }) {
   const [systemOnly, setSystemOnly] = useState(false);
   const [agentFilter, setAgentFilter] = useState<string>('');
 
+  // When the scope changes, op filters that made sense in the old scope may
+  // produce zero results in the new one.  Reset them so the view never lands
+  // in a "No matching events" dead-end solely because of a stale filter.
+  useEffect(() => {
+    setActiveFilters(new Set());
+  }, [targetFilter]);
+
+  // Events pre-filtered by scope (targetFilter only).  Used for StatsBar
+  // counts so the chips reflect what is actually available in the current
+  // scope, not in the entire log.
+  const scopeFiltered = useMemo(() => {
+    if (!targetFilter) return recentEvents;
+    return recentEvents.filter((e) => e.target.startsWith(targetFilter));
+  }, [recentEvents, targetFilter]);
+
   // Unique agents for the agent filter dropdown
   const uniqueAgents = useMemo(() => {
     const agents = new Set<string>();
@@ -728,7 +743,7 @@ export function LogView({ targetFilter }: { targetFilter?: string | null }) {
                 padding: '2px 8px', borderRadius: 10,
                 fontFamily: "'JetBrains Mono', monospace",
               }}>
-                {filtered.length}{filtered.length !== recentEvents.length ? ` / ${recentEvents.length}` : ''}
+                {filtered.length}{filtered.length !== scopeFiltered.length ? ` / ${scopeFiltered.length}` : ''}
               </span>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -816,7 +831,7 @@ export function LogView({ targetFilter }: { targetFilter?: string | null }) {
 
           {/* Stats bar + op chips */}
           <StatsBar
-            events={recentEvents}
+            events={scopeFiltered}
             activeFilters={activeFilters}
             onToggleFilter={toggleFilter}
           />
