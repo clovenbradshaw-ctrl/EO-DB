@@ -1349,6 +1349,8 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       if (roomId) {
         setSpaceRoomId(roomId);
         setSpaceRooms(resolvedSpaceRooms ?? null);
+        // Clear any stale room-phase error now that we have a valid room
+        setConnectionError(prev => prev?.phase === 'room' ? null : prev);
         // Persist immediately — don't wait until end of setup
         persistSpaceMeta({
           spaceId: selectedSpace!,
@@ -1509,8 +1511,11 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         }
       }
 
-      // If Matrix is required but we couldn't get a room, surface the error.
-      if (MATRIX_ENABLED && !spaceRoomId && matrixClientRef.current) {
+      // If Matrix is ready but we couldn't get a room, surface the error.
+      // Only show this when matrixReady=true — if Matrix hasn't connected yet,
+      // the sync-phase error from startMatrix() is already displayed and the
+      // room error would be misleading and overwrite the real cause.
+      if (MATRIX_ENABLED && !spaceRoomId && matrixClientRef.current && matrixReady) {
         console.warn('[EO-DB] No room for space', selectedSpace, '— cannot start PeerSync.');
         setConnectionError({
           phase: 'room',
@@ -1557,12 +1562,9 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             : gdriveStateAfter.googleAccessToken;
           if (!effectiveToken) throw new Error('Google Drive token unavailable after connect');
 
-          // Find the space name
-          const gdriveSpaceEntry = mergedEntries.find(e => {
-            const target = 'canonical' in e ? (e as any).canonical : (e as any).target;
-            return target === selectedSpace;
-          });
-          const gdriveSpaceName = gdriveSpaceEntry ? ((gdriveSpaceEntry as any).name || selectedSpace) : selectedSpace;
+          // Find the space display name for Drive folder labelling
+          const gdriveSpaceEntry = mergedEntries.find(e => e.spaceTarget === selectedSpace);
+          const gdriveSpaceName = gdriveSpaceEntry?.displayName ?? selectedSpace!;
 
           // Set current space in GDrive store
           useGDriveStore.getState().setCurrentSpace(selectedSpace, gdriveSpaceName);
