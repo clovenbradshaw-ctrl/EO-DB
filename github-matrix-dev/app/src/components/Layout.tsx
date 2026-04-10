@@ -1527,19 +1527,20 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         }
       }
 
-      // Start Google Drive sync (backup layer via n8n webhook)
-      // Auto-creates the Drive folder for the space if it doesn't exist
-      // (n8n's Google Drive node uses folderId mode "name", which auto-creates).
+      // Start Google Drive sync (direct OAuth2 — no proxy required)
       let gdriveSync: GDriveSyncService | null = null;
 
-      if (selectedSpace && session.accessToken) {
+      if (selectedSpace && session.accessToken && matrixClientRef.current) {
         try {
-          // Connect to Google Drive via n8n webhook (validates Matrix token)
+          // Connect to Google Drive via the user's own Google OAuth2 account (PKCE)
           const gdriveState = useGDriveStore.getState();
           if (!gdriveState.connected) {
-            await gdriveState.connect(session.accessToken);
-            console.log('[EO-DB] Google Drive auto-connected via n8n webhook');
+            await gdriveState.connect(matrixClientRef.current, spaceRoomId ?? '');
+            console.log('[EO-DB] Google Drive auto-connected via OAuth2');
           }
+
+          const googleAccessToken = useGDriveStore.getState().googleAccessToken;
+          if (!googleAccessToken) throw new Error('Google Drive token unavailable after connect');
 
           // Find the space name
           const gdriveSpaceEntry = mergedEntries.find(e => {
@@ -1559,7 +1560,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             spaceName: gdriveSpaceName,
             userId: session.userId,
             sessionId: getSessionId(),
-            matrixAccessToken: session.accessToken,
+            googleAccessToken,
             spaceRoomId: spaceRoomId ?? undefined,
             onEvent: onFoldEvent,
             onHydrated: () => { init(workerClient); },

@@ -38,6 +38,8 @@ jobs:
       - name: Build
         working-directory: github-matrix-dev/app
         run: npm run build
+        env:
+          VITE_GOOGLE_CLIENT_ID: ${{ vars.VITE_GOOGLE_CLIENT_ID }}
 
       - name: Add .nojekyll
         run: touch docs/.nojekyll

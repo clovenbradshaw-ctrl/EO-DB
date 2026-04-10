@@ -70,7 +70,7 @@ export function GDriveStorageWidget() {
   const s = widgetStyles(theme);
 
   const {
-    connected, matrixAccessToken, currentSpaceId,
+    connected, googleAccessToken, currentSpaceId,
     spaceDisplayNames, lastSyncAt,
   } = useGDriveStore();
 
@@ -88,13 +88,13 @@ export function GDriveStorageWidget() {
   const dataType = currentSpaceId ? `eodb-${currentSpaceId}` : null;
 
   const handleDownload = useCallback(async (entry: GDriveListEntry) => {
-    if (!matrixAccessToken || !store) return;
+    if (!googleAccessToken || !store) return;
     const fileName = `${entry.content_hash.slice(0, 12)}...eodb`;
     setDl({ phase: 'downloading', fileName, eventsApplied: 0, eventsTotal: 0, error: null });
 
     try {
       // 1. Download
-      const result = await gdriveRetrieve(matrixAccessToken, entry.content_hash);
+      const result = await gdriveRetrieve(googleAccessToken, entry.content_hash);
       if (!result.ok || !result.envelope) {
         setDl(prev => ({ ...prev, phase: 'error', error: 'Failed to retrieve file from Google Drive' }));
         return;
@@ -141,20 +141,20 @@ export function GDriveStorageWidget() {
     } catch (e: any) {
       setDl(prev => ({ ...prev, phase: 'error', error: e.message || 'Download failed' }));
     }
-  }, [matrixAccessToken, store, workerClient, init]);
+  }, [googleAccessToken, store, workerClient, init]);
 
   const loadFiles = useCallback(async () => {
-    if (!matrixAccessToken || !dataType) return;
+    if (!googleAccessToken || !dataType) return;
     setLoading(true);
     try {
-      const result = await gdriveList(matrixAccessToken, dataType);
+      const result = await gdriveList(googleAccessToken, dataType);
       setEntries(result.entries || []);
     } catch (e: any) {
       console.warn('[EO-DB] Failed to load files from Google Drive:', e);
     } finally {
       setLoading(false);
     }
-  }, [matrixAccessToken, dataType]);
+  }, [googleAccessToken, dataType]);
 
   useEffect(() => {
     if (connected && dataType) loadFiles();
@@ -170,7 +170,7 @@ export function GDriveStorageWidget() {
       <div style={s.connInfo}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <div style={s.connDot} />
-          <span style={s.connLabel}>Connected via n8n</span>
+          <span style={s.connLabel}>Connected via Google OAuth</span>
         </div>
         {lastSync && (
           <span style={s.syncTime}>

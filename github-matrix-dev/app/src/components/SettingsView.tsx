@@ -59,7 +59,7 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
   const serverConnected = useEoServerStore((s) => s.connected);
   const setServerUrl = useEoServerStore((s) => s.setServerUrl);
   const [serverUrlInput, setServerUrlInput] = useState(serverUrl || '');
-  const gdriveMatrixToken = useGDriveStore((s) => s.matrixAccessToken);
+  const gdriveToken = useGDriveStore((s) => s.googleAccessToken);
   const gdriveOffline = useGDriveStore((s) => s.gdriveOffline);
   const [gdriveTestStatus, setGdriveTestStatus] = useState<string | null>(null);
   const [gdriveTestLoading, setGdriveTestLoading] = useState(false);
@@ -75,22 +75,18 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
   }
 
   const handleTestGDrive = useCallback(async () => {
-    const token = gdriveMatrixToken || session.accessToken;
-    if (!token) { setGdriveTestStatus('✗ No Matrix token available'); return; }
+    const token = gdriveToken;
+    if (!token) { setGdriveTestStatus('✗ Not connected to Google Drive'); return; }
     setGdriveTestLoading(true);
     setGdriveTestStatus(null);
     try {
-      const res = await fetch('https://n8n.intelechia.com/webhook/eo-store', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          matrix_token: token,
-          drive_url: 'https://www.googleapis.com/drive/v3/files?pageSize=1',
-          drive_method: 'GET',
-        }),
+      const res = await fetch('https://www.googleapis.com/drive/v3/about?fields=user', {
+        headers: { Authorization: `Bearer ${token}` },
       });
       if (res.ok) {
-        setGdriveTestStatus('✓ Connected');
+        const data = await res.json();
+        const email = data?.user?.emailAddress ?? 'unknown';
+        setGdriveTestStatus(`✓ Connected as ${email}`);
       } else {
         const text = await res.text().catch(() => String(res.status));
         setGdriveTestStatus(`✗ Failed: ${text.slice(0, 120)}`);
@@ -100,7 +96,7 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
     } finally {
       setGdriveTestLoading(false);
     }
-  }, [gdriveMatrixToken, session.accessToken]);
+  }, [gdriveToken]);
 
 
 

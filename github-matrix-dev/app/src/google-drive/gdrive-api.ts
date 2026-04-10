@@ -1,30 +1,34 @@
 /**
- * Google Drive API — client-side Drive logic, proxied through n8n for OAuth.
- *
- * The n8n webhook at /webhook/eo-store is a thin proxy:
- *   1. Validates the Matrix access token (body.matrix_token)
- *   2. Forwards { drive_url, drive_method, drive_body } to the Google Drive API
- *      using its own OAuth2 credentials
- *   3. Returns the Drive API response verbatim
+ * Google Drive API — client-side Drive logic using direct OAuth2 calls.
  *
  * All routing (find folder, create folder, upload file, list, retrieve)
- * happens here in the client. Files are organized by space:
+ * happens here in the client. Files are organised by space:
  *   EO-DB / <dataType> /
  * where dataType is typically "eodb-<spaceId>".
  *
- * Files are stored as encrypted binary .eodb files (same format as Filen),
- * encrypted with the room keyring (AES-256-GCM) — no Filen-specific encryption.
+ * Files are stored as encrypted binary .eodb files,
+ * encrypted with the room keyring (AES-256-GCM).
  *
- * Binary data is base64-encoded for transport through the JSON proxy.
- * The proxy decodes `_raw_content_base64` back to binary before uploading,
- * and base64-encodes binary responses in `_raw_content_base64`.
- *
- * Access control is enforced by Matrix — only authenticated users can
- * call the webhook. Sharing works naturally: all space members can
- * read/write the same space folder.
+ * Access control:
+ *   1. Folder ID is stored in encrypted Matrix room state (eo.gdrive.folder)
+ *      — only room members can read it.
+ *   2. .eodb files are AES-256-GCM encrypted — the folder contents are
+ *      opaque to anyone without the space keyring.
+ *   3. The space folder has anyoneWithLink + writer sharing so all room
+ *      members can read/write using their own Google OAuth token.
  */
 
-const EO_STORE_WEBHOOK = 'https://n8n.intelechia.com/webhook/eo-store';
+import type { MatrixClient } from 'matrix-js-sdk';
+import {
+  driveGet,
+  driveMutation,
+  driveUploadBinary,
+  driveUploadMultipart,
+  driveDownloadBinary,
+  driveShareAnyone,
+} from './gdrive-direct';
+import { readFolderState, publishFolderState } from './gdrive-folder-state';
+
 const DRIVE_API = 'https://www.googleapis.com/drive/v3/files';
 
 // ──────────────────────────────────────────────────────────────
@@ -57,90 +61,11 @@ export interface GDriveListResult {
 }
 
 // ──────────────────────────────────────────────────────────────
-// Binary ↔ base64 helpers (for JSON proxy transport)
-// ──────────────────────────────────────────────────────────────
-
-/** Convert Uint8Array to base64 (safe for large arrays). */
-function uint8ToBase64(bytes: Uint8Array): string {
-  let binary = '';
-  for (let i = 0; i < bytes.length; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return btoa(binary);
-}
-
-/** Convert base64 string to Uint8Array. */
-function base64ToUint8(b64: string): Uint8Array {
-  const binary = atob(b64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes;
-}
-
-// ──────────────────────────────────────────────────────────────
-// Low-level proxy caller
-// ──────────────────────────────────────────────────────────────
-
-/**
- * Send a Drive API request through the n8n proxy.
- * The proxy validates Matrix token then forwards to Google Drive with OAuth creds.
- *
- * space_room_id: the Matrix main room ID for this space.  The n8n proxy checks
- * that the authenticated user is a member of this room before proxying the
- * request.  Omit only for legacy/unauthenticated contexts.
- */
-async function driveProxy(
-  matrixAccessToken: string,
-  driveUrl: string,
-  driveMethod: string = 'GET',
-  driveBody?: Record<string, unknown> | null,
-  spaceRoomId?: string,
-): Promise<any> {
-  console.log('[EO-DB] GDrive proxy:', driveMethod, driveUrl);
-  const res = await fetch(EO_STORE_WEBHOOK, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      matrix_token: matrixAccessToken,
-      drive_url: driveUrl,
-      drive_method: driveMethod,
-      ...(spaceRoomId ? { space_room_id: spaceRoomId } : {}),
-      ...(driveBody ? { drive_body: driveBody } : {}),
-    }),
-  });
-  const text = await res.text();
-  console.log('[EO-DB] GDrive proxy response:', res.status, text.slice(0, 300));
-  if (res.status === 401) {
-    throw new Error('Unauthorized — Matrix token invalid or expired');
-  }
-  if (res.status === 403) {
-    throw new Error('Forbidden — not a member of this space');
-  }
-  if (!text) return {};
-  return JSON.parse(text);
-}
-
-// ──────────────────────────────────────────────────────────────
 // Folder helpers
 // ──────────────────────────────────────────────────────────────
 
 /** Cache: "parentId/name" → folderId (avoids repeated lookups within a session). */
 const folderIdCache = new Map<string, string>();
-
-// Active space room ID — set by the app shell when switching spaces.
-// Injected into all proxy calls for n8n membership verification.
-let activeSpaceRoomId: string | undefined;
-
-/**
- * Set the current space's Matrix main room ID.
- * Call this whenever the user opens or switches spaces.
- * All subsequent Drive API calls will include this room ID for n8n membership check.
- */
-export function setActiveSpaceRoomId(roomId: string | undefined): void {
-  activeSpaceRoomId = roomId;
-}
 
 /** Clear the folder ID cache. Call this on every space switch. */
 export function clearFolderIdCache(): void {
@@ -162,7 +87,7 @@ async function findFolder(
   let q = `name='${name}' and mimeType='application/vnd.google-apps.folder' and trashed=false`;
   if (parentId) q += ` and '${parentId}' in parents`;
   const url = `${DRIVE_API}?q=${encodeURIComponent(q)}&fields=files(id,name)&spaces=drive`;
-  const data = await driveProxy(token, url, 'GET', null, activeSpaceRoomId);
+  const data = await driveGet(token, url);
   const files = data.files || [];
   if (files.length > 0) {
     folderIdCache.set(cacheKey, files[0].id);
@@ -184,7 +109,7 @@ async function createFolder(
     mimeType: 'application/vnd.google-apps.folder',
   };
   if (parentId) body.parents = [parentId];
-  const data = await driveProxy(token, DRIVE_API, 'POST', body, activeSpaceRoomId);
+  const data = await driveMutation(token, DRIVE_API, 'POST', body);
   const cacheKey = `${parentId || 'root'}/${name}`;
   folderIdCache.set(cacheKey, data.id);
   return data.id;
@@ -204,15 +129,63 @@ async function ensureFolder(
 }
 
 /**
+ * Resolve the shared space folder for a given dataType.
+ *
+ * For the first run (no room state event yet), creates EO-DB/<dataType>/,
+ * enables anyoneWithLink + writer sharing, then publishes the folder ID
+ * to Matrix room state so other members can find it.
+ *
+ * On subsequent calls (or for other members joining later), reads the
+ * folder ID directly from Matrix room state.
+ */
+export async function resolveSpaceFolder(
+  token: string,
+  dataType: string,
+  matrixClient: MatrixClient,
+  mainRoomId: string,
+): Promise<string> {
+  // Check in-memory cache first (warm path)
+  const cacheKey = `space/${dataType}`;
+  const cached = folderIdCache.get(cacheKey);
+  if (cached) return cached;
+
+  // Read from Matrix room state
+  const fromRoomState = readFolderState(matrixClient, mainRoomId);
+  if (fromRoomState) {
+    folderIdCache.set(cacheKey, fromRoomState);
+    return fromRoomState;
+  }
+
+  // First-time setup: create the folder, share it, publish to room state
+  const rootId = await ensureFolder(token, 'EO-DB');
+  const folderId = await ensureFolder(token, dataType, rootId);
+  await driveShareAnyone(token, folderId);
+  // Extract spaceId from dataType (convention: "eodb-{spaceId}")
+  const spaceId = dataType.startsWith('eodb-') ? dataType.slice('eodb-'.length) : dataType;
+  await publishFolderState(matrixClient, mainRoomId, spaceId, folderId).catch(e => {
+    // Non-fatal: other members can still set the folder state later
+    console.warn('[EO-DB] Could not publish folder state to Matrix room:', e);
+  });
+  folderIdCache.set(cacheKey, folderId);
+  return folderId;
+}
+
+/**
  * Resolve folder path: EO-DB / <dataType>
- * Shared by all users in the same space.
+ * Used when no matrixClient is available (legacy list/retrieve calls).
+ * Does NOT enable sharing or publish to room state.
  */
 async function resolveDataFolder(
   token: string,
   dataType: string,
 ): Promise<string> {
+  const cacheKey = `space/${dataType}`;
+  const cached = folderIdCache.get(cacheKey);
+  if (cached) return cached;
   const rootId = await ensureFolder(token, 'EO-DB');
-  return ensureFolder(token, dataType, rootId);
+  const folderId = await ensureFolder(token, dataType, rootId);
+  folderIdCache.set(cacheKey, folderId);
+  return folderId;
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -229,7 +202,7 @@ async function findFileInFolder(
 ): Promise<string | null> {
   const q = `name='${fileName}' and '${folderId}' in parents and trashed=false`;
   const url = `${DRIVE_API}?q=${encodeURIComponent(q)}&fields=files(id)&spaces=drive`;
-  const data = await driveProxy(token, url, 'GET', null, activeSpaceRoomId);
+  const data = await driveGet(token, url);
   const files = data.files || [];
   return files.length > 0 ? files[0].id : null;
 }
@@ -237,30 +210,25 @@ async function findFileInFolder(
 /**
  * Store encrypted .eodb binary on Google Drive.
  * Creates or overwrites `{content_hash}.eodb` inside EO-DB/<dataType>/.
- *
- * Binary is base64-encoded for transport through the JSON proxy.
- * The proxy decodes `_raw_content_base64` → raw binary before uploading.
  */
 export async function gdriveStore(
-  matrixAccessToken: string,
+  googleAccessToken: string,
   encryptedBinary: Uint8Array,
   dataType: string,
   dataId: string,
   contentHash: string,
 ): Promise<GDriveStoreResult> {
-  const folderId = await resolveDataFolder(matrixAccessToken, dataType);
+  const folderId = await resolveDataFolder(googleAccessToken, dataType);
   const fileName = `${contentHash}.eodb`;
 
-  const base64Data = uint8ToBase64(encryptedBinary);
-
-  // Check if a file with this name already exists in the folder
-  const existingId = await findFileInFolder(matrixAccessToken, fileName, folderId);
+  const existingId = await findFileInFolder(googleAccessToken, fileName, folderId);
 
   let fileId: string;
 
   if (existingId) {
     fileId = existingId;
     console.log('[EO-DB] GDrive overwriting .eodb file:', fileId, contentHash);
+    await driveUploadBinary(googleAccessToken, fileId, encryptedBinary);
   } else {
     const metadata: Record<string, unknown> = {
       name: fileName,
@@ -268,17 +236,10 @@ export async function gdriveStore(
       mimeType: 'application/octet-stream',
       description: `EO-DB encrypted backup | ${dataType} | ${dataId}`,
     };
-    const created = await driveProxy(matrixAccessToken, DRIVE_API, 'POST', metadata, activeSpaceRoomId);
+    const created = await driveUploadMultipart(googleAccessToken, metadata, encryptedBinary);
     fileId = created.id;
     console.log('[EO-DB] GDrive .eodb file created:', fileId, contentHash);
   }
-
-  // Upload binary via media endpoint (base64 for proxy transport)
-  const uploadUrl = `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`;
-  await driveProxy(matrixAccessToken, uploadUrl, 'PATCH', {
-    _raw_content_base64: base64Data,
-    _content_type: 'application/octet-stream',
-  }, activeSpaceRoomId);
 
   return {
     ok: true,
@@ -289,59 +250,49 @@ export async function gdriveStore(
 
 /**
  * Retrieve encrypted .eodb binary from Google Drive by content_hash.
- * Falls back to legacy .json files for backward compatibility.
  */
 export async function gdriveRetrieve(
-  matrixAccessToken: string,
+  googleAccessToken: string,
   contentHash: string,
 ): Promise<GDriveRetrieveResult> {
-  // Try .eodb first, fall back to legacy .json
   const qEodb = `name='${contentHash}.eodb' and trashed=false`;
   const urlEodb = `${DRIVE_API}?q=${encodeURIComponent(qEodb)}&fields=files(id,name)&spaces=drive`;
-  const dataEodb = await driveProxy(matrixAccessToken, urlEodb, 'GET', null, activeSpaceRoomId);
+  const dataEodb = await driveGet(googleAccessToken, urlEodb);
   let files = dataEodb.files || [];
-  let isBinary = true;
 
   if (!files.length) {
+    // Legacy: fall back to .json files
     const qJson = `name='${contentHash}.json' and trashed=false`;
     const urlJson = `${DRIVE_API}?q=${encodeURIComponent(qJson)}&fields=files(id,name)&spaces=drive`;
-    const dataJson = await driveProxy(matrixAccessToken, urlJson, 'GET', null, activeSpaceRoomId);
+    const dataJson = await driveGet(googleAccessToken, urlJson);
     files = dataJson.files || [];
-    isBinary = false;
+
+    if (!files.length) throw new Error(`File not found: ${contentHash}`);
+
+    // Legacy JSON — download and parse
+    const { data } = await driveDownloadBinary(googleAccessToken, files[0].id);
+    const text = new TextDecoder().decode(data);
+    const parsed = JSON.parse(text);
+    return { ok: true, envelope: parsed.envelope || parsed };
   }
 
-  if (!files.length) {
-    throw new Error(`File not found: ${contentHash}`);
-  }
-
-  const downloadUrl = `${DRIVE_API}/${files[0].id}?alt=media`;
-  const content = await driveProxy(matrixAccessToken, downloadUrl, 'GET', null, activeSpaceRoomId);
-
-  if (isBinary) {
-    // Proxy returns base64-encoded binary in _raw_content_base64
-    const b64 = content._raw_content_base64 || content;
-    const binary = typeof b64 === 'string' ? base64ToUint8(b64) : b64;
-    return { ok: true, envelope: binary };
-  }
-
-  // Legacy JSON format
-  return { ok: true, envelope: content.envelope || content };
+  const { data } = await driveDownloadBinary(googleAccessToken, files[0].id);
+  return { ok: true, envelope: data };
 }
 
 /**
  * List .eodb files on Google Drive, optionally scoped to a dataType folder.
- * Also picks up legacy .json files for backward compatibility.
  */
 export async function gdriveList(
-  matrixAccessToken: string,
+  googleAccessToken: string,
   dataType?: string,
 ): Promise<GDriveListResult> {
   let q = "trashed=false and (name contains '.eodb' or name contains '.json') and mimeType!='application/vnd.google-apps.folder'";
 
   if (dataType) {
-    const rootId = await findFolder(matrixAccessToken, 'EO-DB');
+    const rootId = await findFolder(googleAccessToken, 'EO-DB');
     if (rootId) {
-      const dataFolderId = await findFolder(matrixAccessToken, dataType, rootId);
+      const dataFolderId = await findFolder(googleAccessToken, dataType, rootId);
       if (dataFolderId) {
         q = `'${dataFolderId}' in parents and trashed=false and (name contains '.eodb' or name contains '.json')`;
       } else {
@@ -353,7 +304,7 @@ export async function gdriveList(
   }
 
   const url = `${DRIVE_API}?q=${encodeURIComponent(q)}&fields=files(id,name,createdTime,parents)&spaces=drive&pageSize=100`;
-  const data = await driveProxy(matrixAccessToken, url, 'GET', null, activeSpaceRoomId);
+  const data = await driveGet(googleAccessToken, url);
   const files = data.files || [];
 
   const entries: GDriveListEntry[] = files.map((f: any) => ({
@@ -373,56 +324,49 @@ export async function gdriveList(
  * Used for op-{seq}.eodb, hydration-{slot}.eodb, etc.
  */
 export async function gdriveStoreNamed(
-  matrixAccessToken: string,
+  googleAccessToken: string,
   binary: Uint8Array,
   dataType: string,
   fileName: string,
 ): Promise<{ ok: boolean; drive_file_id: string }> {
-  const folderId = await resolveDataFolder(matrixAccessToken, dataType);
-  const base64Data = uint8ToBase64(binary);
-  const existingId = await findFileInFolder(matrixAccessToken, fileName, folderId);
+  const folderId = await resolveDataFolder(googleAccessToken, dataType);
+  const existingId = await findFileInFolder(googleAccessToken, fileName, folderId);
 
   let fileId: string;
   if (existingId) {
     fileId = existingId;
     console.log('[EO-DB] GDrive overwriting named file:', fileName);
+    await driveUploadBinary(googleAccessToken, fileId, binary);
   } else {
     const metadata: Record<string, unknown> = {
       name: fileName,
       parents: [folderId],
       mimeType: 'application/octet-stream',
     };
-    const created = await driveProxy(matrixAccessToken, DRIVE_API, 'POST', metadata, activeSpaceRoomId);
+    const created = await driveUploadMultipart(googleAccessToken, metadata, binary);
     fileId = created.id;
     console.log('[EO-DB] GDrive created named file:', fileName, fileId);
   }
-
-  const uploadUrl = `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`;
-  await driveProxy(matrixAccessToken, uploadUrl, 'PATCH', {
-    _raw_content_base64: base64Data,
-    _content_type: 'application/octet-stream',
-  }, activeSpaceRoomId);
 
   return { ok: true, drive_file_id: fileId };
 }
 
 /**
  * List files in EO-DB/<dataType>/ whose names start with the given prefix.
- * Useful for listing op-*.eodb, hydration-*.eodb, or bake-intent-*.json separately.
  */
 export async function gdriveListByPrefix(
-  matrixAccessToken: string,
+  googleAccessToken: string,
   dataType: string,
   prefix: string,
 ): Promise<GDriveListResult> {
-  const rootId = await findFolder(matrixAccessToken, 'EO-DB');
+  const rootId = await findFolder(googleAccessToken, 'EO-DB');
   if (!rootId) return { ok: true, entries: [] };
-  const dataFolderId = await findFolder(matrixAccessToken, dataType, rootId);
+  const dataFolderId = await findFolder(googleAccessToken, dataType, rootId);
   if (!dataFolderId) return { ok: true, entries: [] };
 
   const q = `'${dataFolderId}' in parents and trashed=false and name contains '${prefix}'`;
   const url = `${DRIVE_API}?q=${encodeURIComponent(q)}&fields=files(id,name,createdTime)&spaces=drive&pageSize=1000`;
-  const data = await driveProxy(matrixAccessToken, url, 'GET', null, activeSpaceRoomId);
+  const data = await driveGet(googleAccessToken, url);
   const files = data.files || [];
 
   const entries: GDriveListEntry[] = files.map((f: any) => ({
@@ -440,11 +384,11 @@ export async function gdriveListByPrefix(
  * Trash (soft-delete) a Drive file by its file ID.
  */
 export async function gdriveDeleteFile(
-  matrixAccessToken: string,
+  googleAccessToken: string,
   fileId: string,
 ): Promise<void> {
   const url = `${DRIVE_API}/${fileId}`;
-  await driveProxy(matrixAccessToken, url, 'PATCH', { trashed: true }, activeSpaceRoomId);
+  await driveMutation(googleAccessToken, url, 'PATCH', { trashed: true });
 }
 
 /**
@@ -452,35 +396,29 @@ export async function gdriveDeleteFile(
  * Used for coordination files like bake-intent-{userId}.json.
  */
 export async function gdriveStoreJson(
-  matrixAccessToken: string,
+  googleAccessToken: string,
   dataType: string,
   fileName: string,
   body: Record<string, unknown>,
 ): Promise<{ ok: boolean; drive_file_id: string }> {
   const text = JSON.stringify(body);
   const bytes = new TextEncoder().encode(text);
-  const folderId = await resolveDataFolder(matrixAccessToken, dataType);
-  const base64Data = uint8ToBase64(bytes);
-  const existingId = await findFileInFolder(matrixAccessToken, fileName, folderId);
+  const folderId = await resolveDataFolder(googleAccessToken, dataType);
+  const existingId = await findFileInFolder(googleAccessToken, fileName, folderId);
 
   let fileId: string;
   if (existingId) {
     fileId = existingId;
+    await driveUploadBinary(googleAccessToken, fileId, bytes, 'application/json');
   } else {
     const metadata: Record<string, unknown> = {
       name: fileName,
       parents: [folderId],
       mimeType: 'application/json',
     };
-    const created = await driveProxy(matrixAccessToken, DRIVE_API, 'POST', metadata, activeSpaceRoomId);
+    const created = await driveUploadMultipart(googleAccessToken, metadata, bytes, 'application/json');
     fileId = created.id;
   }
-
-  const uploadUrl = `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`;
-  await driveProxy(matrixAccessToken, uploadUrl, 'PATCH', {
-    _raw_content_base64: base64Data,
-    _content_type: 'application/json',
-  }, activeSpaceRoomId);
 
   return { ok: true, drive_file_id: fileId };
 }
@@ -490,26 +428,19 @@ export async function gdriveStoreJson(
  * Returns null if the file does not exist.
  */
 export async function gdriveReadJson(
-  matrixAccessToken: string,
+  googleAccessToken: string,
   dataType: string,
   fileName: string,
 ): Promise<Record<string, unknown> | null> {
-  const rootId = await findFolder(matrixAccessToken, 'EO-DB');
+  const rootId = await findFolder(googleAccessToken, 'EO-DB');
   if (!rootId) return null;
-  const dataFolderId = await findFolder(matrixAccessToken, dataType, rootId);
+  const dataFolderId = await findFolder(googleAccessToken, dataType, rootId);
   if (!dataFolderId) return null;
-  const fileId = await findFileInFolder(matrixAccessToken, fileName, dataFolderId);
+  const fileId = await findFileInFolder(googleAccessToken, fileName, dataFolderId);
   if (!fileId) return null;
 
-  const downloadUrl = `${DRIVE_API}/${fileId}?alt=media`;
-  const content = await driveProxy(matrixAccessToken, downloadUrl, 'GET', null, activeSpaceRoomId);
-
-  // Proxy may return base64-encoded content for binary types; handle both
-  if (content._raw_content_base64) {
-    const bytes = base64ToUint8(content._raw_content_base64);
-    return JSON.parse(new TextDecoder().decode(bytes));
-  }
-  return content as Record<string, unknown>;
+  const { data } = await driveDownloadBinary(googleAccessToken, fileId);
+  return JSON.parse(new TextDecoder().decode(data));
 }
 
 /**
@@ -517,69 +448,45 @@ export async function gdriveReadJson(
  * Returns null if the file does not exist.
  */
 export async function gdriveRetrieveNamed(
-  matrixAccessToken: string,
+  googleAccessToken: string,
   dataType: string,
   fileName: string,
 ): Promise<{ ok: boolean; data: Uint8Array; fileId?: string } | null> {
-  const folderId = await resolveDataFolder(matrixAccessToken, dataType).catch(() => null);
+  const folderId = await resolveDataFolder(googleAccessToken, dataType).catch(() => null);
   if (!folderId) return null;
-  const fileId = await findFileInFolder(matrixAccessToken, fileName, folderId);
+  const fileId = await findFileInFolder(googleAccessToken, fileName, folderId);
   if (!fileId) return null;
 
-  const downloadUrl = `${DRIVE_API}/${fileId}?alt=media`;
-  const content = await driveProxy(matrixAccessToken, downloadUrl, 'GET', null, activeSpaceRoomId);
-  const b64 = content._raw_content_base64 || content;
-  const data = typeof b64 === 'string' ? base64ToUint8(b64) : (b64 as Uint8Array);
+  const { data } = await driveDownloadBinary(googleAccessToken, fileId);
   return { ok: true, data, fileId };
 }
 
 /**
  * Download a byte range from a named binary file in EO-DB/<dataType>/.
- * Requires the n8n proxy to forward the Range header (updated workflow).
  * Returns null if the file does not exist.
- * Returns partial binary data and the Content-Range response header.
  */
 export async function gdriveRetrieveRange(
-  matrixAccessToken: string,
+  googleAccessToken: string,
   dataType: string,
   fileName: string,
   fromByte: number,
   toByte?: number,
 ): Promise<{ ok: boolean; data: Uint8Array; contentRange?: string } | null> {
-  const folderId = await resolveDataFolder(matrixAccessToken, dataType).catch(() => null);
+  const folderId = await resolveDataFolder(googleAccessToken, dataType).catch(() => null);
   if (!folderId) return null;
-  const fileId = await findFileInFolder(matrixAccessToken, fileName, folderId);
+  const fileId = await findFileInFolder(googleAccessToken, fileName, folderId);
   if (!fileId) return null;
 
   const rangeHeader = toByte !== undefined
     ? `bytes=${fromByte}-${toByte}`
     : `bytes=${fromByte}-`;
 
-  const downloadUrl = `${DRIVE_API}/${fileId}?alt=media`;
-  const res = await fetch(EO_STORE_WEBHOOK, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Range': rangeHeader,
-    },
-    body: JSON.stringify({
-      matrix_token: matrixAccessToken,
-      drive_url: downloadUrl,
-      drive_method: 'GET',
-    }),
-  });
-
-  if (!res.ok && res.status !== 206) {
-    console.warn('[EO-DB] GDrive range request failed:', res.status);
+  try {
+    const { data, contentRange } = await driveDownloadBinary(googleAccessToken, fileId, rangeHeader);
+    return { ok: true, data, contentRange };
+  } catch {
     return null;
   }
-
-  const buffer = await res.arrayBuffer();
-  return {
-    ok: true,
-    data: new Uint8Array(buffer),
-    contentRange: res.headers.get('Content-Range') ?? undefined,
-  };
 }
 
 /**
