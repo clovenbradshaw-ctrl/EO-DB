@@ -420,12 +420,28 @@ export function AirtableSettingsSection({
                                 <span style={s.fieldCount}>{table.fieldCount} fields</span>
                                 {resolvedFieldName && (
                                   <span style={{
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: 4,
                                     fontSize: 10,
                                     color: theme.accent,
                                     marginLeft: 8,
-                                    opacity: 0.8,
+                                    opacity: 0.9,
                                   }}>
                                     name: {resolvedFieldName}
+                                    {displayFieldSelections[table.id] && (
+                                      <span style={{
+                                        background: theme.accentBg,
+                                        color: theme.accent,
+                                        border: `1px solid ${theme.accent}`,
+                                        borderRadius: 4,
+                                        padding: '0px 5px',
+                                        fontSize: 9,
+                                        fontWeight: 700,
+                                        letterSpacing: '0.03em',
+                                        lineHeight: '16px',
+                                      }}>manual</span>
+                                    )}
                                   </span>
                                 )}
                               </div>
