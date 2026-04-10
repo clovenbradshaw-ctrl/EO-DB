@@ -133,6 +133,28 @@ async function setCursor(store: EoStore, baseId: string, tableId: string, cursor
   await store.put(cursorKey(baseId, tableId), cursor);
 }
 
+/**
+ * Returns the set of tables that have been successfully synced at least once,
+ * keyed by baseId → tableId[]. Derived from stored cursor keys so it never
+ * goes stale — if a cursor exists, the table was hydrated.
+ */
+export async function getSyncedTableIds(
+  store: EoStore,
+): Promise<Record<string, string[]>> {
+  const entries = await store.iterator('meta:at_cursor:');
+  const result: Record<string, string[]> = {};
+  for (const [key] of entries) {
+    // key format: meta:at_cursor:{baseId}:{tableId}
+    const parts = key.split(':');
+    if (parts.length < 4) continue;
+    const baseId = parts[2];
+    const tableId = parts[3];
+    if (!result[baseId]) result[baseId] = [];
+    result[baseId].push(tableId);
+  }
+  return result;
+}
+
 // ─── Target naming ──────────────────────────────────────────────────────────
 
 function recordTarget(baseId: string, tableId: string, recordId: string): string {
@@ -488,11 +510,10 @@ async function syncTable(
   const tableState = await getState(store, tableTarget(baseId, tableId));
   const displayField: string | undefined = tableState?.value?._displayField;
 
-  // Subtract a 60-second overlap window from the cursor to guard against
-  // clock skew between the browser and Airtable's servers.
-  // Use IS_AFTER+DATETIME_PARSE — the >= string comparison does not work
-  // reliably with ISO timestamps in Airtable's formula engine.
-  // Idempotency handles any re-fetched duplicates from the overlap.
+  // Subtract a 60-second overlap window from the cursor to catch records
+  // modified during clock skew or at the tail of the previous sync.
+  // Use IS_AFTER+DATETIME_PARSE — the correct Airtable datetime comparison
+  // form. Idempotency deduplicates any re-fetched records from the overlap.
   const filterCursor = cursorSince
     ? new Date(new Date(cursorSince).getTime() - 60_000).toISOString()
     : undefined;

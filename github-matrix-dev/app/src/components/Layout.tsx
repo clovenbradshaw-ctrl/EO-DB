@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo, useCallback, lazy, Suspense } from 'react';
+import { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback, lazy, Suspense } from 'react';
 import { logout, createMatrixClient, type MatrixSession } from '../matrix/client';
 import { useEoStore } from '../store/eo-store';
 import { persistSpaceMeta, listSpaceMeta, clearAllSpaceMetas, saveSpaceMeta, removeSpaceMeta } from '../db/space-meta';
@@ -66,7 +66,7 @@ import { EO_POWER_LEVEL_CONTENT } from '../permissions/types';
 import { listAllHomeserverUsers } from '../matrix/user-discovery';
 import { withRetry } from '../matrix/connection-resilience';
 import { invalidateStatsCache } from '../db/space-statistics';
-import { clearFolderIdCache } from '../google-drive/gdrive-api';
+import { clearFolderIdCache, setActiveSpaceRoomId } from '../google-drive/gdrive-api';
 import { useApiConnectionStore } from '../store/api-connection-store';
 
 /** Set to false to disable all Matrix activity (sync, room creation, discovery). */
@@ -1202,6 +1202,24 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   // --- Cached space stores (survive space switches, avoid re-init) ---
   const spaceCacheRef = useRef<Map<string, CachedSpace>>(new Map());
 
+  // Pre-warm the OPFS fold worker before the first paint so the browser can
+  // parse the Worker module and acquire the OPFS file handle in parallel with
+  // React rendering the initial frame. useLayoutEffect fires synchronously
+  // before paint — ~one full frame (~16 ms) ahead of useEffect, and worker
+  // startup (~100–400 ms) overlaps with the paint instead of following it.
+  const eagerWorkerRef = useRef<{
+    client: FoldWorkerClient;
+    initPromise: Promise<void>;
+    spaceId: string;
+  } | null>(null);
+  useLayoutEffect(() => {
+    if (!selectedSpace || localMode || eagerWorkerRef.current) return;
+    const client = createFoldWorkerClient();
+    // Swallow errors — setupSpaceStore will retry on failure.
+    const initPromise = initFoldWorker(client, selectedSpace).catch(() => {});
+    eagerWorkerRef.current = { client, initPromise, spaceId: selectedSpace };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps — intentionally runs once before first paint
+
   // Generation counter: increments each time setupSpaceStore starts. Stale
   // async completions compare their generation to the current value and bail
   // if a newer run has started, preventing race conditions when the effect
@@ -1438,16 +1456,20 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     async function setupSpaceStore() {
       const cache = spaceCacheRef.current;
 
-      // Resolve room first — a concurrent run may cache the worker during this await.
-      const spaceRoomId = await resolveRoom();
-      if (isStale()) return;
-
-      // Check cache AFTER resolveRoom so we see entries set by concurrent runs.
+      // Check cache BEFORE resolveRoom so local data loads immediately without
+      // waiting for Matrix network calls. cache.set() is always synchronous
+      // (called before any await), so any concurrent run that started before us
+      // has already populated the cache by the time our synchronous code runs here.
       const existing = cache.get(selectedSpace!);
       if (existing) {
         // Reuse cached worker — no OPFS re-open, no replay
         if (isStale()) return;
         await init(existing.workerClient);
+
+        // Resolve the Matrix room AFTER local data is loaded.
+        // ready=true is already set above — UI is unblocked before this await.
+        const spaceRoomId = await resolveRoom();
+        if (isStale()) return;
 
         // Update mainRoomId if room resolution succeeded on this run
         // (fixes the case where the first run cached null because Matrix
@@ -1553,20 +1575,35 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       // Cache the entry BEFORE initFoldWorker so that any concurrent run that
       // starts during the await finds the entry and takes the reuse path above,
       // preventing two workers from racing to open the same OPFS file.
-      const workerClient = createFoldWorkerClient();
-      cache.set(selectedSpace!, { workerClient, syncManager: null, peerSync: null, webrtcPeer: null, gdriveSync: null, mainRoomId: spaceRoomId, presence: null, spaceRooms: resolvedSpaceRooms });
+      //
+      // Prefer the pre-warmed worker started by useLayoutEffect (before first
+      // paint) for the initial space load — it may already be fully initialized
+      // by the time we reach this point, making the await below instant.
+      const eager = eagerWorkerRef.current;
+      const usingEager = eager !== null && eager.spaceId === selectedSpace!;
+      const workerClient = usingEager ? eager.client : createFoldWorkerClient();
+      cache.set(selectedSpace!, { workerClient, syncManager: null, peerSync: null, webrtcPeer: null, gdriveSync: null, mainRoomId: null, presence: null, spaceRooms: null });
 
-      // Retry up to 3 times — the previous worker may still hold the
-      // SyncAccessHandle for a brief window after termination.
       let initError: unknown;
-      for (let attempt = 0; attempt < 3; attempt++) {
+      if (usingEager) {
+        // Await the pre-warmed init — often already resolved, so no wait.
         try {
-          if (attempt > 0) await new Promise(r => setTimeout(r, attempt * 600));
-          await initFoldWorker(workerClient, selectedSpace!);
-          initError = undefined;
-          break;
+          await eager.initPromise;
         } catch (e) {
           initError = e;
+        }
+      } else {
+        // Retry up to 3 times — the previous worker may still hold the
+        // SyncAccessHandle for a brief window after termination.
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            if (attempt > 0) await new Promise(r => setTimeout(r, attempt * 600));
+            await initFoldWorker(workerClient, selectedSpace!);
+            initError = undefined;
+            break;
+          } catch (e) {
+            initError = e;
+          }
         }
       }
       if (initError) {
@@ -1582,6 +1619,11 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       if (isStale()) return;
 
       await init(workerClient);
+
+      // Resolve the Matrix room AFTER local data is loaded.
+      // ready=true is already set above — UI is unblocked before this await.
+      const spaceRoomId = await resolveRoom();
+      if (isStale()) return;
 
       // If Matrix is ready but we couldn't get a room, surface the error.
       // Only show this when matrixReady=true — if Matrix hasn't connected yet,
@@ -1640,6 +1682,10 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           // Find the space display name for Drive folder labelling
           const gdriveSpaceEntry = mergedEntriesRef.current.find(e => e.spaceTarget === selectedSpace);
           const gdriveSpaceName = gdriveSpaceEntry?.displayName ?? selectedSpace!;
+
+          // Activate the space room for n8n proxy auth BEFORE setting currentSpace,
+          // so the widget's immediate loadFiles() call includes the correct space_room_id.
+          setActiveSpaceRoomId(spaceRoomId ?? undefined);
 
           // Set current space in GDrive store (pass room ID so folder lookup uses it)
           useGDriveStore.getState().setCurrentSpace(selectedSpace, gdriveSpaceName, spaceRoomId ?? undefined);
