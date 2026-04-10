@@ -34,7 +34,6 @@ const SYNC_OFFER = _syncTypes.offer;
 const SYNC_REQUEST = _syncTypes.request;
 const SYNC_EVENTS = _syncTypes.events;
 const SYNC_GDRIVE = _syncTypes.gdrive;
-const SYNC_LIVE = _syncTypes.live;
 
 const BATCH_SIZE = 50;
 
@@ -264,12 +263,6 @@ export class PeerSync {
         // A peer wrote new ops to GDrive — trigger an immediate pull instead of waiting 15s.
         this.onGDriveUpdate?.();
         break;
-      case SYNC_LIVE:
-        // A peer dispatched a live field edit — fold it into the local store.
-        if (content.event) {
-          this.onEvent?.(content.event);
-        }
-        break;
       case PERMISSIONS_UPDATED:
         // The admin updated this user's permissions — re-fetch the Drive manifest.
         this.onPermissionsUpdated?.();
@@ -472,26 +465,4 @@ export class PeerSync {
     }
   }
 
-  /**
-   * Broadcast a locally-dispatched op to all room members via Matrix to-device
-   * messaging.  Called by eo-store.ts after each local dispatch so peers receive
-   * field edits in real-time without needing a separate relay server.
-   *
-   * Fire-and-forget — delivery failures are swallowed so a slow peer never
-   * blocks the local write path.
-   */
-  async broadcastLocalEvent(event: EoEvent): Promise<void> {
-    const room = this.client.getRoom(this.roomId);
-    if (!room) return;
-    const myUserId = this.client.getUserId();
-    const members = room.getJoinedMembers().filter(m => m.userId !== myUserId);
-    for (const member of members) {
-      try {
-        await this.client.sendToDevice(
-          SYNC_LIVE,
-          toDeviceContent(member.userId, '*', { event, room_id: this.roomId }),
-        );
-      } catch { /* best-effort */ }
-    }
-  }
 }
