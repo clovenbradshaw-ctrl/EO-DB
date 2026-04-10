@@ -37,14 +37,42 @@ function clamp(v: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, v));
 }
 
-/** Compute a human-friendly sensitivity label. */
 function sensitivityLabel(dy: number): string | null {
   if (dy < 12) return null;
   const factor = 1 / (1 + dy / 60);
   if (factor > 0.7) return null;
-  const pct = Math.round(factor * 100);
-  return `${pct}%`;
+  return `${Math.round(factor * 100)}%`;
 }
+
+// ---------------------------------------------------------------------------
+// Global CSS (injected once for animation + panel transition)
+// ---------------------------------------------------------------------------
+
+const HORIZON_STYLE_ID = 'eo-horizon-v2';
+if (typeof document !== 'undefined' && !document.getElementById(HORIZON_STYLE_ID)) {
+  const el = document.createElement('style');
+  el.id = HORIZON_STYLE_ID;
+  el.textContent = `
+    @keyframes eo-livepulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.3; }
+    }
+    .eo-horizon-live { animation: eo-livepulse 2.2s ease-in-out infinite; }
+    .eo-horizon-panel {
+      max-height: 0;
+      overflow: hidden;
+      transition: max-height 0.35s ease;
+    }
+    .eo-horizon-panel.open { max-height: 400px; }
+  `;
+  document.head.appendChild(el);
+}
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+const SPEEDS = [0.5, 1, 2, 4];
 
 // ---------------------------------------------------------------------------
 // Component
@@ -66,30 +94,35 @@ export function Horizon({ records, dateColumns, filter, onFilterChange }: Horizo
   const trackMax = sliderMax + buffer;
   const trackRange = trackMax - trackMin;
 
-  // Single node position — defaults to the end of the range
   const currentPos = filter.rangeMax ?? trackMax;
+  const isLive = filter.rangeMax == null;
 
-  // Adaptive date formatter based on actual data span
-  const formatDate = useMemo(
-    () => buildAdaptiveFormatter(trackRange),
-    [trackRange],
-  );
+  const formatDate = useMemo(() => buildAdaptiveFormatter(trackRange), [trackRange]);
 
-  const isActive = filter.rangeMax != null;
+  // ---- UI state ----
+  const [expanded, setExpanded] = useState(false);
+  const [playing, setPlaying] = useState(false);
+  const [playSpeed, setPlaySpeed] = useState(1);
 
   // ---- Refs ----
   const trackRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<DragState | null>(null);
+  const rafRef = useRef<number | null>(null);
+  const playPosRef = useRef(currentPos);
+  // Always-current speed ref — lets us change speed without stopping playback
+  const playSpeedRef = useRef(playSpeed);
+  playSpeedRef.current = playSpeed;
 
-  // ---- Local visual state (smooth during drag) ----
+  // ---- Local visual state (smooth during drag / playback) ----
   const [vizPos, setVizPos] = useState(currentPos);
   const [dragging, setDragging] = useState(false);
   const [precisionPct, setPrecisionPct] = useState<string | null>(null);
 
-  // Sync visual state when filter changes externally
+  // Sync visual position when filter changes externally
   useEffect(() => {
     if (!dragRef.current) {
       setVizPos(currentPos);
+      playPosRef.current = currentPos;
     }
   }, [currentPos]);
 
@@ -103,21 +136,57 @@ export function Horizon({ records, dateColumns, filter, onFilterChange }: Horizo
     (value: number) => {
       const clamped = clamp(value, trackMin, trackMax);
       setVizPos(clamped);
-      // Store position in rangeMax; null out rangeMin (no clipping)
       const pos = clamped >= trackMax - buffer ? null : clamped;
       onFilterChange({ ...filter, rangeMin: null, rangeMax: pos });
     },
     [filter, onFilterChange, trackMin, trackMax, buffer],
   );
 
+  // ---- Playback ----
+  const stopPlay = useCallback(() => {
+    setPlaying(false);
+    if (rafRef.current != null) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+  }, []);
+
+  const startPlay = useCallback(() => {
+    if (!range) return;
+    setPlaying(true);
+    let lastTs: number | null = null;
+    const tick = (ts: number) => {
+      if (lastTs == null) lastTs = ts;
+      const dt = (ts - lastTs) / 1000;
+      lastTs = ts;
+      // At 1× speed: traverses the full range in 30 s
+      const advance = (trackRange * playSpeedRef.current * dt) / 30;
+      playPosRef.current = clamp(playPosRef.current + advance, trackMin, trackMax);
+      if (playPosRef.current >= trackMax - buffer) {
+        commitValue(trackMax);
+        stopPlay();
+        return;
+      }
+      commitValue(playPosRef.current);
+      rafRef.current = requestAnimationFrame(tick);
+    };
+    rafRef.current = requestAnimationFrame(tick);
+  }, [range, trackRange, trackMin, trackMax, buffer, commitValue, stopPlay]);
+
+  // Cancel RAF on unmount
+  useEffect(() => () => { if (rafRef.current != null) cancelAnimationFrame(rafRef.current); }, []);
+
+  // Stop playback when scrubber resets to live
+  useEffect(() => { if (isLive) stopPlay(); }, [isLive, stopPlay]);
+
   // ---- Pointer handlers ----
   const onPointerDown = useCallback(
     (e: React.PointerEvent) => {
       if (!trackRef.current || !range) return;
+      stopPlay();
       const rect = trackRef.current.getBoundingClientRect();
       const fraction = (e.clientX - rect.left) / rect.width;
       const value = trackMin + fraction * trackRange;
-
       dragRef.current = {
         lastX: e.clientX,
         startY: e.clientY,
@@ -125,26 +194,21 @@ export function Horizon({ records, dateColumns, filter, onFilterChange }: Horizo
         trackWidth: rect.width,
         pointerId: e.pointerId,
       };
-
       trackRef.current.setPointerCapture(e.pointerId);
       setDragging(true);
       setPrecisionPct(null);
-
-      // Snap node to click position
       commitValue(value);
     },
-    [range, trackMin, trackRange, commitValue],
+    [range, trackMin, trackRange, commitValue, stopPlay],
   );
 
   const onPointerMove = useCallback(
     (e: React.PointerEvent) => {
       const drag = dragRef.current;
       if (!drag) return;
-
       const dx = e.clientX - drag.lastX;
       const dy = e.clientY - drag.startY;
-
-      // Drag down = slower scrubbing
+      // Drag down = finer precision
       const sensitivity = 1 / (1 + Math.max(0, dy) / 60);
       const timePerPixel = trackRange / drag.trackWidth;
       drag.currentValue = clamp(
@@ -153,21 +217,17 @@ export function Horizon({ records, dateColumns, filter, onFilterChange }: Horizo
         trackMax,
       );
       drag.lastX = e.clientX;
-
       setPrecisionPct(sensitivityLabel(dy));
       commitValue(drag.currentValue);
     },
     [trackMin, trackMax, trackRange, commitValue],
   );
 
-  const onPointerUp = useCallback(
-    (_e: React.PointerEvent) => {
-      dragRef.current = null;
-      setDragging(false);
-      setPrecisionPct(null);
-    },
-    [],
-  );
+  const onPointerUp = useCallback((_e: React.PointerEvent) => {
+    dragRef.current = null;
+    setDragging(false);
+    setPrecisionPct(null);
+  }, []);
 
   // ---- Callbacks ----
   const handleDateFieldChange = useCallback(
@@ -178,82 +238,221 @@ export function Horizon({ records, dateColumns, filter, onFilterChange }: Horizo
   );
 
   const handleReset = useCallback(() => {
+    stopPlay();
+    setExpanded(false);
     onFilterChange({ ...DEFAULT_FILTER, dateField: filter.dateField });
-  }, [filter.dateField, onFilterChange]);
+  }, [filter.dateField, onFilterChange, stopPlay]);
 
-  // ---- Computed visual position ----
+  const handleJump = useCallback(
+    (frac: number) => {
+      stopPlay();
+      const value = trackMin + frac * trackRange;
+      playPosRef.current = value;
+      commitValue(value);
+    },
+    [stopPlay, trackMin, trackRange, commitValue],
+  );
+
+  // ---- Derived values ----
   const pctPos = valueToFraction(vizPos) * 100;
-
-  // ---- Current date field label ----
-  const dateFieldLabel =
-    dateColumns.find((c) => c.key === filter.dateField)?.label ?? filter.dateField;
-
-  const s = styles(theme);
+  const dateFieldLabel = dateColumns.find((c) => c.key === filter.dateField)?.label ?? filter.dateField;
+  const isPast = !isLive;
+  const s = makeStyles(theme);
 
   return (
-    <div className="eo-horizon" style={s.bar}>
-      {/* Inline date field selector */}
-      {dateColumns.length > 1 ? (
-        <select
-          value={filter.dateField}
-          onChange={handleDateFieldChange}
-          style={s.fieldSelect}
-          title="Date field"
-        >
-          {dateColumns.map((col) => (
-            <option key={col.key} value={col.key}>{col.label}</option>
-          ))}
-        </select>
-      ) : (
-        <span style={s.fieldLabel}>{dateFieldLabel}</span>
-      )}
+    <div style={s.container}>
 
-      {/* Track area */}
-      <div
-        ref={trackRef}
-        style={s.trackOuter}
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
-        onPointerCancel={onPointerUp}
-      >
-        {/* Background track */}
-        <div style={{ ...s.trackBar, background: theme.bgMuted }} />
+      {/* ── Top row — always visible ── */}
+      <div style={s.topRow}>
 
-        {/* Single node */}
-        {range && (
-          <div
-            style={{
-              ...s.node,
-              left: `${pctPos}%`,
-              background: theme.accent,
-            }}
+        {/* Field pill / selector */}
+        {dateColumns.length > 1 ? (
+          <select
+            value={filter.dateField}
+            onChange={handleDateFieldChange}
+            style={{ ...s.fieldPill, cursor: 'pointer' }}
           >
-            {dragging && (
-              <div style={s.tooltip}>
-                {formatDate(vizPos)}
-                {precisionPct && (
-                  <span style={s.precisionBadge}>{precisionPct}</span>
+            {dateColumns.map((col) => (
+              <option key={col.key} value={col.key}>{col.label}</option>
+            ))}
+          </select>
+        ) : (
+          <span style={s.fieldPill}>{dateFieldLabel}</span>
+        )}
+
+        <div style={{ flex: '1 1 0' }} />
+
+        {/* Current position label */}
+        {range && (
+          <span style={{ ...s.dateDisplay, color: isPast ? theme.purple : theme.textSecondary }}>
+            {isLive ? 'Live' : formatDate(vizPos)}
+          </span>
+        )}
+
+        {/* Live / past indicator dot */}
+        <span
+          className={isLive ? 'eo-horizon-live' : undefined}
+          style={{
+            width: 6,
+            height: 6,
+            borderRadius: '50%',
+            flexShrink: 0,
+            background: isLive ? theme.success : theme.purple,
+            boxShadow: isLive ? `0 0 5px ${theme.success}` : `0 0 5px ${theme.purple}`,
+            transition: 'background 0.3s, box-shadow 0.3s',
+          }}
+        />
+
+        {/* Expand toggle */}
+        <button
+          onClick={() => setExpanded((v) => !v)}
+          style={{
+            ...s.histBtn,
+            ...(expanded ? {
+              borderColor: theme.purpleBorder,
+              color: theme.purple,
+              background: theme.purpleBg,
+            } : {}),
+          }}
+        >
+          {expanded ? '↑ Close' : '⏮ History'}
+        </button>
+
+      </div>
+
+      {/* ── Collapsible panel ── */}
+      <div className={`eo-horizon-panel${expanded ? ' open' : ''}`}>
+        <div style={s.bodyInner}>
+
+          {/* Track */}
+          <div
+            ref={trackRef}
+            style={{ ...s.trackOuter, cursor: range ? 'pointer' : 'default' }}
+            onPointerDown={onPointerDown}
+            onPointerMove={onPointerMove}
+            onPointerUp={onPointerUp}
+            onPointerCancel={onPointerUp}
+          >
+            {/* Background track */}
+            <div style={{ ...s.trackBg, background: theme.bgMuted }} />
+
+            {/* Fill */}
+            {range && (
+              <div style={{
+                ...s.trackFill,
+                width: `${pctPos}%`,
+                background: isPast
+                  ? `linear-gradient(90deg, ${theme.purpleBorder}, ${theme.purple})`
+                  : `linear-gradient(90deg, ${theme.tealBorder}, ${theme.accent})`,
+              }} />
+            )}
+
+            {/* Node */}
+            {range && (
+              <div style={{
+                ...s.node,
+                left: `${pctPos}%`,
+                borderColor: isPast ? theme.purple : theme.accent,
+                boxShadow: `0 0 0 3px ${isPast ? theme.purpleBg : theme.accentBg}`,
+              }}>
+                {/* Drag tooltip */}
+                {dragging && (
+                  <div style={s.tooltip}>
+                    {formatDate(vizPos)}
+                    {precisionPct && (
+                      <span style={{ ...s.precisionBadge, color: isPast ? theme.purple : theme.accent }}>
+                        {precisionPct}
+                      </span>
+                    )}
+                  </div>
                 )}
               </div>
             )}
-          </div>
-        )}
 
-        {/* Date label at node position (shown when not dragging) */}
-        {range && !dragging && (
-          <span style={{ ...s.dateLabel, left: `${pctPos}%` }}>
-            {formatDate(vizPos)}
-          </span>
-        )}
+            {/* Static date label under node */}
+            {range && !dragging && (
+              <span style={{
+                ...s.nodeLabel,
+                left: `${pctPos}%`,
+                color: isPast ? theme.purple : theme.textMuted,
+              }}>
+                {formatDate(vizPos)}
+              </span>
+            )}
+          </div>
+
+          {/* Past banner */}
+          {isPast && range && (
+            <div style={s.pastBanner}>
+              <span style={{ flex: 1, fontSize: 11, lineHeight: '1.3', color: theme.purple }}>
+                Viewing{' '}
+                <strong style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 500 }}>
+                  {formatDate(vizPos)}
+                </strong>
+                {' '}— read-only
+              </span>
+              <button onClick={handleReset} style={s.returnBtn}>
+                ↺ Return to live
+              </button>
+            </div>
+          )}
+
+          {/* Controls panel */}
+          <div style={s.panel}>
+
+            {/* Jump row */}
+            <div style={s.panelRow}>
+              <span style={s.panelLabel}>Jump</span>
+              {([
+                { label: '|← Start', frac: 0 },
+                { label: '¼', frac: 0.25 },
+                { label: '¾', frac: 0.75 },
+                { label: 'End →|', frac: 1 },
+              ] as const).map(({ label, frac }) => (
+                <button key={frac} style={s.jumpBtn} onClick={() => handleJump(frac)}>
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            {/* Playback row */}
+            <div style={s.panelRow}>
+              <span style={s.panelLabel}>Speed</span>
+              <div style={s.speedGroup}>
+                {SPEEDS.map((sp, i) => (
+                  <button
+                    key={sp}
+                    style={{
+                      ...s.speedBtn,
+                      borderRight: i < SPEEDS.length - 1 ? `0.5px solid ${theme.border}` : 'none',
+                      ...(playSpeed === sp ? { background: theme.purpleBg, color: theme.purple } : {}),
+                    }}
+                    onClick={() => setPlaySpeed(sp)}
+                  >
+                    {sp === 0.5 ? '½×' : `${sp}×`}
+                  </button>
+                ))}
+              </div>
+              <button
+                style={{
+                  ...s.playBtn,
+                  background: playing ? theme.purpleBg : theme.accentBg,
+                  color: playing ? theme.purple : theme.accent,
+                  borderColor: playing ? theme.purpleBorder : theme.accentBorder,
+                  opacity: range ? 1 : 0.5,
+                  cursor: range ? 'pointer' : 'default',
+                }}
+                onClick={() => (playing ? stopPlay() : startPlay())}
+                disabled={!range}
+              >
+                {playing ? '⏸ Pause' : '▶ Play'}
+              </button>
+            </div>
+
+          </div>
+        </div>
       </div>
 
-      {/* Inline reset button */}
-      {isActive && (
-        <button onClick={handleReset} style={s.resetBtn} title="Reset position">
-          ×
-        </button>
-      )}
     </div>
   );
 }
@@ -262,55 +461,84 @@ export function Horizon({ records, dateColumns, filter, onFilterChange }: Horizo
 // Styles
 // ---------------------------------------------------------------------------
 
-function styles(t: Theme): Record<string, React.CSSProperties> {
+function makeStyles(t: Theme): Record<string, React.CSSProperties> {
   return {
-    bar: {
+    container: {
       display: 'flex',
-      alignItems: 'center',
-      gap: 6,
-      padding: '2px 16px',
-      borderBottom: `0.5px solid ${t.border}`,
+      flexDirection: 'column',
       background: t.bgCard,
+      borderBottom: `0.5px solid ${t.border}`,
       flexShrink: 0,
-      minHeight: 22,
       userSelect: 'none',
     } as React.CSSProperties,
 
-    // ---- Inline date field selector ----
-    fieldSelect: {
+    // ── Top row ──
+    topRow: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 7,
+      padding: '4px 12px',
+      minHeight: 28,
+    } as React.CSSProperties,
+
+    fieldPill: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      padding: '0 8px',
       height: 20,
+      background: t.bgMuted,
+      border: `0.5px solid ${t.border}`,
+      borderRadius: 10,
       fontSize: 10,
       fontFamily: "'JetBrains Mono', monospace",
-      padding: '0 4px',
-      border: `0.5px solid ${t.border}`,
-      borderRadius: 3,
-      background: 'transparent',
       color: t.textSecondary,
       outline: 'none',
-      cursor: 'pointer',
       flexShrink: 0,
-      maxWidth: 140,
     } as React.CSSProperties,
 
-    fieldLabel: {
+    dateDisplay: {
+      fontFamily: "'JetBrains Mono', monospace",
+      fontSize: 11,
+      fontWeight: 500,
+      letterSpacing: '0.01em',
+      whiteSpace: 'nowrap',
+      transition: 'color 0.3s',
+    } as React.CSSProperties,
+
+    histBtn: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      padding: '0 9px',
+      height: 20,
+      background: 'transparent',
+      border: `0.5px solid ${t.border}`,
+      borderRadius: 10,
       fontSize: 10,
       fontFamily: "'JetBrains Mono', monospace",
-      color: t.textSecondary,
-      flexShrink: 0,
+      color: t.textMuted,
+      cursor: 'pointer',
       whiteSpace: 'nowrap',
+      transition: 'all 0.15s',
+      flexShrink: 0,
     } as React.CSSProperties,
 
-    // ---- Track ----
+    // ── Body ──
+    bodyInner: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 8,
+      padding: '0 12px 10px',
+    } as React.CSSProperties,
+
+    // ── Track ──
     trackOuter: {
       position: 'relative',
-      flex: 1,
-      height: 24,
-      minWidth: 120,
-      cursor: 'pointer',
+      height: 28,
+      minWidth: 100,
       touchAction: 'none',
     } as React.CSSProperties,
 
-    trackBar: {
+    trackBg: {
       position: 'absolute',
       top: '50%',
       left: 0,
@@ -321,22 +549,33 @@ function styles(t: Theme): Record<string, React.CSSProperties> {
       pointerEvents: 'none',
     } as React.CSSProperties,
 
-    // ---- Single node ----
+    trackFill: {
+      position: 'absolute',
+      top: '50%',
+      left: 0,
+      height: 3,
+      borderRadius: 1.5,
+      transform: 'translateY(-50%)',
+      pointerEvents: 'none',
+    } as React.CSSProperties,
+
     node: {
       position: 'absolute',
       top: '50%',
-      width: 8,
-      height: 8,
+      width: 12,
+      height: 12,
       borderRadius: '50%',
+      background: t.bgCard,
+      border: `2px solid ${t.accent}`,
       transform: 'translate(-50%, -50%)',
       pointerEvents: 'none',
       zIndex: 3,
+      transition: 'border-color 0.3s, box-shadow 0.3s',
     } as React.CSSProperties,
 
-    // ---- Tooltip (shown during drag) ----
     tooltip: {
       position: 'absolute',
-      bottom: 16,
+      bottom: 18,
       left: '50%',
       transform: 'translateX(-50%)',
       whiteSpace: 'nowrap',
@@ -355,38 +594,120 @@ function styles(t: Theme): Record<string, React.CSSProperties> {
     precisionBadge: {
       marginLeft: 4,
       fontSize: 9,
-      color: t.accent,
       fontWeight: 600,
-    },
+    } as React.CSSProperties,
 
-    // ---- Date label at node position (when not dragging) ----
-    dateLabel: {
+    nodeLabel: {
       position: 'absolute',
       bottom: -1,
       fontSize: 9,
       fontFamily: "'JetBrains Mono', monospace",
-      color: t.textMuted,
       pointerEvents: 'none',
       whiteSpace: 'nowrap',
       transform: 'translateX(-50%)',
+      transition: 'color 0.3s',
     } as React.CSSProperties,
 
-    // ---- Inline reset button ----
-    resetBtn: {
-      height: 20,
-      width: 20,
+    // ── Past banner ──
+    pastBanner: {
       display: 'flex',
       alignItems: 'center',
-      justifyContent: 'center',
+      gap: 8,
+      padding: '6px 8px',
+      background: t.purpleBg,
+      border: `0.5px solid ${t.purpleBorder}`,
+      borderRadius: 5,
+    } as React.CSSProperties,
+
+    returnBtn: {
+      flexShrink: 0,
+      display: 'inline-flex',
+      alignItems: 'center',
+      padding: '3px 9px',
       background: 'transparent',
+      border: `0.5px solid ${t.purpleBorder}`,
+      borderRadius: 10,
+      fontSize: 10,
+      fontFamily: "'JetBrains Mono', monospace",
+      fontWeight: 600,
+      color: t.purple,
+      cursor: 'pointer',
+      whiteSpace: 'nowrap',
+    } as React.CSSProperties,
+
+    // ── Controls panel ──
+    panel: {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 6,
+      padding: '8px 10px',
+      background: t.bgMuted,
+      border: `0.5px solid ${t.border}`,
+      borderRadius: 5,
+    } as React.CSSProperties,
+
+    panelRow: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 5,
+      flexWrap: 'wrap',
+    } as React.CSSProperties,
+
+    panelLabel: {
+      fontSize: 9,
+      fontFamily: "'JetBrains Mono', monospace",
+      color: t.textMuted,
+      textTransform: 'uppercase',
+      letterSpacing: '0.06em',
+      fontWeight: 600,
+      minWidth: 36,
+      whiteSpace: 'nowrap',
+    } as React.CSSProperties,
+
+    jumpBtn: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      padding: '2px 8px',
+      background: t.bgCard,
       border: `0.5px solid ${t.border}`,
       borderRadius: 4,
-      color: t.textMuted,
-      fontSize: 12,
+      fontSize: 10,
       fontFamily: "'JetBrains Mono', monospace",
+      color: t.textSecondary,
       cursor: 'pointer',
-      flexShrink: 0,
-      padding: 0,
+      whiteSpace: 'nowrap',
+    } as React.CSSProperties,
+
+    speedGroup: {
+      display: 'flex',
+      border: `0.5px solid ${t.border}`,
+      borderRadius: 4,
+      overflow: 'hidden',
+    } as React.CSSProperties,
+
+    speedBtn: {
+      padding: '2px 7px',
+      background: t.bgCard,
+      border: 'none',
+      fontSize: 10,
+      fontFamily: "'JetBrains Mono', monospace",
+      color: t.textMuted,
+      cursor: 'pointer',
+      whiteSpace: 'nowrap',
+      lineHeight: 1.5,
+    } as React.CSSProperties,
+
+    playBtn: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 4,
+      padding: '3px 10px',
+      border: `0.5px solid ${t.accentBorder}`,
+      borderRadius: 4,
+      fontSize: 10,
+      fontFamily: "'JetBrains Mono', monospace",
+      fontWeight: 600,
+      whiteSpace: 'nowrap',
     } as React.CSSProperties,
   };
 }
