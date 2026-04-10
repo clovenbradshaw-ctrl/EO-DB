@@ -233,6 +233,7 @@ export async function discoverPublicSpaces(client: MatrixClient): Promise<SpaceE
       continue; // not peekable or not an EO-DB space
     }
     if (!config?.name || !config?.rooms?.main) continue;
+    if (config.status === 'archived' || config.status === 'deleted') continue;
 
     const spaceTarget = `space_${config.name.toLowerCase().replace(/\s+/g, '_')}`;
 
