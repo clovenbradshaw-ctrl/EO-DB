@@ -88,6 +88,7 @@ async function buildAuthUrl(): Promise<{ url: string; verifier: string }> {
   return { url: `${GOOGLE_AUTH_ENDPOINT}?${params}`, verifier };
 }
 
+
 // ──────────────────────────────────────────────────────────────
 // Token exchange
 // ──────────────────────────────────────────────────────────────
@@ -198,15 +199,17 @@ export async function handleOAuthCallback(): Promise<boolean> {
   const code = params.get('code');
   if (!code) return false;
 
-  const verifier = sessionStorage.getItem(SS_CODE_VERIFIER);
+  // Verifier is stored in localStorage (not sessionStorage) so popup windows
+  // on the same origin can read it — sessionStorage is not shared with popups.
+  const verifier = localStorage.getItem(SS_CODE_VERIFIER);
   if (!verifier) {
-    console.warn('[EO-DB] OAuth callback: no code_verifier in sessionStorage');
+    console.warn('[EO-DB] OAuth callback: no code_verifier in localStorage');
     return false;
   }
 
   try {
     await exchangeCode(code, verifier);
-    sessionStorage.removeItem(SS_CODE_VERIFIER);
+    localStorage.removeItem(SS_CODE_VERIFIER);
 
     // If we are inside a popup, signal the opener and close
     if (window.opener && !window.opener.closed) {
@@ -251,7 +254,7 @@ export async function startOAuthFlow(): Promise<void> {
   if (isConnected()) return;
 
   const { url, verifier } = await buildAuthUrl();
-  sessionStorage.setItem(SS_CODE_VERIFIER, verifier);
+  localStorage.setItem(SS_CODE_VERIFIER, verifier);
 
   // ── Attempt popup ──────────────────────────────────────────
   const popup = window.open(url, 'eo-gdrive-auth', 'width=520,height=640,noopener=0');
