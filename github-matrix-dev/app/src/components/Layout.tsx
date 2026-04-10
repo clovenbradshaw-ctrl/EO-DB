@@ -1577,8 +1577,11 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           // Connect to Google Drive — mode dispatched inside connect()
           const gdriveState = useGDriveStore.getState();
           if (!gdriveState.connected) {
-            await gdriveState.connect(matrixClientRef.current, spaceRoomId ?? '', session.accessToken);
-            console.log('[EO-DB] Google Drive auto-connected via', gdriveState.syncMode, 'mode');
+            if (gdriveState.syncMode === 'n8n') {
+              await gdriveState.connect(matrixClientRef.current, spaceRoomId ?? '', session.accessToken);
+              console.log('[EO-DB] Google Drive auto-connected via n8n proxy');
+            }
+            // oauth mode: never auto-connect — user must trigger from Settings
           }
 
           // Resolve the effective token depending on active sync mode

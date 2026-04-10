@@ -17,7 +17,7 @@
 
 import { create } from 'zustand';
 import type { MatrixClient } from 'matrix-js-sdk';
-import { gdriveList, setSyncMode as setApiSyncMode, type GDriveListEntry } from './gdrive-api';
+import { gdriveList, setSyncMode as setApiSyncMode, EO_STORE_WEBHOOK, type GDriveListEntry } from './gdrive-api';
 import {
   isConnected as oauthIsConnected,
   getAccessToken,
@@ -141,8 +141,17 @@ export const useGDriveStore = create<GDriveStoreState>((set, get) => ({
         const token = matrixAccessToken || matrixClient.getAccessToken() || '';
         if (!token) throw new Error('No Matrix access token available for n8n Drive proxy');
 
-        // Validate by doing a lightweight list call through the proxy
-        await gdriveList(token);
+        // Validate by probing about?fields=user through the proxy (matches Settings test)
+        const probeRes = await fetch(EO_STORE_WEBHOOK, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            matrix_token: token,
+            drive_url: 'https://www.googleapis.com/drive/v3/about?fields=user',
+            drive_method: 'GET',
+          }),
+        });
+        if (!probeRes.ok) throw new Error(`n8n proxy validation failed: ${probeRes.status}`);
 
         set({ connected: true, connecting: false, matrixAccessToken: token });
       } else {
