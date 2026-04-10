@@ -19,6 +19,7 @@ import type { MatrixSession } from '../matrix/client';
 import { AirtableClient } from '../ingestion/airtable-client';
 import {
   discoverSchema,
+  getSyncedTableIds,
   hydrationSync,
   updateSync,
   type HydrationManifest,
@@ -107,6 +108,9 @@ export function AirtableSettingsSection({
   // ── Table selection: { baseId: [tableId, ...] } ──
   const [tableSelections, setTableSelections] = useState<Record<string, string[]>>({});
 
+  // ── Previously-synced tables loaded from IndexedDB cursors ──
+  const [syncedTableIds, setSyncedTableIds] = useState<Record<string, string[]>>({});
+
   // ── Preserve existing toggle (initialized from sync settings) ──
   const [preserveExisting, setPreserveExisting] = useState(syncSettings.preserveExisting);
 
@@ -128,6 +132,12 @@ export function AirtableSettingsSection({
       syncServiceRef.current?.stop();
     };
   }, []);
+
+  // ── Load previously-synced table IDs from IndexedDB cursors ──
+  useEffect(() => {
+    if (!store) return;
+    getSyncedTableIds(store).then(setSyncedTableIds);
+  }, [store]);
 
   // ── Connect via webhook ──
   async function handleConnect() {
@@ -172,6 +182,13 @@ export function AirtableSettingsSection({
   // ── Build customization from current UI state ──
   function buildCustomization(): SyncCustomization {
     const hasSelection = Object.values(tableSelections).some(t => t.length > 0);
+    const hasSyncedIds = Object.keys(syncedTableIds).some(b => (syncedTableIds[b]?.length ?? 0) > 0);
+
+    const selectedTables = hasSelection
+      ? tableSelections
+      : hasSyncedIds
+      ? syncedTableIds
+      : undefined;
 
     const displayFieldsMap: Record<string, string> = {};
     if (manifest) {
@@ -184,7 +201,7 @@ export function AirtableSettingsSection({
     }
 
     return {
-      selectedTables: hasSelection ? tableSelections : undefined,
+      selectedTables,
       preserveExisting,
       recordLimit: recordLimit > 0 ? recordLimit : undefined,
       displayFields: Object.keys(displayFieldsMap).length > 0 ? displayFieldsMap : undefined,
@@ -221,12 +238,21 @@ export function AirtableSettingsSection({
 
       useAirtableStore.getState().setManifest(disc);
 
-      // Default: select all tables
+      // Pre-select previously-synced tables; fall back to all on first-ever discovery
+      const hasSynced = Object.keys(syncedTableIds).some(b => (syncedTableIds[b]?.length ?? 0) > 0);
       const selection: Record<string, string[]> = {};
       for (const base of disc.bases) {
-        selection[base.id] = base.tables.map(t => t.id);
+        if (hasSynced) {
+          const syncedSet = new Set(syncedTableIds[base.id] ?? []);
+          selection[base.id] = base.tables.filter(t => syncedSet.has(t.id)).map(t => t.id);
+        } else {
+          selection[base.id] = base.tables.map(t => t.id);
+        }
       }
       setTableSelections(selection);
+
+      // Refresh the synced index in case cursors were added since mount
+      if (store) getSyncedTableIds(store).then(setSyncedTableIds);
 
       const baseCount = disc.bases.length;
       const tableCount = disc.bases.reduce((t, b) => t + b.tables.length, 0);
