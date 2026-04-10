@@ -66,7 +66,7 @@ import { EO_POWER_LEVEL_CONTENT } from '../permissions/types';
 import { listAllHomeserverUsers } from '../matrix/user-discovery';
 import { withRetry } from '../matrix/connection-resilience';
 import { invalidateStatsCache } from '../db/space-statistics';
-import { clearFolderIdCache } from '../google-drive/gdrive-api';
+import { clearFolderIdCache, setActiveSpaceRoomId } from '../google-drive/gdrive-api';
 import { useApiConnectionStore } from '../store/api-connection-store';
 
 /** Set to false to disable all Matrix activity (sync, room creation, discovery). */
@@ -1640,6 +1640,10 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           // Find the space display name for Drive folder labelling
           const gdriveSpaceEntry = mergedEntriesRef.current.find(e => e.spaceTarget === selectedSpace);
           const gdriveSpaceName = gdriveSpaceEntry?.displayName ?? selectedSpace!;
+
+          // Activate the space room for n8n proxy auth BEFORE setting currentSpace,
+          // so the widget's immediate loadFiles() call includes the correct space_room_id.
+          setActiveSpaceRoomId(spaceRoomId ?? undefined);
 
           // Set current space in GDrive store (pass room ID so folder lookup uses it)
           useGDriveStore.getState().setCurrentSpace(selectedSpace, gdriveSpaceName, spaceRoomId ?? undefined);
