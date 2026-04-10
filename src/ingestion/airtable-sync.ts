@@ -863,13 +863,19 @@ export async function hydrationSync(
             }, opts?.sink);
           } catch { /* idempotency */ }
 
-          // Emit .type DEF with mapped EO-DB column type
+          // Emit .type DEF with mapped EO-DB column type.
+          // For multipleRecordLinks, also store the linked table's EO target so
+          // consumers can resolve the relationship without Airtable API access.
           const eoType = mapAirtableType(field.type);
+          const typeOperand: Record<string, unknown> = { type: eoType };
+          if (field.type === 'multipleRecordLinks' && field.options?.linkedTableId) {
+            typeOperand.linkedTable = tableTarget(base.id, field.options.linkedTableId as string);
+          }
           try {
             await emitEvent(db, feed, {
               op: 'DEF',
               target: `${fieldTarget}.type`,
-              operand: { type: eoType },
+              operand: typeOperand,
               agent,
               ts: new Date().toISOString(),
               acquired_ts: new Date().toISOString(),

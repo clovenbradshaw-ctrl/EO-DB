@@ -2057,16 +2057,25 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
               onSaveOptions={(options) => handleAddConstraint(columnTypeSelector.key, 'enum', { choices: options })}
               onSelect={async (type) => {
                 if (type === 'linkedRecord' || type === 'link' || type === 'relationship') {
-                  // Fetch sibling tables and show a picker before committing
+                  // Fetch sibling tables and show a picker before committing.
+                  // Table-level state entries don't always exist (keyed imports
+                  // only create record-level states like "import.cases.CASE-001").
+                  // Derive unique table scopes from the first two path segments of
+                  // every returned state instead of relying on depth-2 entries.
                   const states = await getStateByPrefix(scopeRoot + '.');
-                  const tables = states
-                    .filter(s => {
-                      const parts = s.target.split('.');
-                      if (parts.length !== 2) return false;
-                      const seg = parts[1];
-                      return !seg.startsWith('_') && seg !== scope.split('.')[1];
+                  const tableScopeSet = new Set<string>();
+                  for (const s of states) {
+                    const parts = s.target.split('.');
+                    if (parts.length >= 2) {
+                      tableScopeSet.add(parts[0] + '.' + parts[1]);
+                    }
+                  }
+                  const tables = [...tableScopeSet]
+                    .filter(tableScope => {
+                      const seg = tableScope.split('.')[1];
+                      return !seg.startsWith('_') && tableScope !== scope;
                     })
-                    .map(s => ({ scope: s.target, name: formatScopeName(s.target) }));
+                    .map(tableScope => ({ scope: tableScope, name: formatScopeName(tableScope) }));
                   setColumnTypeSelector(null);
                   setLinkedRecordPicker({ x: columnTypeSelector.x, y: columnTypeSelector.y, key: columnTypeSelector.key, tables, mode: type as 'linkedRecord' | 'link' | 'relationship' });
                 } else if (type === 'select' || type === 'multiSelect') {
