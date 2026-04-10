@@ -1,6 +1,7 @@
 import { useState, useEffect, type FormEvent } from 'react';
 import { login, normalizeHomeserver, toMatrixUserId, type MatrixSession } from '../matrix/client';
 import { saveOfflineCredentials, verifyOfflineCredentials, listOfflineAccounts } from '../lib/offline-auth';
+import { startOAuthFlow, isConnected as gdriveIsConnected } from '../google-drive/gdrive-oauth';
 import { useTheme, type Theme } from '../theme';
 
 interface LoginProps {
@@ -16,6 +17,10 @@ export function Login({ onLogin, onLocalMode }: LoginProps) {
   const [loading, setLoading] = useState(false);
   const [isOffline, setIsOffline] = useState(!navigator.onLine);
   const [hasOfflineAccounts, setHasOfflineAccounts] = useState(false);
+  // Two-step flow: 'credentials' -> matrix login, 'gdrive' -> ask about Google Drive
+  const [step, setStep] = useState<'credentials' | 'gdrive'>('credentials');
+  const [pendingSession, setPendingSession] = useState<MatrixSession | null>(null);
+  const [gdriveLoading, setGdriveLoading] = useState(false);
   const { theme } = useTheme();
   const s = makeStyles(theme);
 
@@ -45,40 +50,103 @@ export function Login({ onLogin, onLocalMode }: LoginProps) {
     const userId = toMatrixUserId(username, homeserver);
 
     try {
+      let session: MatrixSession | null = null;
+
       if (isOffline) {
-        // Offline-only path
-        const session = await verifyOfflineCredentials(baseUrl, userId, password);
-        if (session) {
-          onLogin(session);
-        } else {
+        session = await verifyOfflineCredentials(baseUrl, userId, password);
+        if (!session) {
           setError('Offline login failed — wrong password or no saved credentials');
+          setLoading(false);
+          return;
         }
       } else {
-        // Online path — try Matrix login, then save offline credentials
         try {
-          const session = await login(homeserver, username, password);
+          session = await login(homeserver, username, password);
           await saveOfflineCredentials(session, password);
-          onLogin(session);
         } catch (err: any) {
-          // If online login fails due to network error, try offline fallback
           if (isNetworkError(err)) {
             setIsOffline(true);
-            const session = await verifyOfflineCredentials(baseUrl, userId, password);
-            if (session) {
-              onLogin(session);
-            } else {
+            session = await verifyOfflineCredentials(baseUrl, userId, password);
+            if (!session) {
               setError('Network unavailable and no offline credentials found');
+              setLoading(false);
+              return;
             }
           } else {
             setError(err.data?.error || err.message || 'Login failed');
+            setLoading(false);
+            return;
           }
         }
+      }
+
+      // Matrix login succeeded — if already connected to GDrive, skip the prompt
+      if (gdriveIsConnected()) {
+        onLogin(session);
+      } else {
+        setPendingSession(session);
+        setStep('gdrive');
       }
     } catch (err: any) {
       setError(err.message || 'Login failed');
     } finally {
       setLoading(false);
     }
+  }
+
+  async function handleConnectGDrive() {
+    if (!pendingSession) return;
+    setGdriveLoading(true);
+    setError('');
+    try {
+      await startOAuthFlow();
+      onLogin(pendingSession);
+    } catch (err: any) {
+      setError(err.message || 'Google Drive sign-in failed');
+      setGdriveLoading(false);
+    }
+  }
+
+  function handleSkipGDrive() {
+    if (pendingSession) onLogin(pendingSession);
+  }
+
+  if (step === 'gdrive') {
+    return (
+      <div style={s.container}>
+        <div style={s.card}>
+          <h1 style={s.title}>EO///DB</h1>
+          <p style={s.subtitle}>Sync with Google Drive?</p>
+          <p style={{ ...s.hint, marginBottom: 24 }}>
+            Connect Google Drive to sync encrypted backups across devices.
+            You can also connect later from Settings.
+          </p>
+          {error && <div style={s.error} role="alert">{error}</div>}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <button
+              type="button"
+              onClick={handleConnectGDrive}
+              disabled={gdriveLoading}
+              style={{
+                ...s.button,
+                ...(gdriveLoading ? { opacity: 0.5, cursor: 'not-allowed' } : {}),
+              }}
+            >
+              {gdriveLoading ? 'Connecting...' : 'Connect Google Drive'}
+            </button>
+            <button
+              type="button"
+              onClick={handleSkipGDrive}
+              disabled={gdriveLoading}
+              style={s.localButton}
+            >
+              Continue without Drive
+            </button>
+          </div>
+          <p style={s.server}>Data stays local until Google Drive is connected</p>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -185,6 +253,12 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       margin: '4px 0 32px',
       fontSize: 14,
       color: t.loginTextDim,
+    },
+    hint: {
+      margin: '4px 0 0',
+      fontSize: 13,
+      color: t.loginTextDim,
+      lineHeight: 1.5,
     },
     form: {
       display: 'flex',
