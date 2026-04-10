@@ -21,11 +21,19 @@ export interface MemoryStore extends EoStore {
    * forwarded to `fn` so the fold worker can persist them to OPFS.
    */
   enablePersistence(fn: (event: EoEvent) => void): void;
+  /**
+   * Return all kv entries as an array for snapshotting.
+   * Used by eo-store to save kv-snapshot.bin to OPFS after init.
+   */
+  getKvEntries(): [string, unknown][];
 }
 
-export function createMemoryStore(): MemoryStore {
-  const kv = new Map<string, unknown>();
-  let currentSeq = 0;
+export function createMemoryStore(opts?: {
+  initialKv?: [string, unknown][];
+  initialSeq?: number;
+}): MemoryStore {
+  const kv = new Map<string, unknown>(opts?.initialKv);
+  let currentSeq = opts?.initialSeq ?? 0;
   let persistFn: ((e: EoEvent) => void) | null = null;
 
   function rangeKeys(prefix: string, opts?: IteratorOpts): string[] {
@@ -81,6 +89,10 @@ export function createMemoryStore(): MemoryStore {
 
     enablePersistence(fn: (event: EoEvent) => void): void {
       persistFn = fn;
+    },
+
+    getKvEntries(): [string, unknown][] {
+      return [...kv.entries()];
     },
   };
 

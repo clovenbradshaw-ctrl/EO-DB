@@ -2266,7 +2266,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           ) : (
             <>
               {showStoreLoading && (
-                <SyncProgress message="Initializing store..." detail="Deriving encryption key" />
+                <SyncProgress message="Initializing store..." detail="Loading local data..." />
               )}
               <HolonNav
                 selectedScope={selectedScope}
