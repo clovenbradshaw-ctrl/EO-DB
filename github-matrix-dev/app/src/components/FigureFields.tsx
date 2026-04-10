@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import type { EoState, EdgeAttrDef, EoEvent } from '../db/types';
 import { reconstructAt } from './RecordTimeline';
 import { useEoStore } from '../store/eo-store';
@@ -36,6 +36,25 @@ export function FigureFields({ figure, onNavigate, profileFields, recordTs, allE
   const { theme } = useTheme();
   const s = makeStyles(theme);
   const value = figure.value;
+
+  // ── Container-query 2-column layout ──────────────────────────────────────
+  // Use a ResizeObserver on our own grid container to decide whether to show
+  // fields as 1 or 2 columns. This works whether the drawer is 360px or 900px,
+  // regardless of window width.
+  const gridRef = useRef<HTMLDivElement>(null);
+  const [twoColumn, setTwoColumn] = useState(false);
+  useEffect(() => {
+    const el = gridRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const w = entry.contentRect.width;
+        setTwoColumn(w >= 560);
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   // Reconstruct field values at the selected timestamp when in time-travel mode
   const historicValue = useMemo<Record<string, unknown>>(() => {
@@ -277,7 +296,14 @@ export function FigureFields({ figure, onNavigate, profileFields, recordTs, allE
   }
 
   return (
-    <div style={s.grid}>
+    <div
+      ref={gridRef}
+      style={{
+        ...s.grid,
+        gridTemplateColumns: twoColumn ? 'repeat(2, minmax(0, 1fr))' : '1fr',
+        columnGap: twoColumn ? 24 : 0,
+      }}
+    >
       {entries.map(([key, val]) => {
         const fts = fieldTypeMap.get(key);
 
@@ -1049,9 +1075,10 @@ function renderFieldValue(
 function makeStyles(t: Theme): Record<string, React.CSSProperties> {
   return {
     grid: {
-      display: 'flex',
-      flexDirection: 'column' as const,
-      gap: 0,
+      display: 'grid',
+      gridTemplateColumns: '1fr',
+      rowGap: 0,
+      columnGap: 0,
     },
     cell: {
       display: 'flex',
@@ -1059,6 +1086,7 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       gap: 16,
       padding: '10px 0',
       borderBottom: `1px solid ${t.border}`,
+      minWidth: 0,
     },
     label: {
       fontSize: 11,

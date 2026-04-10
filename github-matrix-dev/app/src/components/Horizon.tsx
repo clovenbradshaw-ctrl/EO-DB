@@ -265,7 +265,7 @@ export function Horizon({ records, dateColumns, filter, onFilterChange }: Horizo
       {/* ── Top row — always visible ── */}
       <div style={s.topRow}>
 
-        {/* Field pill / selector */}
+        {/* Left cell — field pill / selector */}
         {dateColumns.length > 1 ? (
           <select
             value={filter.dateField}
@@ -280,30 +280,28 @@ export function Horizon({ records, dateColumns, filter, onFilterChange }: Horizo
           <span style={s.fieldPill}>{dateFieldLabel}</span>
         )}
 
-        <div style={{ flex: '1 1 0' }} />
+        {/* Center cell — date label + indicator dot */}
+        <div style={s.topRowCenter}>
+          {range && (
+            <span style={{ ...s.dateDisplay, color: isPast ? theme.purple : theme.textSecondary }}>
+              {isLive ? 'Live' : formatDate(vizPos)}
+            </span>
+          )}
+          <span
+            className={isLive ? 'eo-horizon-live' : undefined}
+            style={{
+              width: 6,
+              height: 6,
+              borderRadius: '50%',
+              flexShrink: 0,
+              background: isLive ? theme.success : theme.purple,
+              boxShadow: isLive ? `0 0 5px ${theme.success}` : `0 0 5px ${theme.purple}`,
+              transition: 'background 0.3s, box-shadow 0.3s',
+            }}
+          />
+        </div>
 
-        {/* Current position label */}
-        {range && (
-          <span style={{ ...s.dateDisplay, color: isPast ? theme.purple : theme.textSecondary }}>
-            {isLive ? 'Live' : formatDate(vizPos)}
-          </span>
-        )}
-
-        {/* Live / past indicator dot */}
-        <span
-          className={isLive ? 'eo-horizon-live' : undefined}
-          style={{
-            width: 6,
-            height: 6,
-            borderRadius: '50%',
-            flexShrink: 0,
-            background: isLive ? theme.success : theme.purple,
-            boxShadow: isLive ? `0 0 5px ${theme.success}` : `0 0 5px ${theme.purple}`,
-            transition: 'background 0.3s, box-shadow 0.3s',
-          }}
-        />
-
-        {/* Expand toggle */}
+        {/* Right cell — expand toggle */}
         <button
           onClick={() => setExpanded((v) => !v)}
           style={{
@@ -466,19 +464,26 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
     container: {
       display: 'flex',
       flexDirection: 'column',
-      background: t.bgCard,
-      borderBottom: `0.5px solid ${t.border}`,
+      background: 'transparent',
       flexShrink: 0,
       userSelect: 'none',
     } as React.CSSProperties,
 
-    // ── Top row ──
+    // ── Top row — 3-column grid: field pill | centered Live/date | History button ──
     topRow: {
-      display: 'flex',
+      display: 'grid',
+      gridTemplateColumns: 'auto 1fr auto',
       alignItems: 'center',
-      gap: 7,
+      columnGap: 10,
       padding: '4px 12px',
       minHeight: 28,
+    } as React.CSSProperties,
+    topRowCenter: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 7,
+      minWidth: 0,
     } as React.CSSProperties,
 
     fieldPill: {

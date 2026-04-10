@@ -5,7 +5,7 @@ import type { FilterRule } from './filter-types';
 // SliceType — the kind of visualization for a saved slice
 // ---------------------------------------------------------------------------
 
-export type SliceType = 'grid' | 'graph' | 'kanban' | 'calendar' | 'gallery' | 'schema';
+export type SliceType = 'grid' | 'graph' | 'kanban' | 'calendar' | 'gallery' | 'schema' | 'record';
 
 export const SLICE_TYPE_META: Record<SliceType, { label: string; icon: string }> = {
   grid: { label: 'Grid', icon: '\u229E' },
@@ -14,6 +14,7 @@ export const SLICE_TYPE_META: Record<SliceType, { label: string; icon: string }>
   calendar: { label: 'Calendar', icon: '\u25F7' },
   gallery: { label: 'Gallery', icon: '\u25A6' },
   schema: { label: 'Schema', icon: '\u2261' },
+  record: { label: 'Record', icon: '\u25C9' },
 };
 
 // ---------------------------------------------------------------------------
@@ -37,6 +38,8 @@ export interface TableSliceConfig {
   kanbanField?: string;
   /** When true, show raw field IDs instead of display names. Defaults to false. */
   showFieldIds?: boolean;
+  /** Target path of the pinned record (only used when sliceType === 'record') */
+  recordTarget?: string;
 }
 
 // ---------------------------------------------------------------------------
