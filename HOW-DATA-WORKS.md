@@ -95,6 +95,26 @@ Each operator builds on the ones before it. When a **DEF** event is processed, f
 
 Every time the fold processes an event, it also updates a **transformation hash** — a cryptographic fingerprint of the complete history of that entity. Think of it like a rolling checksum. Two entities that have gone through the exact same sequence of operations will have identical hashes, making them **structural twins** that can be compared or deduplicated efficiently.
 
+### Reading State: The Horizon
+
+Reading a record in EO-DB isn't just fetching a row — it's assembling a **rich context window** around the target. This is done by a process called the **Horizon**, which builds its response in five layers:
+
+| Layer | Name | What it returns |
+|-------|------|-----------------|
+| 1 | **Figure** | The target's own projected state — its fields, values, and any EVA-computed values. Branch-aware: reads from the branch's projected state, falling back to main if the branch hasn't written this target. |
+| 2 | **Ground** | Values inherited from *ancestor prefixes*. If `firm.cases` has a field set and `firm.cases.rec001` doesn't override it, that ambient value floats up from the ground. |
+| 3 | **Nearby** | Other records in the same collection that share field values or CON connections with this record — structural neighbors, not just alphabetical ones. |
+| 4 | **Governance** | EVA formulas and policies that *govern* this target — either directly, from a parent prefix, or across the same collection. |
+| 5 | **Signals** | Statistical patterns computed across the whole population (e.g., "this record's `amount` is 2.3 standard deviations above the collection average"). Expensive; only computed on request. |
+
+Alongside these five layers, every Horizon response also surfaces:
+- **Hash cohort** — other records that are structural twins of this one (same transformation hash)
+- **Graph metrics** — this record's role in the CON graph (isolated, leaf, bridge, or hub) and its degree
+- **REC cycle info** — whether this record participates in a dependency cycle, and whether the last REC iteration converged
+- **Crystallized-in** — which crystallized entities (see Part 7) this record is a constituent of
+
+Think of it this way: in a traditional database you ask "what is this record?" and get back a row. The Horizon answers "what is this record, what context surrounds it, what rules govern it, and how does it fit in the population?" — all in a single read.
+
 ---
 
 ## Part 4: Where the Data Lives Physically
@@ -130,9 +150,74 @@ Think of it like a **choose-your-own-adventure book**, except all paths are reco
 
 This is very different from a traditional database where there's only ever one version of the truth, and concurrent edits either serialize (one waits for the other) or overwrite each other with no trace.
 
+### How Branches Inherit State
+
+Branches don't start empty — they **inherit everything from their parent**. When you read a value on a branch, the system follows a fallback chain:
+
+1. Check the branch's own projected state for this target.
+2. If not found, check the parent branch.
+3. Continue up the chain until reaching main.
+
+This means a freshly-created branch looks identical to its parent. Only the targets you've explicitly written diverge.
+
+### Fork Markers
+
+Creating a branch writes two events to the parent log: a **SEG** event marking the fork point, followed by a **NUL** attestation whose sequence number becomes the `forkSeq`. Events with a seq greater than `forkSeq` belong to the child branch; everything at or before it is shared history.
+
+### Scope-Aware Branches
+
+A branch can be **scoped to a table prefix** — for example, a "Bob's review" branch scoped to `firm.cases`. When reading from a scoped branch:
+
+- Targets *inside* the scope (`firm.cases.rec001`, `firm.cases.rec001.status`) read from the branch's projected state.
+- Targets *outside* the scope (`firm.config.settings`) bypass the branch entirely and read directly from the parent (or main).
+
+This makes it practical for multiple reviewers to hold simultaneous branches on the same table — an `attorney` branch, a `reviewer` branch, and a `caseworker` branch can all diverge from main independently, each scoped to the same collection, without interfering with each other or with unrelated parts of the database.
+
 ---
 
-## Part 6: Reactive Formulas (EVA)
+## Part 6: Self-Healing — Automatic Data Integrity Recovery
+
+EO-DB includes a built-in **healing instruction set** (classes F1.1 through F3.4) for detecting and recovering from data integrity failures without manual intervention.
+
+Think of it like a **bank reconciliation process** that runs automatically whenever two ledger books meet: it finds discrepancies, records them explicitly, and applies resolution rules.
+
+### Partition Merge (F2.2)
+
+When two devices diverge — for example, one works offline for a day — and then reconnect, a four-phase merge protocol runs:
+
+1. **Replay** — remote events are appended to the local log, idempotently (duplicate events are detected and skipped via `client_event_id`).
+2. **Collect** — all targets touched by the remote events are gathered.
+3. **Detect** — for each target that had a local value *before* the remote event arrived and now has a *different* value, a conflict is recorded. Both values are preserved as a `ConflictState`; nothing is silently overwritten.
+4. **Resolve** — EVA resolution policies registered on conflicted targets fire automatically. Targets without a policy keep the `ConflictState` as their value until a human or policy resolves it.
+
+### Re-import Guard (F1.1)
+
+Re-importing the same dataset (e.g. re-running an Airtable sync) no longer crashes the fold. Duplicate events are detected by `client_event_id` and skipped. The REC cascade also has a guard to break loops that would otherwise run indefinitely when re-processing already-stable formulas.
+
+### Healing API
+
+`POST /heal/check`, `/heal/report`, and `/heal/resolve` expose the healing instruction set to authorized clients for diagnostic and manual recovery workflows.
+
+---
+
+## Part 7: Crystallization — Emergent Structure
+
+Over time, EO-DB can notice when multiple records have converged on the same structural shape — the same transformation hash, meaning they've gone through identical sequences of operations. When a stable **cohort** of structural twins is detected, the system can automatically create a **crystallized entity** to represent the group.
+
+Think of it like a **librarian** who notices that dozens of books have been catalogued in exactly the same way and automatically creates a new genre category to describe them all — without anyone writing a schema migration.
+
+### How It Works
+
+1. The fold maintains a **hash-cohort index** (`state.ts`): every time a target's hash is updated, it's grouped with other records sharing that hash.
+2. The crystallize engine (`src/db/crystallize.ts`) monitors for stable cohorts of two or more records (INS2+) that share the same hash.
+3. When a cohort is stable, the engine emits a new entity — a regular EO-DB record with a `derived:` registration — whose state holds the cohort's shared traits and a list of constituent targets.
+4. Every Horizon response includes a `crystallizedIn` field listing which crystallized entities the record belongs to, along with the shared traits and cohort size.
+
+Crystallized entities are first-class citizens: they have their own targets, can accumulate events, and can themselves be connected via CON edges to other parts of the graph. They are not views — they are records.
+
+---
+
+## Part 8: Reactive Formulas (EVA)
 
 One of the most distinctive features is **EVA** — a way to register *formulas* that automatically recompute when their dependencies change.
 
@@ -145,7 +230,7 @@ Unlike a spreadsheet (which only recalculates when you open it), EO-DB's EVA for
 
 ---
 
-## Part 7: Decentralization and Offline-First
+## Part 9: Decentralization and Offline-First
 
 Traditional databases live on a server. You connect to the server to read or write data. If the server is down, you're stuck.
 
@@ -165,9 +250,17 @@ This means:
 - **End-to-end encrypted** — data is encrypted before it leaves your device; even the sync server can't read it.
 - **Every device is an equal peer** — there's no "master" copy.
 
+### Background Imports
+
+When pulling in data from external sources (Airtable, CSV files), EO-DB generates the same stream of INS + DEF + CON events — but the import process now runs **asynchronously in the background** rather than blocking the caller. Each import is tracked as a named job with a persistent progress record, so:
+
+- Large imports don't time out or block the UI.
+- If an import is interrupted, it **resumes from where it stopped** on the next run.
+- The CSV parser runs at roughly **10x** the speed of the previous synchronous implementation.
+
 ---
 
-## Part 8: Why This Is Different from a Traditional Database
+## Part 10: Why This Is Different from a Traditional Database
 
 Here's the big-picture comparison:
 
@@ -185,6 +278,8 @@ Here's the big-picture comparison:
 | **Decentralization** | Centralized server | Every device holds the complete database |
 | **Schema** | Rigid (columns, types) | Flexible dot-path targets |
 | **Query language** | SQL | Operators + path traversal |
+| **Data integrity** | Manual reconciliation | Automatic self-healing (F1.1–F3.4) |
+| **Emergent structure** | Manual schema migration | Auto-detected via crystallization |
 
 The deepest philosophical difference is this:
 
@@ -202,8 +297,11 @@ This inversion changes everything. It makes EO-DB slower to write (you must stor
 2. **Current state is computed** by "folding" (accumulating) the event log, like totaling a receipt.
 3. **Nine operators** define what a fold does with each type of event (create, connect, define, evaluate, etc.).
 4. **Physical storage** is split: the log (truth) + projected state (fast-lookup cache), both encrypted.
-5. **Branches** allow multiple diverging timelines that can be merged with explicit conflict handling.
-6. **EVA formulas** make derived values reactive — they recompute automatically when dependencies change.
-7. **The whole database runs in your browser** — offline-first, end-to-end encrypted, server-optional.
+5. **Branches** allow multiple diverging timelines that can be merged with explicit conflict handling. Branches are scope-aware and inherit parent state via a fallback chain.
+6. **Self-healing** runs automatically when devices reconnect — a four-phase partition-merge protocol detects conflicts, records them explicitly, and fires EVA resolution policies.
+7. **Crystallization** auto-detects when records converge on the same structural shape and creates derived entities to represent those cohorts — no schema migration required.
+8. **EVA formulas** make derived values reactive — they recompute automatically when dependencies change.
+9. **Horizon reads are multi-layered** — each lookup returns the target's own state (Figure) plus ambient context (Ground), structurally similar records (Nearby), governing policies (Governance), and optional population-level statistics (Signals).
+10. **The whole database runs in your browser** — offline-first, end-to-end encrypted, server-optional. Imports from external sources run asynchronously in the background and are resumable.
 
 The result is a system that behaves less like a database and more like a **distributed, encrypted, reactive ledger** — one where the complete history is the data, and the "database" is just a convenient view computed from that history.
