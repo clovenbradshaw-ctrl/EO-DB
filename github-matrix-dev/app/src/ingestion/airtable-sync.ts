@@ -510,8 +510,15 @@ async function syncTable(
   const tableState = await getState(store, tableTarget(baseId, tableId));
   const displayField: string | undefined = tableState?.value?._displayField;
 
-  const filterByFormula = cursorSince
-    ? `LAST_MODIFIED_TIME()>='${cursorSince}'`
+  // Subtract a 60-second overlap window from the cursor to catch records
+  // modified during clock skew or at the tail of the previous sync.
+  // Idempotency deduplicates any re-fetched records from the overlap.
+  // Use IS_AFTER() — the correct Airtable datetime comparison function.
+  const filterCursor = cursorSince
+    ? new Date(new Date(cursorSince).getTime() - 60_000).toISOString()
+    : undefined;
+  const filterByFormula = filterCursor
+    ? `IS_AFTER(LAST_MODIFIED_TIME(), '${filterCursor}')`
     : undefined;
 
   const useFieldIds = fieldMeta.size > 0;
