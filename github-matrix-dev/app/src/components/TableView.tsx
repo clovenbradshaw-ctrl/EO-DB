@@ -271,8 +271,7 @@ function renderCell(value: any, key: string, onNavigate: (t: string) => void, t:
 
   // Computed/EVA fields with no ingested value
   if ((value === undefined || value === '') && (
-    colType === 'formula' || colType === 'rollup' || colType === 'lookup' || colType === 'count' ||
-    colType === 'lastModifiedTime' || colType === 'lastModifiedBy'
+    colType === 'formula' || colType === 'rollup' || colType === 'lookup' || colType === 'count'
   )) {
     return <span style={{ color: t.textMuted, fontStyle: 'italic', fontSize: 11 }}>(computed)</span>;
   }
@@ -333,6 +332,14 @@ function renderCell(value: any, key: string, onNavigate: (t: string) => void, t:
     try {
       return <span>{new Date(value).toLocaleString()}</span>;
     } catch { /* fall through */ }
+  }
+  if ((colType === 'lastModifiedBy' || colType === 'createdBy' || colType === 'collaborator') && typeof value === 'object' && value !== null) {
+    const display = (value as any).name || (value as any).id || '?';
+    return <span>{display}</span>;
+  }
+  if (colType === 'collaborators' && Array.isArray(value)) {
+    const names = (value as any[]).map((c) => c?.name || c?.id || '?');
+    return <span>{names.join(', ')}</span>;
   }
   if (colType === 'attachment' && Array.isArray(value)) {
     return <span style={{ color: t.textMuted }}>{value.length} file{value.length !== 1 ? 's' : ''}</span>;

@@ -29,6 +29,25 @@ export function extractValue(rawValue: unknown, fieldType: string): unknown {
       // Keep as-is — id, name, color are all user-authored config
       return rawValue;
 
+    case 'lastModifiedBy':
+    case 'createdBy':
+    case 'collaborator':
+      if (typeof rawValue === 'object' && rawValue !== null) {
+        const c = rawValue as Record<string, unknown>;
+        return { id: c.id, name: c.name };
+      }
+      return rawValue;
+
+    case 'collaborators':
+      if (Array.isArray(rawValue)) {
+        return rawValue.map((c) =>
+          typeof c === 'object' && c !== null
+            ? { id: (c as Record<string, unknown>).id, name: (c as Record<string, unknown>).name }
+            : c,
+        );
+      }
+      return rawValue;
+
     case 'multipleRecordLinks':
       // Store linked record IDs only (name is Horizon)
       return Array.isArray(rawValue)

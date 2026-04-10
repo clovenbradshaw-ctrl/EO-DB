@@ -13,6 +13,25 @@ export function extractValue(rawValue: unknown, fieldType: string): unknown {
     case 'multipleSelects':
       return rawValue;
 
+    case 'lastModifiedBy':
+    case 'createdBy':
+    case 'collaborator':
+      if (typeof rawValue === 'object' && rawValue !== null) {
+        const c = rawValue as Record<string, unknown>;
+        return { id: c.id, name: c.name };
+      }
+      return rawValue;
+
+    case 'collaborators':
+      if (Array.isArray(rawValue)) {
+        return rawValue.map((c) =>
+          typeof c === 'object' && c !== null
+            ? { id: (c as Record<string, unknown>).id, name: (c as Record<string, unknown>).name }
+            : c,
+        );
+      }
+      return rawValue;
+
     case 'multipleRecordLinks':
       return Array.isArray(rawValue)
         ? rawValue.map((r) =>
