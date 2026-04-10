@@ -485,6 +485,10 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   const [publicSpaceEntries, setPublicSpaceEntries] = useState<SpaceEntry[]>([]);
   const [cachedSpaceMetas, setCachedSpaceMetas] = useState<Map<string, import('../db/space-meta').SpaceMeta>>(new Map());
   const [allStates, setAllStates] = useState<EoState[]>([]);
+  // Ref so the per-space store init effect can always read the latest mergedEntries
+  // without appearing in the dep array (prevents spurious re-inits when
+  // onSpaceConfigChange fires and updates spaceEntries on every background sync).
+  const mergedEntriesRef = useRef<SpaceEntry[]>([]);
   const prevAllStatesKeyRef = useRef<string>('');
   const allStatesFetchGenRef = useRef(0);
   const [timeScrubberFilter, setTimeScrubberFilter] = useState<TimeScrubberFilter>(DEFAULT_FILTER);
@@ -1147,6 +1151,9 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       };
     });
   }, [spaceEntries, spaces, cachedSpaceMetas]);
+  // Keep the ref in sync every render so the per-space effect always reads
+  // the latest entries without re-running due to mergedEntries changes.
+  mergedEntriesRef.current = mergedEntries;
 
   // Filter out soft-deleted spaces from the browser entries
   const activeEntries = useMemo(() => mergedEntries.filter((e) => !isSpaceDeleted(e.spaceTarget) && !isSpaceArchived(e.spaceTarget)), [mergedEntries, spaces, spaceEntries]);
@@ -1241,7 +1248,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       }
 
       // 1. Try the space's own mainRoomId from discovery
-      const spaceEntry = mergedEntries.find((e) => e.spaceTarget === selectedSpace);
+      const spaceEntry = mergedEntriesRef.current.find((e) => e.spaceTarget === selectedSpace);
       if (spaceEntry?.mainRoomId) {
         // Also run the direct scan to populate the full room topology for Settings.
         if (matrixClientRef.current) {
@@ -1629,7 +1636,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           if (!effectiveToken) throw new Error('Google Drive token unavailable after connect');
 
           // Find the space display name for Drive folder labelling
-          const gdriveSpaceEntry = mergedEntries.find(e => e.spaceTarget === selectedSpace);
+          const gdriveSpaceEntry = mergedEntriesRef.current.find(e => e.spaceTarget === selectedSpace);
           const gdriveSpaceName = gdriveSpaceEntry?.displayName ?? selectedSpace!;
 
           // Set current space in GDrive store (pass room ID so folder lookup uses it)
@@ -1695,7 +1702,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       // Persist space metadata to root IndexedDB so the app can reconnect
       // to Google Drive without needing Matrix for space discovery.
       {
-        const spaceEntry = mergedEntries.find(e => e.spaceTarget === selectedSpace);
+        const spaceEntry = mergedEntriesRef.current.find(e => e.spaceTarget === selectedSpace);
         persistSpaceMeta({
           spaceId: selectedSpace!,
           spaceName: spaceEntry?.displayName || selectedSpace!,
@@ -1719,8 +1726,11 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     };
     // Note: spaceRoomId/spaceRooms are intentionally NOT in the dep array —
     // they are outputs of this effect, not inputs.
+    // mergedEntries is intentionally NOT in the dep array — it is read via
+    // mergedEntriesRef (always current) to avoid re-running the full store init
+    // every time onSpaceConfigChange fires during background Matrix sync.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedSpace, session, init, matrixReady, mergedEntries]);
+  }, [selectedSpace, session, init, matrixReady]);
 
   async function handleLogout() {
     // Save snapshots for ALL cached spaces before clearing state
