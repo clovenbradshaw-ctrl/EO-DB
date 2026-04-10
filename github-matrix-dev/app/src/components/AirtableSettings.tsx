@@ -548,8 +548,8 @@ export function AirtableSettingsSection({
                   </label>
                   <span style={s.preserveHint}>
                     {preserveExisting
-                      ? 'New records and empty fields are filled; existing values are never overwritten'
-                      : 'Airtable values will overwrite EO-DB values on every sync'}
+                      ? 'Airtable only fills new records and empty fields; existing EO-DB values are kept'
+                      : 'Airtable values overwrite EO-DB values on every sync'}
                   </span>
                 </div>
 
