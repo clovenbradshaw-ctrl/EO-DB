@@ -2204,14 +2204,18 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       {/* View-only banner for Viewer role */}
       {selectedSpace && isViewer && <ViewOnlyBanner />}
 
-      {/* Horizon — full width, under header */}
+      {/* Horizon — center 1/3, under header */}
       {activeView === 'records' && (
-        <Horizon
-          records={scopedRecords}
-          dateColumns={dateColumns}
-          filter={timeScrubberFilter}
-          onFilterChange={setTimeScrubberFilter}
-        />
+        <div style={{ display: 'flex', justifyContent: 'center' }}>
+          <div style={{ width: '33.333%' }}>
+            <Horizon
+              records={scopedRecords}
+              dateColumns={dateColumns}
+              filter={timeScrubberFilter}
+              onFilterChange={setTimeScrubberFilter}
+            />
+          </div>
+        </div>
       )}
 
       {/* Headline metrics — type-scoped, under Horizon */}
