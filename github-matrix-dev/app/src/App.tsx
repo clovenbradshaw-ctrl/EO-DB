@@ -82,6 +82,14 @@ function AppMain() {
     localStorage.removeItem('eo-local-mode');
   }
 
+  // When this window is the OAuth popup callback, show a minimal message
+  // while handleOAuthCallback() exchanges the code and closes the window.
+  // This prevents the full app from rendering (and confusing the user).
+  const _cbParams = new URLSearchParams(window.location.search);
+  if (_cbParams.get('state') === 'popup' && _cbParams.has('code')) {
+    return <div style={{ padding: 40, textAlign: 'center', color: theme.textSecondary }}>Completing Google sign-in…</div>;
+  }
+
   if (loading) {
     return <div style={{ padding: 40, textAlign: 'center', color: theme.textSecondary }}>Loading...</div>;
   }
