@@ -15,6 +15,7 @@ import { Grounds } from './Grounds';
 import { Nearby } from './Nearby';
 import { Noticed } from './Noticed';
 import { Governance } from './Governance';
+import { FormulaEditorModal } from './FormulaEditorModal';
 import { Signals } from './Signals';
 import { HashCohort } from './HashCohort';
 import { RecCycleMap } from './RecCycleMap';
@@ -74,6 +75,7 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
   const [recCycleLoading, setRecCycleLoading] = useState(false);
   const [recCycleError, setRecCycleError] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [editingFormula, setEditingFormula] = useState<GovernanceEntry | null>(null);
 
   // Per-record time travel
   const [recordTs, setRecordTs] = useState<number | null>(null);
@@ -436,7 +438,10 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
         {/* Governance chips — inline under fields when available */}
         {(initialGovernance ?? governance) && (initialGovernance ?? governance)!.length > 0 && (
           <div style={{ marginTop: 12 }}>
-            <Governance entries={(initialGovernance ?? governance)!} />
+            <Governance
+              entries={(initialGovernance ?? governance)!}
+              onEdit={(entry) => setEditingFormula(entry)}
+            />
           </div>
         )}
       </Section>
@@ -603,8 +608,49 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
           onClose={() => setDesignerOpen(false)}
         />
       </Modal>
+
+      {/* Formula editor modal */}
+      {editingFormula && (
+        <FormulaEditorModal
+          open={true}
+          onClose={() => setEditingFormula(null)}
+          formula={extractFormulaString(editingFormula.formula)}
+          target={editingFormula.target}
+          onSave={async (newFormula) => {
+            await dispatch({
+              op: 'EVA',
+              target: editingFormula.target,
+              operand: { strategy: 'formula', formula: newFormula },
+              agent: 'user',
+              ts: new Date().toISOString(),
+              acquired_ts: new Date().toISOString(),
+            });
+            setEditingFormula(null);
+            // Re-fetch governance so the updated formula is reflected
+            try {
+              const result = await horizon(target, { governance: true });
+              if (result && !Array.isArray(result)) {
+                setGovernance(result.governance ?? []);
+              }
+            } catch {
+              // non-critical: governance will refresh on next view
+            }
+          }}
+        />
+      )}
     </div>
   );
+}
+
+function extractFormulaString(formula: unknown): string {
+  if (typeof formula === 'string') return formula;
+  if (formula && typeof formula === 'object') {
+    const f = formula as Record<string, unknown>;
+    if (typeof f.formula === 'string') return f.formula;
+    if (typeof f.expr === 'string') return f.expr;
+    return JSON.stringify(formula);
+  }
+  return '';
 }
 
 function Section({ title, subtitle, color, children }: {
