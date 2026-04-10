@@ -3,6 +3,7 @@ import { useEoStore } from '../store/eo-store';
 import { useTheme, type Theme } from '../theme';
 import type { ExternalOperator, EoState } from '../db/types';
 import type { ResolvedPermissions } from '../permissions/types';
+import { FormulaEditorModal } from './FormulaEditorModal';
 
 const OPERATORS: ExternalOperator[] = ['INS', 'DEF', 'CON', 'SEG', 'SYN', 'EVA', 'NUL'];
 
@@ -90,6 +91,7 @@ export function ComposeView({ permissions }: { permissions?: ResolvedPermissions
   // EVA
   const [evaStrategy, setEvaStrategy] = useState('latest');
   const [evaFormula, setEvaFormula] = useState('');
+  const [formulaEditorOpen, setFormulaEditorOpen] = useState(false);
 
   // NUL
   const [nulLabel, setNulLabel] = useState('');
@@ -541,11 +543,31 @@ export function ComposeView({ permissions }: { permissions?: ResolvedPermissions
               {evaStrategy === 'formula' && (
                 <>
                   <div style={{ ...s.subLabel, marginTop: 8 }}>Formula</div>
-                  <input style={s.input} value={evaFormula} onChange={(e) => setEvaFormula(e.target.value)} placeholder="e.g. SUM(field1, field2)" />
+                  <div style={s.formulaPreviewRow}>
+                    <div style={s.formulaPreview}>
+                      {evaFormula
+                        ? evaFormula.length > 72
+                          ? evaFormula.slice(0, 72) + '…'
+                          : evaFormula
+                        : <span style={{ color: s.formulaPlaceholder.color }}>No formula set</span>
+                      }
+                    </div>
+                    <button style={s.editFormulaBtn} onClick={() => setFormulaEditorOpen(true)}>
+                      Edit Formula
+                    </button>
+                  </div>
                 </>
               )}
             </div>
           )}
+
+          <FormulaEditorModal
+            open={formulaEditorOpen}
+            onClose={() => setFormulaEditorOpen(false)}
+            formula={evaFormula}
+            onSave={(f) => { setEvaFormula(f); setFormulaEditorOpen(false); }}
+            target={targetPath || undefined}
+          />
 
           {/* NUL */}
           {op === 'NUL' && (
@@ -705,6 +727,41 @@ function styles(t: Theme): Record<string, React.CSSProperties> {
       fontSize: 11,
       outline: 'none',
       boxSizing: 'border-box' as const,
+    },
+
+    // Formula preview row
+    formulaPreviewRow: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+    },
+    formulaPreview: {
+      flex: 1,
+      padding: '8px 10px',
+      background: t.bgMuted,
+      border: `1px solid ${t.border}`,
+      borderRadius: 4,
+      fontFamily: "'JetBrains Mono', monospace",
+      fontSize: 11,
+      color: t.text,
+      overflow: 'hidden',
+      whiteSpace: 'nowrap' as const,
+      textOverflow: 'ellipsis',
+    },
+    formulaPlaceholder: {
+      color: t.textMuted,
+    },
+    editFormulaBtn: {
+      padding: '7px 12px',
+      background: t.accentBg,
+      border: `1px solid ${t.accentBorder}`,
+      borderRadius: 4,
+      color: t.accent,
+      fontFamily: "'JetBrains Mono', monospace",
+      fontSize: 10,
+      cursor: 'pointer',
+      whiteSpace: 'nowrap' as const,
+      flexShrink: 0,
     },
     select: {
       padding: '8px 10px',

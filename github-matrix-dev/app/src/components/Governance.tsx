@@ -9,9 +9,10 @@ const SCOPE_ICONS: Record<string, string> = {
 
 interface GovernanceProps {
   entries: GovernanceEntry[];
+  onEdit?: (entry: GovernanceEntry) => void;
 }
 
-export function Governance({ entries }: GovernanceProps) {
+export function Governance({ entries, onEdit }: GovernanceProps) {
   const { theme } = useTheme();
   const s = makeStyles(theme);
 
@@ -21,10 +22,17 @@ export function Governance({ entries }: GovernanceProps) {
         <div key={i} style={s.rule}>
           <div style={s.icon}>{SCOPE_ICONS[r.scope] || '\u22a8'}</div>
           <div style={s.text}>
-            <div style={s.desc}>
-              {r.formula
-                ? `Formula: ${typeof r.formula === 'string' ? r.formula : JSON.stringify(r.formula)}`
-                : `Strategy: ${r.strategy || 'default'}`}
+            <div style={s.descRow}>
+              <span style={s.desc}>
+                {r.formula
+                  ? `Formula: ${typeof r.formula === 'string' ? r.formula : JSON.stringify(r.formula)}`
+                  : `Strategy: ${r.strategy || 'default'}`}
+              </span>
+              {r.formula && onEdit && (
+                <button style={s.editBtn} onClick={() => onEdit(r)} title="Edit formula">
+                  ✎ Edit
+                </button>
+              )}
             </div>
             <div style={s.scope}>
               {r.scope} scope · {r.target} · {r.mode || 'fold'}
@@ -61,7 +69,24 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       marginTop: 2,
     },
     text: { flex: 1 },
+    descRow: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: 8,
+    },
     desc: { fontSize: 12, color: t.text, fontWeight: 400 },
+    editBtn: {
+      padding: '2px 8px',
+      background: 'transparent',
+      border: `1px solid ${t.goldBorder}`,
+      borderRadius: 4,
+      color: t.gold,
+      fontFamily: "'JetBrains Mono', monospace",
+      fontSize: 9,
+      cursor: 'pointer',
+      flexShrink: 0,
+    },
     scope: {
       fontFamily: "'JetBrains Mono', monospace",
       fontSize: 9,
