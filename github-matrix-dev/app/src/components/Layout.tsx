@@ -2061,6 +2061,25 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   const sliceSigs = sliceStore.sigs;
   const savedSlices = sliceStore.savedSlices;
   const openScopes = sliceStore.openScopes;
+
+  // Apply the active persona's default slice for a scope when the scope is
+  // opened and no slice is currently active. Respects user overrides within
+  // a session — if the user has already picked a different slice, we leave
+  // it alone. Runs when scope or persona changes.
+  useEffect(() => {
+    if (!selectedScope || !activeTypeDef?.default_slices) return;
+    const defaultSliceId = activeTypeDef.default_slices[selectedScope];
+    if (!defaultSliceId) return;
+    const slice = savedSlices[defaultSliceId];
+    if (!slice || slice.scope !== selectedScope) return;
+    // Only apply if no slice is already active for this scope (respect user choice).
+    const sig = sliceSigs[selectedScope];
+    if (sig?.activeSliceId) return;
+    sliceStore.activateSlice(selectedScope, slice);
+    // We deliberately do NOT list sliceSigs in deps — that would re-apply
+    // after every SIG mutation, overwriting the user's manual slice picks.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedScope, activeUserType, activeTypeDef, savedSlices]);
   const activeSliceType: SliceType = useMemo(() => {
     if (!selectedScope) return 'grid';
     const sig = sliceSigs[selectedScope];

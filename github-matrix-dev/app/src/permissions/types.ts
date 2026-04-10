@@ -224,6 +224,16 @@ export interface UserTypeDefinition {
    * See PersonaHome for the shape.
    */
   home?: PersonaHome;
+  /**
+   * Optional per-scope default slice map. When this persona is active and
+   * a table is opened, if an entry exists for that scope AND the slice
+   * exists and is visible, it is activated automatically.
+   *
+   * Keys are full-path scopes (e.g., "tblCases"); values are slice IDs.
+   * A persona default never overrides an already-active non-default slice
+   * within the same session — it only applies when the SIG is fresh.
+   */
+  default_slices?: Record<string, string>;
 }
 
 /** A single headline metric card displayed above the table. */

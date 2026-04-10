@@ -5,11 +5,12 @@
  * Only visible to admin+ users.
  */
 
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { useTheme, type Theme } from '../theme';
 import type { AccessRole, UserTypeDefinition, HeadlineMetric, PersonaHome } from '../permissions/types';
 import { ROLE_LABELS, ROLE_DESCRIPTIONS } from '../permissions/types';
 import { UserTypeBadge } from './UserTypeBadge';
+import { useSliceStore } from '../store/slice-store';
 
 interface UserTypeManagerProps {
   typeDefinitions: UserTypeDefinition[];
@@ -81,6 +82,19 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
   const [editMetrics, setEditMetrics] = useState<HeadlineMetric[]>([]);
   const [editingViewsId, setEditingViewsId] = useState<string | null>(null);
   const [editingHomeId, setEditingHomeId] = useState<string | null>(null);
+  const [editingSlicesId, setEditingSlicesId] = useState<string | null>(null);
+
+  // Read saved slices for the default-slice editor. Group by scope.
+  const savedSlices = useSliceStore((s) => s.savedSlices);
+  const slicesByScope = useMemo(() => {
+    const map: Record<string, Array<{ id: string; name: string }>> = {};
+    for (const slice of Object.values(savedSlices)) {
+      if (!slice.scope) continue;
+      if (!map[slice.scope]) map[slice.scope] = [];
+      map[slice.scope].push({ id: slice.id, name: slice.name });
+    }
+    return map;
+  }, [savedSlices]);
 
   if (!canManage && typeDefinitions.length === 0) return null;
 
@@ -151,6 +165,24 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
         }
         return { ...t, visible_views: next };
       }
+    }));
+  }
+
+  function handleUpdateDefaultSlice(typeId: string, scope: string, sliceId: string | null) {
+    onUpdate(typeDefinitions.map(t => {
+      if (t.id !== typeId) return t;
+      const current = { ...(t.default_slices ?? {}) };
+      if (sliceId === null) {
+        delete current[scope];
+      } else {
+        current[scope] = sliceId;
+      }
+      if (Object.keys(current).length === 0) {
+        const { default_slices: _ds, ...rest } = t;
+        void _ds;
+        return rest;
+      }
+      return { ...t, default_slices: current };
     }));
   }
 
@@ -278,6 +310,20 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
                     home: {def.home.view}
                   </span>
                 )}
+                {def.default_slices && Object.keys(def.default_slices).length > 0 && (
+                  <span
+                    title={`Default slices: ${Object.entries(def.default_slices)
+                      .map(([scope, sliceId]) => `${scope} \u2192 ${savedSlices[sliceId]?.name ?? sliceId}`)
+                      .join(', ')}`}
+                    style={{
+                      fontFamily: mono, fontSize: 9, color: def.color || theme.textSecondary,
+                      background: def.color ? `${def.color}14` : theme.bgMuted,
+                      padding: '1px 5px', borderRadius: 4,
+                    }}
+                  >
+                    {Object.keys(def.default_slices).length} default slice{Object.keys(def.default_slices).length !== 1 ? 's' : ''}
+                  </span>
+                )}
               </div>
               {canManage && (
                 <div style={{ display: 'flex', gap: 4 }}>
@@ -347,6 +393,25 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
                     }}
                   >
                     home
+                  </button>
+                  <button
+                    onClick={() => setEditingSlicesId(editingSlicesId === def.id ? null : def.id)}
+                    title="Configure default slices per scope"
+                    style={{
+                      fontFamily: mono, fontSize: 9,
+                      color: editingSlicesId === def.id ? '#fff' : (def.color || theme.textSecondary),
+                      background: editingSlicesId === def.id ? (def.color || theme.accent) : 'none',
+                      border: 'none', cursor: 'pointer',
+                      padding: '2px 6px', borderRadius: 4,
+                    }}
+                    onMouseEnter={(e) => {
+                      if (editingSlicesId !== def.id) e.currentTarget.style.background = theme.bgMuted;
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.background = editingSlicesId === def.id ? (def.color || theme.accent) : 'none';
+                    }}
+                  >
+                    slices
                   </button>
                   <button
                     onClick={() => handleDelete(def.id)}
@@ -491,6 +556,58 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
                         : 'No home set — falls back to Records'}
                     </span>
                   </div>
+                </div>
+              )}
+              {/* Default slices panel — inline, expands when "slices" button is clicked */}
+              {canManage && editingSlicesId === def.id && (
+                <div style={{
+                  padding: '10px 0 10px 8px',
+                  background: theme.bgMuted,
+                  borderRadius: 6,
+                  marginBottom: 6,
+                }}>
+                  <div style={{ fontFamily: mono, fontSize: 10, fontWeight: 600, color: theme.textSecondary, marginBottom: 8 }}>
+                    Default slices for "{def.label}"
+                    <span style={{ fontWeight: 400, color: theme.textMuted, marginLeft: 6 }}>
+                      (applied when opening a scope with no active slice)
+                    </span>
+                  </div>
+                  {Object.keys(slicesByScope).length === 0 ? (
+                    <div style={{ fontFamily: mono, fontSize: 9, color: theme.textMuted }}>
+                      No saved slices yet. Create a slice in a table to map it to this persona.
+                    </div>
+                  ) : (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                      {Object.entries(slicesByScope).map(([scope, options]) => {
+                        const current = def.default_slices?.[scope] ?? '';
+                        return (
+                          <label key={scope} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                            <span style={{
+                              fontFamily: mono, fontSize: 9, color: theme.textMuted,
+                              minWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis' as const, whiteSpace: 'nowrap' as const,
+                            }}>
+                              {scope}
+                            </span>
+                            <select
+                              value={current}
+                              onChange={(e) => handleUpdateDefaultSlice(def.id, scope, e.target.value || null)}
+                              style={{
+                                flex: 1, fontFamily: mono, fontSize: 10,
+                                padding: '3px 6px', background: theme.bgCard,
+                                border: `1px solid ${theme.border}`, borderRadius: 4,
+                                color: theme.text,
+                              }}
+                            >
+                              <option value="">(no default)</option>
+                              {options.map((opt) => (
+                                <option key={opt.id} value={opt.id}>{opt.name}</option>
+                              ))}
+                            </select>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
