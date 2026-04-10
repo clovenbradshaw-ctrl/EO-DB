@@ -70,9 +70,12 @@ export function GDriveStorageWidget() {
   const s = widgetStyles(theme);
 
   const {
-    connected, googleAccessToken, currentSpaceId,
+    connected, syncMode, googleAccessToken, matrixAccessToken, currentSpaceId,
     spaceDisplayNames, lastSyncAt,
   } = useGDriveStore();
+
+  // Use the active-mode token: Matrix token for n8n proxy, Google token for direct OAuth
+  const effectiveToken = syncMode === 'n8n' ? matrixAccessToken : googleAccessToken;
 
   const store = useEoStore((st) => st.store);
   const workerClient = useEoStore((st) => st.workerClient);
@@ -88,13 +91,13 @@ export function GDriveStorageWidget() {
   const dataType = currentSpaceId ? `eodb-${currentSpaceId}` : null;
 
   const handleDownload = useCallback(async (entry: GDriveListEntry) => {
-    if (!googleAccessToken || !store) return;
+    if (!effectiveToken || !store) return;
     const fileName = `${entry.content_hash.slice(0, 12)}...eodb`;
     setDl({ phase: 'downloading', fileName, eventsApplied: 0, eventsTotal: 0, error: null });
 
     try {
       // 1. Download
-      const result = await gdriveRetrieve(googleAccessToken, entry.content_hash);
+      const result = await gdriveRetrieve(effectiveToken!, entry.content_hash);
       if (!result.ok || !result.envelope) {
         setDl(prev => ({ ...prev, phase: 'error', error: 'Failed to retrieve file from Google Drive' }));
         return;
@@ -141,20 +144,20 @@ export function GDriveStorageWidget() {
     } catch (e: any) {
       setDl(prev => ({ ...prev, phase: 'error', error: e.message || 'Download failed' }));
     }
-  }, [googleAccessToken, store, workerClient, init]);
+  }, [effectiveToken, store, workerClient, init]);
 
   const loadFiles = useCallback(async () => {
-    if (!googleAccessToken || !dataType) return;
+    if (!effectiveToken || !dataType) return;
     setLoading(true);
     try {
-      const result = await gdriveList(googleAccessToken, dataType);
+      const result = await gdriveList(effectiveToken, dataType);
       setEntries(result.entries || []);
     } catch (e: any) {
       console.warn('[EO-DB] Failed to load files from Google Drive:', e);
     } finally {
       setLoading(false);
     }
-  }, [googleAccessToken, dataType]);
+  }, [effectiveToken, dataType]);
 
   useEffect(() => {
     if (connected && dataType) loadFiles();
@@ -170,7 +173,7 @@ export function GDriveStorageWidget() {
       <div style={s.connInfo}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <div style={s.connDot} />
-          <span style={s.connLabel}>Connected via Google OAuth</span>
+          <span style={s.connLabel}>Connected via {syncMode === 'n8n' ? 'n8n Proxy' : 'Google OAuth'}</span>
         </div>
         {lastSync && (
           <span style={s.syncTime}>
