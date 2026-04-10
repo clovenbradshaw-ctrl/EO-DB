@@ -29,7 +29,7 @@ export interface AirtableSyncSettings {
 export const DEFAULT_SYNC_SETTINGS: AirtableSyncSettings = {
   syncIntervalSec: 30,
   syncStrategy: 'lastModified',
-  preserveExisting: true,
+  preserveExisting: false,
   recordLimit: 0,
 };
 
