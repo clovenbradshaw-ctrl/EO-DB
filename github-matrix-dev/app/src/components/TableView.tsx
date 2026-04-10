@@ -1910,7 +1910,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                           } : undefined}
                           onMouseLeave={col.key === '_record' ? (e) => {
                             const icon = (e.currentTarget as HTMLElement).querySelector('[data-open-icon]') as HTMLElement | null;
-                            if (icon) icon.style.opacity = '0.2';
+                            if (icon) icon.style.opacity = '0';
                           } : undefined}
                         >
                           {isEditingThis && col.type === 'select' && (col.selectOptions?.length ?? 0) > 0
@@ -1989,7 +1989,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                           : isRedacted
                             ? <RedactedCell />
                             : col.key === '_record'
-                            ? <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                            ? <span style={{ display: 'flex', alignItems: 'center', gap: 6, width: '100%' }}>
                                 <span style={{
                                   fontFamily: "'JetBrains Mono', monospace", fontSize: 11,
                                   color: theme.accent, cursor: 'pointer',
@@ -2002,12 +2002,13 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                                 <span
                                   data-open-icon=""
                                   style={{
-                                    opacity: 0.2,
+                                    opacity: 0,
                                     fontSize: 9,
                                     color: theme.accent,
                                     transition: 'opacity 0.12s',
                                     userSelect: 'none' as const,
                                     lineHeight: 1,
+                                    marginLeft: 'auto',
                                   }}
                                 >↗</span>
                               </span>
@@ -2022,20 +2023,25 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                             ? <span
                                 style={{
                                   display: 'inline-block',
-                                  background: theme.mode === 'dark' ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.05)',
-                                  borderRadius: 3,
-                                  padding: '2px 6px',
-                                  minWidth: 80,
-                                  minHeight: 20,
+                                  borderBottom: '1px solid transparent',
+                                  paddingBottom: 1,
+                                  minWidth: 8,
+                                  minHeight: 14,
                                   cursor: 'text',
+                                  transition: 'border-bottom-color 0.12s',
                                   boxSizing: 'border-box' as const,
-                                  verticalAlign: 'middle',
                                 }}
                                 title="Double-click to edit · right-click for options"
                                 onClick={(e) => e.stopPropagation()}
                                 onDoubleClick={(e) => {
                                   e.stopPropagation();
                                   handleCellDoubleClick(rec, col.key);
+                                }}
+                                onMouseEnter={(e) => {
+                                  (e.currentTarget as HTMLElement).style.borderBottomColor = theme.borderLight;
+                                }}
+                                onMouseLeave={(e) => {
+                                  (e.currentTarget as HTMLElement).style.borderBottomColor = 'transparent';
                                 }}
                               >{renderCell(getFieldValue(rec, col.key, useFieldsSub), col.key, onSelectRecord, theme, idResolver, col.type)}</span>
                             : renderCell(getFieldValue(rec, col.key, useFieldsSub), col.key, onSelectRecord, theme, idResolver, col.type)
