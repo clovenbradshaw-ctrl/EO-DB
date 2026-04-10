@@ -130,7 +130,7 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     let hydrated: EoEvent[] = [];
     try {
       const all = await readLogSince(memStore, 0);
-      hydrated = all.slice(-100);
+      hydrated = all;
     } catch {
       // Brand-new store — nothing to hydrate.
     }
@@ -204,7 +204,7 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     // Fold into the MemoryStore (persistence hook writes each log: entry to OPFS).
     const seq = await processEvent(store, populatedEvent, (fullEvent) => {
       set((state) => ({
-        recentEvents: [...state.recentEvents.slice(-99), fullEvent],
+        recentEvents: [...state.recentEvents, fullEvent],
         lastSeq: fullEvent.seq,
       }));
       // Broadcast to peers first (encrypted, via Matrix to-device)
@@ -229,7 +229,7 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     const imported: EoEvent[] = [];
     const lastSeq = await processEventsBulk(store, events, onProgress, (fullEvent) => {
       set((state) => ({
-        recentEvents: [...state.recentEvents.slice(-99), fullEvent],
+        recentEvents: [...state.recentEvents, fullEvent],
         lastSeq: fullEvent.seq,
       }));
       imported.push(fullEvent);
