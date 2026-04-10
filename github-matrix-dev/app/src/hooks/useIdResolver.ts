@@ -15,6 +15,9 @@ import { useEoStore } from '../store/eo-store';
 /** Matches entity IDs like CLI-002, ATT-001, CASE-010, HON-005, BILL-003 */
 const ID_PATTERN = /^[A-Z]{2,5}-\d+$/;
 
+/** Matches Airtable record IDs like recAbcDef123456 */
+const AT_RECORD_PATTERN = /^rec[A-Za-z0-9]{10,}$/;
+
 export interface ResolvedId {
   shortId: string;
   target: string;
@@ -67,7 +70,7 @@ export function useIdResolver(scopeRoot: string): IdResolver {
           if (st.value?._alias) continue;
 
           const shortId = st.target.split('.').pop() || '';
-          if (!ID_PATTERN.test(shortId)) continue;
+          if (!ID_PATTERN.test(shortId) && !AT_RECORD_PATTERN.test(shortId)) continue;
 
           // Try _displayField from parent table first
           const parentTarget = st.target.split('.').slice(0, -1).join('.');
