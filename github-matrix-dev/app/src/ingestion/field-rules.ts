@@ -24,12 +24,12 @@ export const INGESTABLE_METADATA = new Set([
   'createdTime',
   'createdBy',
   'autoNumber',
-]);
-
-/** Metadata fields whose values are computed at fold via EVA. */
-export const FOLD_METADATA = new Set([
   'lastModifiedTime',
   'lastModifiedBy',
+]);
+
+/** Metadata fields whose values are computed at fold via EVA. Reserved for future use. */
+export const FOLD_METADATA = new Set<string>([
 ]);
 
 export const LINK_TYPES = new Set([

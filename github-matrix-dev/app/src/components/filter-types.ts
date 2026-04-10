@@ -25,7 +25,8 @@ export type ColumnType =
   | 'boolean'
   | 'attachment' | 'linkedRecord' | 'link' | 'relationship' | 'object'
   | 'formula' | 'rollup' | 'lookup' | 'count'
-  | 'autoNumber' | 'createdTime' | 'lastModifiedTime' | 'createdBy' | 'lastModifiedBy';
+  | 'autoNumber' | 'createdTime' | 'lastModifiedTime' | 'createdBy' | 'lastModifiedBy'
+  | 'collaborator' | 'collaborators';
 
 export interface ColumnDef {
   key: string;
@@ -75,6 +76,8 @@ export function operatorsForType(type: ColumnDef['type']): FilterOperator[] {
     case 'linkedRecord':
     case 'link':
     case 'relationship':
+    case 'collaborator':
+    case 'collaborators':
       return OBJECT_OPS;
     default:
       return TEXT_OPS;
