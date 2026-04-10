@@ -5,7 +5,7 @@
  * Mirrors the layout of FilenStorageWidget.
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import type { Theme } from '../theme';
 import { useTheme } from '../theme';
 import { useGDriveStore } from '../google-drive/gdrive-store';
@@ -162,6 +162,16 @@ export function GDriveStorageWidget() {
   useEffect(() => {
     if (connected && dataType) loadFiles();
   }, [connected, dataType, loadFiles]);
+
+  // Re-fetch the file list when hydration finishes — start() may have pushed new
+  // files to Drive during the initial sync that the first loadFiles() missed.
+  const prevHydratingRef = useRef(false);
+  useEffect(() => {
+    if (prevHydratingRef.current && !hydrating && connected && dataType) {
+      loadFiles();
+    }
+    prevHydratingRef.current = hydrating;
+  }, [hydrating, connected, dataType, loadFiles]);
 
   if (!connected) return null;
 
