@@ -24,6 +24,29 @@ export class ErrorBoundary extends Component<Props, State> {
     if (this.state.error) {
       if (this.props.fallback) return this.props.fallback;
 
+      // If this is a dynamic-import / chunk load failure, clicking a soft
+      // "Try again" will just re-attempt the same missing chunk and the
+      // error will immediately come back. Offer a hard reload instead, and
+      // clear the reload guard so the next navigation can retry cleanly.
+      const msg = this.state.error.message || '';
+      const isChunkError =
+        msg.includes('Failed to fetch dynamically imported module') ||
+        msg.includes('error loading dynamically imported module') ||
+        msg.includes('Importing a module script failed');
+
+      const handleRetry = () => {
+        if (isChunkError) {
+          try {
+            sessionStorage.removeItem('eo-chunk-reload');
+          } catch {
+            // sessionStorage may be unavailable (private mode, etc.) — ignore
+          }
+          window.location.reload();
+          return;
+        }
+        this.setState({ error: null });
+      };
+
       // ErrorBoundary is a class component that can't use hooks.
       // Use CSS variables set by the theme provider on <html data-theme>.
       // Fallback to light theme colors as defaults.
@@ -34,9 +57,9 @@ export class ErrorBoundary extends Component<Props, State> {
           <div style={styles.message}>{this.state.error.message}</div>
           <button
             style={styles.button}
-            onClick={() => this.setState({ error: null })}
+            onClick={handleRetry}
           >
-            Try again
+            {isChunkError ? 'Reload page' : 'Try again'}
           </button>
         </div>
       );
