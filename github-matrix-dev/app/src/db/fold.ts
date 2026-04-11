@@ -10,13 +10,15 @@ import { validateEvent, formatValidationErrors } from './validate';
 import { updateFoldCache, refreshGraphMetrics } from './fold-cache';
 import {
   AddressingHorizon,
+  StoreHelixStateTracker,
+  checkAndPromote as checkAndPromoteHelix,
   sortByHelixLevel,
-  isHelixValid,
   mergeOperand,
   isFormulaOperand,
   deepEqual,
 } from './fold-core';
-import type { EoEvent, EoEventInput, EoState, EvaRegistration, RecResult, ExternalOperator, DerivedEntity, HelixPosition, LoggableOperator } from './types';
+import type { HelixStateTracker, PromotionCallbacks } from './fold-core';
+import type { EoEvent, EoEventInput, EoState, EvaRegistration, RecResult, ExternalOperator, DerivedEntity, LoggableOperator } from './types';
 
 export { sortByHelixLevel } from './fold-core';
 export type { HelixWave } from './fold-core';
@@ -26,131 +28,47 @@ const foldMutex = new AsyncMutex();
 
 // ─── Helix Infrastructure ────────────────────────────────────────────────────
 //
-// HELIX_LEVEL, sortByHelixLevel, isHelixValid, and the AddressingHorizon now
-// live in fold-core.ts (Phase A — constitutive site model). This file keeps
-// the stateful pieces (updateHelixPosition, checkAndPromote, operator
-// handlers) because they read/write store state.
+// HELIX_LEVEL, sortByHelixLevel, isHelixValid, AddressingHorizon, and now the
+// HelixStateTracker interface + StoreHelixStateTracker + checkAndPromote all
+// live in fold-core.ts (Phase A — constitutive site model). This file owns
+// only the operator handlers and the wiring that turns fold-core's
+// callback-driven promotion into concrete log/fold-cache writes.
 
 /**
- * Records that an operator fired on a target. O(1) — no log traversal.
- * Called after every successful executeOperator, and for system-generated events
- * that bypass executeOperator (REC, INS2+ from detectAndEmitREC).
+ * Build the PromotionCallbacks fold-core's checkAndPromote expects, binding
+ * them to the live store + tracker + onEvent hook. Exposed as a single helper
+ * so processEventCore and processEventInner share one wiring and the blocked-
+ * promotion stub lives in exactly one place.
  */
-async function updateHelixPosition(
+function buildPromotionCallbacks(
   store: EoStore,
-  target: string,
-  op: LoggableOperator,
-  seq: number,
-): Promise<void> {
-  const existing = await store.get(`helix:${target}`) as HelixPosition | null;
-  const pos: HelixPosition = existing ?? { declared: [], firstSeq: {}, lastSeq: {}, count: {} };
-  if (!pos.declared.includes(op)) {
-    pos.declared = [...pos.declared, op];
-  }
-  pos.firstSeq = pos.firstSeq[op] === undefined
-    ? { ...pos.firstSeq, [op]: seq }
-    : pos.firstSeq;
-  pos.lastSeq  = { ...pos.lastSeq,  [op]: seq };
-  pos.count    = { ...pos.count,    [op]: (pos.count[op] ?? 0) + 1 };
-  await store.put(`helix:${target}`, pos);
-}
-
-/** Maximum auto-promotion depth — prevents infinite cascade. */
-const MAX_PROMOTION_DEPTH = 5;
-
-/**
- * Emits system-generated operator events to satisfy an operator's helix preconditions.
- * Each emitted event goes through processEventCore so it is logged with its own seq,
- * updates the helix position, and fires onEvent.
- *
- * Promotions are emitted BEFORE the original event gets its seq assigned, so they
- * appear earlier in the log (lower seq numbers) and replay correctly.
- *
- * If the depth guard fires (> MAX_PROMOTION_DEPTH), a NUL event with
- * nul_state 'promotion_blocked' is emitted and promotion stops.
- */
-async function promoteToHelix(
-  store: EoStore,
-  target: string,
-  requiredOps: LoggableOperator[],
+  tracker: HelixStateTracker,
   onEvent: ((event: EoEvent) => void) | undefined,
-  depth: number,
-): Promise<void> {
-  if (depth >= MAX_PROMOTION_DEPTH) {
-    const now = new Date().toISOString();
-    const blockedSeq = await store.nextSeq();
-    const blockedEvent: EoEvent = {
-      seq: blockedSeq,
-      op: 'NUL',
-      target,
-      operand: {},
-      agent: 'system:helix',
-      ts: now,
-      acquired_ts: now,
-      nul_state: 'promotion_blocked',
-      meta: { auto_promoted: false, promotion_blocked: true, reason: 'max promotion depth exceeded' },
-    };
-    await appendToLog(store, blockedEvent);
-    await updateHelixPosition(store, target, 'NUL', blockedSeq);
-    await updateFoldCache(store, blockedEvent);
-    if (onEvent) onEvent(blockedEvent);
-    return;
-  }
-
-  const helixPos = await store.get(`helix:${target}`) as HelixPosition | null;
-  const declared = new Set(helixPos?.declared ?? []);
-
-  for (const op of requiredOps) {
-    if (declared.has(op)) continue;
-    const now = new Date().toISOString();
-    const systemInput: EoEventInput = {
-      op,
-      target,
-      operand: {},
-      agent: 'system:helix',
-      ts: now,
-      acquired_ts: now,
-      meta: { auto_promoted: true, reason: `required by helix — missing ${op}` },
-    };
-    await processEventCore(store, systemInput, onEvent, depth + 1);
-    // Refresh declared after each promotion so subsequent checks are current.
-    const updated = await store.get(`helix:${target}`) as HelixPosition | null;
-    if (updated) for (const d of updated.declared) declared.add(d);
-  }
-}
-
-/**
- * Checks whether event.target satisfies the helix preconditions for event.op.
- * If not, auto-promotes the target (and for CON, destination targets) by
- * emitting system INS events via promoteToHelix → processEventCore.
- *
- * Called BEFORE seq is assigned to the original event, so promotions
- * receive lower seq numbers and appear first in replay order.
- */
-async function checkAndPromote(
-  store: EoStore,
-  event: EoEventInput,
-  onEvent: ((event: EoEvent) => void) | undefined,
-  depth: number,
-): Promise<void> {
-  // These operators have no helix preconditions — nothing to promote.
-  if (event.op === 'NUL' || event.op === 'SIG' || event.op === 'REC' || event.op === 'INS') return;
-
-  const pos = await store.get(`helix:${event.target}`) as HelixPosition | null;
-  if (!isHelixValid(event.op as LoggableOperator, pos)) {
-    await promoteToHelix(store, event.target, ['INS'], onEvent, depth);
-  }
-
-  // CON: also check every destination target.
-  if (event.op === 'CON' && event.operand?.added) {
-    for (const item of event.operand.added as ConEdgeAddItem[]) {
-      const dest = typeof item === 'string' ? item : item.dest;
-      const destPos = await store.get(`helix:${dest}`) as HelixPosition | null;
-      if (!new Set(destPos?.declared ?? []).has('INS')) {
-        await promoteToHelix(store, dest, ['INS'], onEvent, depth);
-      }
-    }
-  }
+): PromotionCallbacks {
+  return {
+    emitSynthetic: async (input, d) => {
+      await processEventCore(store, input, onEvent, d);
+    },
+    emitBlocked: async (target) => {
+      const now = new Date().toISOString();
+      const blockedSeq = await store.nextSeq();
+      const blockedEvent: EoEvent = {
+        seq: blockedSeq,
+        op: 'NUL',
+        target,
+        operand: {},
+        agent: 'system:helix',
+        ts: now,
+        acquired_ts: now,
+        nul_state: 'promotion_blocked',
+        meta: { auto_promoted: false, promotion_blocked: true, reason: 'max promotion depth exceeded' },
+      };
+      await appendToLog(store, blockedEvent);
+      await tracker.recordOperator(target, 'NUL', blockedSeq);
+      await updateFoldCache(store, blockedEvent);
+      if (onEvent) onEvent(blockedEvent);
+    },
+  };
 }
 
 /**
@@ -204,12 +122,13 @@ export async function processEventsBulk(
   return foldMutex.run(async () => {
     const touchedTargets = new Set<string>();
     const horizon = new AddressingHorizon(store);
+    const helix = new StoreHelixStateTracker(store);
     let lastSeq = 0;
     let processed = 0;
 
     // Persistent across waves: which targets have been INSed so far (either
     // already in the store, or inserted by an earlier wave's real/synthetic
-    // INS). Seeded lazily per target via store reads.
+    // INS). Seeded lazily per target via tracker reads.
     const insedLocal = new Set<string>();
     const insedChecked = new Set<string>();
 
@@ -226,7 +145,7 @@ export async function processEventsBulk(
       if (insedLocal.has(target)) return false;
       if (!insedChecked.has(target)) {
         insedChecked.add(target);
-        const pos = await store.get(`helix:${target}`) as HelixPosition | null;
+        const pos = await helix.getPosition(target);
         if (pos && new Set(pos.declared ?? []).has('INS')) {
           insedLocal.add(target);
           return false;
@@ -367,7 +286,7 @@ export async function processEventsBulk(
  * checkAndPromote — both are handled by the bulk dispatcher's pre-pass.
  *
  * All other steps (validate → client_event_id → idempotency → INS pre-check
- * → appendToLog → executeOperator → updateHelixPosition → updateFoldCache
+ * → appendToLog → executeOperator → helix.recordOperator → updateFoldCache
  * → onEvent) run exactly as they do in the serial processEventCore.
  */
 async function processEventCoreWithSeq(
@@ -423,7 +342,7 @@ async function processEventCoreWithSeq(
     return seq;
   }
 
-  await updateHelixPosition(store, fullEvent.target, fullEvent.op as LoggableOperator, seq);
+  await new StoreHelixStateTracker(store).recordOperator(fullEvent.target, fullEvent.op as LoggableOperator, seq);
   await updateFoldCache(store, fullEvent);
 
   if (onEvent) {
@@ -437,8 +356,9 @@ async function processEventCoreWithSeq(
  * Core event processing — steps 1-7 only (no deferred recomputation).
  * Used by bulk import to defer steps 7b-9 until after all events are ingested.
  *
- * _promotionDepth is an internal parameter used by promoteToHelix to track
- * recursion depth and prevent infinite cascade (cap: MAX_PROMOTION_DEPTH).
+ * _promotionDepth is an internal parameter that tracks recursion through
+ * fold-core's checkAndPromote to prevent infinite cascade (cap:
+ * MAX_PROMOTION_DEPTH, defined in fold-core).
  */
 async function processEventCore(
   store: EoStore,
@@ -474,7 +394,8 @@ async function processEventCore(
 
   // Helix promotion — runs BEFORE seq assignment so promoted events get lower
   // seq numbers and appear before the original event in replay order.
-  await checkAndPromote(store, event, onEvent, _promotionDepth);
+  const helix = new StoreHelixStateTracker(store);
+  await checkAndPromoteHelix(helix, event, buildPromotionCallbacks(store, helix, onEvent), _promotionDepth);
 
   const seq = await store.nextSeq();
   const fullEvent: EoEvent = { ...event, seq };
@@ -498,7 +419,7 @@ async function processEventCore(
     return seq;
   }
 
-  await updateHelixPosition(store, fullEvent.target, fullEvent.op as LoggableOperator, seq);
+  await helix.recordOperator(fullEvent.target, fullEvent.op as LoggableOperator, seq);
   await updateFoldCache(store, fullEvent);
 
   if (onEvent) {
@@ -547,7 +468,8 @@ async function processEventInner(
 
   // 2c. Helix promotion — runs BEFORE seq assignment so promoted events get
   //     lower seq numbers and appear before the original event in replay order.
-  await checkAndPromote(store, event, onEvent, 0);
+  const helix = new StoreHelixStateTracker(store);
+  await checkAndPromoteHelix(helix, event, buildPromotionCallbacks(store, helix, onEvent), 0);
 
   // 3. Assign sequence number
   const seq = await store.nextSeq();
@@ -580,7 +502,7 @@ async function processEventInner(
   }
 
   // 6b. Record this operator in the target's helix position.
-  await updateHelixPosition(store, fullEvent.target, fullEvent.op as LoggableOperator, seq);
+  await helix.recordOperator(fullEvent.target, fullEvent.op as LoggableOperator, seq);
 
   // 7. Update the incrementally-maintained fold cache on the target's state
   //    (trajectory, trajectoryFingerprint, cadence, _lastRecSeq). This is the
@@ -1074,6 +996,7 @@ async function detectAndEmitREC(
   triggeringEvent: EoEvent,
   onEvent?: (event: EoEvent) => void,
 ): Promise<void> {
+  const helix = new StoreHelixStateTracker(store);
   const cycleTargets = await findRecomputationCycle(store, changedTarget);
   if (!cycleTargets || cycleTargets.length === 0) return;
 
@@ -1175,7 +1098,7 @@ async function detectAndEmitREC(
   };
 
   await appendToLog(store, recEvent);
-  await updateHelixPosition(store, changedTarget, 'REC', recSeq);
+  await helix.recordOperator(changedTarget, 'REC', recSeq);
 
   const existingPivot = await getState(store, changedTarget);
   await setState(store, {
@@ -1221,7 +1144,7 @@ async function detectAndEmitREC(
       triggered_by: triggeringEvent.seq,
     };
     await appendToLog(store, updateEvent);
-    await updateHelixPosition(store, derivedTargetId, 'DEF', updateSeq);
+    await helix.recordOperator(derivedTargetId, 'DEF', updateSeq);
     await setState(store, {
       target: derivedTargetId,
       value: derivedOperand,
@@ -1244,7 +1167,7 @@ async function detectAndEmitREC(
       triggered_by: triggeringEvent.seq,
     };
     await appendToLog(store, insEvent);
-    await updateHelixPosition(store, derivedTargetId, 'INS', insSeq);
+    await helix.recordOperator(derivedTargetId, 'INS', insSeq);
     await setState(store, {
       target: derivedTargetId,
       value: derivedOperand,
@@ -1355,6 +1278,7 @@ async function cascadeUpward(
     if (onEvent) onEvent(limitEvent);
     return;
   }
+  const helix = new StoreHelixStateTracker(store);
   const dependentTargets = await getReverseDeps(store, changedTarget);
   for (const derivedTarget of dependentTargets) {
     const derived = await store.get(`derived:${derivedTarget}`) as DerivedEntity | null;
@@ -1383,7 +1307,7 @@ async function cascadeUpward(
       triggered_by: triggeringEvent.seq,
     };
     await appendToLog(store, reEvalEvent);
-    await updateHelixPosition(store, derivedTarget, 'REC', reEvalSeq);
+    await helix.recordOperator(derivedTarget, 'REC', reEvalSeq);
 
     const existingDerived = await getState(store, derivedTarget);
     if (existingDerived) {
@@ -1513,6 +1437,7 @@ export async function replayFromLog(
   onProgress?: (current: number, total: number) => void,
 ): Promise<void> {
   return foldMutex.run(async () => {
+    const helix = new StoreHelixStateTracker(store);
     for (let i = 0; i < events.length; i++) {
       const event = events[i];
 
@@ -1537,7 +1462,7 @@ export async function replayFromLog(
       // Apply operator (REC falls through as a no-op in executeOperator).
       try {
         await executeOperator(store, fullEvent);
-        await updateHelixPosition(store, fullEvent.target, fullEvent.op as LoggableOperator, seq);
+        await helix.recordOperator(fullEvent.target, fullEvent.op as LoggableOperator, seq);
       } catch {
         // Ignore errors during replay — the original fold succeeded.
       }

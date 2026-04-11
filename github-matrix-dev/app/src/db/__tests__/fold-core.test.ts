@@ -12,12 +12,16 @@ import { describe, it, expect } from 'vitest';
 import {
   AddressingHorizon,
   HELIX_LEVEL,
+  MAX_PROMOTION_DEPTH,
+  StoreHelixStateTracker,
+  checkAndPromote,
   sortByHelixLevel,
   isHelixValid,
   mergeOperand,
   isFormulaOperand,
   deepEqual,
 } from '../fold-core';
+import type { HelixStateTracker, PromotionCallbacks } from '../fold-core';
 import type { EoStore, IteratorOpts } from '../encrypted-store';
 import type { EoEventInput, HelixPosition, LoggableOperator } from '../types';
 
@@ -275,5 +279,239 @@ describe('deepEqual', () => {
 
   it('distinguishes arrays and objects', () => {
     expect(deepEqual([1, 2], { 0: 1, 1: 2 })).toBe(false);
+  });
+});
+
+// ─── StoreHelixStateTracker ─────────────────────────────────────────────────
+
+describe('StoreHelixStateTracker', () => {
+  describe('getPosition', () => {
+    it('returns null for a target with no declared operators', async () => {
+      const store = createStubStore();
+      const tracker = new StoreHelixStateTracker(store);
+      expect(await tracker.getPosition('tgt')).toBeNull();
+    });
+
+    it('returns the HelixPosition written by recordOperator', async () => {
+      const store = createStubStore();
+      const tracker = new StoreHelixStateTracker(store);
+      await tracker.recordOperator('tgt', 'INS', 7);
+      const pos = await tracker.getPosition('tgt');
+      expect(pos).not.toBeNull();
+      expect(pos!.declared).toEqual(['INS']);
+      expect(pos!.firstSeq.INS).toBe(7);
+      expect(pos!.lastSeq.INS).toBe(7);
+      expect(pos!.count.INS).toBe(1);
+    });
+  });
+
+  describe('recordOperator', () => {
+    it('creates a fresh HelixPosition on first fire', async () => {
+      const store = createStubStore();
+      const tracker = new StoreHelixStateTracker(store);
+      await tracker.recordOperator('tgt', 'INS', 1);
+      expect(await tracker.getPosition('tgt')).toEqual({
+        declared: ['INS'],
+        firstSeq: { INS: 1 },
+        lastSeq: { INS: 1 },
+        count: { INS: 1 },
+      });
+    });
+
+    it('appends new ops to `declared` without duplicating existing ones', async () => {
+      const store = createStubStore();
+      const tracker = new StoreHelixStateTracker(store);
+      await tracker.recordOperator('tgt', 'INS', 1);
+      await tracker.recordOperator('tgt', 'DEF', 2);
+      await tracker.recordOperator('tgt', 'INS', 3); // second INS on same target
+      const pos = (await tracker.getPosition('tgt'))!;
+      expect(pos.declared).toEqual(['INS', 'DEF']);
+    });
+
+    it('sets firstSeq only on first fire, updates lastSeq every time', async () => {
+      const store = createStubStore();
+      const tracker = new StoreHelixStateTracker(store);
+      await tracker.recordOperator('tgt', 'INS', 5);
+      await tracker.recordOperator('tgt', 'INS', 9);
+      await tracker.recordOperator('tgt', 'INS', 11);
+      const pos = (await tracker.getPosition('tgt'))!;
+      expect(pos.firstSeq.INS).toBe(5);
+      expect(pos.lastSeq.INS).toBe(11);
+      expect(pos.count.INS).toBe(3);
+    });
+
+    it('tracks per-operator counts independently', async () => {
+      const store = createStubStore();
+      const tracker = new StoreHelixStateTracker(store);
+      await tracker.recordOperator('tgt', 'INS', 1);
+      await tracker.recordOperator('tgt', 'DEF', 2);
+      await tracker.recordOperator('tgt', 'DEF', 3);
+      await tracker.recordOperator('tgt', 'SEG', 4);
+      const pos = (await tracker.getPosition('tgt'))!;
+      expect(pos.count).toEqual({ INS: 1, DEF: 2, SEG: 1 });
+      expect(pos.firstSeq).toEqual({ INS: 1, DEF: 2, SEG: 4 });
+      expect(pos.lastSeq).toEqual({ INS: 1, DEF: 3, SEG: 4 });
+    });
+
+    it('writes to the `helix:${target}` key', async () => {
+      const store = createStubStore();
+      const tracker = new StoreHelixStateTracker(store);
+      await tracker.recordOperator('alpha', 'INS', 1);
+      await tracker.recordOperator('beta', 'INS', 2);
+      expect(await store.get('helix:alpha')).not.toBeNull();
+      expect(await store.get('helix:beta')).not.toBeNull();
+      expect(await store.get('helix:gamma')).toBeNull();
+    });
+  });
+
+  describe('isValid', () => {
+    it('delegates to the module-level isHelixValid', () => {
+      const store = createStubStore();
+      const tracker = new StoreHelixStateTracker(store);
+      const pos: HelixPosition = { declared: ['INS'], firstSeq: {}, lastSeq: {}, count: {} };
+      // Spot-check — full rules are covered above.
+      expect(tracker.isValid('DEF', pos)).toBe(isHelixValid('DEF', pos));
+      expect(tracker.isValid('DEF', null)).toBe(isHelixValid('DEF', null));
+      expect(tracker.isValid('INS', pos)).toBe(false);
+    });
+  });
+});
+
+// ─── checkAndPromote ────────────────────────────────────────────────────────
+
+describe('checkAndPromote', () => {
+  // Recording-callback helper: captures every emitSynthetic + emitBlocked call
+  // so assertions can inspect what promotion decided to do.
+  function recordingCallbacks(tracker: HelixStateTracker): {
+    callbacks: PromotionCallbacks;
+    synthetic: { input: EoEventInput; depth: number }[];
+    blocked: string[];
+  } {
+    const synthetic: { input: EoEventInput; depth: number }[] = [];
+    const blocked: string[] = [];
+    const callbacks: PromotionCallbacks = {
+      emitSynthetic: async (input, depth) => {
+        synthetic.push({ input, depth });
+        // Simulate a real emitSynthetic: the synthetic event updates the
+        // helix position on its target so subsequent checks see it as done.
+        if (input.op === 'INS') {
+          await tracker.recordOperator(input.target, 'INS', 1000 + synthetic.length);
+        }
+      },
+      emitBlocked: async (target) => {
+        blocked.push(target);
+      },
+    };
+    return { callbacks, synthetic, blocked };
+  }
+
+  function mk(op: EoEventInput['op'], target = 'tgt', extra: Partial<EoEventInput> = {}): EoEventInput {
+    return {
+      op,
+      target,
+      operand: {},
+      agent: 'system:test',
+      ts: '2025-01-01T00:00:00.000Z',
+      acquired_ts: '2025-01-01T00:00:00.000Z',
+      ...extra,
+    };
+  }
+
+  it('short-circuits for NUL / SIG / REC / INS', async () => {
+    const tracker = new StoreHelixStateTracker(createStubStore());
+    const { callbacks, synthetic, blocked } = recordingCallbacks(tracker);
+    for (const op of ['NUL', 'SIG', 'REC', 'INS'] as EoEventInput['op'][]) {
+      await checkAndPromote(tracker, mk(op, 'x'), callbacks, 0);
+    }
+    expect(synthetic).toEqual([]);
+    expect(blocked).toEqual([]);
+  });
+
+  it('emits a synthetic INS when the target lacks INS', async () => {
+    const tracker = new StoreHelixStateTracker(createStubStore());
+    const { callbacks, synthetic, blocked } = recordingCallbacks(tracker);
+    await checkAndPromote(tracker, mk('DEF', 'tgt'), callbacks, 0);
+    expect(synthetic).toHaveLength(1);
+    expect(synthetic[0].input.op).toBe('INS');
+    expect(synthetic[0].input.target).toBe('tgt');
+    expect(synthetic[0].input.agent).toBe('system:helix');
+    expect(synthetic[0].input.meta).toMatchObject({ auto_promoted: true });
+    expect(synthetic[0].depth).toBe(1); // called at depth + 1
+    expect(blocked).toEqual([]);
+  });
+
+  it('does not promote when the target is already INSed', async () => {
+    const tracker = new StoreHelixStateTracker(createStubStore());
+    await tracker.recordOperator('tgt', 'INS', 1);
+    const { callbacks, synthetic, blocked } = recordingCallbacks(tracker);
+    await checkAndPromote(tracker, mk('DEF', 'tgt'), callbacks, 0);
+    expect(synthetic).toEqual([]);
+    expect(blocked).toEqual([]);
+  });
+
+  it('emits synthetic INS for CON destination targets that lack INS', async () => {
+    const tracker = new StoreHelixStateTracker(createStubStore());
+    await tracker.recordOperator('src', 'INS', 1); // source already INSed
+    const { callbacks, synthetic } = recordingCallbacks(tracker);
+    const conEvent = mk('CON', 'src', {
+      operand: { added: ['dest1', { dest: 'dest2' }, 'dest3'] },
+    });
+    await checkAndPromote(tracker, conEvent, callbacks, 0);
+    expect(synthetic.map((s) => s.input.target)).toEqual(['dest1', 'dest2', 'dest3']);
+    expect(synthetic.every((s) => s.input.op === 'INS')).toBe(true);
+  });
+
+  it('does not re-promote CON destinations that are already INSed', async () => {
+    const tracker = new StoreHelixStateTracker(createStubStore());
+    await tracker.recordOperator('src', 'INS', 1);
+    await tracker.recordOperator('dest1', 'INS', 2);
+    const { callbacks, synthetic } = recordingCallbacks(tracker);
+    const conEvent = mk('CON', 'src', { operand: { added: ['dest1', 'dest2'] } });
+    await checkAndPromote(tracker, conEvent, callbacks, 0);
+    // dest1 was already INSed, dest2 needs a synthetic
+    expect(synthetic.map((s) => s.input.target)).toEqual(['dest2']);
+  });
+
+  it('emits emitBlocked (not emitSynthetic) when depth has reached the cap', async () => {
+    const tracker = new StoreHelixStateTracker(createStubStore());
+    const { callbacks, synthetic, blocked } = recordingCallbacks(tracker);
+    await checkAndPromote(tracker, mk('DEF', 'tgt'), callbacks, MAX_PROMOTION_DEPTH);
+    expect(synthetic).toEqual([]);
+    expect(blocked).toEqual(['tgt']);
+  });
+
+  it('MAX_PROMOTION_DEPTH is the expected cap (5)', () => {
+    expect(MAX_PROMOTION_DEPTH).toBe(5);
+  });
+
+  it('passes depth+1 to emitSynthetic so nested promotions observe the cap', async () => {
+    const tracker = new StoreHelixStateTracker(createStubStore());
+    const { callbacks, synthetic } = recordingCallbacks(tracker);
+    await checkAndPromote(tracker, mk('DEF', 'tgt'), callbacks, 3);
+    expect(synthetic).toHaveLength(1);
+    expect(synthetic[0].depth).toBe(4);
+  });
+
+  it('refreshes the declared set between required-op emissions', async () => {
+    // If an emitSynthetic for one required op ends up declaring a sibling op
+    // on the same target, the sibling should not be re-emitted. We exercise
+    // this with a single required op today — the refresh protects future
+    // multi-op promotion paths.
+    const tracker = new StoreHelixStateTracker(createStubStore());
+    let syntheticCount = 0;
+    const callbacks: PromotionCallbacks = {
+      emitSynthetic: async (input) => {
+        syntheticCount++;
+        await tracker.recordOperator(input.target, 'INS', 100);
+      },
+      emitBlocked: async () => {},
+    };
+    await checkAndPromote(tracker, mk('DEF', 'tgt'), callbacks, 0);
+    // One missing required op → one synthetic. The refresh ensures the
+    // declared set immediately reflects it if promoteToHelix were later
+    // extended to require multiple ops.
+    expect(syntheticCount).toBe(1);
+    const pos = await tracker.getPosition('tgt');
+    expect(pos?.declared).toContain('INS');
   });
 });
