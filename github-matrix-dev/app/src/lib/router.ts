@@ -4,9 +4,9 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 // Types
 // ---------------------------------------------------------------------------
 
-export type View = 'records' | 'log' | 'graph' | 'import' | 'compose' | 'settings' | 'builder' | 'messages' | 'people' | 'multiuser' | 'api' | 'members';
+export type View = 'records' | 'log' | 'graph' | 'import' | 'compose' | 'settings' | 'builder' | 'messages' | 'people' | 'multiuser' | 'api' | 'members' | 'branch';
 
-const VIEWS = new Set<string>(['records', 'log', 'graph', 'import', 'compose', 'settings', 'builder', 'messages', 'people', 'multiuser', 'api', 'members']);
+const VIEWS = new Set<string>(['records', 'log', 'graph', 'import', 'compose', 'settings', 'builder', 'messages', 'people', 'multiuser', 'api', 'members', 'branch']);
 
 export interface AppRoute {
   view: View;
