@@ -1,0 +1,777 @@
+/**
+ * BranchExplorer — temporal branch visualizer for EO///DB.
+ *
+ * Renders a draggable scrubber across a shared time axis, three world tracks
+ * (W-0 canonical, W-1 never-merged, W-2 always-merged), a world / stance
+ * selector, and three entity-state cards that update as the scrubber moves.
+ *
+ * The component is self-contained: it accepts a BranchRecord[] for one merge
+ * subject and manages its own projection state via the branch-store.
+ */
+
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useBranchStore } from '../../store/branch-store';
+import { useEoStore } from '../../store/eo-store';
+import { useTheme } from '../../theme';
+import { warmProjectionCache } from '../../projection/ProjectionEngine';
+import type {
+  BranchRecord,
+  EvaStance,
+  ProjectedField,
+  ProjectedState,
+  WorldType,
+} from '../../types/branch';
+
+// ─── Constants ──────────────────────────────────────────────────────────────
+
+const VIEW_WIDTH = 760;
+const VIEW_HEIGHT = 230;
+
+const W2_Y = 50;
+const TRUNK_Y = 130;
+const W0_Y = 95;
+const W1_Y = 168;
+
+/** Cubic-bezier P0 (forkX,130) → P1 (+40,130) → P2 (+60,target) → P3 (+96,target) */
+const FORK_RUN = 96;
+const FORK_CTRL_1_DX = 40;
+const FORK_CTRL_2_DX = 60;
+
+const WORLD_COLORS: Record<WorldType, string> = {
+  canonical: '#BA7517',
+  'never-merged': '#0F6E56',
+  'always-merged': '#534AB7',
+};
+
+const WORLD_TRACK_COLORS: Record<WorldType, string> = {
+  canonical: '#EF9F27',
+  'never-merged': '#1D9E75',
+  'always-merged': '#7F77DD',
+};
+
+const WORLD_LABELS: Record<WorldType, string> = {
+  canonical: 'W-0  canonical',
+  'never-merged': 'W-1  never merged',
+  'always-merged': 'W-2  always merged',
+};
+
+const STANCES: EvaStance[] = ['clearing', 'binding', 'dissecting', 'composing', 'tracing'];
+
+const OP_DOT_COLOR: Record<string, string> = {
+  EVA: '#EF9F27',
+  DEF: '#D4537E',
+  REC: '#7F77DD',
+  INS: '#1D9E75',
+  SEG: '#888780',
+  CON: '#888780',
+  NUL: '#888780',
+  SIG: '#888780',
+};
+
+// ─── Time utilities ─────────────────────────────────────────────────────────
+
+interface TimeWindow {
+  minTs: string;
+  maxTs: string;
+  minMs: number;
+  maxMs: number;
+  branchTs: string;
+  branchMs: number;
+}
+
+function computeTimeWindow(branch: BranchRecord, eventTimes: string[]): TimeWindow {
+  const branchMs = Date.parse(branch.policy.branch_point_ts);
+  let minMs = branchMs - 60_000;
+  let maxMs = branchMs + 60_000;
+  for (const ts of eventTimes) {
+    const ms = Date.parse(ts);
+    if (!Number.isFinite(ms)) continue;
+    if (ms < minMs) minMs = ms;
+    if (ms > maxMs) maxMs = ms;
+  }
+  if (maxMs <= minMs) {
+    maxMs = minMs + 1;
+  }
+  // Add a little headroom on either side so the branch point isn't pinned.
+  const span = maxMs - minMs;
+  minMs -= span * 0.05;
+  maxMs += span * 0.05;
+  return {
+    minTs: new Date(minMs).toISOString(),
+    maxTs: new Date(maxMs).toISOString(),
+    minMs,
+    maxMs,
+    branchTs: branch.policy.branch_point_ts,
+    branchMs,
+  };
+}
+
+function tsAtT(window: TimeWindow, t: number): string {
+  const clamped = Math.max(0, Math.min(1, t));
+  return new Date(window.minMs + (window.maxMs - window.minMs) * clamped).toISOString();
+}
+
+function xAtTs(window: TimeWindow, ts: string): number {
+  const ms = Date.parse(ts);
+  if (!Number.isFinite(ms)) return 0;
+  if (window.maxMs === window.minMs) return 0;
+  return ((ms - window.minMs) / (window.maxMs - window.minMs)) * VIEW_WIDTH;
+}
+
+/** Cubic-bezier y at parameter u given control y values y0..y3. */
+function bezY(u: number, y0: number, y1: number, y2: number, y3: number): number {
+  const m = 1 - u;
+  return m * m * m * y0 + 3 * m * m * u * y1 + 3 * m * u * u * y2 + u * u * u * y3;
+}
+
+/** Find y-coordinate of a track at a given x position. */
+function trackYAt(world: WorldType, xPx: number, forkX: number): number {
+  if (world === 'always-merged') return W2_Y;
+  if (xPx <= forkX) return TRUNK_Y;
+  const forkEnd = forkX + FORK_RUN;
+  if (xPx >= forkEnd) return world === 'canonical' ? W0_Y : W1_Y;
+  const u = (xPx - forkX) / FORK_RUN;
+  if (world === 'canonical') return bezY(u, TRUNK_Y, TRUNK_Y, W0_Y, W0_Y);
+  return bezY(u, TRUNK_Y, TRUNK_Y, W1_Y, W1_Y);
+}
+
+// ─── Component ──────────────────────────────────────────────────────────────
+
+interface BranchExplorerProps {
+  /** All branches for one merge subject — typically the three world variants. */
+  branches: BranchRecord[];
+}
+
+export function BranchExplorer({ branches }: BranchExplorerProps) {
+  const { theme } = useTheme();
+  const recentEvents = useEoStore((s) => s.recentEvents);
+  const lastSeq = useEoStore((s) => s.lastSeq);
+  const selectedWorld = useBranchStore((s) => s.selectedWorld);
+  const selectedStance = useBranchStore((s) => s.selectedStance);
+  const scrubberT = useBranchStore((s) => s.scrubberT);
+  const setWorld = useBranchStore((s) => s.setWorld);
+  const setStance = useBranchStore((s) => s.setStance);
+  const setScrubberT = useBranchStore((s) => s.setScrubberT);
+  const getProjection = useBranchStore((s) => s.getProjection);
+  const ensureEngine = useBranchStore((s) => s.ensureEngine);
+  const projectionCache = useBranchStore((s) => s.projectionCache);
+
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const dragRef = useRef(false);
+
+  // Pick one canonical branch for time-window computation.
+  const branch = useMemo(() => {
+    return (
+      branches.find((b) => b.policy.world === 'canonical') ??
+      branches[0] ??
+      null
+    );
+  }, [branches]);
+
+  // Build a TimeWindow from all events that touch the branch's source / survivor.
+  const timeWindow = useMemo<TimeWindow | null>(() => {
+    if (!branch) return null;
+    const sources = branch.subject.split(',').map((s) => s.trim()).filter(Boolean);
+    const targets = new Set([...sources, branch.survivor_id]);
+    const relevantTimes: string[] = [];
+    for (const e of recentEvents) {
+      if (
+        targets.has(e.target) ||
+        [...targets].some((t) => e.target.startsWith(t + '.'))
+      ) {
+        relevantTimes.push(e.ts);
+      }
+    }
+    return computeTimeWindow(branch, relevantTimes);
+  }, [branch, recentEvents, lastSeq]);
+
+  // Warm the projection cache once per branch / window combination.
+  useEffect(() => {
+    if (!branch || !timeWindow) return;
+    const engine = ensureEngine();
+    if (!engine) return;
+    const branchesToWarm = branches;
+    void Promise.all(
+      branchesToWarm.map((b) =>
+        warmProjectionCache(engine, b, timeWindow.minTs, timeWindow.maxTs, 11),
+      ),
+    );
+  }, [branch, branches, timeWindow, ensureEngine]);
+
+  if (!branch || !timeWindow) {
+    return (
+      <div style={{ padding: 24, color: theme.textSecondary, fontFamily: 'monospace' }}>
+        No branches loaded. Open a SYN event from the log to create a branch set.
+      </div>
+    );
+  }
+
+  const forkX = xAtTs(timeWindow, timeWindow.branchTs);
+  const scrubberX = scrubberT * VIEW_WIDTH;
+  const scrubberTs = tsAtT(timeWindow, scrubberT);
+
+  // ─── Drag handling ───
+  function onPointerEvent(clientX: number) {
+    const svg = svgRef.current;
+    if (!svg) return;
+    const rect = svg.getBoundingClientRect();
+    const t = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    setScrubberT(t);
+  }
+
+  function onMouseDown(e: React.MouseEvent) {
+    dragRef.current = true;
+    onPointerEvent(e.clientX);
+  }
+
+  function onTouchStart(e: React.TouchEvent) {
+    dragRef.current = true;
+    onPointerEvent(e.touches[0].clientX);
+  }
+
+  useEffect(() => {
+    function onMouseMove(e: MouseEvent) {
+      if (!dragRef.current) return;
+      onPointerEvent(e.clientX);
+    }
+    function onTouchMove(e: TouchEvent) {
+      if (!dragRef.current) return;
+      onPointerEvent(e.touches[0].clientX);
+    }
+    function onUp() {
+      dragRef.current = false;
+    }
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onUp);
+    window.addEventListener('touchmove', onTouchMove);
+    window.addEventListener('touchend', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onUp);
+      window.removeEventListener('touchmove', onTouchMove);
+      window.removeEventListener('touchend', onUp);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Pull projections for each world. They populate asynchronously the first
+  // time and from cache afterward.
+  const projections: Record<WorldType, ProjectedState | null> = {
+    canonical: getProjection('canonical', scrubberTs),
+    'never-merged': getProjection('never-merged', scrubberTs),
+    'always-merged': getProjection('always-merged', scrubberTs),
+  };
+  // projectionCache subscription forces re-render once async fetches resolve.
+  void projectionCache;
+
+  // Filter events to dots that fall within the time window AND involve the
+  // branch subject — keep the visualization focused.
+  const relevantEvents = useMemo(() => {
+    if (!branch) return [];
+    const sources = branch.subject.split(',').map((s) => s.trim()).filter(Boolean);
+    const targets = new Set([...sources, branch.survivor_id]);
+    return recentEvents.filter((e) => {
+      if (e.ts < timeWindow.minTs || e.ts > timeWindow.maxTs) return false;
+      if (targets.has(e.target)) return true;
+      for (const t of targets) {
+        if (e.target.startsWith(t + '.')) return true;
+      }
+      return false;
+    });
+  }, [branch, recentEvents, timeWindow, lastSeq]);
+
+  return (
+    <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {/* Top bar — world pills */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        {(['canonical', 'never-merged', 'always-merged'] as WorldType[]).map((w) => (
+          <WorldPill
+            key={w}
+            world={w}
+            active={selectedWorld === w}
+            onClick={() => setWorld(w)}
+          />
+        ))}
+        <div
+          style={{
+            marginLeft: 'auto',
+            fontSize: 12,
+            fontWeight: 500,
+            color: theme.text,
+            fontFamily: 'monospace',
+          }}
+        >
+          t = {Math.round(scrubberT * 100)
+            .toString()
+            .padStart(2, '0')}
+        </div>
+      </div>
+
+      {/* EVA stance row — only when W-2 active */}
+      {selectedWorld === 'always-merged' && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
+            padding: '8px 12px',
+            border: `0.5px solid ${theme.borderLight}`,
+            borderRadius: 6,
+          }}
+        >
+          <span style={{ fontSize: 10, color: theme.textSecondary, fontFamily: 'monospace' }}>
+            EVA stance:
+          </span>
+          {STANCES.map((s) => (
+            <StanceButton
+              key={s}
+              stance={s}
+              active={selectedStance === s}
+              onClick={() => setStance(s)}
+            />
+          ))}
+        </div>
+      )}
+
+      {/* SVG timeline */}
+      <svg
+        ref={svgRef}
+        viewBox={`0 0 ${VIEW_WIDTH} ${VIEW_HEIGHT}`}
+        width="100%"
+        style={{ display: 'block', cursor: 'crosshair', overflow: 'visible' }}
+        onMouseDown={onMouseDown}
+        onTouchStart={onTouchStart}
+      >
+        <defs>
+          <pattern
+            id="branch-hatch"
+            patternUnits="userSpaceOnUse"
+            width="7"
+            height="7"
+            patternTransform="rotate(45)"
+          >
+            <line x1="0" y1="0" x2="0" y2="7" stroke="#1D9E75" strokeWidth="1.2" opacity="0.4" />
+          </pattern>
+        </defs>
+
+        {/* Background dim tracks */}
+        <line
+          x1="0"
+          y1={W2_Y}
+          x2={VIEW_WIDTH}
+          y2={W2_Y}
+          stroke={WORLD_TRACK_COLORS['always-merged']}
+          strokeWidth={selectedWorld === 'always-merged' ? 3 : 1.5}
+          opacity={selectedWorld === 'always-merged' ? 0.95 : 0.18}
+        />
+        <line
+          x1="0"
+          y1={TRUNK_Y}
+          x2={forkX}
+          y2={TRUNK_Y}
+          stroke="#888780"
+          strokeWidth={selectedWorld !== 'always-merged' ? 3 : 1.5}
+          opacity={selectedWorld !== 'always-merged' ? 0.9 : 0.22}
+        />
+        <path
+          d={`M${forkX},${TRUNK_Y} C${forkX + FORK_CTRL_1_DX},${TRUNK_Y} ${forkX + FORK_CTRL_2_DX},${W0_Y} ${forkX + FORK_RUN},${W0_Y} L${VIEW_WIDTH},${W0_Y}`}
+          fill="none"
+          stroke={WORLD_TRACK_COLORS.canonical}
+          strokeWidth={selectedWorld === 'canonical' ? 3 : 1.5}
+          opacity={selectedWorld === 'canonical' ? 0.9 : 0.18}
+        />
+        <path
+          d={`M${forkX},${TRUNK_Y} C${forkX + FORK_CTRL_1_DX},${TRUNK_Y} ${forkX + FORK_CTRL_2_DX},${W1_Y} ${forkX + FORK_RUN},${W1_Y} L${VIEW_WIDTH},${W1_Y}`}
+          fill="none"
+          stroke={WORLD_TRACK_COLORS['never-merged']}
+          strokeWidth={selectedWorld === 'never-merged' ? 3 : 1.5}
+          opacity={selectedWorld === 'never-merged' ? 0.9 : 0.18}
+        />
+
+        {/* Indeterminate hatch on W-1 post-merge */}
+        {selectedWorld === 'never-merged' && scrubberTs >= timeWindow.branchTs && (
+          <rect
+            x={forkX}
+            y={W1_Y - 16}
+            width={VIEW_WIDTH - forkX}
+            height={32}
+            fill="url(#branch-hatch)"
+            opacity={0.85}
+            rx={3}
+          />
+        )}
+
+        {/* Event dots */}
+        {relevantEvents.map((e) => {
+          const x = xAtTs(timeWindow, e.ts);
+          const color = OP_DOT_COLOR[e.op] ?? '#888780';
+          if (e.op === 'SYN') {
+            return (
+              <rect
+                key={`${e.seq}-syn`}
+                x={x - 9}
+                y={TRUNK_Y - 9}
+                width="18"
+                height="18"
+                rx="2"
+                transform={`rotate(45,${x},${TRUNK_Y})`}
+                fill={WORLD_TRACK_COLORS.canonical}
+                opacity={0.9}
+              />
+            );
+          }
+          // Stamp the dot on every track that exists at this x.
+          const ys: Array<{ y: number; world: WorldType }> = [];
+          ys.push({ y: W2_Y, world: 'always-merged' });
+          if (x <= forkX) {
+            ys.push({ y: TRUNK_Y, world: 'canonical' });
+          } else {
+            ys.push({ y: trackYAt('canonical', x, forkX), world: 'canonical' });
+            ys.push({ y: trackYAt('never-merged', x, forkX), world: 'never-merged' });
+          }
+          return ys.map(({ y }, idx) => (
+            <circle
+              key={`${e.seq}-${idx}`}
+              cx={x}
+              cy={y}
+              r="3.5"
+              fill={color}
+              opacity={0.55}
+            />
+          ));
+        })}
+
+        {/* SYN diamond at fork */}
+        <rect
+          x={forkX - 9}
+          y={TRUNK_Y - 9}
+          width="18"
+          height="18"
+          rx="2"
+          transform={`rotate(45,${forkX},${TRUNK_Y})`}
+          fill={WORLD_TRACK_COLORS.canonical}
+          opacity={0.9}
+        />
+        <text
+          x={forkX}
+          y={TRUNK_Y - 18}
+          fontSize="9"
+          fill={WORLD_TRACK_COLORS.canonical}
+          textAnchor="middle"
+          fontFamily="monospace"
+          opacity={0.9}
+        >
+          {'\u2B25 SYN'}
+        </text>
+
+        {/* Track labels */}
+        <text x="6" y="43" fontSize="9.5" fill={WORLD_TRACK_COLORS['always-merged']} opacity={0.75} fontFamily="monospace">
+          W-2  always merged
+        </text>
+        <text x="6" y="123" fontSize="9.5" fill="#888780" opacity={0.55} fontFamily="monospace">
+          shared trunk  (W-0 = W-1 here)
+        </text>
+        <text x={Math.min(VIEW_WIDTH - 120, forkX + 100)} y="89" fontSize="9.5" fill={WORLD_TRACK_COLORS.canonical} opacity={0.85} fontFamily="monospace">
+          W-0  canonical
+        </text>
+        <text x={Math.min(VIEW_WIDTH - 120, forkX + 100)} y="183" fontSize="9.5" fill={WORLD_TRACK_COLORS['never-merged']} opacity={0.85} fontFamily="monospace">
+          W-1  never merged
+        </text>
+
+        {/* Time axis */}
+        <line x1="0" y1="210" x2={VIEW_WIDTH} y2="210" stroke={theme.borderLight} strokeWidth="0.5" />
+        <line x1="0" y1="207" x2="0" y2="213" stroke={theme.borderLight} strokeWidth="1" />
+        <line x1={forkX} y1="207" x2={forkX} y2="213" stroke={WORLD_TRACK_COLORS.canonical} strokeWidth="1" opacity={0.7} />
+        <line x1={VIEW_WIDTH} y1="207" x2={VIEW_WIDTH} y2="213" stroke={theme.borderLight} strokeWidth="1" />
+        <text x="2" y="223" fontSize="9" fill="#888780" fontFamily="monospace" opacity={0.5}>
+          {formatTimeShort(timeWindow.minTs)}
+        </text>
+        <text x={forkX - 14} y="223" fontSize="9" fill={WORLD_TRACK_COLORS.canonical} fontFamily="monospace" opacity={0.75}>
+          SYN
+        </text>
+        <text x={VIEW_WIDTH - 30} y="223" fontSize="9" fill="#888780" fontFamily="monospace" opacity={0.5}>
+          {formatTimeShort(timeWindow.maxTs)}
+        </text>
+
+        {/* Scrubber */}
+        <line
+          x1={scrubberX}
+          y1="18"
+          x2={scrubberX}
+          y2="208"
+          stroke={theme.text}
+          strokeWidth="1"
+          opacity={0.4}
+          strokeDasharray="4,3"
+          pointerEvents="none"
+        />
+        <circle cx={scrubberX} cy="18" r="5" fill={theme.text} opacity={0.55} pointerEvents="none" />
+
+        {/* Scrubber intersect rings */}
+        <ScrubberRing
+          world="always-merged"
+          x={scrubberX}
+          y={W2_Y}
+          active={selectedWorld === 'always-merged'}
+        />
+        {scrubberTs < timeWindow.branchTs ? (
+          <ScrubberRing
+            world="canonical"
+            x={scrubberX}
+            y={TRUNK_Y}
+            active={selectedWorld === 'canonical' || selectedWorld === 'never-merged'}
+          />
+        ) : (
+          <>
+            <ScrubberRing
+              world="canonical"
+              x={scrubberX}
+              y={trackYAt('canonical', scrubberX, forkX)}
+              active={selectedWorld === 'canonical'}
+            />
+            <ScrubberRing
+              world="never-merged"
+              x={scrubberX}
+              y={trackYAt('never-merged', scrubberX, forkX)}
+              active={selectedWorld === 'never-merged'}
+            />
+          </>
+        )}
+      </svg>
+
+      {/* Entity state cards */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
+        {(['canonical', 'never-merged', 'always-merged'] as WorldType[]).map((w) => (
+          <EntityCard
+            key={w}
+            world={w}
+            active={selectedWorld === w}
+            projection={projections[w]}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── Sub-components ─────────────────────────────────────────────────────────
+
+function WorldPill({ world, active, onClick }: { world: WorldType; active: boolean; onClick: () => void }) {
+  const { theme } = useTheme();
+  const color = WORLD_COLORS[world];
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        border: active ? `1px solid ${color}` : `0.5px solid ${theme.borderLight}`,
+        borderRadius: 20,
+        padding: '4px 14px',
+        fontSize: 11,
+        cursor: 'pointer',
+        background: active ? theme.bgMuted : theme.bgCard,
+        color: active ? color : theme.textSecondary,
+        fontFamily: 'monospace',
+      }}
+    >
+      {WORLD_LABELS[world]}
+    </button>
+  );
+}
+
+function StanceButton({ stance, active, onClick }: { stance: EvaStance; active: boolean; onClick: () => void }) {
+  const { theme } = useTheme();
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        fontFamily: 'monospace',
+        fontSize: 10,
+        border: active ? '0.5px solid #7F77DD' : `0.5px solid ${theme.borderLight}`,
+        borderRadius: 3,
+        padding: '2px 8px',
+        cursor: 'pointer',
+        background: active ? theme.bgMuted : theme.bgCard,
+        color: active ? '#7F77DD' : theme.textSecondary,
+      }}
+    >
+      {stance}
+    </button>
+  );
+}
+
+function ScrubberRing({
+  world,
+  x,
+  y,
+  active,
+}: {
+  world: WorldType;
+  x: number;
+  y: number;
+  active: boolean;
+}) {
+  return (
+    <circle
+      cx={x}
+      cy={y}
+      r={active ? 6 : 4}
+      fill={WORLD_TRACK_COLORS[world]}
+      opacity={active ? 1 : 0.25}
+      stroke="white"
+      strokeWidth="1.5"
+      pointerEvents="none"
+    />
+  );
+}
+
+function EntityCard({
+  world,
+  active,
+  projection,
+}: {
+  world: WorldType;
+  active: boolean;
+  projection: ProjectedState | null;
+}) {
+  const { theme } = useTheme();
+  const color = WORLD_COLORS[world];
+
+  return (
+    <div
+      style={{
+        border: active ? `1px solid ${color}` : `0.5px solid ${theme.borderLight}`,
+        borderRadius: 6,
+        padding: '8px 12px',
+        opacity: active ? 1 : 0.45,
+        transition: 'opacity 0.2s, border-color 0.15s',
+      }}
+    >
+      <div
+        style={{
+          fontSize: 9.5,
+          marginBottom: 5,
+          letterSpacing: '0.05em',
+          color,
+          fontFamily: 'monospace',
+        }}
+      >
+        {WORLD_LABELS[world]}
+      </div>
+      {projection === null ? (
+        <div style={{ fontSize: 11, color: theme.textMuted, fontFamily: 'monospace' }}>
+          loading…
+        </div>
+      ) : (
+        <CardBody projection={projection} active={active} />
+      )}
+    </div>
+  );
+}
+
+function CardBody({ projection, active }: { projection: ProjectedState; active: boolean }) {
+  const { theme } = useTheme();
+  if (projection.entities.length === 0) {
+    return (
+      <div style={{ fontSize: 11, color: theme.textMuted, fontFamily: 'monospace' }}>
+        — no projection —
+      </div>
+    );
+  }
+  return (
+    <>
+      {projection.entities.map((entity) => (
+        <div key={entity.target}>
+          <div
+            style={{
+              fontSize: 12,
+              fontWeight: 500,
+              color: theme.text,
+              marginBottom: 4,
+              fontFamily: 'monospace',
+            }}
+          >
+            {entity.target}
+          </div>
+          {Object.entries(entity.fields).map(([key, field]) => (
+            <FieldRow key={key} fieldKey={key} field={field} active={active} />
+          ))}
+        </div>
+      ))}
+    </>
+  );
+}
+
+function FieldRow({
+  fieldKey,
+  field,
+  active,
+}: {
+  fieldKey: string;
+  field: ProjectedField;
+  active: boolean;
+}) {
+  const { theme } = useTheme();
+  let color = theme.text;
+  let fontStyle: 'italic' | 'normal' = 'normal';
+  let display = formatValue(field.value);
+
+  if (field.epistemic === 'shadow') {
+    color = theme.textSecondary;
+    fontStyle = 'italic';
+    display = '— shadow';
+  } else if (field.epistemic === 'conflict') {
+    color = '#D4537E';
+    const list = (field.conflict_values ?? []).map(formatValue).join(', ');
+    display = `\u22A2 [${list}]`;
+  } else if (field.epistemic === 'policy-sensitive' && active) {
+    color = '#7F77DD';
+  }
+
+  return (
+    <div
+      style={{
+        fontSize: 11,
+        color: theme.textSecondary,
+        lineHeight: 1.7,
+        fontFamily: 'monospace',
+      }}
+    >
+      {fieldKey}: <span style={{ color, fontStyle }}>{display}</span>
+      {field.epistemic === 'policy-sensitive' && active && (
+        <span
+          style={{
+            display: 'inline-block',
+            width: 5,
+            height: 5,
+            borderRadius: '50%',
+            background: '#7F77DD',
+            marginLeft: 6,
+            verticalAlign: 'middle',
+          }}
+        />
+      )}
+      {field.provenance && (
+        <span style={{ color: theme.textMuted, marginLeft: 6 }}>({field.provenance})</span>
+      )}
+    </div>
+  );
+}
+
+function formatValue(v: unknown): string {
+  if (v === null || v === undefined) return '∅';
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+  try {
+    return JSON.stringify(v);
+  } catch {
+    return String(v);
+  }
+}
+
+function formatTimeShort(ts: string): string {
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return ts;
+  return d.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
+}

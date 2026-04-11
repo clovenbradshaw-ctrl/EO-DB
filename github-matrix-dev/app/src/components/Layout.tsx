@@ -70,6 +70,7 @@ const BuilderView = lazyWithRetry(() => import('./builder/BuilderView').then(m =
 const MessagesView = lazyWithRetry(() => import('./MessagesView').then(m => ({ default: m.MessagesView })));
 const PeopleView = lazyWithRetry(() => import('./PeopleView').then(m => ({ default: m.PeopleView })));
 const RecordPageView = lazyWithRetry(() => import('./builder/RecordPageView').then(m => ({ default: m.RecordPageView })));
+const BranchExplorerPanel = lazyWithRetry(() => import('./branch/BranchExplorerPanel').then(m => ({ default: m.BranchExplorerPanel })));
 import { PermissionBadge } from './PermissionBadge';
 import { ViewOnlyBanner } from './ViewOnlyBanner';
 import { HeadlineMetrics } from './HeadlineMetrics';
@@ -1972,6 +1973,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     people: '\u2689', // people icon
     members: '\u2736', // star/members icon
     multiuser: '\u2194', // left-right arrow
+    branch: '\u22EE',   // vertical ellipsis (branch fork)
   };
 
   // --- Permission resolution ---
@@ -2598,6 +2600,13 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                 Settings
               </button>
             )}
+            <button
+              onClick={() => { navigate({ view: 'branch' }); }}
+              style={navItemStyle('branch')}
+            >
+              <span style={s.navIcon}>{NAV_ICONS.branch}</span>
+              Branches
+            </button>
             <div style={s.navGroupLabel}>Testing</div>
             <button
               onClick={() => { navigate({ view: 'multiuser' }); }}
@@ -2836,6 +2845,8 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               <MultiUserTestView matrixClient={matrixClientRef.current} roomId={spaceRoomId} presence={presence} />
             ) : activeView === 'api' ? (
               <ApiConnectionsView />
+            ) : activeView === 'branch' ? (
+              <BranchExplorerPanel />
             ) : null}
             </Suspense>
           </ErrorBoundary>}
