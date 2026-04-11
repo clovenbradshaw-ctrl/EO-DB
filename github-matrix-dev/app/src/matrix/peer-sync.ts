@@ -70,6 +70,18 @@ export class PeerSync {
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
   /**
+   * Serialization chain for to-device handler invocations.
+   *
+   * Every incoming to-device message is appended to this chain so that two
+   * SYNC_EVENTS batches can never race through processIncomingPeerEvents
+   * (which writes the client_event_id idem cache inside a non-locked
+   * for-loop). Without this, a second batch can enter before the first has
+   * finished writing its idem keys, and both wind up calling processEvent
+   * on the same target — producing duplicate folds and divergent state.
+   */
+  private handlerChain: Promise<void> = Promise.resolve();
+
+  /**
    * Called when a peer signals that new ops were written to GDrive.
    * Wire this to gdriveSync.triggerImmediateCheck() in the app shell.
    */
@@ -127,7 +139,16 @@ export class PeerSync {
     // Attach listener BEFORE announcing — if announceToPeers() fails,
     // we can still receive peer messages (they may hello us first).
     this.toDeviceHandler = (event: MatrixEvent) => {
-      this.handleToDeviceEvent(event);
+      // Chain onto handlerChain so concurrent to-device deliveries serialize.
+      // `.catch(() => {})` keeps the chain alive after a prior rejection,
+      // and the trailing `.catch` stops unhandled-rejection noise without
+      // affecting the next enqueue.
+      const prev = this.handlerChain;
+      const next = prev
+        .catch(() => {})
+        .then(() => this.handleToDeviceEvent(event));
+      this.handlerChain = next;
+      next.catch(() => {});
     };
     this.client.on('toDeviceEvent' as any, this.toDeviceHandler);
 
@@ -161,6 +182,14 @@ export class PeerSync {
       this.client.removeListener('toDeviceEvent' as any, this.toDeviceHandler);
       this.toDeviceHandler = undefined;
     }
+  }
+
+  /**
+   * Await any in-flight to-device handler work. Used by tests and by clean
+   * shutdown so the store isn't closed mid-fold.
+   */
+  async drainHandlers(): Promise<void> {
+    await this.handlerChain.catch(() => {});
   }
 
   /** Alias for stop() — satisfies the SyncManager.destroy() call site in Layout. */
