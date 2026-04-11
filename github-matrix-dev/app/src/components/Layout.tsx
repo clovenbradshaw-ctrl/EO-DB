@@ -1910,15 +1910,28 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     onLogout();
   }
 
-  // Save all cached space snapshots when the page is hidden or unloaded.
-  // visibilitychange fires reliably when switching tabs/browsers/closing,
-  // unlike beforeunload which can't await async work.
+  // Handle tab visibility changes.
+  //
+  // On `hidden`: do NOT run the heavy gdriveSync.forceSave() (fullPushToGDrive) —
+  //   every dispatched event is already flushed to Drive in saveOp() via
+  //   flushBuffer(), so ops are durable without a full rewrite. The legacy
+  //   SyncManager path still saves its snapshot (cheap; only fires for older
+  //   spaces that don't use PeerSync).
+  //
+  // On `visible`: proactively re-sync so the user doesn't wait for
+  //   browser-throttled timers to catch up. Background tabs throttle
+  //   setInterval to ~1 min, so GDrive's 15 s cycle and PeerSync's 30 s
+  //   heartbeat effectively pause. Without an explicit kick here, the user
+  //   sees stale data for 30-60+ s after tabbing back in.
+  //
+  // On `beforeunload`: run the full forceSave for durability before the tab
+  //   is closed. This is the only path where a full rewrite is warranted.
   useEffect(() => {
-    let snapshotInFlight = false;
+    let fullSaveInFlight = false;
 
-    const saveAllSnapshots = async () => {
-      if (snapshotInFlight) return;
-      snapshotInFlight = true;
+    const fullSaveAll = async () => {
+      if (fullSaveInFlight) return;
+      fullSaveInFlight = true;
       try {
         const promises: Promise<void>[] = [];
         for (const [, cached] of spaceCacheRef.current) {
@@ -1935,22 +1948,65 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         }
         await Promise.all(promises);
       } finally {
-        snapshotInFlight = false;
+        fullSaveInFlight = false;
+      }
+    };
+
+    const lightSaveOnHide = () => {
+      // Legacy SyncManager snapshot only (cheap). Skip gdriveSync.forceSave —
+      // ops are already flushed to Drive in saveOp() so there's nothing
+      // unsaved, and fullPushToGDrive is expensive enough that running it on
+      // every tab-out causes the slow-load-on-return the user sees.
+      for (const [, cached] of spaceCacheRef.current) {
+        if (cached.syncManager) {
+          cached.syncManager.saveSnapshot().catch((err) => {
+            console.warn('[EO-DB] Snapshot save failed:', err);
+          });
+        }
+      }
+    };
+
+    const refreshOnVisible = () => {
+      // Kick browser-throttled timers back into action:
+      //   1. Pull any new events from Drive immediately (instead of waiting
+      //      up to 15 s for the next setInterval tick).
+      //   2. Re-announce PeerSync presence so peers push us anything we
+      //      missed while the tab was backgrounded.
+      for (const [, cached] of spaceCacheRef.current) {
+        if (cached.gdriveSync) {
+          try {
+            cached.gdriveSync.triggerImmediateCheck();
+          } catch (err) {
+            console.warn('[EO-DB] GDrive immediate check failed:', err);
+          }
+        }
+        if (cached.peerSync) {
+          // Re-run start() — it cancels the old heartbeat and re-announces.
+          cached.peerSync.start().catch((err) => {
+            console.warn('[EO-DB] PeerSync re-announce failed:', err);
+          });
+        }
       }
     };
 
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'hidden') {
-        saveAllSnapshots();
+        lightSaveOnHide();
+      } else if (document.visibilityState === 'visible') {
+        refreshOnVisible();
       }
     };
 
     // beforeunload can't await — fire-and-forget is the best we can do there.
-    // visibilitychange ('hidden') is the reliable path for saving snapshots.
+    // This is the ONE place we still run the heavy fullPushToGDrive, because
+    // the tab is about to close and we need full durability.
+    const handleBeforeUnload = () => { fullSaveAll(); };
+
     document.addEventListener('visibilitychange', handleVisibilityChange);
-    window.addEventListener('beforeunload', () => { saveAllSnapshots(); });
+    window.addEventListener('beforeunload', handleBeforeUnload);
     return () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('beforeunload', handleBeforeUnload);
     };
   }, []);
 
