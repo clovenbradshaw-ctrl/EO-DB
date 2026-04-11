@@ -3,7 +3,8 @@
  *
  * This module hosts the deterministic primitives the fold depends on, so that
  * concurrent execution paths (bulk import, worker pool, GPU shard) can rely on
- * a single, race-free surface for helix addressing and sequence allocation.
+ * a single, race-free surface for helix addressing, sequence allocation, and
+ * helix-state mutation.
  *
  * What lives here:
  *
@@ -17,7 +18,14 @@
  *      Promise.all/per-target nextSeq race documented in
  *      fold-determinism.test.ts (FIXME(phase-A)).
  *
- *   3. Pure helpers — mergeOperand, isFormulaOperand, deepEqual. Order-
+ *   3. HelixStateTracker — the centralized surface for reading, validating,
+ *      and mutating per-target HelixPosition state. StoreHelixStateTracker is
+ *      the canonical EoStore-backed implementation. checkAndPromote +
+ *      MAX_PROMOTION_DEPTH implement the auto-promotion pass on top of any
+ *      tracker, with event-emission provided by caller-supplied callbacks so
+ *      fold-core never imports fold.ts.
+ *
+ *   4. Pure helpers — mergeOperand, isFormulaOperand, deepEqual. Order-
  *      independent, side-effect-free; safe for any caller.
  *
  * fold.ts keeps the operator handlers (INS, DEF, ...), cycle detection, and
@@ -26,7 +34,7 @@
  */
 
 import type { EoStore } from './encrypted-store';
-import type { EoEventInput, LoggableOperator, HelixPosition } from './types';
+import type { ConEdgeAddItem, EoEventInput, LoggableOperator, HelixPosition } from './types';
 
 // ─── Helix constants & wave grouping ────────────────────────────────────────
 
@@ -164,6 +172,181 @@ export class AddressingHorizon {
   /** Total seqs reserved across the horizon's lifetime. */
   get totalReserved(): number {
     return this.reserved.length;
+  }
+}
+
+// ─── HelixStateTracker ──────────────────────────────────────────────────────
+
+/**
+ * Centralized helix-state surface. Every path that reads or mutates a
+ * target's HelixPosition (serial fold, replay, REC cascade, future worker
+ * shards) goes through a HelixStateTracker so the state model lives in one
+ * place and a single implementation can be swapped in for tests or alternate
+ * backends.
+ *
+ * The interface is deliberately narrow — three operations — and is kept free
+ * of any log-write or event-emission dependencies. Promotion logic (which
+ * must append system-generated events) lives above the tracker as a
+ * callback-driven helper, so fold-core never needs to import fold.ts.
+ */
+export interface HelixStateTracker {
+  /** Read a target's HelixPosition, or null if no operators have fired yet. */
+  getPosition(target: string): Promise<HelixPosition | null>;
+  /**
+   * Record that `op` fired on `target` at `seq`. O(1), never walks the log.
+   * Adds `op` to `declared` on first fire, sets `firstSeq[op]` only if it was
+   * unset, always updates `lastSeq[op]`, always increments `count[op]`.
+   */
+  recordOperator(target: string, op: LoggableOperator, seq: number): Promise<void>;
+  /**
+   * Returns true if `pos` satisfies `op`'s helix preconditions. Thin wrapper
+   * over the module-level `isHelixValid` — exposed on the tracker so callers
+   * can mock validation alongside state reads in tests.
+   */
+  isValid(op: LoggableOperator, pos: HelixPosition | null): boolean;
+}
+
+/**
+ * The canonical HelixStateTracker. Stateless wrapper over an EoStore — all
+ * helix state lives on `helix:${target}` keys, and every method is a direct
+ * store read or write with no in-memory caching. Safe to instantiate per-call
+ * or per-function-scope; construction cost is a single field assignment.
+ */
+export class StoreHelixStateTracker implements HelixStateTracker {
+  constructor(private readonly store: EoStore) {}
+
+  async getPosition(target: string): Promise<HelixPosition | null> {
+    return (await this.store.get(`helix:${target}`)) as HelixPosition | null;
+  }
+
+  async recordOperator(target: string, op: LoggableOperator, seq: number): Promise<void> {
+    const existing = (await this.store.get(`helix:${target}`)) as HelixPosition | null;
+    const pos: HelixPosition = existing ?? { declared: [], firstSeq: {}, lastSeq: {}, count: {} };
+    if (!pos.declared.includes(op)) {
+      pos.declared = [...pos.declared, op];
+    }
+    pos.firstSeq = pos.firstSeq[op] === undefined
+      ? { ...pos.firstSeq, [op]: seq }
+      : pos.firstSeq;
+    pos.lastSeq = { ...pos.lastSeq, [op]: seq };
+    pos.count = { ...pos.count, [op]: (pos.count[op] ?? 0) + 1 };
+    await this.store.put(`helix:${target}`, pos);
+  }
+
+  isValid(op: LoggableOperator, pos: HelixPosition | null): boolean {
+    return isHelixValid(op, pos);
+  }
+}
+
+// ─── Helix auto-promotion ───────────────────────────────────────────────────
+
+/** Maximum auto-promotion depth — prevents infinite cascade. */
+export const MAX_PROMOTION_DEPTH = 5;
+
+/**
+ * Callbacks the caller must provide when running a promotion pass. Kept
+ * callback-driven so fold-core does not import fold.ts (which would create
+ * a cycle: fold-core ← fold ← fold-core).
+ */
+export interface PromotionCallbacks {
+  /**
+   * Process a synthetic auto-promoted event through the full event pipeline
+   * (validation → idempotency → seq assignment → log append → operator
+   * dispatch → helix record → fold-cache update). Must recurse back into
+   * the caller's serial processEvent core with the incremented depth so
+   * the MAX_PROMOTION_DEPTH cap is honored on nested promotions.
+   */
+  emitSynthetic: (input: EoEventInput, depth: number) => Promise<void>;
+  /**
+   * Emit a promotion-blocked stub — called once per target when the depth
+   * cap has been reached. The stub is a NUL event with nul_state set to
+   * `promotion_blocked`; the callback is responsible for allocating a seq,
+   * writing the event to the log, recording the NUL on the helix, updating
+   * the fold cache, and calling any onEvent hook.
+   */
+  emitBlocked: (target: string) => Promise<void>;
+}
+
+/**
+ * Check whether an event's target (and, for CON, any destination targets)
+ * satisfies the operator's helix preconditions. If not, auto-promote by
+ * invoking `emitSynthetic` for each missing operator.
+ *
+ * Runs BEFORE seq assignment on the original event so promoted events get
+ * lower seq numbers and appear earlier in replay order.
+ *
+ * NUL / SIG / REC / INS have no preconditions and short-circuit immediately.
+ */
+export async function checkAndPromote(
+  tracker: HelixStateTracker,
+  event: EoEventInput,
+  callbacks: PromotionCallbacks,
+  depth: number,
+): Promise<void> {
+  if (event.op === 'NUL' || event.op === 'SIG' || event.op === 'REC' || event.op === 'INS') {
+    return;
+  }
+
+  const pos = await tracker.getPosition(event.target);
+  if (!tracker.isValid(event.op as LoggableOperator, pos)) {
+    await promoteToHelix(tracker, event.target, ['INS'], callbacks, depth);
+  }
+
+  // CON: also check every destination target.
+  if (event.op === 'CON' && event.operand?.added) {
+    for (const item of event.operand.added as ConEdgeAddItem[]) {
+      const dest = typeof item === 'string' ? item : item.dest;
+      const destPos = await tracker.getPosition(dest);
+      if (!new Set(destPos?.declared ?? []).has('INS')) {
+        await promoteToHelix(tracker, dest, ['INS'], callbacks, depth);
+      }
+    }
+  }
+}
+
+/**
+ * Emits system-generated operator events to satisfy a target's missing helix
+ * preconditions, via the caller's emitSynthetic callback. If `depth` has
+ * reached MAX_PROMOTION_DEPTH, invokes emitBlocked instead and returns
+ * without emitting further events.
+ *
+ * After each emitSynthetic, the declared set is refreshed from the tracker
+ * so a single recursive promotion that fires multiple operators (e.g. a NUL
+ * handler that promotes to INS on the same target) is observed before the
+ * next required op is considered.
+ */
+async function promoteToHelix(
+  tracker: HelixStateTracker,
+  target: string,
+  requiredOps: LoggableOperator[],
+  callbacks: PromotionCallbacks,
+  depth: number,
+): Promise<void> {
+  if (depth >= MAX_PROMOTION_DEPTH) {
+    await callbacks.emitBlocked(target);
+    return;
+  }
+
+  const pos = await tracker.getPosition(target);
+  const declared = new Set(pos?.declared ?? []);
+
+  for (const op of requiredOps) {
+    if (declared.has(op)) continue;
+    const now = new Date().toISOString();
+    const systemInput: EoEventInput = {
+      op,
+      target,
+      operand: {},
+      agent: 'system:helix',
+      ts: now,
+      acquired_ts: now,
+      meta: { auto_promoted: true, reason: `required by helix — missing ${op}` },
+    };
+    await callbacks.emitSynthetic(systemInput, depth + 1);
+    // Refresh declared after each promotion so subsequent required ops see
+    // anything the synthetic event (or its own cascaded promotions) declared.
+    const updated = await tracker.getPosition(target);
+    if (updated) for (const d of updated.declared) declared.add(d);
   }
 }
 
