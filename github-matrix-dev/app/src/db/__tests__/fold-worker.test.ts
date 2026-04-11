@@ -10,6 +10,7 @@
 import { describe, it, expect } from 'vitest';
 import { appendEvent, readEventAt } from '../log-opfs';
 import type { OPFSLog } from '../log-opfs';
+import { createMemoryLog } from './_memory-log';
 import { buildIndex, updateIndex, getIntersection } from '../log-index';
 import type { LogIndex } from '../log-index';
 import {
@@ -18,39 +19,6 @@ import {
 } from '../fold-position';
 import type { FoldPosition } from '../fold-position';
 import type { EoEvent } from '../types';
-
-// ─── Memory log (same as other tests) ────────────────────────────────────────
-
-function createMemoryLog(): OPFSLog {
-  let buf = new Uint8Array(0);
-  const syncHandle = {
-    read(dest: Uint8Array, opts: { at: number }): number {
-      const start = opts.at;
-      const end = Math.min(start + dest.length, buf.length);
-      dest.set(buf.subarray(start, end));
-      return Math.max(0, end - start);
-    },
-    write(src: Uint8Array, opts: { at: number }): number {
-      const needed = opts.at + src.length;
-      if (needed > buf.length) {
-        const next = new Uint8Array(needed);
-        next.set(buf);
-        buf = next;
-      }
-      buf.set(src, opts.at);
-      return src.length;
-    },
-    flush(): void {},
-    getSize(): number { return buf.length; },
-    close(): void {},
-    truncate(size: number): void {
-      const next = new Uint8Array(size);
-      next.set(buf.subarray(0, size));
-      buf = next;
-    },
-  } as unknown as FileSystemSyncAccessHandle;
-  return { fileHandle: {} as FileSystemFileHandle, syncHandle, size: 0 };
-}
 
 function ev(
   seq: number,

@@ -12,11 +12,16 @@
  *      isHelixValid. Previously lived inline in fold.ts; pulled out so every
  *      fold runner can share one authoritative helix model.
  *
- *   2. AddressingHorizon — the constitutive site for seq allocation. The bulk
- *      path pre-reserves a contiguous range of seqs per wave, then hands them
- *      out in a deterministic per-target order. Replaces the previous
+ *   2. SeqReservoir — the seq-allocation primitive used by bulk-import paths.
+ *      Pre-reserves a contiguous range of seqs per wave, then hands them out
+ *      in a deterministic per-target order. Replaces the previous
  *      Promise.all/per-target nextSeq race documented in
  *      fold-determinism.test.ts (FIXME(phase-A)).
+ *
+ *      NOTE: this used to be called `AddressingHorizon`, but the Phase A
+ *      roadmap reserves that name for the constitutive site model in
+ *      addressing-horizon.ts. The class here is just a contiguous-range seq
+ *      reservoir; it has nothing to do with site existence.
  *
  *   3. HelixStateTracker — the centralized surface for reading, validating,
  *      and mutating per-target HelixPosition state. StoreHelixStateTracker is
@@ -50,6 +55,80 @@ export const HELIX_LEVEL: Partial<Record<LoggableOperator, number>> = {
   DEF: 4,
   EVA: 5,
 };
+
+// ─── OPERATOR_PROCESSING_CLASS ──────────────────────────────────────────────
+
+/**
+ * Describes how an operator should be routed through the execution pipeline:
+ * which execution layer handles it (CPU / GPU / boundary / adaptive), which
+ * memory model its state lives in, and whether it acts as a synchronization
+ * barrier between layers.
+ *
+ *   layer:
+ *     'cpu'       — pure CPU operation, never touches GPU
+ *     'gpu'       — GPU compute dispatch (EVA formulas, REC fixed-points)
+ *     'boundary'  — CPU-writes / GPU-reads shared memory (CON adjacency)
+ *     'adaptive'  — routed to CPU or GPU at runtime based on fan-in size
+ *
+ *   memory: free-form label identifying the state's storage shape. Informal
+ *     for now; formalized when Phases C-K wire the actual backing stores.
+ *
+ *   sync:
+ *     'none'       — no cross-layer synchronization required
+ *     'flush-gpu'  — CPU must wait for any in-flight GPU work to drain
+ *                    BEFORE applying this operator. DEF changes the schema
+ *                    (i.e. the dimensionality of the state space), so every
+ *                    dense-vector buffer the GPU is reading becomes stale at
+ *                    the instant the DEF lands. Treat this as an ontological
+ *                    barrier, not a scheduling hint.
+ *     'push-state' — CPU must publish updated state to GPU-visible memory
+ *                    before subsequent GPU ops execute. Reserved; no
+ *                    operator uses this today.
+ */
+export interface OperatorProcessingClass {
+  layer: 'cpu' | 'gpu' | 'boundary' | 'adaptive';
+  memory:
+    | 'constituted-set'
+    | 'ephemeral'
+    | 'point-write'
+    | 'boundary'
+    | 'csr-shared'
+    | 'reduction'
+    | 'schema-table'
+    | 'dense-vector'
+    | 'double-buffered';
+  sync: 'none' | 'flush-gpu' | 'push-state';
+}
+
+/**
+ * Single source of truth for per-operator routing. Every phase of the scaling
+ * roadmap (worker pool, shard workers, GPU SpMV) consults this table rather
+ * than reimplementing operator-class decisions as scattered switch statements.
+ *
+ * Changing a row here propagates the effect of that change to every runner.
+ * Adding a new operator requires adding an entry — TypeScript's exhaustiveness
+ * check on `Record<LoggableOperator, ...>` enforces this at compile time.
+ */
+export const OPERATOR_PROCESSING_CLASS: Record<LoggableOperator, OperatorProcessingClass> = {
+  NUL: { layer: 'cpu',      memory: 'constituted-set', sync: 'none'      },
+  SIG: { layer: 'cpu',      memory: 'ephemeral',       sync: 'none'      },
+  INS: { layer: 'cpu',      memory: 'point-write',     sync: 'none'      },
+  SEG: { layer: 'cpu',      memory: 'boundary',        sync: 'none'      },
+  CON: { layer: 'boundary', memory: 'csr-shared',      sync: 'none'      },
+  SYN: { layer: 'adaptive', memory: 'reduction',       sync: 'none'      },
+  DEF: { layer: 'cpu',      memory: 'schema-table',    sync: 'flush-gpu' },
+  EVA: { layer: 'gpu',      memory: 'dense-vector',    sync: 'none'      },
+  REC: { layer: 'gpu',      memory: 'double-buffered', sync: 'none'      },
+};
+
+/**
+ * True if applying `op` requires draining any in-flight GPU work before the
+ * CPU can proceed. Currently `DEF` is the only such operator (it mutates the
+ * schema dimensionality every GPU buffer is indexed against).
+ */
+export function requiresGpuFlush(op: LoggableOperator): boolean {
+  return OPERATOR_PROCESSING_CLASS[op].sync === 'flush-gpu';
+}
 
 /** A group of events at the same helix level, ready for wave processing. */
 export interface HelixWave {
@@ -100,10 +179,13 @@ export function isHelixValid(op: LoggableOperator, pos: HelixPosition | null): b
   }
 }
 
-// ─── AddressingHorizon ──────────────────────────────────────────────────────
+// ─── SeqReservoir ───────────────────────────────────────────────────────────
 
 /**
- * Deterministic seq allocator used by bulk-import paths.
+ * Deterministic seq allocator used by bulk-import paths. Not the
+ * AddressingHorizon — that name is reserved for the constitutive site model
+ * in addressing-horizon.ts. This class is purely a contiguous-range seq
+ * reservoir.
  *
  * Pre-reserves a contiguous range of sequence numbers from the store via
  * serial store.nextSeq() calls, then hands them out in a fixed, caller-
@@ -111,18 +193,16 @@ export function isHelixValid(op: LoggableOperator, pos: HelixPosition | null): b
  * concurrent tasks would hit store.nextSeq() in microtask-interleaved order
  * and produce non-reproducible seq assignments across runs of the same input.
  *
- * The horizon is the "addressing" half of the Phase A constitutive site
- * model: once a seq has been reserved for an event, that mapping is
- * authoritative and stable, regardless of how many worker shards or
- * parallel per-target tasks execute afterward. Workers/shards consume seqs
- * via take(), never via nextSeq().
+ * Once a seq has been reserved, that mapping is authoritative and stable,
+ * regardless of how many worker shards or parallel per-target tasks execute
+ * afterward. Workers/shards consume seqs via take(), never via nextSeq().
  *
  * USAGE PATTERN
  *
- *   const horizon = new AddressingHorizon(store);
- *   await horizon.reserve(waveEvents.length);   // serial; no races
+ *   const reservoir = new SeqReservoir(store);
+ *   await reservoir.reserve(waveEvents.length);   // serial; no races
  *   for (const event of sortedWaveEvents) {
- *     const seq = horizon.take();               // deterministic order
+ *     const seq = reservoir.take();               // deterministic order
  *     // dispatch to worker / per-target task with (event, seq)
  *   }
  *
@@ -130,7 +210,7 @@ export function isHelixValid(op: LoggableOperator, pos: HelixPosition | null): b
  * may be async), but take() is synchronous so it can be called from inside
  * a tight, deterministic dispatch loop.
  */
-export class AddressingHorizon {
+export class SeqReservoir {
   private readonly reserved: number[] = [];
   private cursor = 0;
 
@@ -157,7 +237,7 @@ export class AddressingHorizon {
   take(): number {
     if (this.cursor >= this.reserved.length) {
       throw new Error(
-        `AddressingHorizon exhausted: asked for seq #${this.cursor + 1} ` +
+        `SeqReservoir exhausted: asked for seq #${this.cursor + 1} ` +
         `but only ${this.reserved.length} were reserved`,
       );
     }
@@ -169,7 +249,7 @@ export class AddressingHorizon {
     return this.reserved.length - this.cursor;
   }
 
-  /** Total seqs reserved across the horizon's lifetime. */
+  /** Total seqs reserved across the reservoir's lifetime. */
   get totalReserved(): number {
     return this.reserved.length;
   }

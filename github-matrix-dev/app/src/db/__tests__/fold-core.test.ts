@@ -10,9 +10,10 @@
 
 import { describe, it, expect } from 'vitest';
 import {
-  AddressingHorizon,
+  SeqReservoir,
   HELIX_LEVEL,
   MAX_PROMOTION_DEPTH,
+  OPERATOR_PROCESSING_CLASS,
   StoreHelixStateTracker,
   checkAndPromote,
   sortByHelixLevel,
@@ -20,6 +21,7 @@ import {
   mergeOperand,
   isFormulaOperand,
   deepEqual,
+  requiresGpuFlush,
 } from '../fold-core';
 import type { HelixStateTracker, PromotionCallbacks } from '../fold-core';
 import type { EoStore, IteratorOpts } from '../encrypted-store';
@@ -52,64 +54,64 @@ function createStubStore(initialSeq = 0): EoStore {
   };
 }
 
-// ─── AddressingHorizon ───────────────────────────────────────────────────────
+// ─── SeqReservoir ───────────────────────────────────────────────────────
 
-describe('AddressingHorizon', () => {
+describe('SeqReservoir', () => {
   it('reserves a contiguous range from store.nextSeq', async () => {
     const store = createStubStore();
-    const horizon = new AddressingHorizon(store);
-    await horizon.reserve(5);
+    const reservoir = new SeqReservoir(store);
+    await reservoir.reserve(5);
 
-    expect(horizon.totalReserved).toBe(5);
-    expect(horizon.remaining).toBe(5);
+    expect(reservoir.totalReserved).toBe(5);
+    expect(reservoir.remaining).toBe(5);
 
-    const taken = [horizon.take(), horizon.take(), horizon.take(), horizon.take(), horizon.take()];
+    const taken = [reservoir.take(), reservoir.take(), reservoir.take(), reservoir.take(), reservoir.take()];
     expect(taken).toEqual([1, 2, 3, 4, 5]);
-    expect(horizon.remaining).toBe(0);
+    expect(reservoir.remaining).toBe(0);
   });
 
   it('picks up wherever store.nextSeq last left off', async () => {
     const store = createStubStore(10);
-    const horizon = new AddressingHorizon(store);
-    await horizon.reserve(3);
-    expect(horizon.take()).toBe(11);
-    expect(horizon.take()).toBe(12);
-    expect(horizon.take()).toBe(13);
+    const reservoir = new SeqReservoir(store);
+    await reservoir.reserve(3);
+    expect(reservoir.take()).toBe(11);
+    expect(reservoir.take()).toBe(12);
+    expect(reservoir.take()).toBe(13);
   });
 
-  it('supports reserving additional seqs later in the same horizon', async () => {
+  it('supports reserving additional seqs later in the same reservoir', async () => {
     const store = createStubStore();
-    const horizon = new AddressingHorizon(store);
-    await horizon.reserve(2);
-    expect(horizon.take()).toBe(1);
-    expect(horizon.take()).toBe(2);
+    const reservoir = new SeqReservoir(store);
+    await reservoir.reserve(2);
+    expect(reservoir.take()).toBe(1);
+    expect(reservoir.take()).toBe(2);
 
-    await horizon.reserve(2);
-    expect(horizon.remaining).toBe(2);
-    expect(horizon.take()).toBe(3);
-    expect(horizon.take()).toBe(4);
+    await reservoir.reserve(2);
+    expect(reservoir.remaining).toBe(2);
+    expect(reservoir.take()).toBe(3);
+    expect(reservoir.take()).toBe(4);
   });
 
   it('throws when take() is called beyond the reserved range', async () => {
     const store = createStubStore();
-    const horizon = new AddressingHorizon(store);
-    await horizon.reserve(2);
-    horizon.take();
-    horizon.take();
-    expect(() => horizon.take()).toThrow(/exhausted/i);
+    const reservoir = new SeqReservoir(store);
+    await reservoir.reserve(2);
+    reservoir.take();
+    reservoir.take();
+    expect(() => reservoir.take()).toThrow(/exhausted/i);
   });
 
   it('never hands out the same seq twice under strictly sequential use', async () => {
-    // Property-style check: build a horizon with 1_000 seqs and confirm
+    // Property-style check: build a reservoir with 1_000 seqs and confirm
     // every taken value is unique and in order.
     const store = createStubStore();
-    const horizon = new AddressingHorizon(store);
-    await horizon.reserve(1_000);
+    const reservoir = new SeqReservoir(store);
+    await reservoir.reserve(1_000);
 
     const seen = new Set<number>();
     let prev = -1;
     for (let i = 0; i < 1_000; i++) {
-      const s = horizon.take();
+      const s = reservoir.take();
       expect(s).toBeGreaterThan(prev);
       expect(seen.has(s)).toBe(false);
       seen.add(s);
@@ -513,5 +515,60 @@ describe('checkAndPromote', () => {
     expect(syntheticCount).toBe(1);
     const pos = await tracker.getPosition('tgt');
     expect(pos?.declared).toContain('INS');
+  });
+});
+
+// ─── OPERATOR_PROCESSING_CLASS ───────────────────────────────────────────────
+
+describe('OPERATOR_PROCESSING_CLASS', () => {
+  const ALL_OPS: LoggableOperator[] = ['NUL', 'SIG', 'INS', 'SEG', 'CON', 'SYN', 'DEF', 'EVA', 'REC'];
+
+  it('has an entry for every loggable operator', () => {
+    for (const op of ALL_OPS) {
+      expect(OPERATOR_PROCESSING_CLASS[op]).toBeDefined();
+    }
+    expect(Object.keys(OPERATOR_PROCESSING_CLASS).sort()).toEqual([...ALL_OPS].sort());
+  });
+
+  it('routes the identity triad (NUL/SIG/INS) and CPU-side structure ops to the CPU layer', () => {
+    expect(OPERATOR_PROCESSING_CLASS.NUL.layer).toBe('cpu');
+    expect(OPERATOR_PROCESSING_CLASS.SIG.layer).toBe('cpu');
+    expect(OPERATOR_PROCESSING_CLASS.INS.layer).toBe('cpu');
+    expect(OPERATOR_PROCESSING_CLASS.SEG.layer).toBe('cpu');
+    expect(OPERATOR_PROCESSING_CLASS.DEF.layer).toBe('cpu');
+  });
+
+  it('routes CON to the CPU↔GPU boundary layer (CSR-shared)', () => {
+    expect(OPERATOR_PROCESSING_CLASS.CON.layer).toBe('boundary');
+    expect(OPERATOR_PROCESSING_CLASS.CON.memory).toBe('csr-shared');
+  });
+
+  it('routes SYN to the adaptive layer (CPU vs GPU reduction)', () => {
+    expect(OPERATOR_PROCESSING_CLASS.SYN.layer).toBe('adaptive');
+    expect(OPERATOR_PROCESSING_CLASS.SYN.memory).toBe('reduction');
+  });
+
+  it('routes EVA and REC to the GPU layer', () => {
+    expect(OPERATOR_PROCESSING_CLASS.EVA.layer).toBe('gpu');
+    expect(OPERATOR_PROCESSING_CLASS.REC.layer).toBe('gpu');
+  });
+
+  it('marks DEF as the only flush-gpu boundary', () => {
+    const flushOps = ALL_OPS.filter((op) => OPERATOR_PROCESSING_CLASS[op].sync === 'flush-gpu');
+    expect(flushOps).toEqual(['DEF']);
+  });
+
+  it('does not declare any push-state operators yet (reserved)', () => {
+    const pushOps = ALL_OPS.filter((op) => OPERATOR_PROCESSING_CLASS[op].sync === 'push-state');
+    expect(pushOps).toEqual([]);
+  });
+});
+
+describe('requiresGpuFlush', () => {
+  it('returns true only for DEF', () => {
+    expect(requiresGpuFlush('DEF')).toBe(true);
+    for (const op of ['NUL', 'SIG', 'INS', 'SEG', 'CON', 'SYN', 'EVA', 'REC'] as LoggableOperator[]) {
+      expect(requiresGpuFlush(op)).toBe(false);
+    }
   });
 });

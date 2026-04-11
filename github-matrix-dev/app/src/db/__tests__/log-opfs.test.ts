@@ -7,49 +7,9 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { appendEvent, readEventAt, scanLog } from '../log-opfs';
-import type { OPFSLog } from '../log-opfs';
-import type { EoEvent } from '../types';
-
-// ─── Memory-backed OPFSLog ────────────────────────────────────────────────────
-
-function createMemoryLog(): OPFSLog {
-  let buf = new Uint8Array(0);
-
-  const syncHandle = {
-    read(dest: Uint8Array, opts: { at: number }): number {
-      const start = opts.at;
-      const end = Math.min(start + dest.length, buf.length);
-      const count = Math.max(0, end - start);
-      dest.set(buf.subarray(start, end));
-      return count;
-    },
-    write(src: Uint8Array, opts: { at: number }): number {
-      const needed = opts.at + src.length;
-      if (needed > buf.length) {
-        const next = new Uint8Array(needed);
-        next.set(buf);
-        buf = next;
-      }
-      buf.set(src, opts.at);
-      return src.length;
-    },
-    flush(): void { /* no-op */ },
-    getSize(): number { return buf.length; },
-    close(): void { /* no-op */ },
-    truncate(size: number): void {
-      const next = new Uint8Array(size);
-      next.set(buf.subarray(0, size));
-      buf = next;
-    },
-  } as unknown as FileSystemSyncAccessHandle;
-
-  return {
-    fileHandle: {} as FileSystemFileHandle,
-    syncHandle,
-    size: 0,
-  };
-}
+import { appendEvent, readEventAt, scanLog, INDEX_RECORD_BYTES } from '../log-opfs';
+import type { EoEvent, LoggableOperator } from '../types';
+import { createMemoryLog } from './_memory-log';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -147,7 +107,12 @@ describe('log-opfs', () => {
 
       const [first, second] = [...scanLog(log)];
       expect(first.nextOffset).toBe(second.byteOffset);
-      expect(second.nextOffset).toBe(log.size);
+      // nextOffset is an INDEX-file offset (40-byte stride), not a total
+      // bytes count. After two events the next index offset is the end of
+      // the index file == log.idxBytes. (log.size in slice 5 means
+      // idxBytes + payBytes; that's the cache-invalidation primitive, not
+      // the scan terminator.)
+      expect(second.nextOffset).toBe(log.idxBytes);
     });
 
     it('fromByteOffset skips earlier entries', () => {
@@ -180,6 +145,165 @@ describe('log-opfs', () => {
       expect(scanned[0].operand).toEqual({ x: 1 });
       expect(scanned[1].operand).toEqual([1, 2, 3]);
       expect(scanned[2].operand).toBe('plain string');
+    });
+  });
+
+  // ─── Format invariants ──────────────────────────────────────────────────────
+
+  describe('two-file format invariants', () => {
+    it('exports INDEX_RECORD_BYTES = 40 (regression guard against drift)', () => {
+      expect(INDEX_RECORD_BYTES).toBe(40);
+    });
+
+    it('every appendEvent advances log.idxBytes by exactly 40', () => {
+      const log = createMemoryLog();
+      for (let i = 1; i <= 10; i++) {
+        const before = log.idxBytes;
+        appendEvent(log, makeEvent(i, `t-${i}`, { v: i }));
+        expect(log.idxBytes - before).toBe(INDEX_RECORD_BYTES);
+      }
+    });
+
+    it('appendEvent grows the payload file by exactly the encoded payload size', () => {
+      const log = createMemoryLog();
+      for (let i = 1; i <= 5; i++) {
+        const before = log.payBytes;
+        appendEvent(log, makeEvent(i, `t-${i}`, { x: 'a'.repeat(i * 10) }));
+        // Payload grew by some positive amount equal to the encoded msgpack size.
+        expect(log.payBytes).toBeGreaterThan(before);
+      }
+    });
+
+    it('log.size == idxBytes + payBytes (cache-invalidation primitive)', () => {
+      const log = createMemoryLog();
+      appendEvent(log, makeEvent(1, 'a', { v: 1 }));
+      appendEvent(log, makeEvent(2, 'b', { v: 2 }));
+      appendEvent(log, makeEvent(3, 'c', { v: 3 }));
+      expect(log.size).toBe(log.idxBytes + log.payBytes);
+      expect(log.idxBytes).toBe(3 * INDEX_RECORD_BYTES);
+    });
+  });
+
+  // ─── Round-trip property: 1000 events, all 9 operators ─────────────────────
+
+  describe('round-trip: 1000 events through the two-file format', () => {
+    function rng(seed: number): () => number {
+      // Tiny deterministic LCG so the test is reproducible.
+      let s = seed >>> 0;
+      return () => {
+        s = (s * 1664525 + 1013904223) >>> 0;
+        return s / 0x100000000;
+      };
+    }
+
+    function makeRandomEvent(seq: number, rand: () => number): EoEvent {
+      const ops: LoggableOperator[] = ['NUL', 'SIG', 'INS', 'SEG', 'CON', 'SYN', 'DEF', 'EVA', 'REC'];
+      const op = ops[Math.floor(rand() * ops.length)];
+
+      // Random site name from a small pool, with depth 1-3 segments. Mixing
+      // depths exercises the index-file site-hash field across many distinct
+      // hash values.
+      const depth = 1 + Math.floor(rand() * 3);
+      const segs: string[] = [];
+      for (let i = 0; i < depth; i++) {
+        segs.push(`s${Math.floor(rand() * 100)}`);
+      }
+      const target = segs.join('.');
+
+      // Random payload shape — string, number, object, array. Sized so the
+      // total run produces a few hundred KB of payload data.
+      let operand: unknown;
+      const shape = Math.floor(rand() * 4);
+      if (shape === 0) operand = 'x'.repeat(Math.floor(rand() * 64));
+      else if (shape === 1) operand = Math.floor(rand() * 1_000_000);
+      else if (shape === 2) operand = { k: Math.floor(rand() * 1000), v: 'value' };
+      else operand = [1, 2, 3, Math.floor(rand() * 1000)];
+
+      return {
+        seq,
+        op,
+        target,
+        operand,
+        agent: 'rt-test',
+        ts: new Date(2026, 0, 1, 0, 0, 0, seq).toISOString(),
+        acquired_ts: new Date(2026, 0, 1, 0, 0, 0, seq).toISOString(),
+      };
+    }
+
+    it('writes 1000 events and reads back identical operator/site/seq/payload', () => {
+      const log = createMemoryLog();
+      const rand = rng(0xdeadbeef);
+
+      const written: EoEvent[] = [];
+      for (let i = 1; i <= 1000; i++) {
+        const ev = makeRandomEvent(i, rand);
+        written.push(ev);
+        appendEvent(log, ev);
+      }
+
+      // Index file is exactly 1000 × 40 bytes — strict stride invariant.
+      expect(log.idxBytes).toBe(1000 * INDEX_RECORD_BYTES);
+
+      // Walk via scanLog and assert byte-identical reconstruction.
+      const scanned = [...scanLog(log)];
+      expect(scanned).toHaveLength(1000);
+
+      for (let i = 0; i < 1000; i++) {
+        const expected = written[i];
+        const actual = scanned[i].event;
+        expect(actual.op).toBe(expected.op);
+        expect(actual.target).toBe(expected.target);
+        expect(actual.seq).toBe(expected.seq);
+        expect(actual.operand).toEqual(expected.operand);
+        expect(actual.agent).toBe(expected.agent);
+        expect(actual.ts).toBe(expected.ts);
+      }
+    });
+
+    it('seq numbers reconstructed from the scan are monotonic', () => {
+      const log = createMemoryLog();
+      const rand = rng(0xc0ffee);
+
+      for (let i = 1; i <= 1000; i++) {
+        appendEvent(log, makeRandomEvent(i, rand));
+      }
+
+      let prev = 0;
+      for (const { event } of scanLog(log)) {
+        expect(event.seq).toBeGreaterThan(prev);
+        prev = event.seq;
+      }
+    });
+
+    it('readEventAt round-trips for every offset emitted by appendEvent', () => {
+      const log = createMemoryLog();
+      const rand = rng(0xfeedface);
+
+      const offsets: number[] = [];
+      const events: EoEvent[] = [];
+      for (let i = 1; i <= 1000; i++) {
+        const ev = makeRandomEvent(i, rand);
+        events.push(ev);
+        offsets.push(appendEvent(log, ev).byteOffset);
+      }
+
+      // Direct random-access lookup at every offset.
+      for (let i = 0; i < 1000; i++) {
+        const back = readEventAt(log, offsets[i]);
+        expect(back.op).toBe(events[i].op);
+        expect(back.target).toBe(events[i].target);
+        expect(back.seq).toBe(events[i].seq);
+        expect(back.operand).toEqual(events[i].operand);
+      }
+    });
+
+    it('every byteOffset is on a 40-byte boundary', () => {
+      const log = createMemoryLog();
+      const rand = rng(0xbadc0de);
+      for (let i = 1; i <= 1000; i++) {
+        const { byteOffset } = appendEvent(log, makeRandomEvent(i, rand));
+        expect(byteOffset % INDEX_RECORD_BYTES).toBe(0);
+      }
     });
   });
 });

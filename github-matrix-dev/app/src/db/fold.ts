@@ -9,7 +9,7 @@ import { eventHash } from './hash';
 import { validateEvent, formatValidationErrors } from './validate';
 import { updateFoldCache, refreshGraphMetrics } from './fold-cache';
 import {
-  AddressingHorizon,
+  SeqReservoir,
   StoreHelixStateTracker,
   checkAndPromote as checkAndPromoteHelix,
   sortByHelixLevel,
@@ -18,6 +18,8 @@ import {
   deepEqual,
 } from './fold-core';
 import type { HelixStateTracker, PromotionCallbacks } from './fold-core';
+import { StoreAddressingHorizon, StoreDeclaredHorizon } from './addressing-horizon';
+import type { AddressingHorizon, DeclaredHorizon } from './addressing-horizon';
 import type { EoEvent, EoEventInput, EoState, EvaRegistration, RecResult, ExternalOperator, DerivedEntity, LoggableOperator } from './types';
 
 export { sortByHelixLevel } from './fold-core';
@@ -28,11 +30,50 @@ const foldMutex = new AsyncMutex();
 
 // ─── Helix Infrastructure ────────────────────────────────────────────────────
 //
-// HELIX_LEVEL, sortByHelixLevel, isHelixValid, AddressingHorizon, and now the
+// HELIX_LEVEL, sortByHelixLevel, isHelixValid, SeqReservoir, and the
 // HelixStateTracker interface + StoreHelixStateTracker + checkAndPromote all
-// live in fold-core.ts (Phase A — constitutive site model). This file owns
-// only the operator handlers and the wiring that turns fold-core's
-// callback-driven promotion into concrete log/fold-cache writes.
+// live in fold-core.ts (Phase A — slice 1/2/4 deliverables). The Phase A
+// constitutive site model — AddressingHorizon and DeclaredHorizon — lives in
+// addressing-horizon.ts (slice 3). This file owns only the operator handlers
+// and the wiring that connects all of them to processEventCore.
+//
+// Constitutive site touches happen at one place per processEvent path:
+// after appendToLog and before helix.recordOperator, every event touches
+// the AddressingHorizon for its target (and, for CON, every destination).
+// Explicit SEG events additionally update the DeclaredHorizon with the
+// SEG's boundary content.
+
+/**
+ * Touch the AddressingHorizon for an event's target plus, for CON events,
+ * every destination site in the operand. Returns nothing — touch is
+ * idempotent and the new lifecycle state is observable via getRecord.
+ */
+async function touchAddressingForEvent(
+  addressing: AddressingHorizon,
+  event: EoEvent,
+): Promise<void> {
+  await addressing.touch(event.target, event.op as LoggableOperator, event.seq);
+
+  if (event.op === 'CON' && event.operand?.added) {
+    for (const item of event.operand.added as ConEdgeAddItem[]) {
+      const dest = typeof item === 'string' ? item : item.dest;
+      await addressing.touch(dest, 'CON', event.seq);
+    }
+  }
+}
+
+/**
+ * Update the DeclaredHorizon for explicit SEG events. The SEG's operand is
+ * the boundary content (type, name, partition, …) — stored verbatim so the
+ * snapshot writer can serialize it without re-walking the log.
+ */
+async function declareForEvent(
+  declared: DeclaredHorizon,
+  event: EoEvent,
+): Promise<void> {
+  if (event.op !== 'SEG') return;
+  await declared.declare(event.target, event.seq, event.operand);
+}
 
 /**
  * Build the PromotionCallbacks fold-core's checkAndPromote expects, binding
@@ -121,8 +162,10 @@ export async function processEventsBulk(
 ): Promise<number> {
   return foldMutex.run(async () => {
     const touchedTargets = new Set<string>();
-    const horizon = new AddressingHorizon(store);
+    const reservoir = new SeqReservoir(store);
     const helix = new StoreHelixStateTracker(store);
+    const addressing = new StoreAddressingHorizon(store);
+    const declared = new StoreDeclaredHorizon(store);
     let lastSeq = 0;
     let processed = 0;
 
@@ -213,14 +256,14 @@ export async function processEventsBulk(
       // Step 2: Reserve a contiguous seq range for the expanded wave. This is
       // the ONLY control-flow site that advances store.nextSeq() during bulk
       // ingestion, so there is no race.
-      await horizon.reserve(expanded.length);
+      await reservoir.reserve(expanded.length);
 
       // Step 3: Assign seqs in expanded-stream order — the same order in
       // which the pre-pass saw events. Synthetic INS events receive a seq
       // BEFORE any event that depends on them.
       const planned: { event: EoEventInput; seq: number }[] = expanded.map((event) => ({
         event,
-        seq: horizon.take(),
+        seq: reservoir.take(),
       }));
 
       // Step 4: Shard by target while preserving the pre-assigned seqs.
@@ -241,7 +284,7 @@ export async function processEventsBulk(
           const targetEvents = byTarget.get(target)!;
           let targetLastSeq = 0;
           for (const { event, seq } of targetEvents) {
-            await processEventCoreWithSeq(store, event, seq, onEvent);
+            await processEventCoreWithSeq(store, event, seq, addressing, declared, onEvent);
             if (seq > targetLastSeq) targetLastSeq = seq;
             processed++;
             onProgress?.(processed, events.length);
@@ -282,17 +325,20 @@ export async function processEventsBulk(
 
 /**
  * Process an event with a pre-assigned seq. Used by the bulk path after
- * AddressingHorizon has reserved and ordered seqs. Skips nextSeq() and
+ * SeqReservoir has reserved and ordered seqs. Skips nextSeq() and
  * checkAndPromote — both are handled by the bulk dispatcher's pre-pass.
  *
  * All other steps (validate → client_event_id → idempotency → INS pre-check
- * → appendToLog → executeOperator → helix.recordOperator → updateFoldCache
- * → onEvent) run exactly as they do in the serial processEventCore.
+ * → appendToLog → executeOperator → addressing.touch → declared.declare
+ * → helix.recordOperator → updateFoldCache → onEvent) run exactly as they
+ * do in the serial processEventCore.
  */
 async function processEventCoreWithSeq(
   store: EoStore,
   event: EoEventInput,
   seq: number,
+  addressing: AddressingHorizon,
+  declared: DeclaredHorizon,
   onEvent?: (event: EoEvent) => void,
 ): Promise<number> {
   if (event.op === 'REC') {
@@ -341,6 +387,12 @@ async function processEventCoreWithSeq(
     if (onEvent) onEvent({ ...fullEvent, meta: { ...fullEvent.meta, _error: message } });
     return seq;
   }
+
+  // Phase A constitutive site touches — every event addresses the AddressingHorizon
+  // for its target (and CON destinations); explicit SEG events update the
+  // DeclaredHorizon with their boundary content.
+  await touchAddressingForEvent(addressing, fullEvent);
+  await declareForEvent(declared, fullEvent);
 
   await new StoreHelixStateTracker(store).recordOperator(fullEvent.target, fullEvent.op as LoggableOperator, seq);
   await updateFoldCache(store, fullEvent);
@@ -395,6 +447,8 @@ async function processEventCore(
   // Helix promotion — runs BEFORE seq assignment so promoted events get lower
   // seq numbers and appear before the original event in replay order.
   const helix = new StoreHelixStateTracker(store);
+  const addressing = new StoreAddressingHorizon(store);
+  const declared = new StoreDeclaredHorizon(store);
   await checkAndPromoteHelix(helix, event, buildPromotionCallbacks(store, helix, onEvent), _promotionDepth);
 
   const seq = await store.nextSeq();
@@ -418,6 +472,10 @@ async function processEventCore(
     if (onEvent) onEvent({ ...fullEvent, meta: { ...fullEvent.meta, _error: message } });
     return seq;
   }
+
+  // Phase A constitutive site touches.
+  await touchAddressingForEvent(addressing, fullEvent);
+  await declareForEvent(declared, fullEvent);
 
   await helix.recordOperator(fullEvent.target, fullEvent.op as LoggableOperator, seq);
   await updateFoldCache(store, fullEvent);
@@ -469,6 +527,8 @@ async function processEventInner(
   // 2c. Helix promotion — runs BEFORE seq assignment so promoted events get
   //     lower seq numbers and appear before the original event in replay order.
   const helix = new StoreHelixStateTracker(store);
+  const addressing = new StoreAddressingHorizon(store);
+  const declared = new StoreDeclaredHorizon(store);
   await checkAndPromoteHelix(helix, event, buildPromotionCallbacks(store, helix, onEvent), 0);
 
   // 3. Assign sequence number
@@ -500,6 +560,12 @@ async function processEventInner(
     if (onEvent) onEvent({ ...fullEvent, meta: { ...fullEvent.meta, _error: message } });
     return seq;
   }
+
+  // 6a. Phase A constitutive site touches — every event addresses the
+  //     AddressingHorizon for its target (and CON destinations); explicit
+  //     SEG events update the DeclaredHorizon with their boundary content.
+  await touchAddressingForEvent(addressing, fullEvent);
+  await declareForEvent(declared, fullEvent);
 
   // 6b. Record this operator in the target's helix position.
   await helix.recordOperator(fullEvent.target, fullEvent.op as LoggableOperator, seq);
@@ -747,6 +813,19 @@ async function handleSIG(store: EoStore, event: EoEvent): Promise<void> {
   const target = await resolveAlias(store, event.target);
   const existing = await getState(store, target);
   const operand = event.operand as { fieldKey: string; draft?: string; editing?: boolean };
+
+  // Phase A: SIG on a never-INSed site is a pure draft signal — there is no
+  // state record to attach the _sigs marker to and there is no UI rendering
+  // a non-existent cell. The SIG fact is recorded in the AddressingHorizon
+  // as an ephemeral entry; promotion happens when (and only when) a real
+  // operator subsequently fires on the same site.
+  //
+  // Without this guard, an INS arriving after a SIG would trip
+  // checkExists() because handleSIG had quietly materialized a phantom
+  // state record. The existing test "SIG does not create a new state:
+  // target (only updates existing)" already documented this as the
+  // intended behavior — this guard makes it actually true.
+  if (!existing) return;
 
   const currentSigs: Record<string, SigEntry> = existing?.value?._sigs ?? {};
 
@@ -1438,6 +1517,8 @@ export async function replayFromLog(
 ): Promise<void> {
   return foldMutex.run(async () => {
     const helix = new StoreHelixStateTracker(store);
+    const addressing = new StoreAddressingHorizon(store);
+    const declared = new StoreDeclaredHorizon(store);
     for (let i = 0; i < events.length; i++) {
       const event = events[i];
 
@@ -1462,6 +1543,8 @@ export async function replayFromLog(
       // Apply operator (REC falls through as a no-op in executeOperator).
       try {
         await executeOperator(store, fullEvent);
+        await touchAddressingForEvent(addressing, fullEvent);
+        await declareForEvent(declared, fullEvent);
         await helix.recordOperator(fullEvent.target, fullEvent.op as LoggableOperator, seq);
       } catch {
         // Ignore errors during replay — the original fold succeeded.
