@@ -36,6 +36,8 @@ export interface TableSliceConfig {
   displayField?: string;
   /** Field key used to group records into kanban columns */
   kanbanField?: string;
+  /** Date field key used to position records on the calendar grid */
+  calendarField?: string;
   /** When true, show raw field IDs instead of display names. Defaults to false. */
   showFieldIds?: boolean;
   /** Target path of the pinned record (only used when sliceType === 'record') */
