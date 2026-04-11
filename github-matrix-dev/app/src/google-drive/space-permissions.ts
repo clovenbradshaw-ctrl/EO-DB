@@ -326,6 +326,9 @@ export function buildRevokeEvent(
   seq: number,
 ): EoEvent {
   const now = new Date().toISOString();
+  // Revocation is a deliberate removal — resolution 'Clearing' in the
+  // lattice model. `nul_state: 'cleared'` is retained for backward-compatible
+  // consumers that still read the legacy field.
   return {
     seq,
     op: 'NUL',
@@ -334,6 +337,7 @@ export function buildRevokeEvent(
     agent: revokedByUserId,
     ts: now,
     acquired_ts: now,
+    resolution: 'Clearing',
     nul_state: 'cleared',
   };
 }

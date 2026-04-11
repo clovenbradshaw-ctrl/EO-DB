@@ -33,7 +33,8 @@ import type {
   FoldResultSet,
   FoldHistoryResult,
 } from '../db/lazy-fold';
-import type { EoEvent, LoggableOperator, RecMigrationRule } from '../db/types';
+import type { EoEvent, LoggableOperator, RecMigrationRule, NulState } from '../db/types';
+import { nulStateToResolution } from '../db/types';
 
 // ─── Module-level state ───────────────────────────────────────────────────────
 
@@ -440,7 +441,10 @@ function getTriggeredByDepth(event: EoEvent): number {
 async function appendNulEvent(triggeredBy: number, nulState: 'unknown' | 'never-set' | 'cleared'): Promise<void> {
   if (!position) return;
   const event = makeSystemEvent('NUL', '__system__', null, triggeredBy);
-  (event as EoEvent & { nul_state: string }).nul_state = nulState;
+  // Canonical Resolution field. The legacy nul_state field is still written
+  // alongside so consumers that have not yet migrated can read the old name.
+  event.resolution = nulStateToResolution(nulState as NulState);
+  event.nul_state = nulState;
   writeEventInternal(event);
 }
 

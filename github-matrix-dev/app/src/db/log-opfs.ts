@@ -70,7 +70,8 @@
  */
 
 import { pack, unpack } from 'msgpackr';
-import type { EoEvent, LoggableOperator } from './types';
+import type { EoEvent, LoggableOperator, Resolution } from './types';
+import { RESOLUTION_NIBBLE, NIBBLE_TO_RESOLUTION } from './types';
 import { xxhash64 } from './xxhash64';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -129,21 +130,13 @@ const NIBBLE_TO_OP: LoggableOperator[] = [
   'NUL', 'SIG', 'INS', 'SEG', 'CON', 'SYN', 'DEF', 'EVA', 'REC',
 ];
 
-const RESOLUTION_TO_NIBBLE: Record<string, number> = {
-  Clearing: 1,
-  Dissecting: 2,
-  Unraveling: 3,
-  Tending: 4,
-  Binding: 5,
-  Tracing: 6,
-  Cultivating: 7,
-  Making: 8,
-  Composing: 9,
-};
+// Resolution nibble encoding is canonicalized in db/types.ts (RESOLUTION_NIBBLE).
+// log-opfs consumes that single source of truth so the two tables can never
+// drift apart.
 
-function encodeOpResolution(op: LoggableOperator, resolution?: string): number {
+function encodeOpResolution(op: LoggableOperator, resolution?: Resolution): number {
   const opNibble = OP_TO_NIBBLE[op];
-  const resNibble: number = resolution ? (RESOLUTION_TO_NIBBLE[resolution] ?? 0) : 0;
+  const resNibble: number = resolution ? (RESOLUTION_NIBBLE[resolution] ?? 0) : 0;
   return ((opNibble & 0x0f) << 4) | (resNibble & 0x0f);
 }
 
@@ -192,6 +185,8 @@ function readUint64BE(view: DataView, offset: number): number {
 
 interface IndexRecord {
   op: LoggableOperator;
+  /** Depth coordinate — low nibble of byte 0. Defaults to 'unspecified'. */
+  resolution?: Resolution;
   siteHash: bigint;
   seq: number;
   ts: number;            // ms since epoch
@@ -203,12 +198,13 @@ function encodeIndexRecord(
   buf: Uint8Array,
   offset: number,
   rec: IndexRecord,
-  resolution?: string,
 ): void {
   const view = new DataView(buf.buffer, buf.byteOffset + offset, INDEX_RECORD_BYTES);
 
-  // Byte 0: op high nibble + resolution low nibble
-  view.setUint8(0, encodeOpResolution(rec.op, resolution));
+  // Byte 0: op high nibble + resolution low nibble — the compound glyph
+  // defined by the lattice model. Events whose resolution is unspecified
+  // (or unset) write nibble 0 in the low half.
+  view.setUint8(0, encodeOpResolution(rec.op, rec.resolution));
 
   // Bytes 1-8: site hash (64-bit BE)
   let h = rec.siteHash;
@@ -235,7 +231,14 @@ function encodeIndexRecord(
 
 function decodeIndexRecord(buf: Uint8Array, offset: number): IndexRecord {
   const view = new DataView(buf.buffer, buf.byteOffset + offset, INDEX_RECORD_BYTES);
-  const op = decodeOp(view.getUint8(0));
+  const byte0 = view.getUint8(0);
+  const op = decodeOp(byte0);
+  const resNibble = byte0 & 0x0f;
+  const resolution: Resolution = (
+    resNibble >= 0 && resNibble < NIBBLE_TO_RESOLUTION.length
+      ? NIBBLE_TO_RESOLUTION[resNibble]
+      : 'unspecified'
+  );
 
   let siteHash = 0n;
   for (let i = 0; i < 8; i++) {
@@ -247,7 +250,7 @@ function decodeIndexRecord(buf: Uint8Array, offset: number): IndexRecord {
   const payloadOffset = readUint64BE(view, 21);
   const payloadLength = view.getUint32(29, false);
 
-  return { op, siteHash, seq, ts, payloadOffset, payloadLength };
+  return { op, resolution, siteHash, seq, ts, payloadOffset, payloadLength };
 }
 
 // ─── openLog ─────────────────────────────────────────────────────────────────
@@ -404,6 +407,7 @@ async function migrateLegacyLog(opfsDir: FileSystemDirectoryHandle): Promise<voi
       const idxBuf = new Uint8Array(INDEX_RECORD_BYTES);
       encodeIndexRecord(idxBuf, 0, {
         op: event.op as LoggableOperator,
+        resolution: event.resolution ?? 'unspecified',
         siteHash: xxhash64(event.target),
         seq: event.seq,
         ts: Date.parse(event.ts) || 0,
@@ -463,9 +467,13 @@ export function appendEvent(
   log.payHandle.write(payload, { at: payOffset });
 
   // Build and write the 40-byte index record.
+  // Byte 0 is the compound lattice glyph: operator high nibble + resolution
+  // low nibble. Events with no explicit resolution write low nibble 0
+  // ('unspecified') — the default for every pre-slice-6 event.
   const idxBuf = new Uint8Array(INDEX_RECORD_BYTES);
   encodeIndexRecord(idxBuf, 0, {
     op: event.op as LoggableOperator,
+    resolution: event.resolution ?? 'unspecified',
     siteHash: xxhash64(event.target),
     seq: event.seq,
     ts: Date.parse(event.ts) || 0,

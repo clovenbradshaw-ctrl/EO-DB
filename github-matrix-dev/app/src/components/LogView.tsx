@@ -1,7 +1,8 @@
 import { useState, useMemo, useEffect, Fragment } from 'react';
 import { useEoStore } from '../store/eo-store';
 import { useTheme } from '../theme';
-import type { EoEvent, LoggableOperator, NulState } from '../db/types';
+import type { EoEvent, LoggableOperator, NulState, Resolution } from '../db/types';
+import { resolutionToNulState, nulStateToResolution } from '../db/types';
 
 // --- Operator colors — three triads ---
 export const OP_COLORS: Record<string, { bg: string; text: string; border: string; fill: string }> = {
@@ -128,6 +129,11 @@ function OpBadge({ op, size = 'normal' }: { op: string; size?: 'normal' | 'small
 }
 
 // --- NulStateBadge (F1.2) ---
+// NUL_STATE_COLORS is keyed by the legacy NulState vocabulary because the
+// visual palette is already well-known in the UI. The Resolution axis is
+// converted into the corresponding NulState via resolutionToNulState so the
+// badge renders the same colors whether the upstream event carries the new
+// `resolution` field or the legacy `nul_state` field.
 const NUL_STATE_COLORS: Record<NulState, { bg: string; text: string }> = {
   'never-set':         { bg: '#6b7280', text: '#fff' },
   'unknown':           { bg: '#d97706', text: '#fff' },
@@ -135,8 +141,22 @@ const NUL_STATE_COLORS: Record<NulState, { bg: string; text: string }> = {
   'promotion_blocked': { bg: '#ef4444', text: '#fff' },
 };
 
-function NulStateBadge({ nulState }: { nulState: NulState }) {
-  const c = NUL_STATE_COLORS[nulState];
+/**
+ * Resolution → color map for NUL events. Non-NUL operators currently have no
+ * resolution surface in the UI — resolution display for the full operator
+ * set is future work. Only NUL rows consult this map.
+ */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+const RESOLUTION_COLORS: Partial<Record<Resolution, { bg: string; text: string }>> = {
+  unspecified: { bg: '#6b7280', text: '#fff' },
+  Clearing:    { bg: '#3b82f6', text: '#fff' },
+  Tracing:     { bg: '#d97706', text: '#fff' },
+  Unraveling:  { bg: '#ef4444', text: '#fff' },
+};
+
+function NulStateBadge({ resolution }: { resolution: Resolution }) {
+  const legacy = resolutionToNulState(resolution);
+  const c = NUL_STATE_COLORS[legacy];
   return (
     <span style={{
       display: 'inline-block',
@@ -146,7 +166,7 @@ function NulStateBadge({ nulState }: { nulState: NulState }) {
       fontFamily: "'JetBrains Mono', monospace",
       letterSpacing: '0.02em',
     }}>
-      {nulState}
+      {legacy}
     </span>
   );
 }
@@ -709,8 +729,10 @@ function EventRow({ event, isSelected, onSelect }: {
           }}>{event.seq}</span>
           <OpBadge op={event.op} />
           <LevelBadge level={level} />
-          {event.op === 'NUL' && event.nul_state && (
-            <NulStateBadge nulState={event.nul_state} />
+          {event.op === 'NUL' && (event.resolution || event.nul_state) && (
+            <NulStateBadge
+              resolution={event.resolution ?? (event.nul_state ? nulStateToResolution(event.nul_state) : 'unspecified')}
+            />
           )}
           <span style={{
             fontFamily: "'JetBrains Mono', monospace", fontSize: 11.5,

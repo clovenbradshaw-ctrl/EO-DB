@@ -56,6 +56,64 @@ export const HELIX_LEVEL: Partial<Record<LoggableOperator, number>> = {
   EVA: 5,
 };
 
+/**
+ * HELIX_ORDINAL — ordinal position of each operator along the lattice's
+ * operator axis. Nine distinct positions 0-8, one per operator.
+ *
+ * DIFFERENT from HELIX_LEVEL (above). HELIX_LEVEL is a wave-group index used
+ * for scheduling: operators at the same level can run concurrently in a wave
+ * because they do not conflict (NUL+SIG share level 0; SEG+CON share level 2).
+ * HELIX_ORDINAL is the canonical lattice coordinate — each operator sits at
+ * exactly one ordinal, strictly ordered from NUL at 0 to REC at 8.
+ *
+ * HELIX_ORDINAL is consulted by:
+ *   - Lattice position queries (which slice is this event in?)
+ *   - Triad boundary detection (is this event at a triad transition?)
+ *   - Checkpoint significance (triad boundaries are the meaningful checkpoints)
+ *   - REC ordinal position (8, above EVA at 7)
+ *
+ * REC is included here even though HELIX_LEVEL omits it — the wave model is
+ * about scheduling, but the lattice model is about position, and REC has a
+ * position regardless of how it gets executed.
+ */
+export const HELIX_ORDINAL: Record<LoggableOperator, number> = {
+  NUL: 0,
+  SIG: 1,
+  INS: 2,
+  SEG: 3,
+  CON: 4,
+  SYN: 5,
+  DEF: 6,
+  EVA: 7,
+  REC: 8,
+};
+
+/**
+ * TRIAD_BOUNDARY — operators that sit at the boundary between triads.
+ * These are the semantically significant checkpoint moments in the operator
+ * axis. A fold walker consulting HELIX_ORDINAL can detect triad transitions
+ * by checking membership in this set.
+ *
+ * Identity triad       ends after INS (ordinal 2).
+ * Structure triad      ends after SYN (ordinal 5).
+ * Interpretation triad ends after REC (ordinal 8).
+ */
+export const TRIAD_BOUNDARY = new Set<LoggableOperator>(['INS', 'SYN', 'REC']);
+
+/**
+ * triadOf — which triad does this operator belong to? Derived from HELIX_ORDINAL.
+ *
+ *   identity        — NUL, SIG, INS                 (ordinal 0-2)
+ *   structure       — SEG, CON, SYN                 (ordinal 3-5)
+ *   interpretation  — DEF, EVA, REC                 (ordinal 6-8)
+ */
+export function triadOf(op: LoggableOperator): 'identity' | 'structure' | 'interpretation' {
+  const ord = HELIX_ORDINAL[op];
+  if (ord <= 2) return 'identity';
+  if (ord <= 5) return 'structure';
+  return 'interpretation';
+}
+
 // ─── OPERATOR_PROCESSING_CLASS ──────────────────────────────────────────────
 
 /**
@@ -108,6 +166,18 @@ export interface OperatorProcessingClass {
  * Changing a row here propagates the effect of that change to every runner.
  * Adding a new operator requires adding an entry — TypeScript's exhaustiveness
  * check on `Record<LoggableOperator, ...>` enforces this at compile time.
+ *
+ * ─── Resolution-awareness: Phase C.5 scope ─────────────────────────────────
+ *
+ * This table is currently indexed by operator alone. That is correct today —
+ * with resolution-writing only just landing in Phase A slice 6, every event
+ * in every existing log reads back with resolution 'unspecified'. There is
+ * nothing to route on.
+ *
+ * Resolution-aware routing (e.g. CON × Binding → high-weight CSR edge vs
+ * CON × Tracing → provisional edge) is reserved for Phase C.5. Do not add
+ * resolution-awareness here until compound glyphs have been populated in
+ * real workloads and profiling reveals which ones actually matter.
  */
 export const OPERATOR_PROCESSING_CLASS: Record<LoggableOperator, OperatorProcessingClass> = {
   NUL: { layer: 'cpu',      memory: 'constituted-set', sync: 'none'      },
