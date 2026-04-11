@@ -18,6 +18,7 @@ import { useIdResolver, isEntityId, isEntityIdArray, type IdResolver } from '../
 import { groupSchemaStates, extractColumnTypeOverrides, schemaTypeTarget, schemaConstraintTarget, schemaResolveTarget, type FieldSchema } from '../db/schema-rules';
 import { ColumnTypeSelector, COLUMN_TYPE_ICON_MAP } from './ColumnTypeSelector';
 import { ResolutionPolicyComposer, summarizePolicy, normalizeResolvePolicy, type ResolvePolicy } from './ResolutionPolicyComposer';
+import { buildNulClearingEvent } from './cell-events';
 import { ConstraintComposer } from './ConstraintComposer';
 import { useIsMobile, useIsNarrow } from '../hooks/useIsMobile';
 import { ColumnManagerPanel } from './ColumnManagerPanel';
@@ -1320,6 +1321,24 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   }
 
   /**
+   * Clear a field value via the explicit "Clear value" / "Clear all" context
+   * menu — a different semantic from editing to an empty string. We emit the
+   * existing DEF with the empty-value sentinel first so the state map and the
+   * UI rendering stay in sync with the current behavior, then dispatch a
+   * NUL × Clearing observation so the NulHorizon records the deliberate
+   * erasure. Phase A.6/3.
+   *
+   * The NUL is fire-and-forget audit metadata — a failure to record it must
+   * not surface to the user (the state mutation already succeeded).
+   */
+  async function handleCellClear(target: string, fieldKey: string, emptyRawValue: '' | '[]') {
+    await handleCellSave(target, fieldKey, emptyRawValue);
+    try {
+      await dispatch(buildNulClearingEvent(target, fieldKey, `user:${session.userId}`));
+    } catch { /* audit metadata — swallow */ }
+  }
+
+  /**
    * Dispatch a cell edit without closing the editor.
    * Used for real-time per-character sync — other users see changes as you type.
    */
@@ -1388,7 +1407,12 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
         items.push({
           label: 'Clear value',
           danger: true,
-          onClick: () => handleCellSave(target, col.key, ''),
+          // A.6/3: routes through handleCellClear so the deliberate erasure
+          // is recorded in the NulHorizon alongside the DEF that empties the
+          // state map. Editing a field to an empty string is still a plain
+          // handleCellSave — only the explicit "Clear value" menu counts as
+          // a Clearing stance.
+          onClick: () => handleCellClear(target, col.key, ''),
         });
       }
     } else if (col.type === 'multiSelect') {
@@ -1421,7 +1445,9 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
         items.push({
           label: 'Clear all',
           danger: true,
-          onClick: () => handleCellSave(target, col.key, '[]'),
+          // A.6/3: same NUL × Clearing audit path as the single-value menu,
+          // just with the empty-array sentinel instead of empty string.
+          onClick: () => handleCellClear(target, col.key, '[]'),
         });
       }
     } else if (col.type === 'link' || col.type === 'linkedRecord' || col.type === 'relationship') {
