@@ -108,7 +108,7 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       left: '50%',
       transform: 'translate(-50%, -50%)',
       maxHeight: '90vh',
-      overflowY: 'auto',
+      overflow: 'hidden',
       background: t.bgCard,
       border: `1px solid ${t.border}`,
       borderRadius: 8,
@@ -122,6 +122,7 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       alignItems: 'center',
       padding: '12px 16px',
       borderBottom: `1px solid ${t.border}`,
+      flexShrink: 0,
     },
     title: {
       fontSize: 13,
@@ -150,10 +151,13 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
     body: {
       padding: 16,
       flex: 1,
+      minHeight: 0,
+      overflowY: 'auto',
     },
     footer: {
       padding: '10px 16px',
       borderTop: `1px solid ${t.border}`,
+      flexShrink: 0,
     },
   };
 }
