@@ -1,5 +1,6 @@
 /**
- * Fold determinism harness — Phase 0 of the EO///DB scaling roadmap.
+ * Fold determinism harness — Phase 0 (with Phase A upgrade) of the EO///DB
+ * scaling roadmap.
  *
  * Property-based tests (via fast-check) that pin down the invariants the
  * fold must satisfy before any of the parallel-execution phases (B–K) can
@@ -10,19 +11,23 @@
  * Properties verified:
  *
  *   1. Serial determinism — running the same input twice through
- *      processEvent produces byte-identical store contents. (This is the
- *      simplest "no hidden randomness" check; it currently passes.)
+ *      processEvent produces byte-identical store contents.
  *
- *   2. Bulk determinism — same property for processEventsBulk.
+ *   2. Bulk determinism — running the same input twice through
+ *      processEventsBulk produces byte-identical store contents. Phase A
+ *      promoted this from projection-level to byte-identical: the bulk
+ *      path now reserves seqs up-front via an AddressingHorizon (see
+ *      fold-core.ts), so the Promise.all/per-target nextSeq race that
+ *      previously made bulk byte-identity flaky is gone.
  *
  *   3. Serial ≡ Bulk projection equivalence — the canonical projection
  *      (state values, content hashes, trajectories, graph edges, helix
  *      declared sets) is identical between the serial and the
  *      wave-grouped bulk path. Seq numbers and log:* keys are excluded
- *      from the projection: the bulk path's per-target sharding
- *      interleaves seq assignment via Promise.all microtask scheduling,
- *      so seq values legitimately differ between paths even when the
- *      "what does the database look like to a reader" view is identical.
+ *      from the projection because the two paths legitimately assign
+ *      different seqs (serial takes seqs in arrival order; bulk pre-
+ *      allocates contiguous wave ranges), even when the "what does the
+ *      database look like to a reader" view is identical.
  *
  *   4. DEF re-block — DEFs sprinkled mid-stream produce a final value at
  *      each field equal to that field's last DEF, and surrounding
@@ -33,17 +38,17 @@
  * ─── Constraints on the generated input ───────────────────────────────
  *
  * The arbitrary produces inputs that respect TWO restrictions, so the
- * harness measures fold determinism in isolation from two pre-existing
- * issues this phase intentionally does NOT fix:
+ * harness measures fold determinism in isolation:
  *
  *   (a) **Every literal target referenced by any event is explicitly
- *       INS'd first.** Without this, processEventCore's checkAndPromote
- *       fires synthetic INS events with `new Date().toISOString()`
- *       timestamps and grabs seq numbers via a microtask race that V8's
- *       JIT optimization tier can reorder between runs of the same input.
- *       That race is real and worth fixing — Phase A's Constitutive Site
- *       Model is the right place to fix it — but the fix is out of scope
- *       for Phase 0. Once Phase A lands, this constraint can be removed.
+ *       INS'd first.** Phase A (constitutive site model) made bulk-mode
+ *       auto-promotion race-free, so in principle this restriction could
+ *       be relaxed. It is kept in Phase 0's harness because the serial
+ *       path still routes auto-promotion through the original nested
+ *       processEventCore path — lifting the restriction would start
+ *       exercising BOTH paths' auto-promotion codepaths, which is a
+ *       different property (serial ≡ bulk under auto-promotion) that
+ *       Phase B will address explicitly.
  *
  *   (b) **The input is pre-sorted by helix level.** processEventsBulk
  *       re-groups events by helix level via sortByHelixLevel, which
@@ -417,53 +422,26 @@ describe('Fold determinism harness (Phase 0)', () => {
     vi.useRealTimers();
   });
 
-  it('bulk determinism (projection): same input twice through processEventsBulk → identical projection', async () => {
-    // Projection-level guarantee. Verifies that two bulk runs of the same
-    // input agree on every value-bearing field (state values, hashes,
-    // trajectories, edges, helix declared sets) even when the underlying
-    // seq numbers don't match between runs.
+  it('bulk determinism: same input twice through processEventsBulk → byte-identical', async () => {
+    // Byte-identical guarantee. Phase A (constitutive site model) made
+    // this reachable: processEventsBulk now reserves a contiguous seq
+    // range for each wave up-front via an AddressingHorizon (fold-core.ts),
+    // then hands seqs out in deterministic expansion order before any
+    // Promise.all dispatch runs. The V8-microtask race that previously
+    // made bulk byte-identity flaky (see Phase 0 FIXME(phase-A), now
+    // resolved) cannot recur: no two parallel tasks ever call
+    // store.nextSeq() concurrently inside a bulk import.
     await fc.assert(
       fc.asyncProperty(sequenceArb, async (events) => {
         const a = createTestStore();
         const b = createTestStore();
         await runBulk(a.store, events);
         await runBulk(b.store, events);
-        expect(projectionFingerprint(a)).toBe(projectionFingerprint(b));
+        expect(fullFingerprint(a)).toBe(fullFingerprint(b));
       }),
       { numRuns: 20 },
     );
   });
-
-  // ───────────────────────────────────────────────────────────────────
-  // FIXME(phase-A) — bulk byte-identity is FLAKY today.
-  //
-  // The byte-identical version of the bulk determinism property — two
-  // runs of the same input through processEventsBulk producing identical
-  // store contents down to seq numbers — is NOT verified above. It is
-  // currently broken by a V8-microtask race in processEventsBulk's
-  // per-target Promise.all sharding (fold.ts:251). When multiple targets
-  // in the same helix wave concurrently call store.nextSeq(), V8's JIT
-  // optimization tier can reorder which task's await resolves first
-  // between runs of the same code on the same input, so identical
-  // events get assigned different seq numbers across runs.
-  //
-  // Empirically (30-iteration diagnostic on a 4-event input):
-  //   serial: 1 distinct fingerprint
-  //   bulk:   4 distinct fingerprints
-  //
-  // The semantic projection is unaffected — the projection-level test
-  // above passes — because seedHash/chainHash are seq-independent and
-  // per-target arrival order is preserved. But the on-disk log is not
-  // reproducible byte-for-byte, which the roadmap's Phase 0 statement
-  // ("byte-for-byte identical FoldPosition output") asks for.
-  //
-  // The fix belongs in Phase A (Constitutive Site Model — make seq
-  // assignment go through the addressing horizon, not through a free
-  // race) or Phase B (productive barrier — assign seq at the barrier,
-  // not inside the per-target task body). Once fixed, replace the
-  // projection-level bulk-determinism test above with the
-  // fullFingerprint version, and update this comment.
-  // ───────────────────────────────────────────────────────────────────
 
   it('serial determinism: same input twice through processEvent → byte-identical', async () => {
     await fc.assert(
