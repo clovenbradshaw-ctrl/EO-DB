@@ -22,6 +22,7 @@ import { ConstraintComposer } from './ConstraintComposer';
 import { useIsMobile, useIsNarrow } from '../hooks/useIsMobile';
 import { ColumnManagerPanel } from './ColumnManagerPanel';
 import { AddColumnDialog } from './AddColumnDialog';
+import { SchemaFieldPanel, type FieldValueStats } from './SchemaFieldPanel';
 import { WatchedFieldsPicker } from './WatchedFieldsPicker';
 import {
   DndContext,
@@ -519,6 +520,8 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   const [linkedRecordPicker, setLinkedRecordPicker] = useState<{ x: number; y: number; key: string; tables: { scope: string; name: string }[]; mode: 'linkedRecord' | 'link' | 'relationship' } | null>(null);
   const [resolutionComposer, setResolutionComposer] = useState<{ x: number; y: number; key: string } | null>(null);
   const [constraintComposer, setConstraintComposer] = useState<{ x: number; y: number; key: string } | null>(null);
+  // Full-field editor side panel — opened by double-clicking a column header.
+  const [fieldPanelKey, setFieldPanelKey] = useState<string | null>(null);
   const [editingCell, setEditingCell] = useState<{ target: string; fieldKey: string; value: string } | null>(null);
   const editDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const prevRecordsKeyRef = useRef<string>('');
@@ -1522,6 +1525,60 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     setTypeSelector(null);
   }
 
+  // ─── Field value stats for the side-panel headline ───────────────────
+  // Computed from the loaded records whenever the user opens the panel on
+  // a column. Gives the editor a headline view of what's actually in the
+  // column before they start changing its settings.
+  const fieldValueStats = useMemo<FieldValueStats | null>(() => {
+    if (!fieldPanelKey) return null;
+    let filled = 0;
+    const distinctSet = new Set<string>();
+    let numMin = Infinity;
+    let numMax = -Infinity;
+    let numCount = 0;
+    const counts = new Map<string, number>();
+    let lenSum = 0;
+    let lenCount = 0;
+    const total = records.length;
+    for (const rec of records) {
+      const v = getFieldValue(rec, fieldPanelKey, useFieldsSub);
+      if (v == null || v === '' || (Array.isArray(v) && v.length === 0)) continue;
+      filled++;
+      let key: string;
+      if (typeof v === 'object') {
+        try { key = JSON.stringify(v); } catch { key = String(v); }
+      } else {
+        key = String(v);
+      }
+      distinctSet.add(key);
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+      if (typeof v === 'number' && Number.isFinite(v)) {
+        numCount++;
+        if (v < numMin) numMin = v;
+        if (v > numMax) numMax = v;
+      }
+      if (typeof v === 'string') {
+        lenSum += v.length;
+        lenCount++;
+      }
+    }
+    const topValues = [...counts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([value, count]) => ({
+        value: value.length > 40 ? value.slice(0, 40) + '…' : value,
+        count,
+      }));
+    return {
+      total,
+      filled,
+      distinct: distinctSet.size,
+      numeric: numCount > 0 ? { min: numMin, max: numMax } : undefined,
+      textAvgLen: lenCount > 0 ? Math.round(lenSum / lenCount) : undefined,
+      topValues: topValues.length > 0 ? topValues : undefined,
+    };
+  }, [fieldPanelKey, records, useFieldsSub]);
+
   return (
     <div style={s.container}>
       {/* Toolbar */}
@@ -1824,6 +1881,15 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                       onResizeStart={(startX) => {
                         const width = columnWidths[col.key] || defaultColumnWidth(col.type);
                         setResizing({ key: col.key, startX, startWidth: width });
+                      }}
+                      onDoubleClick={(e) => {
+                        // Double-click on a column header opens the full
+                        // field editor side panel. Skip metadata columns —
+                        // they aren't user-defined schema fields.
+                        if (col.key === '_record' || col.key === '_last_updated') return;
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setFieldPanelKey(col.key);
                       }}
                     />
                   ))}
@@ -2333,6 +2399,40 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
       {showAddColumn && (
         <AddColumnDialog scope={scope} onClose={() => setShowAddColumn(false)} />
       )}
+
+      {/* Field editor side panel (opened by double-clicking a column header) */}
+      {fieldPanelKey && (
+        <>
+          <div
+            style={{ position: 'fixed', inset: 0, zIndex: 9998, background: 'transparent' }}
+            onClick={() => setFieldPanelKey(null)}
+          />
+          <div
+            style={{
+              position: 'fixed',
+              top: 0,
+              right: 0,
+              bottom: 0,
+              zIndex: 9999,
+              boxShadow: `-8px 0 30px ${theme.shadow}`,
+              display: 'flex',
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <SchemaFieldPanel
+              fieldKey={fieldPanelKey}
+              fieldSchema={fieldSchemas.get(fieldPanelKey)}
+              valueStats={fieldValueStats}
+              onClose={() => setFieldPanelKey(null)}
+              onSaveLabel={(label) => handleColumnRename(fieldPanelKey, label)}
+              onAddConstraint={(name, value) => handleAddConstraint(fieldPanelKey, name, value)}
+              onRemoveConstraint={(name) => handleRemoveConstraint(fieldPanelKey, name)}
+              onSetResolution={(policy) => handleSetResolution(fieldPanelKey, policy)}
+              onClearResolution={() => handleClearResolution(fieldPanelKey)}
+            />
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -2353,13 +2453,14 @@ interface SortableColumnHeaderProps {
   onRename: (val: string) => void;
   onCancelRename: () => void;
   onResizeStart: (startX: number) => void;
+  onDoubleClick?: (e: React.MouseEvent) => void;
 }
 
 const DRAG_DEAD_ZONE_PX = 16; // suppress column drag near right edge (resize area)
 
 function SortableColumnHeader({
   col, theme, thStyle, sorts, renameCol, permissions,
-  isResizing, isAnyResizing, disabled, onContextMenu, onRename, onCancelRename, onResizeStart,
+  isResizing, isAnyResizing, disabled, onContextMenu, onRename, onCancelRename, onResizeStart, onDoubleClick,
 }: SortableColumnHeaderProps) {
   const effectivelyDisabled = disabled || isAnyResizing;
   const {
@@ -2410,6 +2511,7 @@ function SortableColumnHeader({
       {...attributes}
       {...filteredListeners}
       onContextMenu={onContextMenu}
+      onDoubleClick={onDoubleClick}
     >
       {renameCol?.key === col.key ? (
         <input
