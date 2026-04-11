@@ -11,43 +11,9 @@ import {
   mergeSorted,
   trieInsert,
 } from '../log-index';
-import type { OPFSLog } from '../log-opfs';
 import { appendEvent } from '../log-opfs';
 import type { EoEvent } from '../types';
-
-// ─── Memory log (same helper as log-opfs tests) ───────────────────────────────
-
-function createMemoryLog(): OPFSLog {
-  let buf = new Uint8Array(0);
-  const syncHandle = {
-    read(dest: Uint8Array, opts: { at: number }): number {
-      const start = opts.at;
-      const end = Math.min(start + dest.length, buf.length);
-      dest.set(buf.subarray(start, end));
-      return Math.max(0, end - start);
-    },
-    write(src: Uint8Array, opts: { at: number }): number {
-      const needed = opts.at + src.length;
-      if (needed > buf.length) {
-        const next = new Uint8Array(needed);
-        next.set(buf);
-        buf = next;
-      }
-      buf.set(src, opts.at);
-      return src.length;
-    },
-    flush(): void {},
-    getSize(): number { return buf.length; },
-    close(): void {},
-    truncate(size: number): void {
-      const next = new Uint8Array(size);
-      next.set(buf.subarray(0, size));
-      buf = next;
-    },
-  } as unknown as FileSystemSyncAccessHandle;
-
-  return { fileHandle: {} as FileSystemFileHandle, syncHandle, size: 0 };
-}
+import { createMemoryLog } from './_memory-log';
 
 function makeEvent(
   seq: number,
