@@ -167,15 +167,76 @@ function LevelBadge({ level }: { level: number }) {
   );
 }
 
+// Envelope metadata keys on DEF operands that aren't part of the diff itself.
+// NOTE: keys like `_displayField`, `_label`, `_type` ARE diffed values (the DEF's
+// intent) and must NOT be excluded — only pure envelope metadata goes here.
+const DEF_METADATA_KEYS = new Set(['_airtable', '_prev', '_sigs']);
+
+/**
+ * Extract the diffed field entries from a DEF operand. DEF events carry only
+ * the fields that were changed by the update, but they can arrive in several
+ * shapes:
+ *   - { fields: { ... }, _airtable: {...} }  (Airtable sync, cell edits)
+ *   - { name: 'foo', type: 'bar' }           (direct top-level fields)
+ *   - { field: 'x', from: 'a', to: 'b' }     (legacy explicit diff shape)
+ */
+function getDefDiffFields(operand: any): Array<[string, unknown]> {
+  if (!operand || typeof operand !== 'object') return [];
+
+  // Legacy explicit-diff shape
+  if (
+    typeof operand.field === 'string' &&
+    ('to' in operand || 'new_value' in operand || 'from' in operand || 'old_value' in operand)
+  ) {
+    return [[operand.field, operand.to ?? operand.new_value]];
+  }
+
+  // Nested fields shape — only show the diffed fields, never the envelope metadata
+  if (operand.fields && typeof operand.fields === 'object' && !Array.isArray(operand.fields)) {
+    return Object.entries(operand.fields as Record<string, unknown>);
+  }
+
+  // Top-level fields shape — exclude known envelope metadata
+  return Object.entries(operand as Record<string, unknown>).filter(
+    ([k]) => !DEF_METADATA_KEYS.has(k)
+  );
+}
+
+/** Look up the previous value for a field from a DEF operand's _prev snapshot. */
+function getDefPrevValue(operand: any, key: string): unknown {
+  if (!operand || typeof operand !== 'object' || !operand._prev || typeof operand._prev !== 'object') {
+    return undefined;
+  }
+  return (operand._prev as Record<string, unknown>)[key];
+}
+
+function shortValue(v: unknown, max = 40): string {
+  const s = typeof v === 'string' ? v : JSON.stringify(v);
+  if (s == null) return String(s);
+  return s.length > max ? s.slice(0, max) + '\u2026' : s;
+}
+
 // --- Operand summary (short inline preview) ---
 function operandSummary(op: string, operand: any): string | null {
   if (!operand || (typeof operand === 'object' && Object.keys(operand).length === 0)) return null;
 
   if (op === 'DEF') {
-    const field = operand.field || '';
-    const from = operand.from ?? operand.old_value;
-    const to = operand.to ?? operand.new_value;
-    return `${field ? field + ': ' : ''}${JSON.stringify(from)} \u2192 ${JSON.stringify(to)}`;
+    // Legacy explicit-diff shape: show old \u2192 new on a single line
+    if (
+      typeof operand.field === 'string' &&
+      ('to' in operand || 'new_value' in operand || 'from' in operand || 'old_value' in operand)
+    ) {
+      const from = operand.from ?? operand.old_value;
+      const to = operand.to ?? operand.new_value;
+      return `${operand.field}: ${JSON.stringify(from)} \u2192 ${JSON.stringify(to)}`;
+    }
+
+    const entries = getDefDiffFields(operand);
+    if (entries.length === 0) return 'updated';
+
+    const parts = entries.slice(0, 2).map(([k, v]) => `${k}: ${shortValue(v, 32)}`);
+    const summary = parts.join(' | ');
+    return entries.length > 2 ? `${summary} | +${entries.length - 2} more` : summary;
   }
   if (op === 'CON') {
     const dest = operand.link_to ?? operand.dest;
@@ -199,15 +260,65 @@ function formatOperand(op: string, operand: any, t: { textSecondary: string; tex
   if (!operand || (typeof operand === 'object' && Object.keys(operand).length === 0)) return null;
 
   if (op === 'DEF') {
-    const from = operand.from ?? operand.old_value;
-    const to = operand.to ?? operand.new_value;
+    // Legacy explicit-diff shape
+    if (
+      typeof operand.field === 'string' &&
+      ('to' in operand || 'new_value' in operand || 'from' in operand || 'old_value' in operand)
+    ) {
+      const from = operand.from ?? operand.old_value;
+      const to = operand.to ?? operand.new_value;
+      return (
+        <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11 }}>
+          <span style={{ color: t.textSecondary }}>{operand.field}: </span>
+          <span style={{ color: t.textSecondary, textDecoration: 'line-through', opacity: 0.7 }}>{JSON.stringify(from)}</span>
+          <span style={{ color: t.textMuted, margin: '0 5px' }}>{'\u2192'}</span>
+          <span style={{ color: t.success }}>{JSON.stringify(to)}</span>
+        </span>
+      );
+    }
+
+    const entries = getDefDiffFields(operand);
+    if (entries.length === 0) {
+      return (
+        <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: t.textMuted }}>
+          updated
+        </span>
+      );
+    }
+
     return (
-      <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11 }}>
-        {operand.field && <span style={{ color: t.textSecondary }}>{operand.field}: </span>}
-        <span style={{ color: t.textSecondary, textDecoration: 'line-through', opacity: 0.7 }}>{JSON.stringify(from)}</span>
-        <span style={{ color: t.textMuted, margin: '0 5px' }}>{'\u2192'}</span>
-        <span style={{ color: t.success }}>{JSON.stringify(to)}</span>
-      </span>
+      <div style={{
+        fontFamily: "'JetBrains Mono', monospace", fontSize: 11,
+        display: 'flex', flexDirection: 'column' as const, gap: 3,
+      }}>
+        {entries.map(([k, v]) => {
+          const newDisplay = typeof v === 'string' ? v : JSON.stringify(v);
+          const prev = getDefPrevValue(operand, k);
+          const oldDisplay = prev !== undefined
+            ? (typeof prev === 'string' ? prev : JSON.stringify(prev))
+            : null;
+          return (
+            <div key={k} style={{
+              display: 'flex', gap: 6, alignItems: 'flex-start',
+              flexWrap: 'wrap' as const, minWidth: 0,
+            }}>
+              <span style={{ color: t.textMuted, flexShrink: 0 }}>{k}:</span>
+              {oldDisplay !== null && (
+                <>
+                  <span style={{
+                    color: t.textSecondary, textDecoration: 'line-through', opacity: 0.7,
+                    wordBreak: 'break-all' as const,
+                  }}>{oldDisplay}</span>
+                  <span style={{ color: t.textMuted }}>{'\u2192'}</span>
+                </>
+              )}
+              <span style={{
+                color: t.success, wordBreak: 'break-all' as const, minWidth: 0,
+              }}>{newDisplay}</span>
+            </div>
+          );
+        })}
+      </div>
     );
   }
   if (op === 'CON') {
