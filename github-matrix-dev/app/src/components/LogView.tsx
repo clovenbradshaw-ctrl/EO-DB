@@ -167,15 +167,40 @@ function LevelBadge({ level }: { level: number }) {
   );
 }
 
+// A DEF operand represents a state-change diff only when it has at least one
+// of these fields. Otherwise it's a definition (e.g. schema field type, link
+// target, Airtable metadata) and should render as generic key-value pairs.
+function isDefDiff(operand: any): boolean {
+  return operand && (
+    operand.from !== undefined ||
+    operand.to !== undefined ||
+    operand.old_value !== undefined ||
+    operand.new_value !== undefined
+  );
+}
+
+function genericOperandSummary(operand: any, maxEntries: number): string | null {
+  const entries = Object.entries(operand)
+    .filter(([k, v]) => !['type'].includes(k) && v !== undefined)
+    .slice(0, maxEntries);
+  if (entries.length === 0) return null;
+  return entries.map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`).join(' | ');
+}
+
 // --- Operand summary (short inline preview) ---
 function operandSummary(op: string, operand: any): string | null {
   if (!operand || (typeof operand === 'object' && Object.keys(operand).length === 0)) return null;
 
   if (op === 'DEF') {
-    const field = operand.field || '';
-    const from = operand.from ?? operand.old_value;
-    const to = operand.to ?? operand.new_value;
-    return `${field ? field + ': ' : ''}${JSON.stringify(from)} \u2192 ${JSON.stringify(to)}`;
+    if (isDefDiff(operand)) {
+      const field = operand.field || '';
+      const from = operand.from ?? operand.old_value;
+      const to = operand.to ?? operand.new_value;
+      return `${field ? field + ': ' : ''}${JSON.stringify(from)} \u2192 ${JSON.stringify(to)}`;
+    }
+    // Definition-shape DEF (e.g. schema field: {name, type, _airtable}) —
+    // fall through to generic rendering.
+    return genericOperandSummary(operand, 2);
   }
   if (op === 'CON') {
     const dest = operand.link_to ?? operand.dest;
@@ -189,16 +214,14 @@ function operandSummary(op: string, operand: any): string | null {
   if (op === 'NUL') {
     return `nullified${operand.reason ? ' \u2014 ' + operand.reason : ''}`;
   }
-  const entries = Object.entries(operand).filter(([k]) => !['type'].includes(k)).slice(0, 2);
-  if (entries.length === 0) return null;
-  return entries.map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`).join(' | ');
+  return genericOperandSummary(operand, 2);
 }
 
 // --- Operand formatting (rich, for detail panel) ---
 function formatOperand(op: string, operand: any, t: { textSecondary: string; textMuted: string; text: string; border: string; success: string; purple: string; warning: string }): JSX.Element | null {
   if (!operand || (typeof operand === 'object' && Object.keys(operand).length === 0)) return null;
 
-  if (op === 'DEF') {
+  if (op === 'DEF' && isDefDiff(operand)) {
     const from = operand.from ?? operand.old_value;
     const to = operand.to ?? operand.new_value;
     return (
