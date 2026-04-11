@@ -14,6 +14,14 @@ import { useBranchStore } from '../../store/branch-store';
 import { useEoStore } from '../../store/eo-store';
 import { useTheme, type Theme } from '../../theme';
 import { warmProjectionCache } from '../../projection/ProjectionEngine';
+import {
+  findNearestDivergence,
+  findNextDivergence,
+  findPrevDivergence,
+  mergeDivergencePoints,
+  sortDivergencePoints,
+  tAtTs,
+} from './branch-navigation';
 import type {
   BranchRecord,
   DivergencePoint,
@@ -316,6 +324,59 @@ export function BranchExplorer({ branches }: BranchExplorerProps) {
     );
   }, [divergencePoints, timeWindow]);
 
+  // Dedupe + stable-sort for the navigation list. Two points at the same
+  // (ts, field) collapse into a single jump target — a single field that
+  // diverges in multiple worlds should not force the user to press "next"
+  // twice to get past it.
+  const navigablePoints = useMemo(
+    () => sortDivergencePoints(mergeDivergencePoints(visibleDivergence)),
+    [visibleDivergence],
+  );
+
+  // Which point is currently closest to the scrubber — used to highlight
+  // the active row in the DivergenceList as the user drags.
+  const nearestPoint = useMemo(
+    () => findNearestDivergence(navigablePoints, scrubberTs),
+    [navigablePoints, scrubberTs],
+  );
+
+  function jumpToDivergence(point: DivergencePoint) {
+    setScrubberT(tAtTs(timeWindow!, point.ts));
+  }
+
+  function jumpPrevDivergence() {
+    const p = findPrevDivergence(navigablePoints, scrubberTs);
+    if (p) jumpToDivergence(p);
+  }
+
+  function jumpNextDivergence() {
+    const p = findNextDivergence(navigablePoints, scrubberTs);
+    if (p) jumpToDivergence(p);
+  }
+
+  // Keyboard shortcuts: `[` / `]` step through divergences. Bound globally
+  // rather than on the svg element so the user doesn't have to click into
+  // the timeline first.
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      // Skip when typing in an input / textarea — don't hijack normal text entry.
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+        return;
+      }
+      if (e.key === '[') {
+        jumpPrevDivergence();
+        e.preventDefault();
+      } else if (e.key === ']') {
+        jumpNextDivergence();
+        e.preventDefault();
+      }
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [navigablePoints, scrubberTs, timeWindow]);
+
   // Count W-2 divergences for the meta row.
   const w2DivergenceCount = useMemo(
     () => divergencePoints.filter((p) => p.worlds_diverge.includes('always-merged')).length,
@@ -352,11 +413,19 @@ export function BranchExplorer({ branches }: BranchExplorerProps) {
           style={{
             marginLeft: 'auto',
             display: 'flex',
-            alignItems: 'baseline',
+            alignItems: 'center',
             gap: 10,
             fontFamily: 'monospace',
           }}
         >
+          <DivergenceStepper
+            theme={theme}
+            totalPoints={navigablePoints.length}
+            hasPrev={!!findPrevDivergence(navigablePoints, scrubberTs)}
+            hasNext={!!findNextDivergence(navigablePoints, scrubberTs)}
+            onPrev={jumpPrevDivergence}
+            onNext={jumpNextDivergence}
+          />
           <span style={{ fontSize: 10, color: theme.textMuted }}>
             {formatTimeFull(scrubberTs)}
           </span>
@@ -504,7 +573,8 @@ export function BranchExplorer({ branches }: BranchExplorerProps) {
 
         {/* Divergence ticks — a small mark on the tracks where the
             projection engine detected field-level divergence. W-2 divergences
-            hit the top track; W-0/W-1 divergences straddle the fork. */}
+            hit the top track; W-0/W-1 divergences straddle the fork. Each
+            tick is clickable and snaps the scrubber to its timestamp. */}
         {visibleDivergence.map((d, idx) => {
           const x = xAtTs(timeWindow, d.ts);
           if (d.field_path === '_syn') {
@@ -522,22 +592,51 @@ export function BranchExplorer({ branches }: BranchExplorerProps) {
               ticks.push({ y: trackYAt('never-merged', x, forkX), color: WORLD_TRACK_COLORS['never-merged'] });
             }
           }
-          return ticks.map((t, j) => (
-            <line
-              key={`div-${idx}-${j}`}
-              x1={x}
-              y1={t.y - 7}
-              x2={x}
-              y2={t.y + 7}
-              stroke={t.color}
-              strokeWidth="1.2"
-              opacity={0.75}
+          const isNearest =
+            nearestPoint !== null &&
+            nearestPoint.ts === d.ts &&
+            nearestPoint.field_path === d.field_path;
+          return (
+            <g
+              key={`div-${idx}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                jumpToDivergence(d);
+              }}
+              onMouseDown={(e) => {
+                // Prevent the svg's onMouseDown (drag scrubber) from firing
+                // when the user clicks directly on a tick.
+                e.stopPropagation();
+              }}
+              style={{ cursor: 'pointer' }}
             >
-              <title>
-                {`divergence @ ${formatTimeShort(d.ts)} — field ${d.field_path}`}
-              </title>
-            </line>
-          ));
+              {/* Invisible fat hit target for easier clicking. */}
+              <rect
+                x={x - 6}
+                y={ticks.reduce((min, t) => Math.min(min, t.y - 10), Infinity)}
+                width={12}
+                height={ticks.reduce((max, t) => Math.max(max, t.y + 10), 0) -
+                  ticks.reduce((min, t) => Math.min(min, t.y - 10), Infinity)}
+                fill="transparent"
+              />
+              {ticks.map((t, j) => (
+                <line
+                  key={`div-${idx}-${j}`}
+                  x1={x}
+                  y1={t.y - 7}
+                  x2={x}
+                  y2={t.y + 7}
+                  stroke={t.color}
+                  strokeWidth={isNearest ? 2.2 : 1.2}
+                  opacity={isNearest ? 1 : 0.75}
+                >
+                  <title>
+                    {`divergence @ ${formatTimeShort(d.ts)} — field ${d.field_path} (click to jump)`}
+                  </title>
+                </line>
+              ))}
+            </g>
+          );
         })}
 
         {/* SYN diamond at fork */}
@@ -671,6 +770,17 @@ export function BranchExplorer({ branches }: BranchExplorerProps) {
           />
         ))}
       </div>
+
+      {/* Divergence list — click any row to snap the scrubber there.
+          Nearest row to the current scrubber position is highlighted. */}
+      {navigablePoints.length > 0 && (
+        <DivergenceList
+          theme={theme}
+          points={navigablePoints}
+          nearest={nearestPoint}
+          onJump={jumpToDivergence}
+        />
+      )}
 
       {/* Legend */}
       <LegendRow theme={theme} />
@@ -1123,5 +1233,224 @@ function Swatch({ color }: { color: string }) {
         opacity: 0.9,
       }}
     />
+  );
+}
+
+// ─── Divergence navigation ──────────────────────────────────────────────────
+
+/**
+ * Prev / next stepper that snaps the scrubber to the adjacent divergence
+ * point. Shown next to the scrubber time readout in the top bar. Buttons
+ * disable when there's nothing to step to. Also surfaces the in-window
+ * divergence count so the user sees "3 points" before deciding to step.
+ */
+function DivergenceStepper({
+  theme,
+  totalPoints,
+  hasPrev,
+  hasNext,
+  onPrev,
+  onNext,
+}: {
+  theme: Theme;
+  totalPoints: number;
+  hasPrev: boolean;
+  hasNext: boolean;
+  onPrev: () => void;
+  onNext: () => void;
+}) {
+  const disabledStyle = {
+    opacity: 0.3,
+    cursor: 'not-allowed' as const,
+  };
+  const activeStyle = {
+    opacity: 1,
+    cursor: 'pointer' as const,
+  };
+  const baseButton: React.CSSProperties = {
+    fontFamily: 'monospace',
+    fontSize: 11,
+    background: 'transparent',
+    border: `0.5px solid ${theme.borderLight}`,
+    borderRadius: 3,
+    color: theme.textSecondary,
+    padding: '2px 7px',
+    lineHeight: 1.1,
+  };
+
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+      <button
+        type="button"
+        onClick={onPrev}
+        disabled={!hasPrev}
+        title="Previous divergence  [ "
+        aria-label="Jump to previous divergence"
+        style={{ ...baseButton, ...(hasPrev ? activeStyle : disabledStyle) }}
+      >
+        {'\u25C0'} prev
+      </button>
+      <span
+        style={{
+          fontSize: 10,
+          color: theme.textMuted,
+          fontFamily: 'monospace',
+          minWidth: 46,
+          textAlign: 'center',
+        }}
+      >
+        {totalPoints} {totalPoints === 1 ? 'div' : 'divs'}
+      </span>
+      <button
+        type="button"
+        onClick={onNext}
+        disabled={!hasNext}
+        title="Next divergence  ]"
+        aria-label="Jump to next divergence"
+        style={{ ...baseButton, ...(hasNext ? activeStyle : disabledStyle) }}
+      >
+        next {'\u25B6'}
+      </button>
+    </div>
+  );
+}
+
+/**
+ * Chronological list of every divergence inside the visible window. Each
+ * row shows the timestamp, the field, and colored dots for every world
+ * that diverges at this point. Clicking a row snaps the scrubber to its
+ * timestamp. The row nearest to the current scrubber position is
+ * highlighted so the user sees "where am I" at a glance while dragging.
+ */
+function DivergenceList({
+  theme,
+  points,
+  nearest,
+  onJump,
+}: {
+  theme: Theme;
+  points: DivergencePoint[];
+  nearest: DivergencePoint | null;
+  onJump: (point: DivergencePoint) => void;
+}) {
+  return (
+    <div
+      style={{
+        border: `0.5px solid ${theme.borderLight}`,
+        borderRadius: 6,
+        padding: '8px 10px',
+        background: theme.bgCard,
+      }}
+    >
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'baseline',
+          justifyContent: 'space-between',
+          marginBottom: 6,
+        }}
+      >
+        <span
+          style={{
+            fontSize: 10,
+            color: theme.textMuted,
+            fontFamily: 'monospace',
+            textTransform: 'uppercase',
+            letterSpacing: '0.06em',
+          }}
+        >
+          divergences in window ({points.length})
+        </span>
+        <span
+          style={{
+            fontSize: 9,
+            color: theme.textMuted,
+            fontFamily: 'monospace',
+          }}
+        >
+          {'['} prev  {']'} next
+        </span>
+      </div>
+      <div
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          maxHeight: 140,
+          overflowY: 'auto',
+        }}
+      >
+        {points.map((point) => {
+          const isActive =
+            nearest !== null &&
+            nearest.ts === point.ts &&
+            nearest.field_path === point.field_path;
+          const isSyn = point.field_path === '_syn';
+          return (
+            <button
+              key={`${point.ts}-${point.field_path}`}
+              type="button"
+              onClick={() => onJump(point)}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 10,
+                width: '100%',
+                padding: '4px 6px',
+                border: 'none',
+                background: isActive ? theme.bgActive : 'transparent',
+                borderLeft: isActive
+                  ? `2px solid ${WORLD_TRACK_COLORS.canonical}`
+                  : '2px solid transparent',
+                color: theme.text,
+                fontFamily: 'monospace',
+                fontSize: 11,
+                cursor: 'pointer',
+                textAlign: 'left',
+                borderRadius: 2,
+              }}
+            >
+              <span
+                style={{
+                  fontSize: 10,
+                  color: theme.textMuted,
+                  minWidth: 48,
+                  textAlign: 'right',
+                }}
+              >
+                {formatTimeShort(point.ts)}
+              </span>
+              <span
+                style={{
+                  flex: 1,
+                  color: isSyn ? WORLD_TRACK_COLORS.canonical : theme.textSecondary,
+                  whiteSpace: 'nowrap',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  fontStyle: isSyn ? 'italic' : 'normal',
+                }}
+              >
+                {isSyn ? 'SYN fork point' : point.field_path}
+              </span>
+              <span style={{ display: 'flex', gap: 3 }}>
+                {point.worlds_diverge.map((w) => (
+                  <span
+                    key={w}
+                    title={`${w} diverges here`}
+                    style={{
+                      display: 'inline-block',
+                      width: 7,
+                      height: 7,
+                      borderRadius: '50%',
+                      background: WORLD_TRACK_COLORS[w],
+                      opacity: 0.9,
+                    }}
+                  />
+                ))}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
   );
 }
