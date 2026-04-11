@@ -17,7 +17,7 @@ import { formatName } from './scope-picker-utils';
 import { useIdResolver, isEntityId, isEntityIdArray, type IdResolver } from '../hooks/useIdResolver';
 import { groupSchemaStates, extractColumnTypeOverrides, schemaTypeTarget, schemaConstraintTarget, schemaResolveTarget, type FieldSchema } from '../db/schema-rules';
 import { ColumnTypeSelector, COLUMN_TYPE_ICON_MAP } from './ColumnTypeSelector';
-import { ResolutionPolicyComposer, summarizePolicy, type ResolvePolicy } from './ResolutionPolicyComposer';
+import { ResolutionPolicyComposer, summarizePolicy, normalizeResolvePolicy, type ResolvePolicy } from './ResolutionPolicyComposer';
 import { ConstraintComposer } from './ConstraintComposer';
 import { useIsMobile, useIsNarrow } from '../hooks/useIsMobile';
 import { ColumnManagerPanel } from './ColumnManagerPanel';
@@ -1017,11 +1017,10 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
       );
 
       // ─── ⊨ Evaluations ───
-      const currentPolicy: ResolvePolicy | null = fs?.resolve?.value?.stances
-        ? fs.resolve.value as ResolvePolicy
-        : fs?.resolve?.value?.strategy
-          ? { stances: [{ stance: 'dissecting', subType: fs.resolve.value.strategy }] }
-          : null;
+      // normalizeResolvePolicy absorbs both legacy shapes (lowercase stances
+      // and pre-composer {strategy}) at the read boundary, so the column
+      // menu only ever sees the canonical titlecase form downstream.
+      const currentPolicy: ResolvePolicy | null = normalizeResolvePolicy(fs?.resolve?.value);
       items.push(
         { label: '', onClick: () => {}, separator: true },
         { header: true, icon: '⊨', label: 'Evaluations', onClick: () => {} },
@@ -2392,11 +2391,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
       )}
       {resolutionComposer && (() => {
         const fs = fieldSchemas.get(resolutionComposer.key);
-        const currentPolicy: ResolvePolicy | null = fs?.resolve?.value?.stances
-          ? fs.resolve.value as ResolvePolicy
-          : fs?.resolve?.value?.strategy
-            ? { stances: [{ stance: 'dissecting', subType: fs.resolve.value.strategy }] }
-            : null;
+        const currentPolicy: ResolvePolicy | null = normalizeResolvePolicy(fs?.resolve?.value);
         return (
           <>
             <div

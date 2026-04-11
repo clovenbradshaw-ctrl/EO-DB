@@ -14,11 +14,20 @@
 
 import { useState, useMemo } from 'react';
 import { useTheme, type Theme } from '../theme';
+import type { Resolution } from '../db/types';
 
 // ─── Types ──────────────────────────────────────────────────────────────
 
 export interface StanceEntry {
-  stance: string;
+  /**
+   * Canonical titlecase resolution stance from the shared lattice taxonomy
+   * in db/types.ts. The `'unspecified'` value is nominally allowed by the
+   * Resolution union but the UI never produces it — STANCES only holds the
+   * nine authored stances. Persisted legacy policies that were written with
+   * lowercase keys (pre-A.6/2) are normalized by normalizeResolvePolicy at
+   * the deserialization boundary.
+   */
+  stance: Resolution;
   subType?: string;
   formula?: string;
   order?: number;
@@ -31,7 +40,7 @@ export interface ResolvePolicy {
 // ─── Stance Definitions ─────────────────────────────────────────────────
 
 interface StanceDef {
-  key: string;
+  key: Resolution;
   name: string;
   cell: string;        // e.g. "Diff × Ground"
   description: string;
@@ -48,21 +57,21 @@ interface StanceDef {
 const STANCES: StanceDef[] = [
   // ── Differentiating ──
   {
-    key: 'clearing', name: 'Clearing', cell: 'Diff × Ground',
+    key: 'Clearing', name: 'Clearing', cell: 'Diff × Ground',
     description: 'Neither value wins. Conflict voids the field entirely.',
     example: '"status": ["active", "archived"] → null',
     output: '→ null', outputColor: '#7a756d',
     row: 'diff', col: 'ground',
   },
   {
-    key: 'dissecting', name: 'Dissecting', cell: 'Diff × Figure',
+    key: 'Dissecting', name: 'Dissecting', cell: 'Diff × Figure',
     description: 'One value selected by explicit rule. All picker strategies live here.',
     example: '"price": [9.99, 12.99] → pick latest write → 12.99',
     output: '→ one value by rule', outputColor: '#9A3412',
     row: 'diff', col: 'figure', hasSubTypes: true,
   },
   {
-    key: 'unraveling', name: 'Unraveling', cell: 'Diff × Pattern',
+    key: 'Unraveling', name: 'Unraveling', cell: 'Diff × Pattern',
     description: 'No value returned. The pattern of disagreement is the output — who conflicts, how often.',
     example: '"region": EU vs US → {sources: 2, diverged_at: "2024-03"}',
     output: '→ conflict structure', outputColor: '#6B21A8',
@@ -70,21 +79,21 @@ const STANCES: StanceDef[] = [
   },
   // ── Relating ──
   {
-    key: 'tending', name: 'Tending', cell: 'Relate × Ground',
+    key: 'Tending', name: 'Tending', cell: 'Relate × Ground',
     description: 'Return last uncontested value. Hold pre-conflict ground while conflict sits in the log.',
     example: '"email" was "a@b.com" before fork → returns "a@b.com"',
     output: '→ pre-conflict value', outputColor: '#166534',
     row: 'relate', col: 'ground',
   },
   {
-    key: 'binding', name: 'Binding', cell: 'Relate × Figure',
+    key: 'Binding', name: 'Binding', cell: 'Relate × Figure',
     description: 'All values returned with full provenance. The conflict itself is the datum — no scalar.',
     example: '"name" → {A: "Jon", B: "John", sources: […]}',
     output: '→ structured conflict', outputColor: '#1E40AF',
     row: 'relate', col: 'figure',
   },
   {
-    key: 'tracing', name: 'Tracing', cell: 'Relate × Pattern',
+    key: 'Tracing', name: 'Tracing', cell: 'Relate × Pattern',
     description: 'Follow the historical resolution pattern. Precedent on this path determines the output.',
     example: '"priority" → resolved same way as last 5 conflicts on this path',
     output: '→ precedent-based', outputColor: '#115E59',
@@ -92,21 +101,21 @@ const STANCES: StanceDef[] = [
   },
   // ── Generating ──
   {
-    key: 'cultivating', name: 'Cultivating', cell: 'Gen × Ground',
+    key: 'Cultivating', name: 'Cultivating', cell: 'Gen × Ground',
     description: 'No value returned. A review workflow is triggered — creates conditions for resolution.',
     example: '"owner" conflict → queued for human arbitration',
     output: '→ workflow triggered', outputColor: '#92400E',
     row: 'gen', col: 'ground',
   },
   {
-    key: 'making', name: 'Making', cell: 'Gen × Figure',
+    key: 'Making', name: 'Making', cell: 'Gen × Figure',
     description: 'New value computed from conflicting values — average, merge, consensus. Not in either source.',
     example: '"score": [88, 92] → AVERAGE(88, 92) = 90',
     output: '→ new computed value', outputColor: '#3730A3',
     row: 'gen', col: 'figure', hasFormula: true,
   },
   {
-    key: 'composing', name: 'Composing', cell: 'Gen × Pattern',
+    key: 'Composing', name: 'Composing', cell: 'Gen × Pattern',
     description: 'New policy written for this conflict class. Future conflicts of this class auto-resolve.',
     example: 'recurring "currency" conflict → writes: prefer reporting currency',
     output: '→ new policy written', outputColor: '#9D174D',
@@ -144,7 +153,7 @@ const COLS = ['ground', 'figure', 'pattern'] as const;
 
 export function deriveCompositionType(stances: StanceEntry[]): string {
   if (stances.length <= 1) return 'single';
-  const hasCultivating = stances.some(s => s.stance === 'cultivating');
+  const hasCultivating = stances.some(s => s.stance === 'Cultivating');
   const rows = new Set(stances.map(s => STANCES.find(d => d.key === s.stance)?.row));
   if (hasCultivating && stances.length > 1) return 'parallel_background';
   if (rows.size === 1) return 'parallel';
@@ -164,6 +173,101 @@ export function summarizePolicy(policy: ResolvePolicy | null): string {
   if (comp === 'parallel_background') return names.join(' + ');
   if (comp === 'parallel') return names.join(' + ');
   return names[0];
+}
+
+// ─── Resolution policy normalization ────────────────────────────────────
+
+/**
+ * Lowercase → titlecase map for legacy StanceEntry.stance values written
+ * before Phase A.6/2. Persisted policies predate the rename and use keys
+ * like `'clearing'`; the composer and the lattice both use `'Clearing'`.
+ * This map is the single migration surface — add a new key here if a
+ * further case-sensitivity drift ever ships.
+ */
+const LEGACY_STANCE_TO_RESOLUTION: Record<string, Resolution> = {
+  clearing: 'Clearing',
+  dissecting: 'Dissecting',
+  unraveling: 'Unraveling',
+  tending: 'Tending',
+  binding: 'Binding',
+  tracing: 'Tracing',
+  cultivating: 'Cultivating',
+  making: 'Making',
+  composing: 'Composing',
+};
+
+/**
+ * Titlecase resolution values the composer recognizes. Derived from STANCES
+ * so this stays in sync with the grid as new stances are added.
+ */
+const VALID_RESOLUTIONS: ReadonlySet<Resolution> = new Set(STANCES.map(s => s.key));
+
+function normalizeStanceKey(raw: unknown): Resolution | null {
+  if (typeof raw !== 'string') return null;
+  if (VALID_RESOLUTIONS.has(raw as Resolution)) return raw as Resolution;
+  const migrated = LEGACY_STANCE_TO_RESOLUTION[raw];
+  return migrated ?? null;
+}
+
+/**
+ * Take raw `fs.resolve.value` off a persisted FieldSchema and return a
+ * ResolvePolicy the composer can consume, or null if the input is not a
+ * recognizable policy shape.
+ *
+ * Handles two legacy shapes plus the canonical shape:
+ *
+ *   1. `{ strategy: 'latest' }`           — pre-composer single-strategy
+ *                                           form. Converted to a one-entry
+ *                                           Dissecting policy carrying the
+ *                                           strategy name as subType.
+ *   2. `{ stances: [{ stance: 'clearing', ... }] }` — lowercase-keyed
+ *                                           policy from before A.6/2.
+ *                                           Each stance is mapped to its
+ *                                           titlecase counterpart; entries
+ *                                           whose stance cannot be mapped
+ *                                           are dropped.
+ *   3. `{ stances: [{ stance: 'Clearing', ... }] }` — canonical form.
+ *                                           Passes through unchanged
+ *                                           (still validated so junk is
+ *                                           filtered out).
+ *
+ * Unknown shapes, null / undefined, and empty `{ stances: [] }` all return
+ * null so consumers can treat "no policy" as a single case.
+ */
+export function normalizeResolvePolicy(raw: unknown): ResolvePolicy | null {
+  if (!raw || typeof raw !== 'object') return null;
+
+  const obj = raw as { stances?: unknown; strategy?: unknown };
+
+  // Legacy single-strategy shape.
+  if (!obj.stances && typeof obj.strategy === 'string') {
+    return {
+      stances: [{ stance: 'Dissecting', subType: obj.strategy }],
+    };
+  }
+
+  if (!Array.isArray(obj.stances)) return null;
+
+  const normalized: StanceEntry[] = [];
+  for (const rawEntry of obj.stances) {
+    if (!rawEntry || typeof rawEntry !== 'object') continue;
+    const entry = rawEntry as {
+      stance?: unknown;
+      subType?: unknown;
+      formula?: unknown;
+      order?: unknown;
+    };
+    const stance = normalizeStanceKey(entry.stance);
+    if (!stance) continue;
+    const out: StanceEntry = { stance };
+    if (typeof entry.subType === 'string') out.subType = entry.subType;
+    if (typeof entry.formula === 'string') out.formula = entry.formula;
+    if (typeof entry.order === 'number') out.order = entry.order;
+    normalized.push(out);
+  }
+
+  if (normalized.length === 0) return null;
+  return { stances: normalized };
 }
 
 // ─── GPU check ──────────────────────────────────────────────────────────
@@ -197,11 +301,15 @@ export function ResolutionPolicyComposer({
   const s = makeStyles(theme, embedded);
   const gpuAvailable = useMemo(hasWebGPU, []);
 
-  // Local editing state — initialize from currentPolicy
-  const [selected, setSelected] = useState<Map<string, StanceEntry>>(() => {
-    const m = new Map<string, StanceEntry>();
-    if (currentPolicy) {
-      for (const entry of currentPolicy.stances) {
+  // Local editing state — initialize from currentPolicy. If the caller
+  // forgot to normalize a legacy policy on the way in, normalize here so
+  // the composer renders it correctly regardless. Idempotent on already-
+  // normalized inputs.
+  const [selected, setSelected] = useState<Map<Resolution, StanceEntry>>(() => {
+    const m = new Map<Resolution, StanceEntry>();
+    const normalized = normalizeResolvePolicy(currentPolicy);
+    if (normalized) {
+      for (const entry of normalized.stances) {
         m.set(entry.stance, entry);
       }
     }
@@ -210,23 +318,23 @@ export function ResolutionPolicyComposer({
 
   // Dissecting sub-type state
   const [dissectingSubType, setDissectingSubType] = useState<string>(
-    currentPolicy?.stances.find(s => s.stance === 'dissecting')?.subType ?? 'latest'
+    currentPolicy?.stances.find(s => s.stance === 'Dissecting')?.subType ?? 'latest'
   );
 
   // Making formula state
   const [makingFormula, setMakingFormula] = useState<string>(
-    currentPolicy?.stances.find(s => s.stance === 'making')?.formula ?? ''
+    currentPolicy?.stances.find(s => s.stance === 'Making')?.formula ?? ''
   );
 
-  function toggleStance(key: string) {
+  function toggleStance(key: Resolution) {
     setSelected(prev => {
       const next = new Map(prev);
       if (next.has(key)) {
         next.delete(key);
       } else {
         const entry: StanceEntry = { stance: key };
-        if (key === 'dissecting') entry.subType = dissectingSubType;
-        if (key === 'making' && makingFormula) entry.formula = makingFormula;
+        if (key === 'Dissecting') entry.subType = dissectingSubType;
+        if (key === 'Making' && makingFormula) entry.formula = makingFormula;
         // Assign order for cross-mode fallback
         entry.order = next.size;
         next.set(key, entry);
@@ -238,8 +346,8 @@ export function ResolutionPolicyComposer({
   function handleApply() {
     // Update dissecting/making entries with latest values before applying
     const stances = Array.from(selected.values()).map(entry => {
-      if (entry.stance === 'dissecting') return { ...entry, subType: dissectingSubType };
-      if (entry.stance === 'making') return { ...entry, formula: makingFormula };
+      if (entry.stance === 'Dissecting') return { ...entry, subType: dissectingSubType };
+      if (entry.stance === 'Making') return { ...entry, formula: makingFormula };
       return entry;
     });
     // Sort by order for deterministic fallback chains
@@ -249,8 +357,8 @@ export function ResolutionPolicyComposer({
 
   const compositionType = deriveCompositionType(Array.from(selected.values()));
   const stanceCount = selected.size;
-  const isDissectingSelected = selected.has('dissecting');
-  const isMakingSelected = selected.has('making');
+  const isDissectingSelected = selected.has('Dissecting');
+  const isMakingSelected = selected.has('Making');
 
   return (
     <div style={embedded ? { padding: '0 16px 8px' } : s.container}>

@@ -19,7 +19,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ConstraintComposer } from './ConstraintComposer';
-import { ResolutionPolicyComposer, summarizePolicy, type ResolvePolicy } from './ResolutionPolicyComposer';
+import { ResolutionPolicyComposer, summarizePolicy, normalizeResolvePolicy, type ResolvePolicy } from './ResolutionPolicyComposer';
 import { useTheme, type Theme } from '../theme';
 import { formatName } from './scope-picker-utils';
 import { getAirtableTypeIcon, getAirtableTypeColor } from './field-type-icons';
@@ -207,11 +207,10 @@ export function SchemaFieldPanel({
 
   const hasLayer2 = constraints.some(c => LAYER_2_CONSTRAINT_NAMES.has(c.name));
 
-  const currentPolicy: ResolvePolicy | null = fieldSchema?.resolve?.value?.stances
-    ? (fieldSchema.resolve.value as ResolvePolicy)
-    : fieldSchema?.resolve?.value?.strategy
-      ? { stances: [{ stance: 'dissecting', subType: fieldSchema.resolve.value.strategy }] }
-      : null;
+  // normalizeResolvePolicy handles both the canonical titlecase-keyed shape
+  // and the two legacy shapes (lowercase stances + pre-composer {strategy})
+  // that may still live in persisted FieldSchema records from before A.6/2.
+  const currentPolicy: ResolvePolicy | null = normalizeResolvePolicy(fieldSchema?.resolve?.value);
   const hasResolution = !!currentPolicy;
 
   // ── Disclosure state ──
