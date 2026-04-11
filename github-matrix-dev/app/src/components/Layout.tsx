@@ -2,6 +2,8 @@ import { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback, laz
 import { logout, createMatrixClient, type MatrixSession } from '../matrix/client';
 import { useEoStore } from '../store/eo-store';
 import { persistSpaceMeta, listSpaceMeta, clearAllSpaceMetas, saveSpaceMeta, removeSpaceMeta } from '../db/space-meta';
+import { clearSpaceLocalData } from '../db/clear-space-data';
+import { Modal } from './Modal';
 import { createFoldWorkerClient, initFoldWorker, type FoldWorkerClient } from '../db/lazy-fold';
 import { SyncManager } from '../matrix/sync-manager';
 import { PeerSync } from '../matrix/peer-sync';
@@ -513,6 +515,11 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   });
   const [spaceOpen, setSpaceOpen] = useState(false);
   const [showRecycleBin, setShowRecycleBin] = useState(false);
+  // When the user clicks a different space in SpaceBrowser we stash the
+  // target here and surface the wipe-confirmation modal instead of switching
+  // immediately. `confirmSpaceSwitch` is the only code path that actually
+  // advances the space after a user-initiated switch.
+  const [pendingSpaceSwitch, setPendingSpaceSwitch] = useState<string | null>(null);
   const isMobile = useIsMobile();
   const isTablet = useIsTablet();
   const isNarrow = useIsNarrow(); // mobile OR tablet
@@ -636,8 +643,13 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     ?? connectionDetail
     ?? (connectionState === 'syncing' ? 'Matrix is starting and performing initial sync.' : undefined);
 
-  // Helper to select a space and persist the choice
-  function selectSpace(target: string) {
+  // Helper to select a space and persist the choice.
+  //
+  // NOTE: Internal callers (archive / delete fallbacks, startup auto-select,
+  // post-create) call `_doSelectSpace` directly — they must not surface the
+  // wipe-confirmation modal. Only user-initiated clicks in SpaceBrowser go
+  // through the gated `selectSpace` wrapper below.
+  function _doSelectSpace(target: string) {
     const canonical = normalizeSpaceTarget(target);
     // Hardwall: purge all caches not scoped to a space before loading new space data.
     invalidateStatsCache();
@@ -647,6 +659,51 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     localStorage.setItem('eo-selected-space', canonical);
     // Clear route state when switching spaces — space is now part of the URL
     navigate({ space: canonical, scope: null, record: null, view: 'records', builderViewId: null, customPageId: null });
+  }
+
+  // User-initiated space switch. Shows a confirmation modal warning that
+  // switching will wipe the outgoing space's local cache. If there is no
+  // current space (first load) we skip the prompt and select immediately.
+  function selectSpace(target: string) {
+    const canonical = normalizeSpaceTarget(target);
+    if (canonical === selectedSpace) return;
+    if (!selectedSpace) {
+      _doSelectSpace(canonical);
+      return;
+    }
+    setPendingSpaceSwitch(canonical);
+  }
+
+  // Tear down every in-memory service attached to a cached space so its
+  // Workers, timers, and open RTC connections don't keep running after the
+  // user has left. Safe to call with a spaceId that is not in the cache.
+  function evictSpaceCache(target: string) {
+    const cached = spaceCacheRef.current.get(target);
+    if (!cached) return;
+    try { cached.workerClient.worker.terminate(); } catch { /* best effort */ }
+    try { cached.gdriveSync?.stop(); } catch { /* best effort */ }
+    try { cached.peerSync?.destroy(); } catch { /* best effort */ }
+    try { cached.webrtcPeer?.stop(); } catch { /* best effort */ }
+    try { cached.syncManager?.destroy(); } catch { /* best effort */ }
+    try { cached.presence?.stop(); } catch { /* best effort */ }
+    spaceCacheRef.current.delete(target);
+  }
+
+  // Confirm the pending user-initiated space switch: evict the outgoing
+  // space's live services, wipe its local data (OPFS + slice-store + space
+  // metadata), then advance to the new space.
+  async function confirmSpaceSwitch() {
+    const incoming = pendingSpaceSwitch;
+    const outgoing = selectedSpace;
+    setPendingSpaceSwitch(null);
+    if (!incoming || !outgoing) return;
+    evictSpaceCache(outgoing);
+    try {
+      await clearSpaceLocalData(outgoing);
+    } catch (e) {
+      console.warn('[EO-DB] clearSpaceLocalData failed:', e);
+    }
+    _doSelectSpace(incoming);
   }
   // Soft-delete a space: hide from list, track in recycle bin
   /**
@@ -705,7 +762,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     if (selectedSpace === spaceTarget) {
       const remaining = mergedEntries.filter((e) => e.spaceTarget !== spaceTarget && !isSpaceDeleted(e.spaceTarget));
       if (remaining.length > 0) {
-        selectSpace(remaining[0].spaceTarget);
+        _doSelectSpace(remaining[0].spaceTarget);
       } else {
         setSelectedSpace(null);
         localStorage.removeItem('eo-selected-space');
@@ -724,7 +781,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     persistSpaceStatus(target, 'active');
     setSpaces([...spaces]);
     setSpaceEntries([...spaceEntries]);
-    selectSpace(target);
+    _doSelectSpace(target);
     setShowRecycleBin(false);
   }
 
@@ -765,7 +822,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     if (selectedSpace === spaceTarget) {
       const remaining = mergedEntries.filter((e) => e.spaceTarget !== spaceTarget && !isSpaceDeleted(e.spaceTarget) && !isSpaceArchived(e.spaceTarget));
       if (remaining.length > 0) {
-        selectSpace(remaining[0].spaceTarget);
+        _doSelectSpace(remaining[0].spaceTarget);
       } else {
         setSelectedSpace(null);
         localStorage.removeItem('eo-selected-space');
@@ -799,7 +856,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
 
     setSpaces([...spaces]);
     setSpaceEntries([...spaceEntries]);
-    selectSpace(target);
+    _doSelectSpace(target);
   }
 
   // Sync selectedSpace → URL: when selectedSpace changes outside of navigate
@@ -821,19 +878,14 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     }
   }, [route.space]);
 
-  // Permanently delete a space's local OPFS data
+  // Permanently delete a space's local data (OPFS + slice-store + metadata)
   async function handlePermanentDelete(target: string) {
-    const cached = spaceCacheRef.current.get(target);
-    if (cached) {
-      cached.workerClient.worker.terminate();
-      spaceCacheRef.current.delete(target);
-    }
-    // Delete the space's OPFS subdirectory
+    evictSpaceCache(target);
     try {
-      const root = await navigator.storage.getDirectory();
-      await root.removeEntry(`space.${target}`, { recursive: true });
-    } catch { /* best effort */ }
-    removeSpaceMeta(target);
+      await clearSpaceLocalData(target);
+    } catch (e) {
+      console.warn('[EO-DB] clearSpaceLocalData failed:', e);
+    }
   }
 
   const { theme, toggleTheme } = useTheme();
@@ -1145,7 +1197,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         last_acquired_ts: now,
       };
       setSpaces([localSpace]);
-      if (selectedSpace === null) selectSpace('space_local');
+      if (selectedSpace === null) _doSelectSpace('space_local');
       return;
     }
 
@@ -1159,7 +1211,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           const parsed = JSON.parse(cached) as EoState[];
           if (parsed.length > 0) {
             setSpaces(parsed);
-            if (selectedSpace === null) selectSpace(parsed[0].target);
+            if (selectedSpace === null) _doSelectSpace(parsed[0].target);
           }
         } catch { /* ignore bad cache */ }
       }
@@ -1190,7 +1242,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           if (spaceRoots.length > 0) {
             setSpaces(spaceRoots);
             localStorage.setItem('eo-spaces', JSON.stringify(spaceRoots));
-            if (selectedSpace === null) selectSpace(spaceRoots[0].target);
+            if (selectedSpace === null) _doSelectSpace(spaceRoots[0].target);
           }
         }
       } catch { /* best effort */ }
@@ -2332,7 +2384,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                   mainRoomId: mainRoomId || '',
                 });
 
-                selectSpace(spaceTarget);
+                _doSelectSpace(spaceTarget);
                 setSpaceOpen(false);
               }}
               onDelete={handleDeleteSpace}
@@ -2945,6 +2997,51 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           />
         )}
       </div>
+
+      <Modal
+        open={!!pendingSpaceSwitch}
+        onClose={() => setPendingSpaceSwitch(null)}
+        title="Switch spaces?"
+        footer={
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+            <button
+              onClick={() => setPendingSpaceSwitch(null)}
+              style={{
+                padding: '6px 14px',
+                background: theme.bgMuted,
+                color: theme.text,
+                border: `1px solid ${theme.border}`,
+                borderRadius: 4,
+                fontSize: 12,
+                fontFamily: "'Outfit', sans-serif",
+                cursor: 'pointer',
+              }}
+            >
+              Cancel
+            </button>
+            <button
+              onClick={confirmSpaceSwitch}
+              style={{
+                padding: '6px 14px',
+                background: theme.accent,
+                color: '#fff',
+                border: `1px solid ${theme.accent}`,
+                borderRadius: 4,
+                fontSize: 12,
+                fontFamily: "'Outfit', sans-serif",
+                fontWeight: 500,
+                cursor: 'pointer',
+              }}
+            >
+              Switch &amp; wipe cache
+            </button>
+          </div>
+        }
+      >
+        <div style={{ fontSize: 13, lineHeight: 1.5, color: theme.text }}>
+          Are you sure you want to switch spaces? This will wipe your local cache of it.
+        </div>
+      </Modal>
     </div>
   );
 }

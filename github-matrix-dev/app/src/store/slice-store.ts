@@ -174,6 +174,19 @@ interface SliceStoreState {
 
   /** Get the ordered list of open scopes */
   getOpenScopes: () => string[];
+
+  /**
+   * Wipe every slice-store artifact rooted in a space. Drops in-memory SIGs,
+   * filters open/pinned scopes, removes saved slices scoped to the space, and
+   * clears the matching `eo-slice-sig:` localStorage entries. Used when
+   * leaving a space so state does not leak back in on re-entry.
+   */
+  clearSpaceScopes: (spaceId: string) => void;
+}
+
+/** True if a scope string is equal to or rooted inside `spaceId`. */
+function scopeBelongsToSpace(scope: string, spaceId: string): boolean {
+  return scope === spaceId || scope.startsWith(spaceId + '.');
 }
 
 export const useSliceStore = create<SliceStoreState>((set, get) => ({
@@ -410,6 +423,42 @@ export const useSliceStore = create<SliceStoreState>((set, get) => ({
 
   getOpenScopes() {
     return get().openScopes;
+  },
+
+  clearSpaceScopes(spaceId: string) {
+    // Drop in-memory SIGs for scopes rooted in this space
+    const sigs = { ...get().sigs };
+    for (const scope of Object.keys(sigs)) {
+      if (scopeBelongsToSpace(scope, spaceId)) delete sigs[scope];
+    }
+
+    // Drop saved slices whose scope is rooted in this space
+    const savedSlices = { ...get().savedSlices };
+    for (const [id, slice] of Object.entries(savedSlices)) {
+      if (scopeBelongsToSpace(slice.scope, spaceId)) delete savedSlices[id];
+    }
+
+    // Filter open/pinned scopes
+    const openScopes = get().openScopes.filter((s) => !scopeBelongsToSpace(s, spaceId));
+    const pinnedScopes = get().pinnedScopes.filter((s) => !scopeBelongsToSpace(s, spaceId));
+
+    set({ sigs, savedSlices, openScopes, pinnedScopes });
+    persistSavedSlices(savedSlices);
+    persistOpenScopes(openScopes);
+    persistPinnedScopes(pinnedScopes);
+
+    // Clear persisted per-scope SIGs from localStorage. The SIG key format
+    // is `eo-slice-sig:{scope}` (see sigKey() above).
+    try {
+      const toRemove: string[] = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (!key || !key.startsWith('eo-slice-sig:')) continue;
+        const scope = key.slice('eo-slice-sig:'.length);
+        if (scopeBelongsToSpace(scope, spaceId)) toRemove.push(key);
+      }
+      for (const key of toRemove) localStorage.removeItem(key);
+    } catch { /* localStorage unavailable — best effort */ }
   },
 }));
 
