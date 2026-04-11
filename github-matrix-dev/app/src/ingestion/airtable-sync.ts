@@ -15,6 +15,7 @@
 import type { EoStore } from '../db/encrypted-store';
 import { processEvent } from '../db/fold';
 import { getState } from '../db/state';
+import type { Resolution } from '../db/types';
 import {
   AirtableClient,
   type AirtableBase,
@@ -159,6 +160,22 @@ export interface SyncCustomization {
    * Example: { 'tblClients': 'fldFullName' }
    */
   displayFields?: Record<string, string>;
+
+  /**
+   * Batch-level resolution stamped on every INS event constructed during
+   * this import. Encodes the caller's declared stance for the import — e.g.
+   * `'Making'` for fresh rows being brought into existence for the first
+   * time, `'Composing'` for rows assembled from multiple upstream sources,
+   * `'Binding'` for rows instantiated as concrete realizations of an
+   * existing specification. When unset or `'unspecified'` (the default),
+   * imported INS events carry nibble 0 — the honest "stance not recorded"
+   * coordinate on the lattice's resolution axis.
+   *
+   * Applied ONLY to record INS events. DEF events carrying field values
+   * remain at unspecified: the stance of an import is about how rows are
+   * brought into existence, not about the individual value assertions.
+   */
+  defaultResolution?: Resolution;
 }
 
 // ─── Cursor management (IndexedDB meta store) ─────────────────────────────
@@ -394,6 +411,7 @@ async function ingestRecord(
   preserveExisting: boolean = false,
   onEvent?: (event: any) => void,
   displayField?: string,
+  defaultResolution?: Resolution,
 ): Promise<'ingested' | 'skipped_no_change' | 'skipped_duplicate'> {
   const target = recordTarget(baseId, tableId, record.id);
 
@@ -427,7 +445,11 @@ async function ingestRecord(
   const contentKey = stableStringify(diffFields);
   const clientEventId = recordEventId(baseId, tableId, record.id, contentKey);
 
-  // 7. Explicit INS for new records — entity birth event in the log
+  // 7. Explicit INS for new records — entity birth event in the log.
+  //    defaultResolution (if set) stamps the import batch's declared stance
+  //    onto every record-level INS. DEF events below intentionally stay at
+  //    unspecified — the batch stance describes how rows are brought into
+  //    existence, not how their individual values are asserted.
   if (!existing) {
     try {
       await processEvent(store, {
@@ -445,6 +467,7 @@ async function ingestRecord(
         ts: new Date().toISOString(),
         acquired_ts: new Date().toISOString(),
         client_event_id: `at-ins:${baseId}:${tableId}:${record.id}`,
+        ...(defaultResolution ? { resolution: defaultResolution } : {}),
       }, onEvent);
     } catch {
       // Idempotency or concurrent INS — safe to continue to DEF
@@ -538,6 +561,7 @@ async function syncTable(
   onEvent?: (event: any) => void,
   onProgress?: (progress: SyncProgress) => void,
   recordLimit?: number,
+  defaultResolution?: Resolution,
 ): Promise<SyncResult> {
   let fetched = 0;
   let ingested = 0;
@@ -573,7 +597,7 @@ async function syncTable(
     for (const record of page) {
       if (fetched >= limit) { limitReached = true; break; }
       fetched++;
-      const result = await ingestRecord(store, baseId, tableId, record, agent, fieldMeta, exclusions, preserveExisting, onEvent, displayField);
+      const result = await ingestRecord(store, baseId, tableId, record, agent, fieldMeta, exclusions, preserveExisting, onEvent, displayField, defaultResolution);
       switch (result) {
         case 'ingested': ingested++; break;
         case 'skipped_no_change': skippedNoChange++; break;
@@ -732,6 +756,7 @@ export async function processHydrationBundle(
   const preserveExisting = opts?.customization?.preserveExisting ?? false;
   const fieldExclusions = opts?.customization?.fieldExclusions;
   const displayFields = opts?.customization?.displayFields;
+  const defaultResolution = opts?.customization?.defaultResolution;
   const syncResults: SyncResult[] = [];
 
   // ── Emit an import record linking to the provenance blob ────────────────
@@ -915,6 +940,7 @@ export async function processHydrationBundle(
       const r = await ingestRecord(
         store, base.id, table.id, record, agent, fieldMeta,
         exclusions, preserveExisting, opts?.onEvent, displayField,
+        defaultResolution,
       );
       switch (r) {
         case 'ingested': ingested++; break;
@@ -1021,6 +1047,7 @@ export async function updateSync(
   const selectedTables = opts?.customization?.selectedTables;
   const fieldExclusions = opts?.customization?.fieldExclusions;
   const recordLimit = opts?.customization?.recordLimit;
+  const defaultResolution = opts?.customization?.defaultResolution;
   const syncResults: SyncResult[] = [];
 
   opts?.onProgress?.({ phase: 'discovering' });
@@ -1151,6 +1178,7 @@ export async function updateSync(
         store, client, base.id, table.id, table.name, agent, cursor,
         exclusions, preserveExisting,
         opts?.onEvent, opts?.onProgress, recordLimit,
+        defaultResolution,
       );
       syncResults.push(result);
       opts?.onTableComplete?.(result);
