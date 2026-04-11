@@ -8,13 +8,43 @@ import { deriveColumns, type ColumnDef } from './filter-types';
 import { formatName } from './scope-picker-utils';
 import type { UserTypeDefinition } from '../permissions/types';
 
-// Hide webkit scrollbar for the horizontal tab strip (SliceTabs container uses
-// `eo-slice-tabs-strip` className). Injected once, idempotent.
+// Injected stylesheet for the Chrome-style tab strip. Uses CSS custom
+// properties (set inline on the strip container) so hover states can adapt
+// to the current theme without re-injection. Idempotent.
 const SLICE_TABS_STYLE_ID = 'eo-slice-tabs-style';
 if (typeof document !== 'undefined' && !document.getElementById(SLICE_TABS_STYLE_ID)) {
   const el = document.createElement('style');
   el.id = SLICE_TABS_STYLE_ID;
-  el.textContent = `.eo-slice-tabs-strip::-webkit-scrollbar { display: none; }`;
+  el.textContent = `
+    .eo-slice-tabs-strip::-webkit-scrollbar { display: none; }
+    .eo-tab {
+      transition: background 140ms ease, color 140ms ease;
+    }
+    .eo-tab:hover:not(.eo-tab-active) {
+      background: var(--eo-tab-hover-bg);
+      color: var(--eo-tab-hover-color);
+    }
+    .eo-tab-group-actions .eo-tab-action {
+      opacity: 0;
+      transition: opacity 140ms ease, background 140ms ease, color 140ms ease;
+    }
+    .eo-tab-group:hover .eo-tab-group-actions .eo-tab-action,
+    .eo-tab-group-actions .eo-tab-action.eo-tab-action--visible {
+      opacity: 0.85;
+    }
+    .eo-tab-group-actions .eo-tab-action:hover {
+      opacity: 1 !important;
+      background: var(--eo-tab-action-hover-bg) !important;
+      color: var(--eo-tab-action-hover-color) !important;
+    }
+    .eo-tab-add {
+      transition: background 140ms ease, color 140ms ease;
+    }
+    .eo-tab-add:hover {
+      background: var(--eo-tab-hover-bg);
+      color: var(--eo-tab-hover-color);
+    }
+  `;
   document.head.appendChild(el);
 }
 
@@ -347,9 +377,19 @@ export function SliceTabs({ openScopes, activeScope, onSelectScope, onCloseScope
     ];
   }
 
+  // CSS custom properties read by the injected stylesheet. Setting them on
+  // the strip container lets hover states use the current theme without
+  // re-injecting CSS on theme change.
+  const stripVars = {
+    '--eo-tab-hover-bg': theme.borderLight,
+    '--eo-tab-hover-color': theme.textHeading,
+    '--eo-tab-action-hover-bg': theme.border,
+    '--eo-tab-action-hover-color': theme.textHeading,
+  } as React.CSSProperties;
+
   return (
     <div style={s.wrapper}>
-      <div className="eo-slice-tabs-strip" style={s.container}>
+      <div className="eo-slice-tabs-strip" style={{ ...s.container, ...stripVars }}>
         {openScopes.map((sc, idx) => {
           const scSig = sliceStore.getSig(sc);
           const scSavedSlices = sliceStore.getSlicesForScope(sc);
@@ -362,10 +402,17 @@ export function SliceTabs({ openScopes, activeScope, onSelectScope, onCloseScope
             activateFn();
           };
 
+          const groupStyle: React.CSSProperties = {
+            ...s.group,
+            ...(idx > 0 ? { marginLeft: 6 } : {}),
+            ...(!isPinned ? { fontStyle: 'italic' } : {}),
+          };
+
           return (
-            <div key={sc} style={{ display: 'inline-flex', alignItems: 'center', gap: 0, ...(idx > 0 ? { borderLeft: `1px solid ${theme.border}`, marginLeft: 4, paddingLeft: 4 } : {}), ...(!isPinned ? { fontStyle: 'italic' } : {}) }}>
+            <div key={sc} className="eo-tab-group" style={groupStyle}>
               {/* Schema tab — first */}
               <button
+                className={`eo-tab${isActive && scSig.activeSliceId === '__schema' ? ' eo-tab-active' : ''}`}
                 style={isActive && scSig.activeSliceId === '__schema' ? s.tabActive : s.tab}
                 onClick={() => handleTabClick(() => sliceStore.activateSlice(sc, {
                   id: '__schema', name: 'Schema', scope: sc, sliceType: 'schema',
@@ -373,17 +420,22 @@ export function SliceTabs({ openScopes, activeScope, onSelectScope, onCloseScope
                   visibility: 'shared', createdBy: '', createdAt: '', updatedAt: '',
                 }))}
               >
-                <span style={{ fontSize: 11, opacity: 0.7 }}>{SLICE_TYPE_META.schema.icon}</span>
-                <span style={{ opacity: 0.5, fontSize: 10 }}>{collectionName}</span> / Schema
+                <span style={s.tabIcon}>{SLICE_TYPE_META.schema.icon}</span>
+                <span style={s.tabCollectionLabel}>{collectionName}</span>
+                <span style={s.tabSeparator}>/</span>
+                <span style={s.tabViewLabel}>Schema</span>
               </button>
 
               {/* Grid tab — second */}
               <button
+                className={`eo-tab${isActive && scSig.activeSliceId === null ? ' eo-tab-active' : ''}`}
                 style={isActive && scSig.activeSliceId === null ? s.tabActive : s.tab}
                 onClick={() => handleTabClick(() => sliceStore.resetToDefault(sc))}
               >
-                <span style={{ fontSize: 11, opacity: 0.7 }}>{SLICE_TYPE_META.grid.icon}</span>
-                <span style={{ opacity: 0.5, fontSize: 10 }}>{collectionName}</span> / Grid
+                <span style={s.tabIcon}>{SLICE_TYPE_META.grid.icon}</span>
+                <span style={s.tabCollectionLabel}>{collectionName}</span>
+                <span style={s.tabSeparator}>/</span>
+                <span style={s.tabViewLabel}>Grid</span>
               </button>
 
               {/* Saved slice tabs — filtered by active user type */}
@@ -394,10 +446,12 @@ export function SliceTabs({ openScopes, activeScope, onSelectScope, onCloseScope
                 return true;
               }).map((slice) => {
                 const vtMeta = SLICE_TYPE_META[slice.sliceType || 'grid'];
+                const sliceActive = isActive && scSig.activeSliceId === slice.id;
                 return (
                   <button
                     key={slice.id}
-                    style={isActive && scSig.activeSliceId === slice.id ? s.tabActive : s.tab}
+                    className={`eo-tab${sliceActive ? ' eo-tab-active' : ''}`}
+                    style={sliceActive ? s.tabActive : s.tab}
                     onClick={() => handleTabClick(() => sliceStore.activateSlice(sc, slice))}
                     onContextMenu={(e) => {
                       e.preventDefault();
@@ -419,10 +473,12 @@ export function SliceTabs({ openScopes, activeScope, onSelectScope, onCloseScope
                       />
                     ) : (
                       <>
-                        <span style={{ fontSize: 11, opacity: 0.7 }}>{vtMeta.icon}</span>
-                        {slice.visibility === 'private' && <span style={{ marginRight: 2, fontSize: 10 }}>{'\uD83D\uDD12'}</span>}
-                        <span style={{ opacity: 0.5, fontSize: 10 }}>{collectionName}</span> / {slice.name}
-                        {isActive && scSig.activeSliceId === slice.id && scSig.dirty && (
+                        <span style={s.tabIcon}>{vtMeta.icon}</span>
+                        {slice.visibility === 'private' && <span style={s.tabLockIcon}>{'\uD83D\uDD12'}</span>}
+                        <span style={s.tabCollectionLabel}>{collectionName}</span>
+                        <span style={s.tabSeparator}>/</span>
+                        <span style={s.tabViewLabel}>{slice.name}</span>
+                        {sliceActive && scSig.dirty && (
                           <span style={s.dirtyDot} title="Unsaved changes" />
                         )}
                       </>
@@ -431,27 +487,31 @@ export function SliceTabs({ openScopes, activeScope, onSelectScope, onCloseScope
                 );
               })}
 
-              {/* Pin / Close buttons for this collection's tab group */}
-              <button
-                style={isPinned ? s.pinBtnActive : s.pinBtn}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  if (isPinned) sliceStore.unpinScope(sc);
-                  else sliceStore.pinScope(sc);
-                }}
-                title={isPinned ? `Unpin ${collectionName}` : `Pin ${collectionName}`}
-              >
-                {isPinned ? '\uD83D\uDCCC' : '\uD83D\uDCCC'}
-              </button>
-              {openScopes.length > 1 && (
+              {/* Pin / Close action buttons — revealed on group hover */}
+              <div className="eo-tab-group-actions" style={s.groupActions}>
                 <button
-                  style={s.closeBtn}
-                  onClick={(e) => { e.stopPropagation(); onCloseScope(sc); }}
-                  title={`Close ${collectionName} tabs`}
+                  className={`eo-tab-action${isPinned ? ' eo-tab-action--visible' : ''}`}
+                  style={isPinned ? s.pinBtnActive : s.pinBtn}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (isPinned) sliceStore.unpinScope(sc);
+                    else sliceStore.pinScope(sc);
+                  }}
+                  title={isPinned ? `Unpin ${collectionName}` : `Pin ${collectionName}`}
                 >
-                  {'\u00D7'}
+                  {'\uD83D\uDCCC'}
                 </button>
-              )}
+                {openScopes.length > 1 && (
+                  <button
+                    className="eo-tab-action"
+                    style={s.closeBtn}
+                    onClick={(e) => { e.stopPropagation(); onCloseScope(sc); }}
+                    title={`Close ${collectionName} tabs`}
+                  >
+                    {'\u00D7'}
+                  </button>
+                )}
+              </div>
             </div>
           );
         })}
@@ -470,7 +530,7 @@ export function SliceTabs({ openScopes, activeScope, onSelectScope, onCloseScope
         )}
 
         {/* New slice button */}
-        <button style={s.addBtn} onClick={() => setShowNameInput(true)} title="Create new slice">
+        <button className="eo-tab-add" style={s.addBtn} onClick={() => setShowNameInput(true)} title="Create new slice">
           +
         </button>
       </div>
@@ -719,21 +779,34 @@ export function SliceTabs({ openScopes, activeScope, onSelectScope, onCloseScope
 
 // --- Styles ---
 
+const TAB_HEIGHT = 32;
+const TAB_RADIUS = 8;
+const STRIP_PADDING_TOP = 6;
+
 function makeStyles(t: Theme): Record<string, React.CSSProperties> {
   const tabBase: React.CSSProperties = {
     display: 'inline-flex',
     alignItems: 'center',
-    gap: 4,
-    padding: '6px 12px',
+    gap: 6,
+    padding: '0 14px',
+    height: TAB_HEIGHT,
+    minWidth: 0,
+    maxWidth: 240,
     fontSize: 12,
     fontWeight: 500,
     border: 'none',
-    borderBottom: '2px solid transparent',
-    background: 'none',
-    color: t.textMuted,
+    borderTopLeftRadius: TAB_RADIUS,
+    borderTopRightRadius: TAB_RADIUS,
+    borderBottomLeftRadius: 0,
+    borderBottomRightRadius: 0,
+    background: 'transparent',
+    color: t.textSecondary,
     cursor: 'pointer',
     whiteSpace: 'nowrap',
-    position: 'relative',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    position: 'relative' as const,
+    outline: 'none',
   };
 
   return {
@@ -743,24 +816,69 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
     },
     container: {
       display: 'flex',
-      alignItems: 'center',
+      alignItems: 'flex-end',
       gap: 0,
-      padding: '0 16px',
-      borderBottom: `0.5px solid ${t.border}`,
-      background: t.bgCard,
+      padding: `${STRIP_PADDING_TOP}px 12px 0 12px`,
+      // height = padding-top + tab + border-bottom so the tab row fits exactly
+      // inside the content box (box-sizing: border-box).
+      height: TAB_HEIGHT + STRIP_PADDING_TOP + 1,
+      background: t.bgMuted,
+      borderBottom: `1px solid ${t.border}`,
+      boxSizing: 'border-box' as const,
       overflowX: 'auto',
       overflowY: 'hidden',
       flexShrink: 0,
       flexWrap: 'nowrap',
-      scrollbarWidth: 'none',
-      msOverflowStyle: 'none',
+      scrollbarWidth: 'none' as const,
+      msOverflowStyle: 'none' as const,
+    },
+    group: {
+      display: 'inline-flex',
+      alignItems: 'flex-end',
+      gap: 0,
+      position: 'relative' as const,
+    },
+    groupActions: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 2,
+      height: TAB_HEIGHT,
+      paddingLeft: 4,
+      paddingRight: 2,
     },
     tab: tabBase,
     tabActive: {
       ...tabBase,
-      color: t.accent,
-      borderBottomColor: t.accent,
+      background: t.bgCard,
+      color: t.textHeading,
       fontWeight: 600,
+      boxShadow: `inset 1px 0 0 0 ${t.border}, inset -1px 0 0 0 ${t.border}, inset 0 1px 0 0 ${t.border}`,
+      zIndex: 2,
+    },
+    tabIcon: {
+      fontSize: 11,
+      opacity: 0.75,
+      flexShrink: 0,
+    },
+    tabLockIcon: {
+      fontSize: 10,
+      marginRight: 2,
+      flexShrink: 0,
+    },
+    tabCollectionLabel: {
+      opacity: 0.55,
+      fontSize: 10,
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+      maxWidth: 110,
+    },
+    tabSeparator: {
+      opacity: 0.4,
+      fontSize: 11,
+    },
+    tabViewLabel: {
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
     },
     closeBtn: {
       display: 'inline-flex',
@@ -768,15 +886,16 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       justifyContent: 'center',
       width: 18,
       height: 18,
-      fontSize: 12,
-      fontWeight: 600,
+      fontSize: 14,
+      lineHeight: 1,
+      fontWeight: 500,
       border: 'none',
-      borderRadius: 3,
+      borderRadius: '50%',
       background: 'transparent',
       color: t.textMuted,
       cursor: 'pointer',
-      marginLeft: 2,
-      opacity: 0.6,
+      padding: 0,
+      flexShrink: 0,
     },
     pinBtn: {
       display: 'inline-flex',
@@ -784,14 +903,14 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       justifyContent: 'center',
       width: 18,
       height: 18,
-      fontSize: 9,
+      fontSize: 10,
       border: 'none',
-      borderRadius: 3,
+      borderRadius: '50%',
       background: 'transparent',
       color: t.textMuted,
       cursor: 'pointer',
-      marginLeft: 4,
-      opacity: 0.35,
+      padding: 0,
+      flexShrink: 0,
       transform: 'rotate(45deg)',
     },
     pinBtnActive: {
@@ -800,14 +919,14 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       justifyContent: 'center',
       width: 18,
       height: 18,
-      fontSize: 9,
+      fontSize: 10,
       border: 'none',
-      borderRadius: 3,
-      background: 'transparent',
+      borderRadius: '50%',
+      background: t.accentBg,
       color: t.accent,
       cursor: 'pointer',
-      marginLeft: 4,
-      opacity: 0.85,
+      padding: 0,
+      flexShrink: 0,
     },
     dirtyDot: {
       display: 'inline-block',
@@ -816,35 +935,42 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       borderRadius: '50%',
       background: t.accent,
       marginLeft: 4,
+      flexShrink: 0,
     },
     addBtn: {
       display: 'inline-flex',
       alignItems: 'center',
       justifyContent: 'center',
-      width: 24,
-      height: 24,
-      fontSize: 14,
-      fontWeight: 600,
+      width: 26,
+      height: 26,
+      fontSize: 16,
+      fontWeight: 500,
+      lineHeight: 1,
       border: 'none',
-      borderRadius: 4,
+      borderRadius: '50%',
       background: 'transparent',
       color: t.textMuted,
       cursor: 'pointer',
-      marginLeft: 4,
+      marginLeft: 6,
+      marginBottom: 3,
+      padding: 0,
+      flexShrink: 0,
     },
     saveBtn: {
       display: 'inline-flex',
       alignItems: 'center',
-      padding: '4px 10px',
+      padding: '5px 12px',
       fontSize: 11,
       fontWeight: 600,
       border: `1px solid ${t.accent}`,
-      borderRadius: 4,
+      borderRadius: 999,
       background: t.accent,
       color: '#fff',
       cursor: 'pointer',
-      marginLeft: 8,
+      marginLeft: 10,
+      marginBottom: 4,
       whiteSpace: 'nowrap',
+      flexShrink: 0,
     },
     overlay: {
       position: 'fixed' as const,
