@@ -12,11 +12,16 @@
  *      isHelixValid. Previously lived inline in fold.ts; pulled out so every
  *      fold runner can share one authoritative helix model.
  *
- *   2. AddressingHorizon — the constitutive site for seq allocation. The bulk
- *      path pre-reserves a contiguous range of seqs per wave, then hands them
- *      out in a deterministic per-target order. Replaces the previous
+ *   2. SeqReservoir — the seq-allocation primitive used by bulk-import paths.
+ *      Pre-reserves a contiguous range of seqs per wave, then hands them out
+ *      in a deterministic per-target order. Replaces the previous
  *      Promise.all/per-target nextSeq race documented in
  *      fold-determinism.test.ts (FIXME(phase-A)).
+ *
+ *      NOTE: this used to be called `AddressingHorizon`, but the Phase A
+ *      roadmap reserves that name for the constitutive site model in
+ *      addressing-horizon.ts. The class here is just a contiguous-range seq
+ *      reservoir; it has nothing to do with site existence.
  *
  *   3. HelixStateTracker — the centralized surface for reading, validating,
  *      and mutating per-target HelixPosition state. StoreHelixStateTracker is
@@ -174,10 +179,13 @@ export function isHelixValid(op: LoggableOperator, pos: HelixPosition | null): b
   }
 }
 
-// ─── AddressingHorizon ──────────────────────────────────────────────────────
+// ─── SeqReservoir ───────────────────────────────────────────────────────────
 
 /**
- * Deterministic seq allocator used by bulk-import paths.
+ * Deterministic seq allocator used by bulk-import paths. Not the
+ * AddressingHorizon — that name is reserved for the constitutive site model
+ * in addressing-horizon.ts. This class is purely a contiguous-range seq
+ * reservoir.
  *
  * Pre-reserves a contiguous range of sequence numbers from the store via
  * serial store.nextSeq() calls, then hands them out in a fixed, caller-
@@ -185,18 +193,16 @@ export function isHelixValid(op: LoggableOperator, pos: HelixPosition | null): b
  * concurrent tasks would hit store.nextSeq() in microtask-interleaved order
  * and produce non-reproducible seq assignments across runs of the same input.
  *
- * The horizon is the "addressing" half of the Phase A constitutive site
- * model: once a seq has been reserved for an event, that mapping is
- * authoritative and stable, regardless of how many worker shards or
- * parallel per-target tasks execute afterward. Workers/shards consume seqs
- * via take(), never via nextSeq().
+ * Once a seq has been reserved, that mapping is authoritative and stable,
+ * regardless of how many worker shards or parallel per-target tasks execute
+ * afterward. Workers/shards consume seqs via take(), never via nextSeq().
  *
  * USAGE PATTERN
  *
- *   const horizon = new AddressingHorizon(store);
- *   await horizon.reserve(waveEvents.length);   // serial; no races
+ *   const reservoir = new SeqReservoir(store);
+ *   await reservoir.reserve(waveEvents.length);   // serial; no races
  *   for (const event of sortedWaveEvents) {
- *     const seq = horizon.take();               // deterministic order
+ *     const seq = reservoir.take();               // deterministic order
  *     // dispatch to worker / per-target task with (event, seq)
  *   }
  *
@@ -204,7 +210,7 @@ export function isHelixValid(op: LoggableOperator, pos: HelixPosition | null): b
  * may be async), but take() is synchronous so it can be called from inside
  * a tight, deterministic dispatch loop.
  */
-export class AddressingHorizon {
+export class SeqReservoir {
   private readonly reserved: number[] = [];
   private cursor = 0;
 
@@ -231,7 +237,7 @@ export class AddressingHorizon {
   take(): number {
     if (this.cursor >= this.reserved.length) {
       throw new Error(
-        `AddressingHorizon exhausted: asked for seq #${this.cursor + 1} ` +
+        `SeqReservoir exhausted: asked for seq #${this.cursor + 1} ` +
         `but only ${this.reserved.length} were reserved`,
       );
     }
@@ -243,7 +249,7 @@ export class AddressingHorizon {
     return this.reserved.length - this.cursor;
   }
 
-  /** Total seqs reserved across the horizon's lifetime. */
+  /** Total seqs reserved across the reservoir's lifetime. */
   get totalReserved(): number {
     return this.reserved.length;
   }
