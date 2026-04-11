@@ -20,9 +20,11 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { buildNulClearingEvent } from '../cell-events';
+import { buildNulClearingEvent, buildMakingDefEvent } from '../cell-events';
 import { processEvent } from '../../db/fold';
 import { StoreNulHorizon } from '../../db/addressing-horizon';
+import { RESOLUTION_NIBBLE } from '../../db/types';
+import type { EoEvent } from '../../db/types';
 import type { EoStore, IteratorOpts } from '../../db/encrypted-store';
 
 // ─── In-memory store (mirrors the shape used in db/__tests__) ───────────────
@@ -228,5 +230,199 @@ describe('A.6/3 — buildNulClearingEvent → fold → NulHorizon', () => {
     const afterState = await store.get('state:at.appTEST.tblClients.recC');
     const afterValue = JSON.stringify((afterState as { value: unknown }).value);
     expect(afterValue).toBe(beforeValue);
+  });
+});
+
+// ─── A.6/5 — buildMakingDefEvent pure-shape tests ──────────────────────────
+
+describe('A.6/5 — buildMakingDefEvent (pure shape)', () => {
+  it('produces a DEF × Making event (resolution: Making)', () => {
+    const ev = buildMakingDefEvent(
+      'at.appTEST.tblClients.recA',
+      'fldEmail',
+      'alice@example.com',
+      'user:@alice:example.com',
+      /* useFieldsSub */ true,
+      '2026-04-11T10:00:00.000Z',
+    );
+    expect(ev.op).toBe('DEF');
+    expect(ev.resolution).toBe('Making');
+    expect(ev.target).toBe('at.appTEST.tblClients.recA');
+    expect(ev.agent).toBe('user:@alice:example.com');
+    expect(ev.ts).toBe('2026-04-11T10:00:00.000Z');
+    expect(ev.acquired_ts).toBe('2026-04-11T10:00:00.000Z');
+  });
+
+  it('wraps the operand in { fields: { ... } } when useFieldsSub = true', () => {
+    const ev = buildMakingDefEvent(
+      'at.appTEST.tblClients.recA',
+      'fldEmail',
+      'alice@example.com',
+      'user:@alice:example.com',
+      true,
+    );
+    expect(ev.operand).toEqual({ fields: { fldEmail: 'alice@example.com' } });
+  });
+
+  it('uses a flat { [fieldKey]: parsed } operand when useFieldsSub = false', () => {
+    const ev = buildMakingDefEvent(
+      'ns.rec1',
+      'title',
+      'Hello',
+      'user:@alice:example.com',
+      false,
+    );
+    expect(ev.operand).toEqual({ title: 'Hello' });
+  });
+
+  it('preserves array and object parsed values (multi-select, nested structures)', () => {
+    const arrEv = buildMakingDefEvent(
+      'ns.rec1',
+      'tags',
+      ['a', 'b', 'c'],
+      'user:@alice:example.com',
+      true,
+    );
+    expect(arrEv.operand).toEqual({ fields: { tags: ['a', 'b', 'c'] } });
+
+    const objEv = buildMakingDefEvent(
+      'ns.rec1',
+      'meta',
+      { k: 'v' },
+      'user:@alice:example.com',
+      false,
+    );
+    expect(objEv.operand).toEqual({ meta: { k: 'v' } });
+  });
+
+  it('defaults ts to the current time when not provided', () => {
+    const before = Date.now();
+    const ev = buildMakingDefEvent('t', 'fldA', 'x', 'user:x', true);
+    const after = Date.now();
+    const parsed = Date.parse(ev.ts);
+    expect(parsed).toBeGreaterThanOrEqual(before);
+    expect(parsed).toBeLessThanOrEqual(after);
+    expect(ev.acquired_ts).toBe(ev.ts);
+  });
+
+  it('passes the agent string through unchanged', () => {
+    const ev = buildMakingDefEvent(
+      't', 'fldA', 'x',
+      'user:@weird+characters:example.com',
+      true,
+    );
+    expect(ev.agent).toBe('user:@weird+characters:example.com');
+  });
+
+  it('does not leak meta / level / nul_state / triggered_by onto the event', () => {
+    // The resolution nibble is the only depth-coordinate we intend to stamp;
+    // extra fields would muddy the compound glyph written to eodb.idx byte 0.
+    const ev = buildMakingDefEvent('t', 'fldA', 'x', 'user:x', true);
+    expect(ev.nul_state).toBeUndefined();
+    expect(ev.meta).toBeUndefined();
+    expect(ev.level).toBeUndefined();
+    expect(ev.triggered_by).toBeUndefined();
+  });
+});
+
+// ─── A.6/5 — first-fill DEF × Making → fold integration ────────────────────
+
+describe('A.6/5 — first-fill DEF × Making → fold integration', () => {
+  /**
+   * Compute the compound glyph byte that log-opfs would write for this event.
+   * Mirrors the private `encodeOpResolution` helper in db/log-opfs.ts: high
+   * nibble is the operator index (NUL=0, SIG=1, INS=2, SEG=3, CON=4, SYN=5,
+   * DEF=6, EVA=7, REC=8); low nibble is `RESOLUTION_NIBBLE[event.resolution]`
+   * (0 when resolution is absent / 'unspecified').
+   */
+  const OP_NIBBLE: Record<string, number> = {
+    NUL: 0, SIG: 1, INS: 2, SEG: 3, CON: 4, SYN: 5, DEF: 6, EVA: 7, REC: 8,
+  };
+  function compoundGlyph(ev: EoEvent): number {
+    const opNibble = OP_NIBBLE[ev.op] ?? 0;
+    const resNibble = ev.resolution ? RESOLUTION_NIBBLE[ev.resolution] : 0;
+    return ((opNibble & 0x0f) << 4) | (resNibble & 0x0f);
+  }
+
+  it('dispatched through the fold, the DEF event carries resolution Making and byte0 = 0x68', async () => {
+    const store = createTestStore();
+
+    // Site-existence floor: INS the record first so the DEF has somewhere to land.
+    await processEvent(store, {
+      op: 'INS',
+      target: 'at.appTEST.tblClients.recA',
+      operand: { _airtable: { record_id: 'recA' } },
+      agent: 'user:@alice:example.com',
+      ts: '2026-04-11T09:00:00.000Z',
+      acquired_ts: '2026-04-11T09:00:00.000Z',
+      client_event_id: 'test-ins-recA',
+    });
+
+    const captured: EoEvent[] = [];
+    const onEvent = (e: EoEvent) => { captured.push(e); };
+
+    const defEvent = buildMakingDefEvent(
+      'at.appTEST.tblClients.recA',
+      'fldEmail',
+      'alice@example.com',
+      'user:@alice:example.com',
+      /* useFieldsSub */ true,
+      '2026-04-11T10:00:00.000Z',
+    );
+    await processEvent(
+      store,
+      { ...defEvent, client_event_id: 'test-def-recA-fldEmail' },
+      onEvent,
+    );
+
+    // The onEvent callback sees the full persisted event, including its
+    // assigned seq and the resolution field that encodeIndexRecord reads.
+    const persisted = captured.find((e) => e.op === 'DEF');
+    expect(persisted).toBeDefined();
+    expect(persisted!.resolution).toBe('Making');
+
+    // DEF high nibble (0x6) | Making low nibble (0x8) == 0x68.
+    const byte0 = compoundGlyph(persisted!);
+    expect(byte0).toBe(0x68);
+    expect(byte0 >> 4).toBe(0x6); // DEF
+    expect(byte0 & 0x0f).toBe(0x8); // Making
+  });
+
+  it('a plain DEF (no resolution) encodes to byte0 = 0x60 — the reference point', async () => {
+    // Regression bar: today's non-first-fill path still writes DEF ×
+    // unspecified. If a future slice accidentally stamps Making on every
+    // DEF, the two bytes converge and branch-explorer distinctions at the
+    // Phase C.5 nibble-scan level would collapse.
+    const store = createTestStore();
+
+    await processEvent(store, {
+      op: 'INS',
+      target: 'at.appTEST.tblClients.recB',
+      operand: {},
+      agent: 'user:@alice:example.com',
+      ts: '2026-04-11T09:00:00.000Z',
+      acquired_ts: '2026-04-11T09:00:00.000Z',
+      client_event_id: 'test-ins-recB',
+    });
+
+    const captured: EoEvent[] = [];
+    await processEvent(
+      store,
+      {
+        op: 'DEF',
+        target: 'at.appTEST.tblClients.recB',
+        operand: { fields: { fldEmail: 'bob@example.com' } },
+        agent: 'user:@alice:example.com',
+        ts: '2026-04-11T10:00:00.000Z',
+        acquired_ts: '2026-04-11T10:00:00.000Z',
+        client_event_id: 'test-def-recB-plain',
+      },
+      (e) => captured.push(e),
+    );
+
+    const persisted = captured.find((e) => e.op === 'DEF');
+    expect(persisted).toBeDefined();
+    expect(persisted!.resolution).toBeUndefined();
+    expect(compoundGlyph(persisted!)).toBe(0x60);
   });
 });
