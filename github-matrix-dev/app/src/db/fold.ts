@@ -8,48 +8,28 @@ import { AsyncMutex } from './mutex';
 import { eventHash } from './hash';
 import { validateEvent, formatValidationErrors } from './validate';
 import { updateFoldCache, refreshGraphMetrics } from './fold-cache';
+import {
+  AddressingHorizon,
+  sortByHelixLevel,
+  isHelixValid,
+  mergeOperand,
+  isFormulaOperand,
+  deepEqual,
+} from './fold-core';
 import type { EoEvent, EoEventInput, EoState, EvaRegistration, RecResult, ExternalOperator, DerivedEntity, HelixPosition, LoggableOperator } from './types';
+
+export { sortByHelixLevel } from './fold-core';
+export type { HelixWave } from './fold-core';
 
 /** Fold mutex — ensures only one processEvent executes at a time. */
 const foldMutex = new AsyncMutex();
 
 // ─── Helix Infrastructure ────────────────────────────────────────────────────
-
-/**
- * Helix level assignment. Determines wave ordering during bulk import.
- * REC is excluded — system-generated and handled separately after all waves.
- */
-const HELIX_LEVEL: Partial<Record<LoggableOperator, number>> = {
-  NUL: 0, SIG: 0,
-  INS: 1,
-  SEG: 2, CON: 2,
-  SYN: 3,
-  DEF: 4,
-  EVA: 5,
-};
-
-/** A group of events at the same helix level, ready for wave processing. */
-export interface HelixWave {
-  level: number;
-  events: EoEventInput[];
-}
-
-/**
- * Groups events by helix level in ascending order, preserving arrival order
- * within each level. REC events are excluded (system-generated).
- */
-export function sortByHelixLevel(events: EoEventInput[]): HelixWave[] {
-  const byLevel = new Map<number, EoEventInput[]>();
-  for (const event of events) {
-    const level = HELIX_LEVEL[event.op as LoggableOperator];
-    if (level === undefined) continue; // skip REC and unknown ops
-    if (!byLevel.has(level)) byLevel.set(level, []);
-    byLevel.get(level)!.push(event);
-  }
-  return Array.from(byLevel.entries())
-    .sort(([a], [b]) => a - b)
-    .map(([level, evts]) => ({ level, events: evts }));
-}
+//
+// HELIX_LEVEL, sortByHelixLevel, isHelixValid, and the AddressingHorizon now
+// live in fold-core.ts (Phase A — constitutive site model). This file keeps
+// the stateful pieces (updateHelixPosition, checkAndPromote, operator
+// handlers) because they read/write store state.
 
 /**
  * Records that an operator fired on a target. O(1) — no log traversal.
@@ -73,32 +53,6 @@ async function updateHelixPosition(
   pos.lastSeq  = { ...pos.lastSeq,  [op]: seq };
   pos.count    = { ...pos.count,    [op]: (pos.count[op] ?? 0) + 1 };
   await store.put(`helix:${target}`, pos);
-}
-
-/**
- * Returns true if the current helix position satisfies the operator's preconditions.
- *
- *   NUL, SIG, REC — always valid (no preconditions)
- *   INS           — valid only if target has NOT yet been instantiated
- *   SEG, CON, SYN, DEF, EVA — require INS to have fired on the target
- *
- * CON's requirement that destination targets be instantiated is checked
- * separately in checkAndPromote (operand-level, not target-level).
- * EVA's CON-edge requirement is handled in handleEVA (checked post-INS).
- */
-function isHelixValid(op: LoggableOperator, pos: HelixPosition | null): boolean {
-  const declared = new Set(pos?.declared ?? []);
-  switch (op) {
-    case 'NUL': return true;
-    case 'SIG': return true;
-    case 'INS': return !declared.has('INS');
-    case 'SEG': return declared.has('INS');
-    case 'CON': return declared.has('INS');
-    case 'SYN': return declared.has('INS');
-    case 'DEF': return declared.has('INS');
-    case 'EVA': return declared.has('INS');
-    case 'REC': return true;
-  }
 }
 
 /** Maximum auto-promotion depth — prevents infinite cascade. */
@@ -217,12 +171,29 @@ export async function processEvent(
 
 /**
  * Bulk-import mode: process events quickly by:
- *   1. Sorting events into helix waves (NUL/SIG → INS → SEG/CON → SYN → DEF → EVA)
- *   2. Within each wave, processing events on different targets in parallel
- *      (they are independent at the same helix level), sequential within a target
- *      (preserves arrival order for determinism).
- *   3. Deferring recomputeDependents and detectAndEmitREC until all waves complete,
- *      then running them once per unique target.
+ *
+ *   1. Sorting events into helix waves (NUL/SIG → INS → SEG/CON → SYN → DEF → EVA).
+ *
+ *   2. Walking each wave in arrival order to expand auto-promotion into
+ *      explicit synthetic INS events (Phase A constitutive site pre-pass).
+ *      The expansion is fully sequential, so there is no microtask race on
+ *      helix checks — and no need for the recursive checkAndPromote path.
+ *
+ *   3. Reserving a contiguous seq range for the expanded wave via an
+ *      AddressingHorizon, assigning seqs in deterministic expansion order
+ *      BEFORE any parallel dispatch runs. This is the fix for the V8-
+ *      microtask race documented in fold-determinism.test.ts (FIXME(phase-A)):
+ *      seqs are frozen before Promise.all sees them, so the bulk path is now
+ *      byte-identical across runs of the same input.
+ *
+ *   4. Grouping by target and executing targets in parallel via
+ *      processEventCoreWithSeq, which skips nextSeq() and checkAndPromote
+ *      (both handled by the pre-pass). Per-target tasks remain sequential
+ *      within a target to preserve arrival order on that target's trajectory
+ *      hash chain.
+ *
+ *   5. Deferring recomputeDependents, detectAndEmitREC, and cascadeUpward
+ *      until all waves complete, then running each once per touched target.
  */
 export async function processEventsBulk(
   store: EoStore,
@@ -232,27 +203,126 @@ export async function processEventsBulk(
 ): Promise<number> {
   return foldMutex.run(async () => {
     const touchedTargets = new Set<string>();
+    const horizon = new AddressingHorizon(store);
     let lastSeq = 0;
     let processed = 0;
+
+    // Persistent across waves: which targets have been INSed so far (either
+    // already in the store, or inserted by an earlier wave's real/synthetic
+    // INS). Seeded lazily per target via store reads.
+    const insedLocal = new Set<string>();
+    const insedChecked = new Set<string>();
+
+    async function markInsed(target: string): Promise<void> {
+      if (insedChecked.has(target)) {
+        insedLocal.add(target);
+        return;
+      }
+      insedChecked.add(target);
+      insedLocal.add(target);
+    }
+
+    async function needsSyntheticINS(target: string): Promise<boolean> {
+      if (insedLocal.has(target)) return false;
+      if (!insedChecked.has(target)) {
+        insedChecked.add(target);
+        const pos = await store.get(`helix:${target}`) as HelixPosition | null;
+        if (pos && new Set(pos.declared ?? []).has('INS')) {
+          insedLocal.add(target);
+          return false;
+        }
+      }
+      return true;
+    }
+
+    function makeSyntheticINS(target: string): EoEventInput {
+      const now = new Date().toISOString();
+      return {
+        op: 'INS',
+        target,
+        operand: {},
+        agent: 'system:helix',
+        ts: now,
+        acquired_ts: now,
+        meta: { auto_promoted: true, reason: 'required by helix — missing INS' },
+      };
+    }
 
     // Phase 1: wave-based ingestion
     const waves = sortByHelixLevel(events);
 
     for (const wave of waves) {
-      // Group events by target within this wave.
-      const byTarget = new Map<string, EoEventInput[]>();
+      // Step 1: Pre-pass. Walk wave events in deterministic arrival order and
+      // emit synthetic INS events for any target (or CON destination) that
+      // has not yet been INSed. The expanded stream is the full sequence of
+      // work for this wave, in replay order.
+      const expanded: EoEventInput[] = [];
       for (const event of wave.events) {
-        if (!byTarget.has(event.target)) byTarget.set(event.target, []);
-        byTarget.get(event.target)!.push(event);
         touchedTargets.add(event.target);
+
+        // Synthetic INS for the event's own target, if it needs one.
+        if (
+          event.op !== 'NUL' && event.op !== 'SIG' &&
+          event.op !== 'REC' && event.op !== 'INS'
+        ) {
+          if (await needsSyntheticINS(event.target)) {
+            expanded.push(makeSyntheticINS(event.target));
+            await markInsed(event.target);
+          }
+        } else if (event.op === 'INS') {
+          // The event itself is the INS — mark and enqueue.
+          await markInsed(event.target);
+        }
+
+        // CON: synthetic INS for any destination target that needs one.
+        if (event.op === 'CON' && event.operand?.added) {
+          for (const item of event.operand.added as ConEdgeAddItem[]) {
+            const dest = typeof item === 'string' ? item : item.dest;
+            touchedTargets.add(dest);
+            if (await needsSyntheticINS(dest)) {
+              expanded.push(makeSyntheticINS(dest));
+              await markInsed(dest);
+            }
+          }
+        }
+
+        expanded.push(event);
       }
 
-      // Process targets in parallel, sequential within each target.
+      if (expanded.length === 0) continue;
+
+      // Step 2: Reserve a contiguous seq range for the expanded wave. This is
+      // the ONLY control-flow site that advances store.nextSeq() during bulk
+      // ingestion, so there is no race.
+      await horizon.reserve(expanded.length);
+
+      // Step 3: Assign seqs in expanded-stream order — the same order in
+      // which the pre-pass saw events. Synthetic INS events receive a seq
+      // BEFORE any event that depends on them.
+      const planned: { event: EoEventInput; seq: number }[] = expanded.map((event) => ({
+        event,
+        seq: horizon.take(),
+      }));
+
+      // Step 4: Shard by target while preserving the pre-assigned seqs.
+      // Iterate sortedTargetKeys for deterministic Promise.all dispatch order
+      // (no semantic effect, but keeps the test's byte-identical assertion
+      // robust against Map iteration order drift).
+      const byTarget = new Map<string, { event: EoEventInput; seq: number }[]>();
+      for (const p of planned) {
+        const bucket = byTarget.get(p.event.target);
+        if (bucket) bucket.push(p);
+        else byTarget.set(p.event.target, [p]);
+      }
+      const sortedTargetKeys = [...byTarget.keys()].sort();
+
+      // Step 5: Process targets in parallel, sequential within each target.
       const waveSeqs = await Promise.all(
-        [...byTarget.values()].map(async (targetEvents) => {
+        sortedTargetKeys.map(async (target) => {
+          const targetEvents = byTarget.get(target)!;
           let targetLastSeq = 0;
-          for (const event of targetEvents) {
-            const seq = await processEventCore(store, event, onEvent);
+          for (const { event, seq } of targetEvents) {
+            await processEventCoreWithSeq(store, event, seq, onEvent);
             if (seq > targetLastSeq) targetLastSeq = seq;
             processed++;
             onProgress?.(processed, events.length);
@@ -289,6 +359,78 @@ export async function processEventsBulk(
 
     return lastSeq;
   });
+}
+
+/**
+ * Process an event with a pre-assigned seq. Used by the bulk path after
+ * AddressingHorizon has reserved and ordered seqs. Skips nextSeq() and
+ * checkAndPromote — both are handled by the bulk dispatcher's pre-pass.
+ *
+ * All other steps (validate → client_event_id → idempotency → INS pre-check
+ * → appendToLog → executeOperator → updateHelixPosition → updateFoldCache
+ * → onEvent) run exactly as they do in the serial processEventCore.
+ */
+async function processEventCoreWithSeq(
+  store: EoStore,
+  event: EoEventInput,
+  seq: number,
+  onEvent?: (event: EoEvent) => void,
+): Promise<number> {
+  if (event.op === 'REC') {
+    throw new Error('REC is system-generated and cannot be submitted externally');
+  }
+  const validationErrors = validateEvent(event);
+  if (validationErrors) {
+    throw new Error(`Invalid event: ${formatValidationErrors(validationErrors)}`);
+  }
+
+  if (!event.client_event_id) {
+    event = { ...event, client_event_id: await eventHash(event) };
+  }
+
+  // Idempotency check
+  const idemExisting = await store.get(`idem:${event.client_event_id}`);
+  if (idemExisting != null) {
+    return idemExisting as number;
+  }
+
+  // Pre-check for INS: reject before any state mutation if target already exists.
+  if (event.op === 'INS') {
+    const existingState = await checkExists(store, event.target);
+    if (existingState) {
+      throw new Error(`Target already instantiated: ${event.target}`);
+    }
+  }
+
+  const fullEvent: EoEvent = { ...event, seq };
+
+  await appendToLog(store, fullEvent);
+  await store.put(`idem:${event.client_event_id!}`, seq);
+
+  try {
+    await executeOperator(store, fullEvent);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    await store.put(`error:${seq}`, {
+      seq,
+      client_event_id: event.client_event_id,
+      op: event.op,
+      target: event.target,
+      error: message,
+      ts: new Date().toISOString(),
+    });
+    if (onEvent) onEvent({ ...fullEvent, meta: { ...fullEvent.meta, _error: message } });
+    return seq;
+  }
+
+  await updateHelixPosition(store, fullEvent.target, fullEvent.op as LoggableOperator, seq);
+  await updateFoldCache(store, fullEvent);
+
+  if (onEvent) {
+    onEvent(fullEvent);
+  }
+
+  return seq;
 }
 
 /**
@@ -1313,20 +1455,12 @@ function executeFormulaFunction(formula: any, inputs: Record<string, any>): any 
 }
 
 // --- Helpers ---
+//
+// mergeOperand, isFormulaOperand, and deepEqual are pure and live in
+// fold-core.ts (Phase A). They are re-exported here for backward compat
+// with existing importers (tests, etc.).
 
-function mergeOperand(existing: any, incoming: any): any {
-  if (
-    existing && typeof existing === 'object' && !Array.isArray(existing) &&
-    incoming && typeof incoming === 'object' && !Array.isArray(incoming)
-  ) {
-    return { ...existing, ...incoming };
-  }
-  return incoming;
-}
-
-function isFormulaOperand(operand: any): boolean {
-  return operand && typeof operand === 'object' && 'formula' in operand;
-}
+export { mergeOperand, isFormulaOperand, deepEqual } from './fold-core';
 
 async function registerEvaActive(store: EoStore, target: string, operand: any): Promise<void> {
   const edges = await getEdgesFrom(store, target);
@@ -1356,26 +1490,6 @@ function formulaReferencesExternal(formula: any): boolean {
   const str = typeof formula === 'string' ? formula.toUpperCase() : '';
   return externalPatterns.some(p => str.includes(p));
 }
-
-function deepEqual(a: any, b: any): boolean {
-  if (a === b) return true;
-  if (a == null || b == null) return false;
-  if (typeof a !== typeof b) return false;
-  if (typeof a !== 'object') return false;
-  if (Array.isArray(a) !== Array.isArray(b)) return false;
-
-  if (Array.isArray(a)) {
-    if (a.length !== b.length) return false;
-    return a.every((val: any, i: number) => deepEqual(val, b[i]));
-  }
-
-  const keysA = Object.keys(a);
-  const keysB = Object.keys(b);
-  if (keysA.length !== keysB.length) return false;
-  return keysA.every(key => deepEqual(a[key], b[key]));
-}
-
-export { mergeOperand, isFormulaOperand, deepEqual };
 
 /**
  * Replay already-processed events from the OPFS log into a fresh in-memory
