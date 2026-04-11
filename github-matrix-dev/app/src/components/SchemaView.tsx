@@ -1,7 +1,7 @@
 import { useEffect, useState, useMemo } from 'react';
 import { useEoStore } from '../store/eo-store';
 import { groupSchemaStates, schemaFieldTarget, schemaResolveTarget, schemaConstraintTarget, type FieldSchema } from '../db/schema-rules';
-import { summarizePolicy, type ResolvePolicy } from './ResolutionPolicyComposer';
+import { summarizePolicy, normalizeResolvePolicy, type ResolvePolicy } from './ResolutionPolicyComposer';
 import { SchemaFieldPanel } from './SchemaFieldPanel';
 import { readLogForPrefix } from '../db/log';
 import { useTheme, type Theme } from '../theme';
@@ -632,11 +632,7 @@ export function SchemaView({ scope }: SchemaViewProps) {
               const constraintDisplay = fs.constraints.length > 0
                 ? fs.constraints.map(c => c.name).join(', ')
                 : '\u2014';
-              const resolvePolicy: ResolvePolicy | null = fs.resolve?.value?.stances
-                ? fs.resolve.value as ResolvePolicy
-                : fs.resolve?.value?.strategy
-                  ? { stances: [{ stance: 'dissecting', subType: fs.resolve.value.strategy }] }
-                  : null;
+              const resolvePolicy: ResolvePolicy | null = normalizeResolvePolicy(fs.resolve?.value);
               const resolveDisplay = resolvePolicy ? summarizePolicy(resolvePolicy) : '\u2014';
 
               return (
