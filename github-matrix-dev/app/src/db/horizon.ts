@@ -8,7 +8,7 @@ import type {
   SimilarRecord, SimilarityReason, Observation,
   GovernanceEntry, LoggableOperator, AncestryEntry, TrajectoryEntry,
   TrajectoryFingerprint, CadenceInfo, CadenceClass, GraphMetrics, GraphRole,
-  RecResult, RecCycleInfo, DerivedEntity,
+  RecResult, RecCycleInfo, DerivedEntity, Resolution,
 } from './types';
 import { seedHash, chainHash } from './hash';
 import { classifyOnDemand } from './space-statistics';
@@ -830,4 +830,40 @@ async function getRecCycleInfo(store: EoStore, figure: EoState): Promise<RecCycl
     result,
     edges,
   };
+}
+
+// ─── Resolution-axis read path (Phase A slice 6 stub) ───────────────────────
+
+/**
+ * A single fold record indexed by resolution coordinate. Placeholder type for
+ * the Phase C resolution-aware read path; intentionally opaque today because
+ * no production callers consume it yet. Phase C will widen this to include
+ * value, seq, ts, and any projection-specific fields.
+ */
+export interface HorizonRecord {
+  site: string;
+  resolution: Resolution;
+  seq: number;
+}
+
+/**
+ * getRecordsByResolution — resolution-aware read path for a site.
+ *
+ * STUB. Returns an empty Map for every site. Exists in this slice to lock in
+ * the API contract so Phase C callers — and any adjacent planning work — do
+ * not invent their own shape. The resolution axis is being populated for the
+ * first time in this slice; until events with non-zero resolution nibbles
+ * accumulate, there is nothing meaningful to return here.
+ *
+ * Phase C will wire this up to the resolution-aware Horizon layers
+ * (currently a design sketch, not yet an implementation) and return a real
+ * Map keyed by Resolution value.
+ */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+export function getRecordsByResolution(
+  _store: EoStore,
+  _site: string,
+): Map<Resolution, HorizonRecord> {
+  // TODO Phase C: populate from resolution-aware Horizon layers.
+  return new Map();
 }

@@ -18,9 +18,10 @@ import {
   deepEqual,
 } from './fold-core';
 import type { HelixStateTracker, PromotionCallbacks } from './fold-core';
-import { StoreAddressingHorizon, StoreDeclaredHorizon } from './addressing-horizon';
-import type { AddressingHorizon, DeclaredHorizon } from './addressing-horizon';
-import type { EoEvent, EoEventInput, EoState, EvaRegistration, RecResult, ExternalOperator, DerivedEntity, LoggableOperator } from './types';
+import { StoreAddressingHorizon, StoreDeclaredHorizon, StoreNulHorizon } from './addressing-horizon';
+import type { AddressingHorizon, DeclaredHorizon, NulHorizon } from './addressing-horizon';
+import type { EoEvent, EoEventInput, EoState, EvaRegistration, RecResult, ExternalOperator, DerivedEntity, LoggableOperator, Resolution } from './types';
+import { nulStateToResolution } from './types';
 
 export { sortByHelixLevel } from './fold-core';
 export type { HelixWave } from './fold-core';
@@ -76,6 +77,38 @@ async function declareForEvent(
 }
 
 /**
+ * Resolve the effective Resolution for a NUL event. Prefers the canonical
+ * `resolution` field; falls back to the deprecated `nul_state` field via
+ * nulStateToResolution for events that pre-date Phase A slice 6 or come
+ * from callers that have not yet been migrated. If neither is set, returns
+ * 'unspecified'.
+ */
+function effectiveResolutionForNul(event: EoEvent): Resolution {
+  if (event.resolution && event.resolution !== 'unspecified') {
+    return event.resolution;
+  }
+  if (event.nul_state) {
+    return nulStateToResolution(event.nul_state);
+  }
+  return event.resolution ?? 'unspecified';
+}
+
+/**
+ * Record a NUL event on the NulHorizon. NUL is a typed observation, not a
+ * deletion — this function does not mutate any state map. The resolution is
+ * resolved via effectiveResolutionForNul so callers that still set the
+ * legacy `nul_state` field continue to be honored.
+ */
+async function recordNulForEvent(
+  nulHorizon: NulHorizon,
+  event: EoEvent,
+): Promise<void> {
+  if (event.op !== 'NUL') return;
+  const resolution = effectiveResolutionForNul(event);
+  await nulHorizon.record(event.target, resolution, event.seq);
+}
+
+/**
  * Build the PromotionCallbacks fold-core's checkAndPromote expects, binding
  * them to the live store + tracker + onEvent hook. Exposed as a single helper
  * so processEventCore and processEventInner share one wiring and the blocked-
@@ -93,6 +126,10 @@ function buildPromotionCallbacks(
     emitBlocked: async (target) => {
       const now = new Date().toISOString();
       const blockedSeq = await store.nextSeq();
+      // Resolution 'Unraveling' is the lattice-model encoding of cascade-limit
+      // observations. `nul_state: 'promotion_blocked'` is retained for
+      // backward-compatible display until consumers migrate; both mean the
+      // same thing — the depth cap was hit trying to auto-promote this site.
       const blockedEvent: EoEvent = {
         seq: blockedSeq,
         op: 'NUL',
@@ -101,11 +138,15 @@ function buildPromotionCallbacks(
         agent: 'system:helix',
         ts: now,
         acquired_ts: now,
+        resolution: 'Unraveling',
         nul_state: 'promotion_blocked',
         meta: { auto_promoted: false, promotion_blocked: true, reason: 'max promotion depth exceeded' },
       };
       await appendToLog(store, blockedEvent);
       await tracker.recordOperator(target, 'NUL', blockedSeq);
+      // Record the blocked observation in the NulHorizon so replayed state
+      // carries the absence fact forward.
+      await new StoreNulHorizon(store).record(target, 'Unraveling', blockedSeq);
       await updateFoldCache(store, blockedEvent);
       if (onEvent) onEvent(blockedEvent);
     },
@@ -166,6 +207,7 @@ export async function processEventsBulk(
     const helix = new StoreHelixStateTracker(store);
     const addressing = new StoreAddressingHorizon(store);
     const declared = new StoreDeclaredHorizon(store);
+    const nulHorizon = new StoreNulHorizon(store);
     let lastSeq = 0;
     let processed = 0;
 
@@ -284,7 +326,7 @@ export async function processEventsBulk(
           const targetEvents = byTarget.get(target)!;
           let targetLastSeq = 0;
           for (const { event, seq } of targetEvents) {
-            await processEventCoreWithSeq(store, event, seq, addressing, declared, onEvent);
+            await processEventCoreWithSeq(store, event, seq, addressing, declared, nulHorizon, onEvent);
             if (seq > targetLastSeq) targetLastSeq = seq;
             processed++;
             onProgress?.(processed, events.length);
@@ -339,6 +381,7 @@ async function processEventCoreWithSeq(
   seq: number,
   addressing: AddressingHorizon,
   declared: DeclaredHorizon,
+  nulHorizon: NulHorizon,
   onEvent?: (event: EoEvent) => void,
 ): Promise<number> {
   if (event.op === 'REC') {
@@ -390,9 +433,11 @@ async function processEventCoreWithSeq(
 
   // Phase A constitutive site touches — every event addresses the AddressingHorizon
   // for its target (and CON destinations); explicit SEG events update the
-  // DeclaredHorizon with their boundary content.
+  // DeclaredHorizon with their boundary content; NUL events record a typed
+  // absence observation on the NulHorizon.
   await touchAddressingForEvent(addressing, fullEvent);
   await declareForEvent(declared, fullEvent);
+  await recordNulForEvent(nulHorizon, fullEvent);
 
   await new StoreHelixStateTracker(store).recordOperator(fullEvent.target, fullEvent.op as LoggableOperator, seq);
   await updateFoldCache(store, fullEvent);
@@ -449,6 +494,7 @@ async function processEventCore(
   const helix = new StoreHelixStateTracker(store);
   const addressing = new StoreAddressingHorizon(store);
   const declared = new StoreDeclaredHorizon(store);
+  const nulHorizon = new StoreNulHorizon(store);
   await checkAndPromoteHelix(helix, event, buildPromotionCallbacks(store, helix, onEvent), _promotionDepth);
 
   const seq = await store.nextSeq();
@@ -476,6 +522,7 @@ async function processEventCore(
   // Phase A constitutive site touches.
   await touchAddressingForEvent(addressing, fullEvent);
   await declareForEvent(declared, fullEvent);
+  await recordNulForEvent(nulHorizon, fullEvent);
 
   await helix.recordOperator(fullEvent.target, fullEvent.op as LoggableOperator, seq);
   await updateFoldCache(store, fullEvent);
@@ -529,6 +576,7 @@ async function processEventInner(
   const helix = new StoreHelixStateTracker(store);
   const addressing = new StoreAddressingHorizon(store);
   const declared = new StoreDeclaredHorizon(store);
+  const nulHorizon = new StoreNulHorizon(store);
   await checkAndPromoteHelix(helix, event, buildPromotionCallbacks(store, helix, onEvent), 0);
 
   // 3. Assign sequence number
@@ -563,9 +611,11 @@ async function processEventInner(
 
   // 6a. Phase A constitutive site touches — every event addresses the
   //     AddressingHorizon for its target (and CON destinations); explicit
-  //     SEG events update the DeclaredHorizon with their boundary content.
+  //     SEG events update the DeclaredHorizon with their boundary content;
+  //     NUL events record a typed absence observation on the NulHorizon.
   await touchAddressingForEvent(addressing, fullEvent);
   await declareForEvent(declared, fullEvent);
+  await recordNulForEvent(nulHorizon, fullEvent);
 
   // 6b. Record this operator in the target's helix position.
   await helix.recordOperator(fullEvent.target, fullEvent.op as LoggableOperator, seq);
@@ -1343,6 +1393,9 @@ async function cascadeUpward(
 ): Promise<void> {
   if (depth >= MAX_CASCADE_DEPTH) {
     // Record cascade limit hit as a NUL event so it appears in the log.
+    // Resolution 'Unraveling' encodes the cascade-limit flavor of absence
+    // in the lattice model; the legacy nul_state:'cascade_limit' literal
+    // lives on in the operand for backward-compatible introspection.
     const now = new Date().toISOString();
     const limitEvent: EoEvent = {
       seq: await store.nextSeq(),
@@ -1352,8 +1405,10 @@ async function cascadeUpward(
       agent: 'system:cascade-guard',
       ts: now,
       acquired_ts: now,
+      resolution: 'Unraveling',
     };
     await appendToLog(store, limitEvent);
+    await new StoreNulHorizon(store).record(changedTarget, 'Unraveling', limitEvent.seq);
     if (onEvent) onEvent(limitEvent);
     return;
   }
@@ -1519,6 +1574,7 @@ export async function replayFromLog(
     const helix = new StoreHelixStateTracker(store);
     const addressing = new StoreAddressingHorizon(store);
     const declared = new StoreDeclaredHorizon(store);
+    const nulHorizon = new StoreNulHorizon(store);
     for (let i = 0; i < events.length; i++) {
       const event = events[i];
 
@@ -1545,6 +1601,7 @@ export async function replayFromLog(
         await executeOperator(store, fullEvent);
         await touchAddressingForEvent(addressing, fullEvent);
         await declareForEvent(declared, fullEvent);
+        await recordNulForEvent(nulHorizon, fullEvent);
         await helix.recordOperator(fullEvent.target, fullEvent.op as LoggableOperator, seq);
       } catch {
         // Ignore errors during replay — the original fold succeeded.

@@ -5,10 +5,88 @@ export { ROLE_POWER_LEVELS, ROLE_LABELS, powerLevelToRole } from '../permissions
 // The nine operators
 export type Operator = 'NUL' | 'SIG' | 'INS' | 'SEG' | 'CON' | 'SYN' | 'DEF' | 'EVA' | 'REC';
 
+// ─── Resolution axis (Phase A slice 6) ────────────────────────────────────────
+
+/**
+ * Resolution — the depth coordinate in the operator × site × resolution lattice.
+ * Nine canonical stances. `unspecified` is the default nibble (0) and is the
+ * only value written for events that do not carry an explicit resolution.
+ */
+export type Resolution =
+  | 'unspecified'
+  | 'Clearing'
+  | 'Dissecting'
+  | 'Unraveling'
+  | 'Tending'
+  | 'Binding'
+  | 'Tracing'
+  | 'Cultivating'
+  | 'Making'
+  | 'Composing';
+
+/** Resolution → low-nibble encoding in the compound glyph written to eodb.idx byte 0. */
+export const RESOLUTION_NIBBLE: Record<Resolution, number> = {
+  unspecified: 0,
+  Clearing:    1,
+  Dissecting:  2,
+  Unraveling:  3,
+  Tending:     4,
+  Binding:     5,
+  Tracing:     6,
+  Cultivating: 7,
+  Making:      8,
+  Composing:   9,
+};
+
+/** Low-nibble → Resolution decoding. Index i corresponds to RESOLUTION_NIBBLE value i. */
+export const NIBBLE_TO_RESOLUTION: Resolution[] = [
+  'unspecified', 'Clearing', 'Dissecting', 'Unraveling',
+  'Tending', 'Binding', 'Tracing', 'Cultivating', 'Making', 'Composing',
+];
+
 // ─── Self-Healing Types ───────────────────────────────────────────────────────
 
-/** Three NUL states — distinct absence conditions (F1.2). */
+/**
+ * @deprecated Use `EoEvent.resolution` (Resolution) instead. Kept as a type
+ *   alias for backward compatibility with existing data and UI components that
+ *   have not yet been migrated to the resolution axis. Mapping:
+ *     'cleared'            → Resolution 'Clearing'
+ *     'unknown'            → Resolution 'Tracing'
+ *     'never-set'          → Resolution 'unspecified'
+ *     'promotion_blocked'  → Resolution 'Unraveling'
+ *
+ *   Convert via `nulStateToResolution` / `resolutionToNulState` below.
+ */
 export type NulState = 'never-set' | 'unknown' | 'cleared' | 'promotion_blocked';
+
+/**
+ * Convert a legacy NulState value to the corresponding Resolution. Used by
+ * the fold worker and permissions layer while they are still writing NulState
+ * values but persisting events whose canonical field is `resolution`.
+ */
+export function nulStateToResolution(s: NulState): Resolution {
+  switch (s) {
+    case 'cleared':           return 'Clearing';
+    case 'unknown':           return 'Tracing';
+    case 'never-set':         return 'unspecified';
+    case 'promotion_blocked': return 'Unraveling';
+  }
+}
+
+/**
+ * Convert a Resolution to the closest legacy NulState value. Used by UI
+ * components that still render NulStateBadge — they can read `event.resolution`
+ * and produce a NulState for the existing color map. Resolutions that do not
+ * map to a named NulState fall back to 'never-set'.
+ */
+export function resolutionToNulState(r: Resolution): NulState {
+  switch (r) {
+    case 'Clearing':   return 'cleared';
+    case 'Tracing':    return 'unknown';
+    case 'Unraveling': return 'promotion_blocked';
+    default:           return 'never-set';
+  }
+}
 
 /** Partition context envelope — stamped on writes during split operation (F2.1). */
 export interface ContextEnvelope {
@@ -74,7 +152,15 @@ export interface EoEvent {
   triggered_by?: number;          // for REC/INS2+: seq of the human-initiated event that caused the cycle
   meta?: Record<string, any>;
   context_envelope?: ContextEnvelope; // set during partition operation (F2.1)
-  nul_state?: NulState;               // set by system on NUL events (F1.2)
+  /**
+   * Depth coordinate in the operator × site × resolution lattice. Defaults to
+   * 'unspecified' when absent — every event written before Phase A slice 6
+   * reads back as 'unspecified'. NUL events: the canonical flavor-of-absence
+   * field (the legacy `nul_state` field is still read as a fallback).
+   */
+  resolution?: Resolution;
+  /** @deprecated Set by system on NUL events (F1.2). Use `resolution` instead. */
+  nul_state?: NulState;
 }
 
 // Projected state at a target

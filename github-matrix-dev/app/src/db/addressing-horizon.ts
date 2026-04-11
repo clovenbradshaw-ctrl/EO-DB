@@ -44,7 +44,7 @@
  */
 
 import type { EoStore } from './encrypted-store';
-import type { LoggableOperator } from './types';
+import type { LoggableOperator, Resolution } from './types';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -98,10 +98,25 @@ export interface DeclaredRecord {
   boundary: unknown;
 }
 
+/**
+ * A single NUL observation on a site. NUL events are typed facts — the event's
+ * resolution is the flavor of absence (Clearing, Tracing, Unraveling, …) and
+ * the seq pins the moment the observation was made. A site can accumulate
+ * many observations with different resolutions over time: e.g. first a
+ * Tracing (we looked and didn't find), later a Clearing (we deliberately
+ * removed the value).
+ */
+export interface NulObservation {
+  site: string;
+  resolution: Resolution;
+  seq: number;
+}
+
 // ─── Storage layout ─────────────────────────────────────────────────────────
 
 const ADDRESSING_PREFIX = 'addressing:';
 const DECLARED_PREFIX = 'declared:';
+const NUL_PREFIX = 'nul:';
 
 function addressingKey(site: string): string {
   return `${ADDRESSING_PREFIX}${site}`;
@@ -109,6 +124,10 @@ function addressingKey(site: string): string {
 
 function declaredKey(site: string): string {
   return `${DECLARED_PREFIX}${site}`;
+}
+
+function nulKey(site: string): string {
+  return `${NUL_PREFIX}${site}`;
 }
 
 // ─── AddressingHorizon ──────────────────────────────────────────────────────
@@ -275,5 +294,74 @@ export class StoreDeclaredHorizon implements DeclaredHorizon {
       site: key.slice(DECLARED_PREFIX.length),
       record: value as DeclaredRecord,
     }));
+  }
+}
+
+// ─── NulHorizon ─────────────────────────────────────────────────────────────
+
+/**
+ * NulHorizon — projection of the NUL slice onto the site axis.
+ *
+ * Not a table of missing values. A table of stable addresses where absence
+ * has been explicitly observed, each tagged with the resolution (flavor of
+ * absence) the observation carried and the seq it was made at.
+ *
+ * A site may accumulate multiple NUL entries with different resolutions —
+ * e.g. first a Tracing (we looked and didn't find), later a Clearing (we
+ * deliberately removed the value). The ordering is seq-ascending.
+ *
+ * Wired into the fold alongside AddressingHorizon and DeclaredHorizon; every
+ * NUL event flows through `record()` after dispatch so the horizon's view of
+ * absence survives replay.
+ */
+export interface NulHorizon {
+  /** Record a NUL observation on `site`. O(1) — append to the per-site list. */
+  record(site: string, resolution: Resolution, seq: number): Promise<void>;
+
+  /** All observations on `site` in seq-ascending order. Empty array if none. */
+  getObservations(site: string): Promise<NulObservation[]>;
+
+  /** Most recent observation on `site` (highest seq), or undefined if none. */
+  getLatest(site: string): Promise<NulObservation | undefined>;
+
+  /** True if any NUL has ever fired on `site`. */
+  isExplicitlyAbsent(site: string): Promise<boolean>;
+
+  /** Every observation across every site — flattened, unordered. */
+  snapshot(): Promise<NulObservation[]>;
+}
+
+/** EoStore-backed canonical NulHorizon. */
+export class StoreNulHorizon implements NulHorizon {
+  constructor(private readonly store: EoStore) {}
+
+  async record(site: string, resolution: Resolution, seq: number): Promise<void> {
+    const existing = ((await this.store.get(nulKey(site))) as NulObservation[] | null) ?? [];
+    existing.push({ site, resolution, seq });
+    await this.store.put(nulKey(site), existing);
+  }
+
+  async getObservations(site: string): Promise<NulObservation[]> {
+    return ((await this.store.get(nulKey(site))) as NulObservation[] | null) ?? [];
+  }
+
+  async getLatest(site: string): Promise<NulObservation | undefined> {
+    const obs = await this.getObservations(site);
+    return obs.length === 0 ? undefined : obs[obs.length - 1];
+  }
+
+  async isExplicitlyAbsent(site: string): Promise<boolean> {
+    const rec = (await this.store.get(nulKey(site))) as NulObservation[] | null;
+    return rec !== null && rec.length > 0;
+  }
+
+  async snapshot(): Promise<NulObservation[]> {
+    const entries = await this.store.iterator(NUL_PREFIX);
+    const out: NulObservation[] = [];
+    for (const [, value] of entries) {
+      const obs = value as NulObservation[];
+      for (const o of obs) out.push(o);
+    }
+    return out;
   }
 }
