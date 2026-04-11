@@ -12,10 +12,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useBranchStore } from '../../store/branch-store';
 import { useEoStore } from '../../store/eo-store';
-import { useTheme } from '../../theme';
+import { useTheme, type Theme } from '../../theme';
 import { warmProjectionCache } from '../../projection/ProjectionEngine';
 import type {
   BranchRecord,
+  DivergencePoint,
   EvaStance,
   ProjectedField,
   ProjectedState,
@@ -158,6 +159,7 @@ export function BranchExplorer({ branches }: BranchExplorerProps) {
 
   const svgRef = useRef<SVGSVGElement | null>(null);
   const dragRef = useRef(false);
+  const [divergencePoints, setDivergencePoints] = useState<DivergencePoint[]>([]);
 
   // Pick one canonical branch for time-window computation.
   const branch = useMemo(() => {
@@ -197,6 +199,32 @@ export function BranchExplorer({ branches }: BranchExplorerProps) {
       ),
     );
   }, [branch, branches, timeWindow, ensureEngine]);
+
+  // Compute the divergence map so we can render ticks on the tracks at every
+  // point where a world's state diverges from its neighbours.
+  useEffect(() => {
+    if (!branch) {
+      setDivergencePoints([]);
+      return;
+    }
+    const engine = ensureEngine();
+    if (!engine) return;
+    let cancelled = false;
+    engine
+      .divergenceMap(branch)
+      .then((points) => {
+        if (!cancelled) setDivergencePoints(points);
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          console.warn('[branch-explorer] divergenceMap failed', e);
+          setDivergencePoints([]);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [branch, lastSeq, ensureEngine]);
 
   if (!branch || !timeWindow) {
     return (
@@ -280,8 +308,36 @@ export function BranchExplorer({ branches }: BranchExplorerProps) {
     });
   }, [branch, recentEvents, timeWindow, lastSeq]);
 
+  // Filter divergence points to those that fall inside the visible window —
+  // out-of-window ticks would render off-canvas.
+  const visibleDivergence = useMemo(() => {
+    return divergencePoints.filter(
+      (p) => p.ts >= timeWindow.minTs && p.ts <= timeWindow.maxTs,
+    );
+  }, [divergencePoints, timeWindow]);
+
+  // Count W-2 divergences for the meta row.
+  const w2DivergenceCount = useMemo(
+    () => divergencePoints.filter((p) => p.worlds_diverge.includes('always-merged')).length,
+    [divergencePoints],
+  );
+
+  const sources = branch.subject
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+
   return (
     <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {/* Branch meta row */}
+      <BranchMetaRow
+        theme={theme}
+        branch={branch}
+        sources={sources}
+        w2DivergenceCount={w2DivergenceCount}
+        eventCount={relevantEvents.length}
+      />
+
       {/* Top bar — world pills */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
         {(['canonical', 'never-merged', 'always-merged'] as WorldType[]).map((w) => (
@@ -295,15 +351,20 @@ export function BranchExplorer({ branches }: BranchExplorerProps) {
         <div
           style={{
             marginLeft: 'auto',
-            fontSize: 12,
-            fontWeight: 500,
-            color: theme.text,
+            display: 'flex',
+            alignItems: 'baseline',
+            gap: 10,
             fontFamily: 'monospace',
           }}
         >
-          t = {Math.round(scrubberT * 100)
-            .toString()
-            .padStart(2, '0')}
+          <span style={{ fontSize: 10, color: theme.textMuted }}>
+            {formatTimeFull(scrubberTs)}
+          </span>
+          <span style={{ fontSize: 12, fontWeight: 500, color: theme.text }}>
+            t = {Math.round(scrubberT * 100)
+              .toString()
+              .padStart(2, '0')}
+          </span>
         </div>
       </div>
 
@@ -441,6 +502,44 @@ export function BranchExplorer({ branches }: BranchExplorerProps) {
           ));
         })}
 
+        {/* Divergence ticks — a small mark on the tracks where the
+            projection engine detected field-level divergence. W-2 divergences
+            hit the top track; W-0/W-1 divergences straddle the fork. */}
+        {visibleDivergence.map((d, idx) => {
+          const x = xAtTs(timeWindow, d.ts);
+          if (d.field_path === '_syn') {
+            // Already rendered as the SYN diamond; skip.
+            return null;
+          }
+          const ticks: Array<{ y: number; color: string }> = [];
+          if (d.worlds_diverge.includes('always-merged')) {
+            ticks.push({ y: W2_Y, color: WORLD_TRACK_COLORS['always-merged'] });
+          }
+          if (d.worlds_diverge.includes('canonical') || d.worlds_diverge.includes('never-merged')) {
+            const y = x <= forkX ? TRUNK_Y : trackYAt('canonical', x, forkX);
+            ticks.push({ y, color: WORLD_TRACK_COLORS.canonical });
+            if (x > forkX) {
+              ticks.push({ y: trackYAt('never-merged', x, forkX), color: WORLD_TRACK_COLORS['never-merged'] });
+            }
+          }
+          return ticks.map((t, j) => (
+            <line
+              key={`div-${idx}-${j}`}
+              x1={x}
+              y1={t.y - 7}
+              x2={x}
+              y2={t.y + 7}
+              stroke={t.color}
+              strokeWidth="1.2"
+              opacity={0.75}
+            >
+              <title>
+                {`divergence @ ${formatTimeShort(d.ts)} — field ${d.field_path}`}
+              </title>
+            </line>
+          ));
+        })}
+
         {/* SYN diamond at fork */}
         <rect
           x={forkX - 9}
@@ -507,6 +606,28 @@ export function BranchExplorer({ branches }: BranchExplorerProps) {
         />
         <circle cx={scrubberX} cy="18" r="5" fill={theme.text} opacity={0.55} pointerEvents="none" />
 
+        {/* Scrubber timestamp callout — flips to the left side of the line once
+            the scrubber passes the halfway mark so the label stays in view. */}
+        {(() => {
+          const flip = scrubberX > VIEW_WIDTH * 0.6;
+          const tx = flip ? scrubberX - 6 : scrubberX + 6;
+          const anchor = flip ? 'end' : 'start';
+          return (
+            <text
+              x={tx}
+              y="14"
+              fontSize="9"
+              fill={theme.text}
+              fontFamily="monospace"
+              opacity={0.75}
+              textAnchor={anchor}
+              pointerEvents="none"
+            >
+              {formatTimeShort(scrubberTs)}
+            </text>
+          );
+        })()}
+
         {/* Scrubber intersect rings */}
         <ScrubberRing
           world="always-merged"
@@ -550,6 +671,9 @@ export function BranchExplorer({ branches }: BranchExplorerProps) {
           />
         ))}
       </div>
+
+      {/* Legend */}
+      <LegendRow theme={theme} />
     </div>
   );
 }
@@ -774,4 +898,230 @@ function formatTimeShort(ts: string): string {
   const d = new Date(ts);
   if (Number.isNaN(d.getTime())) return ts;
   return d.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
+}
+
+function formatTimeFull(ts: string): string {
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return ts;
+  return d.toLocaleString('en-US', {
+    hour12: false,
+    month: 'short',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+}
+
+// ─── Branch meta row ────────────────────────────────────────────────────────
+
+function BranchMetaRow({
+  theme,
+  branch,
+  sources,
+  w2DivergenceCount,
+  eventCount,
+}: {
+  theme: Theme;
+  branch: BranchRecord;
+  sources: string[];
+  w2DivergenceCount: number;
+  eventCount: number;
+}) {
+  const items: Array<{ label: string; value: string; mono?: boolean }> = [
+    { label: 'subject', value: sources.join(' + ') || '(none)', mono: true },
+    { label: 'survivor', value: branch.survivor_id, mono: true },
+    { label: 'forked at', value: formatTimeFull(branch.policy.branch_point_ts) },
+    { label: 'events in window', value: String(eventCount) },
+    { label: 'W-2 collisions', value: String(w2DivergenceCount) },
+  ];
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexWrap: 'wrap',
+        gap: '4px 18px',
+        padding: '6px 10px',
+        border: `0.5px solid ${theme.borderLight}`,
+        borderLeft: '2px solid #EF9F27',
+        borderRadius: 4,
+        background: theme.bgMuted,
+      }}
+    >
+      {items.map((item) => (
+        <div
+          key={item.label}
+          style={{
+            display: 'flex',
+            alignItems: 'baseline',
+            gap: 6,
+            fontFamily: 'monospace',
+            fontSize: 10.5,
+            minWidth: 0,
+          }}
+        >
+          <span
+            style={{
+              color: theme.textMuted,
+              textTransform: 'uppercase',
+              letterSpacing: '0.05em',
+              fontSize: 9,
+            }}
+          >
+            {item.label}
+          </span>
+          <span
+            style={{
+              color: theme.text,
+              fontWeight: item.mono ? 500 : 400,
+              whiteSpace: 'nowrap',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              maxWidth: 260,
+            }}
+            title={item.value}
+          >
+            {item.value}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ─── Legend ─────────────────────────────────────────────────────────────────
+
+function LegendRow({ theme }: { theme: Theme }) {
+  const items: Array<{ swatch: JSX.Element; label: string }> = [
+    {
+      swatch: <Swatch color={WORLD_TRACK_COLORS.canonical} />,
+      label: 'W-0 canonical',
+    },
+    {
+      swatch: <Swatch color={WORLD_TRACK_COLORS['never-merged']} />,
+      label: 'W-1 never merged',
+    },
+    {
+      swatch: <Swatch color={WORLD_TRACK_COLORS['always-merged']} />,
+      label: 'W-2 always merged',
+    },
+    {
+      swatch: (
+        <span
+          style={{
+            display: 'inline-block',
+            width: 10,
+            height: 10,
+            background: WORLD_TRACK_COLORS.canonical,
+            transform: 'rotate(45deg)',
+            opacity: 0.9,
+          }}
+        />
+      ),
+      label: 'SYN event',
+    },
+    {
+      swatch: (
+        <span
+          style={{
+            display: 'inline-block',
+            width: 1.5,
+            height: 12,
+            background: WORLD_TRACK_COLORS.canonical,
+            opacity: 0.8,
+          }}
+        />
+      ),
+      label: 'divergence tick',
+    },
+    {
+      swatch: (
+        <span
+          style={{
+            display: 'inline-block',
+            width: 14,
+            height: 8,
+            background:
+              'repeating-linear-gradient(45deg, #1D9E75 0 2px, transparent 2px 5px)',
+            opacity: 0.85,
+          }}
+        />
+      ),
+      label: 'shadow / indeterminate',
+    },
+    {
+      swatch: (
+        <span
+          style={{
+            display: 'inline-block',
+            width: 10,
+            height: 10,
+            borderRadius: '50%',
+            background: '#D4537E',
+            opacity: 0.9,
+          }}
+        />
+      ),
+      label: 'DEF conflict',
+    },
+    {
+      swatch: (
+        <span
+          style={{
+            display: 'inline-block',
+            width: 10,
+            height: 10,
+            borderRadius: '50%',
+            background: '#7F77DD',
+            opacity: 0.9,
+          }}
+        />
+      ),
+      label: 'policy-sensitive',
+    },
+  ];
+
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexWrap: 'wrap',
+        gap: '6px 14px',
+        paddingTop: 8,
+        borderTop: `0.5px solid ${theme.borderLight}`,
+        fontFamily: 'monospace',
+      }}
+    >
+      {items.map((item) => (
+        <div
+          key={item.label}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
+            fontSize: 10,
+            color: theme.textMuted,
+          }}
+        >
+          {item.swatch}
+          <span>{item.label}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function Swatch({ color }: { color: string }) {
+  return (
+    <span
+      style={{
+        display: 'inline-block',
+        width: 14,
+        height: 3,
+        background: color,
+        borderRadius: 1,
+        opacity: 0.9,
+      }}
+    />
+  );
 }
