@@ -51,6 +51,80 @@ export const HELIX_LEVEL: Partial<Record<LoggableOperator, number>> = {
   EVA: 5,
 };
 
+// ─── OPERATOR_PROCESSING_CLASS ──────────────────────────────────────────────
+
+/**
+ * Describes how an operator should be routed through the execution pipeline:
+ * which execution layer handles it (CPU / GPU / boundary / adaptive), which
+ * memory model its state lives in, and whether it acts as a synchronization
+ * barrier between layers.
+ *
+ *   layer:
+ *     'cpu'       — pure CPU operation, never touches GPU
+ *     'gpu'       — GPU compute dispatch (EVA formulas, REC fixed-points)
+ *     'boundary'  — CPU-writes / GPU-reads shared memory (CON adjacency)
+ *     'adaptive'  — routed to CPU or GPU at runtime based on fan-in size
+ *
+ *   memory: free-form label identifying the state's storage shape. Informal
+ *     for now; formalized when Phases C-K wire the actual backing stores.
+ *
+ *   sync:
+ *     'none'       — no cross-layer synchronization required
+ *     'flush-gpu'  — CPU must wait for any in-flight GPU work to drain
+ *                    BEFORE applying this operator. DEF changes the schema
+ *                    (i.e. the dimensionality of the state space), so every
+ *                    dense-vector buffer the GPU is reading becomes stale at
+ *                    the instant the DEF lands. Treat this as an ontological
+ *                    barrier, not a scheduling hint.
+ *     'push-state' — CPU must publish updated state to GPU-visible memory
+ *                    before subsequent GPU ops execute. Reserved; no
+ *                    operator uses this today.
+ */
+export interface OperatorProcessingClass {
+  layer: 'cpu' | 'gpu' | 'boundary' | 'adaptive';
+  memory:
+    | 'constituted-set'
+    | 'ephemeral'
+    | 'point-write'
+    | 'boundary'
+    | 'csr-shared'
+    | 'reduction'
+    | 'schema-table'
+    | 'dense-vector'
+    | 'double-buffered';
+  sync: 'none' | 'flush-gpu' | 'push-state';
+}
+
+/**
+ * Single source of truth for per-operator routing. Every phase of the scaling
+ * roadmap (worker pool, shard workers, GPU SpMV) consults this table rather
+ * than reimplementing operator-class decisions as scattered switch statements.
+ *
+ * Changing a row here propagates the effect of that change to every runner.
+ * Adding a new operator requires adding an entry — TypeScript's exhaustiveness
+ * check on `Record<LoggableOperator, ...>` enforces this at compile time.
+ */
+export const OPERATOR_PROCESSING_CLASS: Record<LoggableOperator, OperatorProcessingClass> = {
+  NUL: { layer: 'cpu',      memory: 'constituted-set', sync: 'none'      },
+  SIG: { layer: 'cpu',      memory: 'ephemeral',       sync: 'none'      },
+  INS: { layer: 'cpu',      memory: 'point-write',     sync: 'none'      },
+  SEG: { layer: 'cpu',      memory: 'boundary',        sync: 'none'      },
+  CON: { layer: 'boundary', memory: 'csr-shared',      sync: 'none'      },
+  SYN: { layer: 'adaptive', memory: 'reduction',       sync: 'none'      },
+  DEF: { layer: 'cpu',      memory: 'schema-table',    sync: 'flush-gpu' },
+  EVA: { layer: 'gpu',      memory: 'dense-vector',    sync: 'none'      },
+  REC: { layer: 'gpu',      memory: 'double-buffered', sync: 'none'      },
+};
+
+/**
+ * True if applying `op` requires draining any in-flight GPU work before the
+ * CPU can proceed. Currently `DEF` is the only such operator (it mutates the
+ * schema dimensionality every GPU buffer is indexed against).
+ */
+export function requiresGpuFlush(op: LoggableOperator): boolean {
+  return OPERATOR_PROCESSING_CLASS[op].sync === 'flush-gpu';
+}
+
 /** A group of events at the same helix level, ready for wave processing. */
 export interface HelixWave {
   level: number;

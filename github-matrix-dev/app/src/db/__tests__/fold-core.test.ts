@@ -13,6 +13,7 @@ import {
   AddressingHorizon,
   HELIX_LEVEL,
   MAX_PROMOTION_DEPTH,
+  OPERATOR_PROCESSING_CLASS,
   StoreHelixStateTracker,
   checkAndPromote,
   sortByHelixLevel,
@@ -20,6 +21,7 @@ import {
   mergeOperand,
   isFormulaOperand,
   deepEqual,
+  requiresGpuFlush,
 } from '../fold-core';
 import type { HelixStateTracker, PromotionCallbacks } from '../fold-core';
 import type { EoStore, IteratorOpts } from '../encrypted-store';
@@ -513,5 +515,60 @@ describe('checkAndPromote', () => {
     expect(syntheticCount).toBe(1);
     const pos = await tracker.getPosition('tgt');
     expect(pos?.declared).toContain('INS');
+  });
+});
+
+// ─── OPERATOR_PROCESSING_CLASS ───────────────────────────────────────────────
+
+describe('OPERATOR_PROCESSING_CLASS', () => {
+  const ALL_OPS: LoggableOperator[] = ['NUL', 'SIG', 'INS', 'SEG', 'CON', 'SYN', 'DEF', 'EVA', 'REC'];
+
+  it('has an entry for every loggable operator', () => {
+    for (const op of ALL_OPS) {
+      expect(OPERATOR_PROCESSING_CLASS[op]).toBeDefined();
+    }
+    expect(Object.keys(OPERATOR_PROCESSING_CLASS).sort()).toEqual([...ALL_OPS].sort());
+  });
+
+  it('routes the identity triad (NUL/SIG/INS) and CPU-side structure ops to the CPU layer', () => {
+    expect(OPERATOR_PROCESSING_CLASS.NUL.layer).toBe('cpu');
+    expect(OPERATOR_PROCESSING_CLASS.SIG.layer).toBe('cpu');
+    expect(OPERATOR_PROCESSING_CLASS.INS.layer).toBe('cpu');
+    expect(OPERATOR_PROCESSING_CLASS.SEG.layer).toBe('cpu');
+    expect(OPERATOR_PROCESSING_CLASS.DEF.layer).toBe('cpu');
+  });
+
+  it('routes CON to the CPU↔GPU boundary layer (CSR-shared)', () => {
+    expect(OPERATOR_PROCESSING_CLASS.CON.layer).toBe('boundary');
+    expect(OPERATOR_PROCESSING_CLASS.CON.memory).toBe('csr-shared');
+  });
+
+  it('routes SYN to the adaptive layer (CPU vs GPU reduction)', () => {
+    expect(OPERATOR_PROCESSING_CLASS.SYN.layer).toBe('adaptive');
+    expect(OPERATOR_PROCESSING_CLASS.SYN.memory).toBe('reduction');
+  });
+
+  it('routes EVA and REC to the GPU layer', () => {
+    expect(OPERATOR_PROCESSING_CLASS.EVA.layer).toBe('gpu');
+    expect(OPERATOR_PROCESSING_CLASS.REC.layer).toBe('gpu');
+  });
+
+  it('marks DEF as the only flush-gpu boundary', () => {
+    const flushOps = ALL_OPS.filter((op) => OPERATOR_PROCESSING_CLASS[op].sync === 'flush-gpu');
+    expect(flushOps).toEqual(['DEF']);
+  });
+
+  it('does not declare any push-state operators yet (reserved)', () => {
+    const pushOps = ALL_OPS.filter((op) => OPERATOR_PROCESSING_CLASS[op].sync === 'push-state');
+    expect(pushOps).toEqual([]);
+  });
+});
+
+describe('requiresGpuFlush', () => {
+  it('returns true only for DEF', () => {
+    expect(requiresGpuFlush('DEF')).toBe(true);
+    for (const op of ['NUL', 'SIG', 'INS', 'SEG', 'CON', 'SYN', 'EVA', 'REC'] as LoggableOperator[]) {
+      expect(requiresGpuFlush(op)).toBe(false);
+    }
   });
 });
