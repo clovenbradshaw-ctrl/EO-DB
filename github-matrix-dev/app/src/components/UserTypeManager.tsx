@@ -72,7 +72,6 @@ function slugify(label: string): string {
 export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, canManage }: UserTypeManagerProps) {
   const { theme } = useTheme();
   const mono = "'JetBrains Mono', monospace";
-  const [expanded, setExpanded] = useState(false);
   const [adding, setAdding] = useState(false);
   const [newLabel, setNewLabel] = useState('');
   const [newColor, setNewColor] = useState(DEFAULT_COLORS[0]);
@@ -253,66 +252,161 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
   }
 
   return (
-    <div style={{ marginTop: 12 }}>
-      <button
-        onClick={() => setExpanded(!expanded)}
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 6,
+    <div style={{
+      marginTop: 16,
+      border: `1px solid ${theme.border}`,
+      borderRadius: 8,
+      background: theme.bgCard,
+      overflow: 'hidden' as const,
+    }}>
+      {/* Section header — always visible */}
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        padding: '10px 14px',
+        background: theme.bgMuted,
+        borderBottom: `1px solid ${theme.border}`,
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{
+            fontFamily: mono, fontSize: 12, fontWeight: 600,
+            color: theme.text,
+          }}>
+            Personas
+          </span>
+          <span style={{
+            fontFamily: mono, fontSize: 10, fontWeight: 500,
+            color: theme.textMuted, background: theme.bgCard,
+            border: `1px solid ${theme.border}`,
+            padding: '1px 7px', borderRadius: 10,
+          }}>
+            {typeDefinitions.length}
+          </span>
+        </div>
+        {canManage && !adding && (
+          <button
+            onClick={() => setAdding(true)}
+            style={{
+              fontFamily: mono, fontSize: 11, fontWeight: 600,
+              color: '#fff', background: theme.accent,
+              border: 'none', borderRadius: 6,
+              padding: '5px 12px', cursor: 'pointer',
+            }}
+          >
+            + Add persona
+          </button>
+        )}
+      </div>
+
+      {/* Table column header row */}
+      {typeDefinitions.length > 0 && (
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'minmax(160px, 2fr) 90px minmax(120px, 1.4fr) minmax(160px, 2fr) auto',
+          gap: 12,
+          padding: '8px 14px',
+          background: theme.bg,
+          borderBottom: `1px solid ${theme.border}`,
+          fontFamily: mono,
+          fontSize: 9,
+          fontWeight: 600,
+          color: theme.textMuted,
+          textTransform: 'uppercase' as const,
+          letterSpacing: 0.5,
+        }}>
+          <div>Persona</div>
+          <div>Capability</div>
+          <div>Home</div>
+          <div>Overrides</div>
+          <div style={{ textAlign: 'right' as const }}>Configure</div>
+        </div>
+      )}
+
+      {/* Empty state */}
+      {typeDefinitions.length === 0 && !adding && (
+        <div style={{
+          padding: '24px 14px',
+          textAlign: 'center' as const,
           fontFamily: mono,
           fontSize: 11,
-          fontWeight: 600,
-          color: theme.textSecondary,
-          background: 'none',
-          border: 'none',
-          cursor: 'pointer',
-          padding: 0,
-        }}
-      >
-        <svg width="10" height="10" viewBox="0 0 10 10" fill="none"
-          style={{ transform: expanded ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s' }}>
-          <path d="M3 1.5L7 5L3 8.5" stroke={theme.textMuted} strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
-        </svg>
-        User types
-        <span style={{
-          fontFamily: mono, fontSize: 10, fontWeight: 500,
-          color: theme.textMuted, background: theme.bgMuted,
-          padding: '1px 6px', borderRadius: 10,
+          color: theme.textMuted,
         }}>
-          {typeDefinitions.length}
-        </span>
-      </button>
+          No personas defined for this space yet.
+          {canManage && (
+            <>
+              <br />
+              Click <strong>+ Add persona</strong> to create one — or create a
+              new space to auto-seed the default law-firm personas.
+            </>
+          )}
+        </div>
+      )}
 
-      {expanded && (
-        <div style={{ marginTop: 8 }}>
+      <div>
           {/* Existing types */}
           {typeDefinitions.map((def) => (
             <div key={def.id} style={{ borderBottom: `1px solid ${theme.border}` }}>
-              {/* Type row */}
+              {/* Type row — grid layout for table-like columns */}
               <div style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                padding: '6px 0',
+                display: 'grid',
+                gridTemplateColumns: 'minmax(160px, 2fr) 90px minmax(120px, 1.4fr) minmax(160px, 2fr) auto',
+                gap: 12,
+                alignItems: 'start',
+                padding: '10px 14px',
               }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' as const }}>
+              {/* Column 1: Persona name + description */}
+              <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 3 }}>
                 <UserTypeBadge label={def.label} color={def.color} />
                 {def.description && (
                   <span style={{ fontFamily: mono, fontSize: 9, color: theme.textMuted }}>
                     {def.description}
                   </span>
                 )}
-                {def.base_role && (
+              </div>
+              {/* Column 2: Capability */}
+              <div style={{ display: 'flex', alignItems: 'center' }}>
+                {def.base_role ? (
                   <span style={{
                     fontFamily: mono, fontSize: 9,
                     color: def.color || theme.textSecondary,
                     background: def.color ? `${def.color}14` : theme.bgMuted,
-                    padding: '1px 5px', borderRadius: 4,
+                    border: `1px solid ${def.color ? `${def.color}30` : theme.border}`,
+                    padding: '2px 6px', borderRadius: 4,
                   }}>
                     {ROLE_LABELS[def.base_role]}
                   </span>
+                ) : (
+                  <span style={{ fontFamily: mono, fontSize: 9, color: theme.textMuted }}>
+                    —
+                  </span>
                 )}
+              </div>
+              {/* Column 3: Home */}
+              <div style={{ display: 'flex', alignItems: 'center', minWidth: 0 }}>
+                {def.home ? (
+                  <span
+                    title={`Lands on ${def.home.view}${def.home.scope ? ` / ${def.home.scope}` : ''}`}
+                    style={{
+                      fontFamily: mono, fontSize: 9,
+                      color: def.color || theme.textSecondary,
+                      background: def.color ? `${def.color}14` : theme.bgMuted,
+                      padding: '2px 6px', borderRadius: 4,
+                      overflow: 'hidden' as const,
+                      textOverflow: 'ellipsis' as const,
+                      whiteSpace: 'nowrap' as const,
+                    }}
+                  >
+                    {def.home.view}{def.home.scope ? ` · ${def.home.scope.split('.').pop()}` : ''}
+                  </span>
+                ) : (
+                  <span style={{ fontFamily: mono, fontSize: 9, color: theme.textMuted }}>
+                    —
+                  </span>
+                )}
+              </div>
+              {/* Column 4: Overrides (badges) */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' as const }}>
                 {def.headline_metrics && def.headline_metrics.length > 0 && (
                   <span style={{
                     fontFamily: mono, fontSize: 9, color: theme.accent,
@@ -328,18 +422,6 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
                     padding: '1px 5px', borderRadius: 4,
                   }}>
                     {def.visible_views.length} views
-                  </span>
-                )}
-                {def.home && (
-                  <span
-                    title={`Lands on ${def.home.view}${def.home.scope ? ` / ${def.home.scope}` : ''}`}
-                    style={{
-                      fontFamily: mono, fontSize: 9, color: def.color || theme.textSecondary,
-                      background: def.color ? `${def.color}14` : theme.bgMuted,
-                      padding: '1px 5px', borderRadius: 4,
-                    }}
-                  >
-                    home: {def.home.view}
                   </span>
                 )}
                 {def.default_slices && Object.keys(def.default_slices).length > 0 && (
@@ -380,9 +462,19 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
                     {Object.keys(def.terminology).length} term{Object.keys(def.terminology).length !== 1 ? 's' : ''}
                   </span>
                 )}
+                {(!def.headline_metrics?.length &&
+                  def.visible_views == null &&
+                  !(def.default_slices && Object.keys(def.default_slices).length) &&
+                  !(def.quick_actions && def.quick_actions.length) &&
+                  !(def.terminology && Object.keys(def.terminology).length)) && (
+                  <span style={{ fontFamily: mono, fontSize: 9, color: theme.textMuted }}>
+                    —
+                  </span>
+                )}
               </div>
-              {canManage && (
-                <div style={{ display: 'flex', gap: 4 }}>
+              {/* Column 5: Configure buttons */}
+              {canManage ? (
+                <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' as const, justifyContent: 'flex-end' as const }}>
                   <button
                     onClick={() => handleStartEditMetrics(def)}
                     style={{
@@ -520,6 +612,8 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
                     remove
                   </button>
                 </div>
+              ) : (
+                <div />
               )}
               </div>
               {/* Views config panel — inline, expands when "views" button is clicked */}
@@ -945,23 +1039,10 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
             </div>
           )}
 
-          {/* Add new type */}
-          {canManage && !adding && (
-            <button
-              onClick={() => setAdding(true)}
-              style={{
-                fontFamily: mono, fontSize: 10, color: theme.accent,
-                background: 'none', border: 'none', cursor: 'pointer',
-                padding: '6px 0',
-              }}
-            >
-              + Add user type
-            </button>
-          )}
-
+          {/* Add new type — header has its own "+ Add persona" button */}
           {canManage && adding && (
             <div style={{
-              margin: '8px 0',
+              margin: '8px 14px',
               padding: 10,
               background: theme.bg,
               border: `1px solid ${theme.border}`,
@@ -1064,7 +1145,6 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
             </div>
           )}
         </div>
-      )}
     </div>
   );
 }
