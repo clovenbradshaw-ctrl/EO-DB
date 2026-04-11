@@ -728,6 +728,35 @@ function buildFoldEntry(target: string): FoldEntry {
           index = buildIndex(log);
         }
 
+        // ── Compute the real log head seq from the freshly-built index ───────
+        // `appendRaw` (used by bulk imports / Airtable sync) writes straight to
+        // the OPFS log and updates the in-memory `position`, but does NOT call
+        // checkAdaptiveCheckpoint, so the on-disk fold-position.bin checkpoint
+        // lags behind the log when events are ingested between checkpoints.
+        // On init, `position` is restored from that stale checkpoint. If we
+        // reported `position.seq` as `headSeq`, it could equal the equally-
+        // stale kv-snapshot seq on the main thread, causing init's "nothingNew"
+        // fast-path to skip scanLog/replay entirely — and the user sees an
+        // empty database even though every event is still on disk.
+        //
+        // Derive the true log head from the index (which was just built from
+        // every log entry) and advance nextSeq defensively. We intentionally
+        // do NOT touch position.seq or the rest of position's structural state
+        // here: the main thread will run scanLog + replayFromLog against its
+        // memStore, which is where structural state actually lives during a
+        // session. The worker's position catches up naturally as future
+        // events flow through appendRaw / writeEvent.
+        let logHeadSeq = position.seq;
+        for (const seq of index.seqToOffset.keys()) {
+          if (seq > logHeadSeq) logHeadSeq = seq;
+        }
+        if (logHeadSeq > position.seq) {
+          console.warn(
+            `[EO-DB] fold checkpoint stale (checkpoint seq=${position.seq}, log head=${logHeadSeq}) — reporting log head as ready headSeq`,
+          );
+          nextSeq = Math.max(nextSeq, logHeadSeq);
+        }
+
         const elapsed = performance.now() - t0;
         if (position.seq > 0) {
           avgProcessMicrosPerEvent = (elapsed * 1000) / position.seq;
@@ -747,7 +776,7 @@ function buildFoldEntry(target: string): FoldEntry {
             if (reg.mode === 'fold') evaluateFormula(reg);
           }
         }
-        post({ id: -1, type: 'ready', headSeq: position.seq, fastPath });
+        post({ id: -1, type: 'ready', headSeq: logHeadSeq, fastPath });
         break;
       }
 

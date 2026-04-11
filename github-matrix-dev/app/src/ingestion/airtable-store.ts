@@ -18,7 +18,9 @@ export type SyncLogEventType =
   | 'sync_complete'
   | 'hydration_complete'
   | 'sync_error'
-  | 'sync_start';
+  | 'sync_start'
+  /** Raw pre-fold bundle was uploaded to Drive as provenance. */
+  | 'provenance_uploaded';
 
 export interface SyncLogEntry {
   /** Unix ms timestamp. */

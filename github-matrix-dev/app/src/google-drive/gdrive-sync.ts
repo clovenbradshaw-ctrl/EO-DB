@@ -642,6 +642,72 @@ export class GDriveSyncService {
     console.log(`[EO-DB] fullPushToGDrive: complete — ${events.length} events at seq ${toSeq}`);
   }
 
+  // ── Provenance blobs ──────────────────────────────────────────
+  //
+  // A provenance blob is the raw, *unmodified* payload we received from an
+  // upstream source (e.g. the Airtable API) at the moment a bulk import was
+  // triggered. The blob is uploaded to Drive BEFORE the import is folded into
+  // operators, so we always have an audit trail of exactly what came in —
+  // even if the subsequent fold crashes, gets cancelled, or is later
+  // superseded. Each blob gets a unique filename and the file id is linked
+  // from an `import:<source>:<uuid>` record in the event log; callers can
+  // pull it back later via downloadProvenance().
+
+  /**
+   * Upload a raw provenance blob to this space's Drive folder.
+   *
+   * The blob is encrypted with the viewer-tier key (same policy as the log
+   * file) so only space members can read it back. Returns the generated
+   * filename and the Drive file id so the caller can reference it from an
+   * in-log import record.
+   */
+  async uploadProvenance(
+    rawBytes: Uint8Array,
+    opts: { source: string; importId: string; contentType?: string; label?: string },
+  ): Promise<{ fileName: string; driveFileId: string; byteSize: number }> {
+    if (this.destroyed) throw new Error('GDriveSyncService destroyed');
+    this.activateSpaceRoom();
+
+    // Filename: `provenance-<source>-<importId>.bin`. importId is supplied by
+    // the caller (typically a UUID or timestamped token) so the event-log
+    // record can reference it deterministically.
+    const safeSource = opts.source.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const safeId = opts.importId.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const fileName = `provenance-${safeSource}-${safeId}.bin`;
+
+    console.log(
+      `[EO-DB] uploadProvenance: uploading ${rawBytes.byteLength} bytes → ${fileName}`,
+    );
+
+    const encrypted = await this.encryptBinary(rawBytes);
+    const result = await gdriveStoreNamed(this.accessToken, encrypted, this.dataType, fileName);
+
+    console.log(`[EO-DB] uploadProvenance: stored ${fileName} (drive id=${result.drive_file_id})`);
+    return {
+      fileName,
+      driveFileId: result.drive_file_id,
+      byteSize: rawBytes.byteLength,
+    };
+  }
+
+  /**
+   * Download a previously uploaded provenance blob by filename and return the
+   * decrypted raw bytes. Used by the UI's "download provenance" action so the
+   * user can save the exact payload that produced a given import record.
+   */
+  async downloadProvenance(fileName: string): Promise<Uint8Array | null> {
+    if (this.destroyed) return null;
+    this.activateSpaceRoom();
+    try {
+      const result = await gdriveRetrieveNamed(this.accessToken, this.dataType, fileName);
+      if (!result?.ok) return null;
+      return await this.decryptBinary(result.data);
+    } catch (e) {
+      console.warn(`[EO-DB] downloadProvenance failed for ${fileName}:`, e);
+      return null;
+    }
+  }
+
   /**
    * Download all accessible recent buffers (viewer always; restricted/admin if keys held).
    * Merges and deduplicates events from all tiers.

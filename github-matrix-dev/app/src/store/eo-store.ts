@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import type { EoStore } from '../db/encrypted-store';
-import { createMemoryStore } from '../db/memory-store';
+import { createMemoryStore, type MemoryStore } from '../db/memory-store';
 import { replayFromLog, processEvent, processEventsBulk } from '../db/fold';
 import { horizonGet, type HorizonOpts } from '../db/horizon';
 import { getState, getStateByPrefix, getStateByPrefixPage, type StatePage } from '../db/state';
@@ -360,13 +360,34 @@ export const useEoStore = create<EoDbState>((set, get) => ({
   },
 
   async manualSnapshot() {
-    const { store, gdriveSync } = get();
+    const { store, workerClient, recentEvents, gdriveSync } = get();
     if (!store) throw new Error('Store not initialized');
+
+    // Persist the current in-memory KV state to OPFS first. Without this, a
+    // page refresh after a bulk import + "Take Snapshot" would load the last
+    // *init-time* snapshot (which predates the import) and — depending on
+    // whether the stale fold-position checkpoint matches that snapshot — could
+    // short-circuit the scanLog/replayFromLog recovery path entirely. Saving
+    // the kv-snapshot here makes the Snapshot button actually durable locally.
+    const lastSeq = await store.getCurrentSeq();
+    const memStore = store as MemoryStore;
+    if (workerClient && typeof memStore.getKvEntries === 'function') {
+      try {
+        await saveKvSnapshot(workerClient, memStore.getKvEntries(), recentEvents, lastSeq);
+      } catch (e) {
+        console.warn('[EO-DB] manualSnapshot: kv snapshot save failed:', e);
+      }
+      // Bake the worker's init-cache alongside so the next page refresh can
+      // skip buildIndex() when the log hasn't moved since this snapshot.
+      saveInitCache(workerClient).catch((e) =>
+        console.warn('[EO-DB] manualSnapshot: init-cache save failed:', e),
+      );
+    }
+
     if (gdriveSync) {
       await gdriveSync.forceSave();
     }
-    const seq = await store.getCurrentSeq();
-    return { mxc: 'gdrive', seq };
+    return { mxc: 'gdrive', seq: lastSeq };
   },
 
   teardown() {

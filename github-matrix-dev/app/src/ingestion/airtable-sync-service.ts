@@ -22,6 +22,7 @@
  */
 
 import type { MatrixClient, MatrixEvent } from 'matrix-js-sdk';
+import { pack } from 'msgpackr';
 import type { EoStore } from '../db/encrypted-store';
 import { AirtableClient } from './airtable-client';
 import {
@@ -30,9 +31,12 @@ import {
   type SyncCustomization,
   type HydrationResult,
   type UpdateSyncResult,
+  type RawImportBundle,
+  type ProvenanceResult,
 } from './airtable-sync';
 import { useAirtableStore, DEFAULT_SYNC_SETTINGS, type AirtableSyncSettings, type SyncLogEntry } from './airtable-store';
 import { airtableSyncEventTypes } from '../lib/matrix-domain';
+import type { GDriveSyncService } from '../google-drive/gdrive-sync';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -77,6 +81,13 @@ export class AirtableSyncService {
     private agent: string,
     private getApiKey: () => string | null,
     private customization?: SyncCustomization,
+    /**
+     * Optional Google Drive sync reference. When supplied, bulk hydrations
+     * upload the raw Airtable payload to Drive for provenance BEFORE any
+     * records are folded, and then rewrite the on-Drive .eodb log with the
+     * processed events when the sync finishes.
+     */
+    private gdriveSync?: GDriveSyncService,
   ) {
     this.deviceId = this.matrixClient.getDeviceId() ?? `browser-${Date.now()}`;
   }
@@ -422,11 +433,14 @@ export class AirtableSyncService {
       };
 
       let result: HydrationResult | UpdateSyncResult;
+      let ranHydration = false;
 
       if (!isHydrated) {
         result = await hydrationSync(this.store, client, this.agent, {
           customization: effectiveCustomization,
+          onRawImport: (bundle) => this.persistBulkImportProvenance(bundle),
         });
+        ranHydration = true;
       } else {
         // 'fullDiff' strategy: pass null cursor by re-hydrating with
         // preserveExisting=false, so every field is compared.
@@ -434,12 +448,25 @@ export class AirtableSyncService {
         if (syncSettings.syncStrategy === 'fullDiff') {
           result = await hydrationSync(this.store, client, this.agent, {
             customization: { ...effectiveCustomization, preserveExisting: false },
+            onRawImport: (bundle) => this.persistBulkImportProvenance(bundle),
           });
+          ranHydration = true;
         } else {
           result = await updateSync(this.store, client, this.agent, {
             customization: effectiveCustomization,
           });
         }
+      }
+
+      // After a bulk hydration completes, rewrite the .eodb log file on
+      // Drive so the cumulative log matches the freshly-folded state. This
+      // is the "upload the content to google drive by rewriting the .eodb"
+      // step of the provenance-first bulk import flow. Fire-and-forget: if
+      // Drive is flaky, the normal rolling buffer + next bake will catch up.
+      if (ranHydration && this.gdriveSync && result.total_records_ingested > 0) {
+        this.gdriveSync.fullPushToGDrive().catch((e) =>
+          console.warn('[EO-DB] post-hydration fullPushToGDrive failed:', e),
+        );
       }
 
       useAirtableStore.getState().setLastSyncResult(result);
@@ -487,6 +514,53 @@ export class AirtableSyncService {
         device: this.deviceId,
       });
     }
+  }
+
+  /**
+   * Provenance step (1) of the bulk import flow — pack the raw bundle into a
+   * binary blob and upload it to Drive BEFORE the fold runs. The returned
+   * ProvenanceResult is handed back to processHydrationBundle which emits an
+   * `import.airtable.<importId>` record linking to the Drive file, so future
+   * UI can list imports and offer a one-click re-download.
+   *
+   * Throws if upload fails, which aborts the hydration (we only fold after
+   * provenance is durably stored).
+   */
+  private async persistBulkImportProvenance(
+    bundle: RawImportBundle,
+  ): Promise<ProvenanceResult | void> {
+    if (!this.gdriveSync) return;
+
+    // Serialize the bundle exactly as collected — no field normalization,
+    // no renaming, no flattening. Msgpack gives us a compact, deterministic
+    // binary that round-trips through unpack() for later re-imports.
+    const packed = pack(bundle) as Uint8Array;
+    const rawBytes = new Uint8Array(
+      packed.buffer.slice(packed.byteOffset, packed.byteOffset + packed.byteLength),
+    );
+
+    const totalRecords = bundle.tables.reduce((s, t) => s + t.records.length, 0);
+    console.log(
+      `[EO-DB] Airtable bulk import: uploading provenance (${totalRecords} records, ${rawBytes.byteLength} bytes)…`,
+    );
+
+    const result = await this.gdriveSync.uploadProvenance(rawBytes, {
+      source: 'airtable',
+      importId: bundle.importId,
+      contentType: 'application/vnd.eo-db.airtable-import.msgpack',
+      label: `airtable-${bundle.importId}`,
+    });
+
+    useAirtableStore.getState().addSyncLogEntry({
+      ts: Date.now(),
+      type: 'provenance_uploaded',
+      source: 'local',
+      syncer: this.agent,
+      device: this.deviceId,
+      detail: `${totalRecords} records → ${result.fileName} (${rawBytes.byteLength} B)`,
+    });
+
+    return result;
   }
 
   private async signalCompletion(

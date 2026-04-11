@@ -13,6 +13,7 @@
  */
 
 import { useState, useEffect, useRef } from 'react';
+import { pack } from 'msgpackr';
 import type { MatrixClient } from 'matrix-js-sdk';
 import { useEoStore } from '../store/eo-store';
 import type { MatrixSession } from '../matrix/client';
@@ -24,7 +25,10 @@ import {
   updateSync,
   type HydrationManifest,
   type SyncCustomization,
+  type RawImportBundle,
+  type ProvenanceResult,
 } from '../ingestion/airtable-sync';
+import type { GDriveSyncService } from '../google-drive/gdrive-sync';
 import { useAirtableStore, DEFAULT_SYNC_SETTINGS, type SyncLogEntry } from '../ingestion/airtable-store';
 import { AirtableSyncService } from '../ingestion/airtable-sync-service';
 import { useTheme, type Theme } from '../theme';
@@ -71,6 +75,31 @@ function guessNameField(fields: Array<{ id: string; name: string; type: string }
   return undefined;
 }
 
+/**
+ * Pack a RawImportBundle as msgpack and upload it to Drive for provenance.
+ *
+ * Returns undefined when gdriveSync isn't available yet (the hydration will
+ * still run, but without a linked import record — same behaviour as before
+ * this feature was added). Throws if the upload itself fails so the caller's
+ * hydration aborts before any records are folded.
+ */
+async function uploadBulkImportProvenance(
+  bundle: RawImportBundle,
+  gdriveSync: GDriveSyncService | null,
+): Promise<ProvenanceResult | void> {
+  if (!gdriveSync) return;
+  const packed = pack(bundle) as Uint8Array;
+  const rawBytes = new Uint8Array(
+    packed.buffer.slice(packed.byteOffset, packed.byteOffset + packed.byteLength),
+  );
+  return gdriveSync.uploadProvenance(rawBytes, {
+    source: 'airtable',
+    importId: bundle.importId,
+    contentType: 'application/vnd.eo-db.airtable-import.msgpack',
+    label: `airtable-${bundle.importId}`,
+  });
+}
+
 // ─── Component ──────────────────────────────────────────────────────────────
 
 /**
@@ -87,6 +116,7 @@ export function AirtableSettingsSection({
   roomId?: string | null;
 }) {
   const store = useEoStore((s) => s.store);
+  const gdriveSync = useEoStore((s) => s.gdriveSync);
   const { theme } = useTheme();
   const s = makeStyles(theme);
 
@@ -297,8 +327,25 @@ export function AirtableSettingsSection({
       });
 
       const result = mode === 'hydrate'
-        ? await hydrationSync(store, client, session.userId, { onProgress, customization })
+        ? await hydrationSync(store, client, session.userId, {
+            onProgress,
+            customization,
+            // Provenance-first bulk import: upload the raw bundle to Drive
+            // BEFORE anything gets folded, then emit an import record that
+            // links to the blob. If gdriveSync isn't hooked up yet, the hook
+            // is a no-op and the old behaviour is preserved.
+            onRawImport: (bundle) => uploadBulkImportProvenance(bundle, gdriveSync),
+          })
         : await updateSync(store, client, session.userId, { onProgress, customization });
+
+      // After a successful hydration, rewrite the on-Drive .eodb log file so
+      // the cumulative log reflects the freshly-folded state (step (3) of the
+      // provenance-first bulk import flow).
+      if (mode === 'hydrate' && gdriveSync && result.total_records_ingested > 0) {
+        gdriveSync.fullPushToGDrive().catch((e) =>
+          console.warn('[EO-DB] post-hydration fullPushToGDrive failed:', e),
+        );
+      }
 
       const ingested = result.total_records_ingested;
       const skipped = result.total_records_skipped;
@@ -353,6 +400,10 @@ export function AirtableSettingsSection({
         session.userId,
         () => useAirtableStore.getState().apiKey,
         buildCustomization(),
+        // Pass gdriveSync so the service can upload provenance blobs and
+        // rewrite the .eodb log after bulk hydrations. Undefined means the
+        // Drive features degrade gracefully to no-ops.
+        gdriveSync ?? undefined,
       );
       syncServiceRef.current = service;
       useAirtableStore.getState().setContinuousSync(true);
@@ -814,21 +865,23 @@ function SyncLogRow({ entry, userId }: { entry: SyncLogEntry; userId: string }) 
   const isMe = entry.syncer === userId;
 
   const icon: Record<SyncLogEntry['type'], string> = {
-    lock_acquired:     '🔒',
-    lock_released:     '🔓',
-    sync_complete:     '✓',
-    hydration_complete:'✓',
-    sync_error:        '✗',
-    sync_start:        '▶',
+    lock_acquired:      '🔒',
+    lock_released:      '🔓',
+    sync_complete:      '✓',
+    hydration_complete: '✓',
+    sync_error:         '✗',
+    sync_start:         '▶',
+    provenance_uploaded:'↑',
   };
 
   const label: Record<SyncLogEntry['type'], string> = {
-    lock_acquired:     'acquired lock',
-    lock_released:     'released lock',
-    sync_complete:     'sync complete',
-    hydration_complete:'full sync complete',
-    sync_error:        'sync error',
-    sync_start:        'started sync',
+    lock_acquired:      'acquired lock',
+    lock_released:      'released lock',
+    sync_complete:      'sync complete',
+    hydration_complete: 'full sync complete',
+    sync_error:         'sync error',
+    sync_start:         'started sync',
+    provenance_uploaded:'uploaded provenance',
   };
 
   const color: Partial<Record<SyncLogEntry['type'], string>> = {
