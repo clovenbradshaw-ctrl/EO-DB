@@ -17,13 +17,14 @@ import {
   StoreHelixStateTracker,
   checkAndPromote,
   sortByHelixLevel,
+  splitWaveIntoSteps,
   isHelixValid,
   mergeOperand,
   isFormulaOperand,
   deepEqual,
   requiresGpuFlush,
 } from '../fold-core';
-import type { HelixStateTracker, PromotionCallbacks } from '../fold-core';
+import type { HelixStateTracker, PromotionCallbacks, WaveStep } from '../fold-core';
 import type { EoStore, IteratorOpts } from '../encrypted-store';
 import type { EoEventInput, HelixPosition, LoggableOperator } from '../types';
 
@@ -569,6 +570,128 @@ describe('requiresGpuFlush', () => {
     expect(requiresGpuFlush('DEF')).toBe(true);
     for (const op of ['NUL', 'SIG', 'INS', 'SEG', 'CON', 'SYN', 'EVA', 'REC'] as LoggableOperator[]) {
       expect(requiresGpuFlush(op)).toBe(false);
+    }
+  });
+});
+
+// ─── splitWaveIntoSteps (Phase B — Barrier extraction) ──────────────────────
+
+describe('splitWaveIntoSteps', () => {
+  function mk(op: EoEventInput['op'], target = 'tgt'): EoEventInput {
+    return {
+      op,
+      target,
+      operand: {},
+      agent: '@harness:example.com',
+      ts: '2025-01-01T00:00:00.000Z',
+      acquired_ts: '2025-01-01T00:00:00.000Z',
+    };
+  }
+
+  it('returns an empty array for an empty wave', () => {
+    const steps = splitWaveIntoSteps({ level: 1, events: [] });
+    expect(steps).toEqual([]);
+  });
+
+  it('produces a single non-barrier step for a wave with no flush-gpu ops', () => {
+    const events = [mk('INS', 'a'), mk('INS', 'b'), mk('INS', 'c')];
+    const steps = splitWaveIntoSteps({ level: 1, events });
+    expect(steps).toHaveLength(1);
+    expect(steps[0].barrier).toBe(false);
+    expect(steps[0].events).toEqual(events);
+  });
+
+  it('produces a single barrier step for a wave with one DEF', () => {
+    const events = [mk('DEF', 'a.f')];
+    const steps = splitWaveIntoSteps({ level: 4, events });
+    expect(steps).toHaveLength(1);
+    expect(steps[0].barrier).toBe(true);
+    expect(steps[0].events).toEqual(events);
+  });
+
+  it('does NOT coalesce consecutive DEFs into one step', () => {
+    // Rule pin: each flush-gpu op lives in its own single-event step. A
+    // wave of two DEFs produces two barrier steps, not one. The "skip
+    // redundant drain" optimization belongs inside drainGpuInFlight, not
+    // in the splitter.
+    const d1 = mk('DEF', 'a.f');
+    const d2 = mk('DEF', 'b.f');
+    const steps = splitWaveIntoSteps({ level: 4, events: [d1, d2] });
+    expect(steps).toHaveLength(2);
+    expect(steps[0]).toEqual({ events: [d1], barrier: true });
+    expect(steps[1]).toEqual({ events: [d2], barrier: true });
+  });
+
+  it('alternates non-barrier and barrier steps for interleaved non-flush / flush events', () => {
+    const i1 = mk('INS', 'a');
+    const d1 = mk('DEF', 'a.f');
+    const i2 = mk('INS', 'b');
+    const d2 = mk('DEF', 'b.f');
+    const i3 = mk('INS', 'c');
+    const steps = splitWaveIntoSteps({
+      level: 99, // doesn't matter — splitter is level-agnostic
+      events: [i1, d1, i2, d2, i3],
+    });
+    expect(steps).toHaveLength(5);
+    expect(steps[0]).toEqual({ events: [i1], barrier: false });
+    expect(steps[1]).toEqual({ events: [d1], barrier: true });
+    expect(steps[2]).toEqual({ events: [i2], barrier: false });
+    expect(steps[3]).toEqual({ events: [d2], barrier: true });
+    expect(steps[4]).toEqual({ events: [i3], barrier: false });
+  });
+
+  it('groups consecutive non-flush events into a single step around a DEF', () => {
+    const c1 = mk('CON', 'a.f');
+    const c2 = mk('CON', 'a.g');
+    const d = mk('DEF', 'a.f');
+    const c3 = mk('CON', 'b.f');
+    const c4 = mk('CON', 'b.g');
+    const steps = splitWaveIntoSteps({ level: 2, events: [c1, c2, d, c3, c4] });
+    expect(steps).toHaveLength(3);
+    expect(steps[0]).toEqual({ events: [c1, c2], barrier: false });
+    expect(steps[1]).toEqual({ events: [d], barrier: true });
+    expect(steps[2]).toEqual({ events: [c3, c4], barrier: false });
+  });
+
+  it('handles a trailing non-flush event after a flush event', () => {
+    const c1 = mk('CON', 'a');
+    const d = mk('DEF', 'a.f');
+    const c2 = mk('CON', 'b');
+    const steps = splitWaveIntoSteps({ level: 2, events: [c1, d, c2] });
+    expect(steps).toHaveLength(3);
+    expect(steps[0]).toEqual({ events: [c1], barrier: false });
+    expect(steps[1]).toEqual({ events: [d], barrier: true });
+    expect(steps[2]).toEqual({ events: [c2], barrier: false });
+  });
+
+  it('preserves total event order: flattened steps equal the input events', () => {
+    // Every input event appears in exactly one step, and the concatenation
+    // of step.events across all steps equals the original input list.
+    const events = [
+      mk('INS', 'a'),
+      mk('CON', 'a.f'),
+      mk('DEF', 'a.f'),
+      mk('DEF', 'a.g'),
+      mk('SYN', 'a'),
+      mk('DEF', 'b.f'),
+      mk('EVA', 'c.f'),
+    ];
+    const steps = splitWaveIntoSteps({ level: 99, events });
+    const flattened = steps.flatMap((s: WaveStep) => s.events);
+    expect(flattened).toEqual(events);
+
+    // Every barrier step has exactly one event whose op returns true from
+    // requiresGpuFlush, and every non-barrier step contains only
+    // non-flush events.
+    for (const step of steps) {
+      if (step.barrier) {
+        expect(step.events).toHaveLength(1);
+        expect(requiresGpuFlush(step.events[0].op as LoggableOperator)).toBe(true);
+      } else {
+        for (const e of step.events) {
+          expect(requiresGpuFlush(e.op as LoggableOperator)).toBe(false);
+        }
+      }
     }
   });
 });
