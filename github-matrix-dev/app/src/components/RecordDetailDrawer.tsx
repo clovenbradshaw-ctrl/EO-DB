@@ -6,6 +6,11 @@ import { useSliceStore } from '../store/slice-store';
 import { useTheme, type Theme } from '../theme';
 import type { LayoutDisplayType } from './detail-layout';
 import type { TableSliceConfig, SavedSlice } from './slice-types';
+import {
+  loadSavedDrawerWidth,
+  clampDrawerWidth,
+  saveDrawerWidth,
+} from './drawer-dimensions';
 
 interface RecordDetailDrawerProps {
   target: string;
@@ -61,31 +66,6 @@ const TYPE_COLORS: Record<string, string> = {
   note: '#7c5cbf',
 };
 
-const DRAWER_WIDTH_KEY = 'eo-record-drawer-width';
-const DRAWER_DEFAULT_WIDTH = 640;
-const DRAWER_MIN_WIDTH = 360;
-const DRAWER_MAX_WIDTH = 1200;
-
-function loadSavedDrawerWidth(): number {
-  if (typeof window === 'undefined') return DRAWER_DEFAULT_WIDTH;
-  try {
-    const raw = window.localStorage.getItem(DRAWER_WIDTH_KEY);
-    if (!raw) return DRAWER_DEFAULT_WIDTH;
-    const n = parseInt(raw, 10);
-    if (!Number.isFinite(n)) return DRAWER_DEFAULT_WIDTH;
-    return n;
-  } catch {
-    return DRAWER_DEFAULT_WIDTH;
-  }
-}
-
-function clampDrawerWidth(w: number): number {
-  const maxByViewport = typeof window !== 'undefined'
-    ? Math.min(DRAWER_MAX_WIDTH, Math.max(DRAWER_MIN_WIDTH, window.innerWidth - 240))
-    : DRAWER_MAX_WIDTH;
-  return Math.max(DRAWER_MIN_WIDTH, Math.min(maxByViewport, w));
-}
-
 export function RecordDetailDrawer({ target, onClose, onNavigate, profileFields, isMobile, layoutType, tableRecordTargets, userId }: RecordDetailDrawerProps) {
   const { theme } = useTheme();
   const s = makeStyles(theme);
@@ -137,7 +117,7 @@ export function RecordDetailDrawer({ target, onClose, onNavigate, profileFields,
     const onUp = () => {
       setIsResizing(false);
       resizeStartRef.current = null;
-      try { window.localStorage.setItem(DRAWER_WIDTH_KEY, String(drawerWidth)); } catch { /* ignore */ }
+      saveDrawerWidth(drawerWidth);
     };
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);

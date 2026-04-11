@@ -62,6 +62,7 @@ const ComposeView = lazyWithRetry(() => import('./ComposeView').then(m => ({ def
 const GraphView = lazyWithRetry(() => import('./GraphView').then(m => ({ default: m.GraphView })));
 const SchemaView = lazyWithRetry(() => import('./SchemaView').then(m => ({ default: m.SchemaView })));
 const KanbanView = lazyWithRetry(() => import('./KanbanView').then(m => ({ default: m.KanbanView })));
+const CalendarView = lazyWithRetry(() => import('./CalendarView').then(m => ({ default: m.CalendarView })));
 const SettingsView = lazyWithRetry(() => import('./SettingsView').then(m => ({ default: m.SettingsView })));
 const SpaceMembers = lazyWithRetry(() => import('./SpaceMembers').then(m => ({ default: m.SpaceMembers })));
 const ImportView = lazyWithRetry(() => import('./ImportView').then(m => ({ default: m.ImportView })));
@@ -2761,14 +2762,27 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                             return sv?.readOnlyForTypes?.includes(activeUserType) ?? false;
                           })()}
                         />
+                      ) : activeSliceType === 'calendar' ? (
+                        <CalendarView
+                          scope={selectedScope}
+                          onSelectRecord={(rec) => navigate({ record: rec })}
+                          activeRecord={selectedRecord}
+                          session={{ userId: session.userId }}
+                          permissions={currentPermissions}
+                          sliceReadOnly={(() => {
+                            if (!activeUserType) return false;
+                            const sig = sliceSigs[selectedScope];
+                            if (!sig?.activeSliceId) return false;
+                            const sv = savedSlices[sig.activeSliceId];
+                            return sv?.readOnlyForTypes?.includes(activeUserType) ?? false;
+                          })()}
+                        />
                       ) : (
                         <div style={{
                           flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
                           flexDirection: 'column' as const, gap: 8, color: theme.textMuted,
                         }}>
-                          <div style={{ fontSize: 28, opacity: 0.3 }}>
-                            {activeSliceType === 'calendar' ? '\u25F7' : '\u25A6'}
-                          </div>
+                          <div style={{ fontSize: 28, opacity: 0.3 }}>{'\u25A6'}</div>
                           <div style={{ fontSize: 13, fontWeight: 500 }}>
                             {activeSliceType.charAt(0).toUpperCase() + activeSliceType.slice(1)} slice
                           </div>

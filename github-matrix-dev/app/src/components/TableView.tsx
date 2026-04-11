@@ -2419,17 +2419,73 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
             }}
             onClick={(e) => e.stopPropagation()}
           >
-            <SchemaFieldPanel
-              fieldKey={fieldPanelKey}
-              fieldSchema={fieldSchemas.get(fieldPanelKey)}
-              valueStats={fieldValueStats}
-              onClose={() => setFieldPanelKey(null)}
-              onSaveLabel={(label) => handleColumnRename(fieldPanelKey, label)}
-              onAddConstraint={(name, value) => handleAddConstraint(fieldPanelKey, name, value)}
-              onRemoveConstraint={(name) => handleRemoveConstraint(fieldPanelKey, name)}
-              onSetResolution={(policy) => handleSetResolution(fieldPanelKey, policy)}
-              onClearResolution={() => handleClearResolution(fieldPanelKey)}
-            />
+            {(() => {
+              const fs = fieldSchemas.get(fieldPanelKey);
+              const activeSort = sorts.find((s) => s.field === fieldPanelKey);
+              const isSystemCol = fieldPanelKey === '_record' || fieldPanelKey === '_last_updated';
+              const resolvedType: string = fs?.typeDef?.value?.type
+                ?? entityColumns.find((c) => c.key === fieldPanelKey)?.type
+                ?? 'text';
+              return (
+                <SchemaFieldPanel
+                  fieldKey={fieldPanelKey}
+                  fieldSchema={fs}
+                  scope={scope}
+                  valueStats={fieldValueStats}
+                  onClose={() => setFieldPanelKey(null)}
+                  onSaveLabel={(label) => handleColumnRename(fieldPanelKey, label)}
+                  onAddConstraint={(name, value) => handleAddConstraint(fieldPanelKey, name, value)}
+                  onRemoveConstraint={(name) => handleRemoveConstraint(fieldPanelKey, name)}
+                  onSetResolution={(policy) => handleSetResolution(fieldPanelKey, policy)}
+                  onClearResolution={() => handleClearResolution(fieldPanelKey)}
+                  sortDirection={activeSort?.direction ?? null}
+                  isDisplayField={displayField === fieldPanelKey}
+                  isSystemColumn={isSystemCol}
+                  isLastModifiedTime={resolvedType === 'lastModifiedTime'}
+                  onSortAsc={() => setSorts([{ id: crypto.randomUUID(), field: fieldPanelKey, direction: 'asc' }])}
+                  onSortDesc={() => setSorts([{ id: crypto.randomUUID(), field: fieldPanelKey, direction: 'desc' }])}
+                  onRemoveSort={() => setSorts(sorts.filter((s) => s.field !== fieldPanelKey))}
+                  onFilterBy={() => {
+                    const col = entityColumns.find((c) => c.key === fieldPanelKey);
+                    setAdvancedFilters([
+                      ...advancedFilters,
+                      {
+                        id: crypto.randomUUID(),
+                        field: fieldPanelKey,
+                        operator: col?.type === 'number' ? 'gt' : 'contains',
+                        value: '',
+                      },
+                    ]);
+                  }}
+                  onChangeType={isSystemCol ? undefined : () => {
+                    setColumnTypeSelector({ key: fieldPanelKey, x: 0, y: 0 });
+                    setFieldPanelKey(null);
+                  }}
+                  onConfigureWatchedFields={resolvedType === 'lastModifiedTime' ? () => {
+                    setWatchedFieldsPicker({ key: fieldPanelKey, x: 0, y: 0 });
+                    setFieldPanelKey(null);
+                  } : undefined}
+                  onToggleDisplayField={isSystemCol ? undefined : async () => {
+                    const newField = displayField === fieldPanelKey ? null : fieldPanelKey;
+                    try {
+                      await dispatch({
+                        op: 'DEF',
+                        target: scope,
+                        operand: { _displayField: newField },
+                        agent: `user:${session.userId}`,
+                        ts: new Date().toISOString(),
+                        acquired_ts: new Date().toISOString(),
+                      });
+                      setAuditableDisplayField(newField);
+                    } catch { /* ignore */ }
+                  }}
+                  onHideColumn={() => {
+                    sliceStore.toggleHiddenColumn(scope, fieldPanelKey);
+                    setFieldPanelKey(null);
+                  }}
+                />
+              );
+            })()}
           </div>
         </>
       )}

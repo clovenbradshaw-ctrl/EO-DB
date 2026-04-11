@@ -172,33 +172,38 @@ function LevelBadge({ level }: { level: number }) {
 // intent) and must NOT be excluded — only pure envelope metadata goes here.
 const DEF_METADATA_KEYS = new Set(['_airtable', '_prev', '_sigs']);
 
+// A DEF operand uses the legacy explicit-diff shape when it has at least one
+// of `from`/`to`/`old_value`/`new_value`. These are rendered as a single
+// old → new arrow. All other DEF shapes are key-value diffs extracted via
+// getDefDiffFields.
+function isDefDiff(operand: any): boolean {
+  return operand && (
+    operand.from !== undefined ||
+    operand.to !== undefined ||
+    operand.old_value !== undefined ||
+    operand.new_value !== undefined
+  );
+}
+
 /**
  * Extract the diffed field entries from a DEF operand. DEF events carry only
  * the fields that were changed by the update, but they can arrive in several
  * shapes:
  *   - { fields: { ... }, _airtable: {...} }  (Airtable sync, cell edits)
  *   - { name: 'foo', type: 'bar' }           (direct top-level fields)
- *   - { field: 'x', from: 'a', to: 'b' }     (legacy explicit diff shape)
  */
 function getDefDiffFields(operand: any): Array<[string, unknown]> {
   if (!operand || typeof operand !== 'object') return [];
 
-  // Legacy explicit-diff shape
-  if (
-    typeof operand.field === 'string' &&
-    ('to' in operand || 'new_value' in operand || 'from' in operand || 'old_value' in operand)
-  ) {
-    return [[operand.field, operand.to ?? operand.new_value]];
-  }
-
   // Nested fields shape — only show the diffed fields, never the envelope metadata
   if (operand.fields && typeof operand.fields === 'object' && !Array.isArray(operand.fields)) {
-    return Object.entries(operand.fields as Record<string, unknown>);
+    return Object.entries(operand.fields as Record<string, unknown>)
+      .filter(([, v]) => v !== undefined);
   }
 
   // Top-level fields shape — exclude known envelope metadata
   return Object.entries(operand as Record<string, unknown>).filter(
-    ([k]) => !DEF_METADATA_KEYS.has(k)
+    ([k, v]) => !DEF_METADATA_KEYS.has(k) && v !== undefined
   );
 }
 
@@ -216,21 +221,30 @@ function shortValue(v: unknown, max = 40): string {
   return s.length > max ? s.slice(0, max) + '\u2026' : s;
 }
 
+function genericOperandSummary(operand: any, maxEntries: number): string | null {
+  const entries = Object.entries(operand)
+    .filter(([k, v]) => !['type'].includes(k) && v !== undefined)
+    .slice(0, maxEntries);
+  if (entries.length === 0) return null;
+  return entries.map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`).join(' | ');
+}
+
 // --- Operand summary (short inline preview) ---
 function operandSummary(op: string, operand: any): string | null {
   if (!operand || (typeof operand === 'object' && Object.keys(operand).length === 0)) return null;
 
   if (op === 'DEF') {
-    // Legacy explicit-diff shape: show old \u2192 new on a single line
-    if (
-      typeof operand.field === 'string' &&
-      ('to' in operand || 'new_value' in operand || 'from' in operand || 'old_value' in operand)
-    ) {
+    // Legacy explicit-diff shape: show old → new on a single line
+    if (isDefDiff(operand)) {
+      const field = operand.field || '';
       const from = operand.from ?? operand.old_value;
       const to = operand.to ?? operand.new_value;
-      return `${operand.field}: ${JSON.stringify(from)} \u2192 ${JSON.stringify(to)}`;
+      return `${field ? field + ': ' : ''}${JSON.stringify(from)} \u2192 ${JSON.stringify(to)}`;
     }
 
+    // Otherwise show only the fields that were diff'd, unwrapping the
+    // { fields: { ... } } envelope when present and filtering envelope
+    // metadata like _airtable/_prev/_sigs.
     const entries = getDefDiffFields(operand);
     if (entries.length === 0) return 'updated';
 
@@ -250,9 +264,7 @@ function operandSummary(op: string, operand: any): string | null {
   if (op === 'NUL') {
     return `nullified${operand.reason ? ' \u2014 ' + operand.reason : ''}`;
   }
-  const entries = Object.entries(operand).filter(([k]) => !['type'].includes(k)).slice(0, 2);
-  if (entries.length === 0) return null;
-  return entries.map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`).join(' | ');
+  return genericOperandSummary(operand, 2);
 }
 
 // --- Operand formatting (rich, for detail panel) ---
@@ -261,15 +273,12 @@ function formatOperand(op: string, operand: any, t: { textSecondary: string; tex
 
   if (op === 'DEF') {
     // Legacy explicit-diff shape
-    if (
-      typeof operand.field === 'string' &&
-      ('to' in operand || 'new_value' in operand || 'from' in operand || 'old_value' in operand)
-    ) {
+    if (isDefDiff(operand)) {
       const from = operand.from ?? operand.old_value;
       const to = operand.to ?? operand.new_value;
       return (
         <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11 }}>
-          <span style={{ color: t.textSecondary }}>{operand.field}: </span>
+          {operand.field && <span style={{ color: t.textSecondary }}>{operand.field}: </span>}
           <span style={{ color: t.textSecondary, textDecoration: 'line-through', opacity: 0.7 }}>{JSON.stringify(from)}</span>
           <span style={{ color: t.textMuted, margin: '0 5px' }}>{'\u2192'}</span>
           <span style={{ color: t.success }}>{JSON.stringify(to)}</span>
@@ -277,6 +286,8 @@ function formatOperand(op: string, operand: any, t: { textSecondary: string; tex
       );
     }
 
+    // Otherwise show only the fields that were diff'd, unwrapping the
+    // { fields: { ... } } envelope when present.
     const entries = getDefDiffFields(operand);
     if (entries.length === 0) {
       return (

@@ -127,6 +127,7 @@ interface SliceStoreState {
   setDisplayField: (scope: string, field: string | undefined) => void;
   setShowFieldIds: (scope: string, show: boolean) => void;
   setKanbanField: (scope: string, field: string | undefined) => void;
+  setCalendarField: (scope: string, field: string | undefined) => void;
 
   // --- Slice lifecycle ---
 
@@ -286,6 +287,10 @@ export const useSliceStore = create<SliceStoreState>((set, get) => ({
 
   setKanbanField(scope, field) {
     _updateConfig(set, get, scope, { kanbanField: field });
+  },
+
+  setCalendarField(scope, field) {
+    _updateConfig(set, get, scope, { calendarField: field });
   },
 
   activateSlice(scope, slice) {

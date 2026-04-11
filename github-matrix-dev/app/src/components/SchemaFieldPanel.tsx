@@ -17,12 +17,17 @@
  * confused about missing settings.
  */
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ConstraintComposer } from './ConstraintComposer';
 import { ResolutionPolicyComposer, summarizePolicy, type ResolvePolicy } from './ResolutionPolicyComposer';
 import { useTheme, type Theme } from '../theme';
 import { formatName } from './scope-picker-utils';
 import { getAirtableTypeIcon, getAirtableTypeColor } from './field-type-icons';
+import {
+  loadSavedDrawerWidth,
+  clampDrawerWidth,
+  saveDrawerWidth,
+} from './drawer-dimensions';
 import type { FieldSchema } from '../db/schema-rules';
 
 /**
@@ -42,6 +47,12 @@ export interface FieldValueStats {
 interface SchemaFieldPanelProps {
   fieldKey: string;
   fieldSchema: FieldSchema | undefined;
+  /**
+   * Dotted scope path of the field's parent table (e.g. "billing_accounts").
+   * When provided, the subtitle below the field name is rendered as
+   * `scope.fieldKey` so the user can tell which table the column belongs to.
+   */
+  scope?: string;
   valueStats?: FieldValueStats | null;
   onClose: () => void;
   onSaveLabel: (newLabel: string) => void;
@@ -49,6 +60,26 @@ interface SchemaFieldPanelProps {
   onRemoveConstraint: (name: string) => void;
   onSetResolution: (policy: ResolvePolicy) => void;
   onClearResolution: () => void;
+
+  // ── Column-menu parity actions ──
+  // The column header right-click menu exposes these; the panel mirrors them
+  // so every option is reachable from one place.
+  /** Current sort direction for this column, or null if not sorted. */
+  sortDirection?: 'asc' | 'desc' | null;
+  /** Whether this column is currently the table's display name field. */
+  isDisplayField?: boolean;
+  /** True for `_record` / `_last_updated` — hides type/display/constraint UI. */
+  isSystemColumn?: boolean;
+  /** True if this column's resolved type is `lastModifiedTime`. */
+  isLastModifiedTime?: boolean;
+  onSortAsc?: () => void;
+  onSortDesc?: () => void;
+  onRemoveSort?: () => void;
+  onFilterBy?: () => void;
+  onChangeType?: () => void;
+  onConfigureWatchedFields?: () => void;
+  onToggleDisplayField?: () => void;
+  onHideColumn?: () => void;
 }
 
 // ─── Type family classification ─────────────────────────────────────────
@@ -74,6 +105,7 @@ const LAYER_2_CONSTRAINT_NAMES = new Set(['uniqueness', 'cardinality', 'immutabi
 export function SchemaFieldPanel({
   fieldKey,
   fieldSchema,
+  scope,
   valueStats,
   onClose,
   onSaveLabel,
@@ -81,12 +113,79 @@ export function SchemaFieldPanel({
   onRemoveConstraint,
   onSetResolution,
   onClearResolution,
+  sortDirection = null,
+  isDisplayField = false,
+  isSystemColumn = false,
+  isLastModifiedTime = false,
+  onSortAsc,
+  onSortDesc,
+  onRemoveSort,
+  onFilterBy,
+  onChangeType,
+  onConfigureWatchedFields,
+  onToggleDisplayField,
+  onHideColumn,
 }: SchemaFieldPanelProps) {
   const { theme } = useTheme();
   const s = makeRowStyles(theme);
 
   const [editingName, setEditingName] = useState(false);
   const [nameValue, setNameValue] = useState(fieldSchema?.name || '');
+
+  // ── Drag-to-resize width — shared with RecordDetailDrawer so both right-side
+  // drawers feel like one unified component with a single remembered width.
+  const [drawerWidth, setDrawerWidth] = useState<number>(() => clampDrawerWidth(loadSavedDrawerWidth()));
+  const [isResizing, setIsResizing] = useState(false);
+  const resizeStartRef = useRef<{ startX: number; startWidth: number } | null>(null);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handler = () => {
+      setDrawerWidth((w) => {
+        const next = clampDrawerWidth(w);
+        return next === w ? w : next;
+      });
+    };
+    window.addEventListener('resize', handler);
+    return () => window.removeEventListener('resize', handler);
+  }, []);
+
+  const handleResizeStart = (clientX: number) => {
+    resizeStartRef.current = { startX: clientX, startWidth: drawerWidth };
+    setIsResizing(true);
+  };
+
+  useEffect(() => {
+    if (!isResizing) return;
+    const onMove = (e: MouseEvent | TouchEvent) => {
+      const st = resizeStartRef.current;
+      if (!st) return;
+      const clientX = 'touches' in e ? e.touches[0]?.clientX : e.clientX;
+      if (clientX == null) return;
+      // Drawer is on the right — moving handle LEFT should widen it.
+      const delta = st.startX - clientX;
+      const next = clampDrawerWidth(st.startWidth + delta);
+      setDrawerWidth(next);
+    };
+    const onUp = () => {
+      setIsResizing(false);
+      resizeStartRef.current = null;
+      saveDrawerWidth(drawerWidth);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    window.addEventListener('touchmove', onMove, { passive: false });
+    window.addEventListener('touchend', onUp);
+    const prevUserSelect = document.body.style.userSelect;
+    document.body.style.userSelect = 'none';
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      window.removeEventListener('touchmove', onMove);
+      window.removeEventListener('touchend', onUp);
+      document.body.style.userSelect = prevUserSelect;
+    };
+  }, [isResizing, drawerWidth]);
 
   const typeDisplay = fieldSchema?.typeDef?.value?.type || fieldSchema?.ingestedType || '—';
   const formatDisplay = fieldSchema?.typeDef?.value?.format ? ` (${fieldSchema.typeDef.value.format})` : '';
@@ -263,14 +362,34 @@ export function SchemaFieldPanel({
 
   return (
     <div style={{
-      width: 520,
-      minWidth: 520,
+      width: drawerWidth,
+      minWidth: drawerWidth,
       borderLeft: `1px solid ${theme.border}`,
       display: 'flex',
       flexDirection: 'column',
       background: theme.bgCard,
       overflow: 'hidden',
+      position: 'relative',
     }}>
+      {/* Resize handle — 6px hit area on the left edge, matches RecordDetailDrawer. */}
+      <div
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize field panel"
+        onMouseDown={(e) => { e.preventDefault(); handleResizeStart(e.clientX); }}
+        onTouchStart={(e) => { if (e.touches[0]) handleResizeStart(e.touches[0].clientX); }}
+        style={{
+          position: 'absolute',
+          left: 0,
+          top: 0,
+          bottom: 0,
+          width: 6,
+          cursor: 'col-resize',
+          zIndex: 5,
+          background: isResizing ? theme.accent : 'transparent',
+          opacity: isResizing ? 0.4 : 1,
+        }}
+      />
       {/* ── Panel header ── */}
       <div style={{
         display: 'flex',
@@ -348,7 +467,7 @@ export function SchemaFieldPanel({
             fontFamily: "'JetBrains Mono', monospace",
             color: theme.textMuted,
           }}>
-            {fieldKey}
+            {scope ? `${scope}.${fieldKey}` : fieldKey}
           </span>
         </div>
 
@@ -383,6 +502,23 @@ export function SchemaFieldPanel({
           &times;
         </button>
       </div>
+
+      {/* ── Quick actions toolbar — mirrors the column header right-click menu ── */}
+      <QuickActionsBar
+        theme={theme}
+        sortDirection={sortDirection}
+        isDisplayField={isDisplayField}
+        isSystemColumn={isSystemColumn}
+        isLastModifiedTime={isLastModifiedTime}
+        onSortAsc={onSortAsc}
+        onSortDesc={onSortDesc}
+        onRemoveSort={onRemoveSort}
+        onFilterBy={onFilterBy}
+        onChangeType={onChangeType}
+        onConfigureWatchedFields={onConfigureWatchedFields}
+        onToggleDisplayField={onToggleDisplayField}
+        onHideColumn={onHideColumn}
+      />
 
       {/* ── Scrollable body ── */}
       <div style={{ flex: 1, overflowY: 'auto' }}>
@@ -703,6 +839,138 @@ export function SchemaFieldPanel({
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+// ─── Quick actions bar ──────────────────────────────────────────────────
+//
+// Mirrors the column header right-click context menu so every column action
+// is reachable from inside the field panel. Rendered as a compact horizontal
+// toolbar immediately below the panel header — sort, filter, type, display,
+// hide. Callbacks are optional: a button renders only if its handler is wired.
+
+interface QuickActionsBarProps {
+  theme: Theme;
+  sortDirection: 'asc' | 'desc' | null;
+  isDisplayField: boolean;
+  isSystemColumn: boolean;
+  isLastModifiedTime: boolean;
+  onSortAsc?: () => void;
+  onSortDesc?: () => void;
+  onRemoveSort?: () => void;
+  onFilterBy?: () => void;
+  onChangeType?: () => void;
+  onConfigureWatchedFields?: () => void;
+  onToggleDisplayField?: () => void;
+  onHideColumn?: () => void;
+}
+
+function QuickActionsBar({
+  theme,
+  sortDirection,
+  isDisplayField,
+  isSystemColumn,
+  isLastModifiedTime,
+  onSortAsc,
+  onSortDesc,
+  onRemoveSort,
+  onFilterBy,
+  onChangeType,
+  onConfigureWatchedFields,
+  onToggleDisplayField,
+  onHideColumn,
+}: QuickActionsBarProps) {
+  const hasAny =
+    onSortAsc || onSortDesc || onFilterBy || onChangeType ||
+    onConfigureWatchedFields || onToggleDisplayField || onHideColumn;
+  if (!hasAny) return null;
+
+  const btnStyle = (active: boolean): React.CSSProperties => ({
+    fontSize: 11,
+    fontFamily: 'inherit',
+    padding: '4px 8px',
+    borderRadius: 4,
+    border: `1px solid ${active ? theme.accent : theme.borderLight}`,
+    background: active ? theme.bgMuted : theme.bg,
+    color: active ? theme.accent : theme.textSecondary,
+    cursor: 'pointer',
+    whiteSpace: 'nowrap',
+  });
+
+  return (
+    <div style={{
+      display: 'flex',
+      flexWrap: 'wrap',
+      gap: 6,
+      padding: '8px 16px',
+      borderBottom: `1px solid ${theme.border}`,
+      background: theme.bg,
+      flexShrink: 0,
+    }}>
+      {onSortAsc && (
+        <button
+          style={btnStyle(sortDirection === 'asc')}
+          onClick={() => (sortDirection === 'asc' && onRemoveSort ? onRemoveSort() : onSortAsc())}
+          title={sortDirection === 'asc' ? 'Remove sort' : 'Sort ascending'}
+        >
+          {'\u2191'} Asc{sortDirection === 'asc' ? ' \u00b7 active' : ''}
+        </button>
+      )}
+      {onSortDesc && (
+        <button
+          style={btnStyle(sortDirection === 'desc')}
+          onClick={() => (sortDirection === 'desc' && onRemoveSort ? onRemoveSort() : onSortDesc())}
+          title={sortDirection === 'desc' ? 'Remove sort' : 'Sort descending'}
+        >
+          {'\u2193'} Desc{sortDirection === 'desc' ? ' \u00b7 active' : ''}
+        </button>
+      )}
+      {onFilterBy && (
+        <button
+          style={btnStyle(false)}
+          onClick={onFilterBy}
+          title="Add a filter on this column"
+        >
+          {'\u2023'} Filter
+        </button>
+      )}
+      {!isSystemColumn && onChangeType && (
+        <button
+          style={btnStyle(false)}
+          onClick={onChangeType}
+          title="Change column type"
+        >
+          {'Type\u2026'}
+        </button>
+      )}
+      {!isSystemColumn && isLastModifiedTime && onConfigureWatchedFields && (
+        <button
+          style={btnStyle(false)}
+          onClick={onConfigureWatchedFields}
+          title="Configure watched fields"
+        >
+          {'Watched\u2026'}
+        </button>
+      )}
+      {!isSystemColumn && onToggleDisplayField && (
+        <button
+          style={btnStyle(isDisplayField)}
+          onClick={onToggleDisplayField}
+          title={isDisplayField ? 'This is the display name field' : 'Use as display name'}
+        >
+          {isDisplayField ? '\u2605 Display' : 'Use as display'}
+        </button>
+      )}
+      {onHideColumn && (
+        <button
+          style={btnStyle(false)}
+          onClick={onHideColumn}
+          title="Hide column"
+        >
+          Hide
+        </button>
+      )}
     </div>
   );
 }
