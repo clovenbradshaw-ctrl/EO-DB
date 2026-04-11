@@ -28,6 +28,7 @@ import {
   type RawImportBundle,
   type ProvenanceResult,
 } from '../ingestion/airtable-sync';
+import type { Resolution } from '../db/types';
 import type { GDriveSyncService } from '../google-drive/gdrive-sync';
 import { useAirtableStore, DEFAULT_SYNC_SETTINGS, type SyncLogEntry } from '../ingestion/airtable-store';
 import { AirtableSyncService } from '../ingestion/airtable-sync-service';
@@ -151,6 +152,13 @@ export function AirtableSettingsSection({
   // ── Display field per table: { tableId: fieldId } ──
   const [displayFieldSelections, setDisplayFieldSelections] = useState<Record<string, string>>({});
 
+  // ── Batch-level import resolution stance (Phase A.6/4) ──
+  // Stamped onto every record INS event constructed during this import,
+  // encoding the caller's declared stance on how rows are coming into
+  // existence. 'unspecified' (the default) means no stance is recorded —
+  // INS events carry nibble 0 on the lattice's resolution axis.
+  const [importResolution, setImportResolution] = useState<Resolution>('unspecified');
+
   // ── Expanded tables (for field preview): Set of tableId ──
   const [expandedTables, setExpandedTables] = useState<Set<string>>(new Set());
 
@@ -236,6 +244,7 @@ export function AirtableSettingsSection({
       preserveExisting,
       recordLimit: recordLimit > 0 ? recordLimit : undefined,
       displayFields: Object.keys(displayFieldsMap).length > 0 ? displayFieldsMap : undefined,
+      defaultResolution: importResolution !== 'unspecified' ? importResolution : undefined,
     };
   }
 
@@ -661,6 +670,46 @@ export function AirtableSettingsSection({
                     {recordLimit > 0
                       ? `Import up to ${recordLimit} records from each selected table`
                       : 'Import all records from each selected table'}
+                  </span>
+                </div>
+
+                {/* Import resolution stance (Phase A.6/4) */}
+                <div style={s.resolutionRow}>
+                  <label style={s.resolutionLabel}>
+                    Import stance
+                  </label>
+                  <div style={s.resolutionOptions}>
+                    {([
+                      { value: 'unspecified', label: 'No stance', hint: 'Record INS events carry no declared stance (default)' },
+                      { value: 'Making',     label: 'Making',    hint: 'Fresh rows brought into existence for the first time' },
+                      { value: 'Composing',  label: 'Composing', hint: 'Rows assembled from multiple upstream sources' },
+                      { value: 'Binding',    label: 'Binding',   hint: 'Rows instantiated as concrete realizations of a specification' },
+                    ] as const).map((opt) => (
+                      <label
+                        key={opt.value}
+                        style={{
+                          ...s.resolutionOption,
+                          ...(importResolution === opt.value ? s.resolutionOptionActive : {}),
+                        }}
+                      >
+                        <input
+                          type="radio"
+                          name="import-resolution"
+                          value={opt.value}
+                          checked={importResolution === opt.value}
+                          onChange={() => setImportResolution(opt.value)}
+                          style={s.resolutionRadio}
+                        />
+                        <span style={s.resolutionOptionLabel}>{opt.label}</span>
+                        <span style={s.resolutionOptionHint}>{opt.hint}</span>
+                      </label>
+                    ))}
+                  </div>
+                  <span style={s.resolutionFooter}>
+                    Stamped onto every record INS event in this import. DEF
+                    events carrying field values remain unstamped — the stance
+                    is about how rows come into existence, not individual
+                    value assertions.
                   </span>
                 </div>
 
@@ -1252,6 +1301,62 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
     recordLimitHint: {
       fontSize: 10,
       color: t.textMuted,
+    },
+
+    // ── Import resolution stance (Phase A.6/4) ──
+    resolutionRow: {
+      marginTop: 10,
+      padding: '8px 0',
+      borderTop: `1px solid ${t.borderLight}`,
+      display: 'flex',
+      flexDirection: 'column' as const,
+      gap: 6,
+    },
+    resolutionLabel: {
+      fontSize: 11,
+      fontWeight: 600,
+      color: t.textMuted,
+      textTransform: 'uppercase' as const,
+      letterSpacing: '0.06em',
+    },
+    resolutionOptions: {
+      display: 'flex',
+      flexDirection: 'column' as const,
+      gap: 4,
+    },
+    resolutionOption: {
+      display: 'grid',
+      gridTemplateColumns: 'auto auto 1fr',
+      alignItems: 'center',
+      gap: 8,
+      padding: '6px 10px',
+      border: `1px solid ${t.border}`,
+      borderRadius: 5,
+      background: t.bgCard,
+      cursor: 'pointer',
+    },
+    resolutionOptionActive: {
+      borderColor: t.accent,
+      background: t.accentBg,
+    },
+    resolutionRadio: {
+      margin: 0,
+      cursor: 'pointer',
+    },
+    resolutionOptionLabel: {
+      fontSize: 12,
+      fontWeight: 600,
+      color: t.text,
+    },
+    resolutionOptionHint: {
+      fontSize: 10,
+      color: t.textMuted,
+      lineHeight: 1.3,
+    },
+    resolutionFooter: {
+      fontSize: 10,
+      color: t.textMuted,
+      lineHeight: 1.4,
     },
 
     // ── Sync modes ──
