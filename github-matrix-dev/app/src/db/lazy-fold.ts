@@ -82,21 +82,36 @@ export type FoldWorkerPayload =
   /**
    * saveKvSnapshot — serialize and write the MemoryStore kv map to
    * 'kv-snapshot.bin' in the space's OPFS directory for fast restore
-   * on next page load.
+   * on next page load. `recentTail` is the last ~2 000 events the UI
+   * should show — persisted alongside the kv so refresh can skip the
+   * per-init `readLogSince` scan of the in-memory store.
    */
-  | { type: 'saveKvSnapshot'; entries: [string, unknown][]; seq: number }
+  | { type: 'saveKvSnapshot'; entries: [string, unknown][]; recentTail: EoEvent[]; seq: number }
   /**
    * loadKvSnapshot — read 'kv-snapshot.bin' and return its entries,
    * or null if no snapshot exists.
    */
-  | { type: 'loadKvSnapshot' };
+  | { type: 'loadKvSnapshot' }
+  /**
+   * saveInitCache — tell the worker to persist its own LogIndex + computed
+   * cache snapshot to 'init-cache.bin'. The worker builds the payload from
+   * its own state; no arguments needed.
+   */
+  | { type: 'saveInitCache' };
 
 export type FoldWorkerRequest = FoldWorkerPayload & { id: number };
 
 export type FoldWorkerResponse =
   | { id: number; type: 'result'; value: unknown }
   | { id: number; type: 'error'; message: string }
-  | { id: -1; type: 'ready' }
+  /**
+   * `ready` is posted once after `init` completes. `headSeq` lets the main
+   * thread compare it against the kv-snapshot seq and skip `scanLog`
+   * entirely when the log hasn't advanced since the snapshot was written.
+   * `fastPath` is true when the worker restored from its init-cache (i.e.
+   * skipped `buildIndex`) — purely informational, for logging.
+   */
+  | { id: -1; type: 'ready'; headSeq: number; fastPath: boolean }
   | { id: -1; type: 'recOscillation'; target: string; cyclingStates: Record<string, unknown>[]; suggestedFix: RecMigrationRule[] }
   | { id: -1; type: 'eventEmitted'; event: EoEvent }
   | { id: -1; type: 'progress'; current: number; total: number };
@@ -197,13 +212,16 @@ function send<T>(client: FoldWorkerClient, msg: FoldWorkerPayload): Promise<T> {
 
 /**
  * Initialize the Worker with a space ID. Resolves when the Worker posts
- * { id: -1, type: 'ready' }.
+ * the `ready` push notification. The resolved value carries `headSeq` so the
+ * caller can compare it against its kv-snapshot seq and skip delta replay
+ * entirely when the log hasn't advanced since the snapshot was written.
+ * `fastPath` indicates whether the worker restored from its init-cache.
  */
 export function initFoldWorker(
   client: FoldWorkerClient,
   spaceId: string,
-): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
+): Promise<{ headSeq: number; fastPath: boolean }> {
+  return new Promise<{ headSeq: number; fastPath: boolean }>((resolve, reject) => {
     const id = client.nextId++;
     // Intercept the 'ready' push notification for this init call.
     const originalOnMessage = client.worker.onmessage;
@@ -211,7 +229,7 @@ export function initFoldWorker(
       const msg = e.data;
       if (msg.id === -1 && msg.type === 'ready') {
         client.worker.onmessage = originalOnMessage;
-        resolve();
+        resolve({ headSeq: msg.headSeq, fastPath: msg.fastPath });
         return;
       }
       originalOnMessage?.call(client.worker, e);
@@ -287,27 +305,42 @@ export function scanLog(
 
 /**
  * Serialize the MemoryStore kv map to 'kv-snapshot.bin' in OPFS so the next
- * page load can restore state without replaying the full event log.
+ * page load can restore state without replaying the full event log. The
+ * `recentTail` array (last ~2 000 events) is persisted alongside so that the
+ * main-thread init can skip re-scanning the in-memory store's log: entries.
  */
 export function saveKvSnapshot(
   client: FoldWorkerClient,
   entries: [string, unknown][],
+  recentTail: EoEvent[],
   seq: number,
 ): Promise<void> {
-  return send(client, { type: 'saveKvSnapshot', entries, seq });
+  return send(client, { type: 'saveKvSnapshot', entries, recentTail, seq });
 }
 
 /**
  * Load a previously saved kv snapshot from OPFS. Returns null if no snapshot
- * exists yet (first load) or if the file is corrupt.
+ * exists yet (first load) or if the file is corrupt. `recentTail` is the last
+ * ~2 000 events captured at save time — used directly as Zustand state on the
+ * no-change refresh path.
  */
 export function loadKvSnapshot(
   client: FoldWorkerClient,
-): Promise<{ entries: [string, unknown][]; seq: number } | null> {
-  return send<{ entries: [string, unknown][]; seq: number } | null>(
+): Promise<{ entries: [string, unknown][]; recentTail: EoEvent[]; seq: number } | null> {
+  return send<{ entries: [string, unknown][]; recentTail: EoEvent[]; seq: number } | null>(
     client,
     { type: 'loadKvSnapshot' },
   );
+}
+
+/**
+ * Ask the worker to persist its LogIndex + computedCache snapshot to
+ * 'init-cache.bin'. Fire-and-forget from the caller's perspective — the
+ * worker uses its own state to build the payload. A subsequent worker init
+ * that finds a matching `logByteSize` will skip `buildIndex()` entirely.
+ */
+export function saveInitCache(client: FoldWorkerClient): Promise<void> {
+  return send(client, { type: 'saveInitCache' });
 }
 
 // ─── getField ─────────────────────────────────────────────────────────────────

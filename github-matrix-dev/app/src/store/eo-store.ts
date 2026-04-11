@@ -12,6 +12,7 @@ import {
   scanLog,
   saveKvSnapshot,
   loadKvSnapshot,
+  saveInitCache,
   type FoldWorkerClient,
 } from '../db/lazy-fold';
 import type { EoEvent, EoEventInput, EoState, HorizonResponse } from '../db/types';
@@ -47,8 +48,13 @@ interface EoDbState {
    * Initialize the store from a fold worker client.
    * Creates a fresh MemoryStore, replays the OPFS log into it, then
    * enables OPFS persistence for future writes.
+   *
+   * Pass `workerHeadSeq` (the worker's `position.seq` at the moment `ready`
+   * was posted) to enable the "nothing changed since the snapshot" fast path —
+   * when it equals the kv-snapshot's seq, init skips scanLog, readLogSince,
+   * and the snapshot re-save entirely.
    */
-  init: (workerClient: FoldWorkerClient) => Promise<void>;
+  init: (workerClient: FoldWorkerClient, workerHeadSeq?: number) => Promise<void>;
 
   /**
    * Initialize a local-only store backed by a fold worker for the
@@ -93,7 +99,7 @@ export const useEoStore = create<EoDbState>((set, get) => ({
   activeUserType: null,
   onDispatch: null,
 
-  async init(workerClient: FoldWorkerClient) {
+  async init(workerClient: FoldWorkerClient, workerHeadSeq?: number) {
     const wasReady = get().ready;
     const prevClient = get().workerClient;
     const isSameWorker = prevClient === workerClient;
@@ -114,12 +120,16 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     // ── Try restoring from OPFS kv snapshot for fast page-load ───────────────
     // On the first load there's no snapshot yet; fall back to full log replay.
     let snapshotSeq = 0;
+    let cachedTail: EoEvent[] = [];
+    let snapshotHit = false;
     let memStore: ReturnType<typeof createMemoryStore>;
     try {
       const snapshot = await loadKvSnapshot(workerClient);
       if (snapshot) {
         memStore = createMemoryStore({ initialKv: snapshot.entries, initialSeq: snapshot.seq });
         snapshotSeq = snapshot.seq;
+        cachedTail = snapshot.recentTail;
+        snapshotHit = true;
       } else {
         memStore = createMemoryStore();
       }
@@ -127,14 +137,26 @@ export const useEoStore = create<EoDbState>((set, get) => ({
       memStore = createMemoryStore();
     }
 
-    // Replay only events that arrived after the snapshot was written.
-    try {
-      const events = await scanLog(workerClient, snapshotSeq);
-      if (events.length > 0) {
-        await replayFromLog(memStore, events);
+    // ── Fast path: worker says the log hasn't advanced past the snapshot ─────
+    // When `workerHeadSeq === snapshotSeq` the log has literally no events the
+    // snapshot doesn't already include, so scanLog would return [] anyway —
+    // skip it to avoid the extra worker roundtrip. This is the "refresh when
+    // nothing has changed" path: no replay, no readLogSince, no snapshot resave.
+    const nothingNew =
+      snapshotHit &&
+      workerHeadSeq !== undefined &&
+      workerHeadSeq === snapshotSeq;
+
+    if (!nothingNew) {
+      // Replay only events that arrived after the snapshot was written.
+      try {
+        const events = await scanLog(workerClient, snapshotSeq);
+        if (events.length > 0) {
+          await replayFromLog(memStore, events);
+        }
+      } catch (e) {
+        console.warn('[EO-DB] OPFS log replay failed:', e);
       }
-    } catch (e) {
-      console.warn('[EO-DB] OPFS log replay failed:', e);
     }
 
     // From here on, every log: write also persists to OPFS.
@@ -150,27 +172,42 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     // a large array into Zustand state on init.  LogView loads older pages on demand.
     const RECENT_EVENT_LIMIT = 2_000;
     let hydrated: EoEvent[] = [];
-    try {
-      const fromSeq = Math.max(0, lastSeq - RECENT_EVENT_LIMIT);
-      hydrated = await readLogSince(memStore, fromSeq);
-    } catch {
-      // Brand-new store — nothing to hydrate.
+    if (nothingNew && cachedTail.length > 0) {
+      // Nothing changed since the snapshot was written, and the tail was
+      // persisted alongside it — use it directly and skip the O(n) scan of
+      // the memory store's log: entries.
+      hydrated = cachedTail;
+    } else {
+      try {
+        const fromSeq = Math.max(0, lastSeq - RECENT_EVENT_LIMIT);
+        hydrated = await readLogSince(memStore, fromSeq);
+      } catch {
+        // Brand-new store — nothing to hydrate.
+      }
     }
 
     set({ store: memStore, workerClient, lastSeq, ready: true, recentEvents: hydrated });
 
     // ── Persist an updated snapshot for the next page refresh ────────────────
-    // Fire-and-forget: snapshot save happens after ready=true so the UI
-    // is unblocked immediately. Failures are non-fatal (full replay as fallback).
-    saveKvSnapshot(workerClient, memStore.getKvEntries(), lastSeq).catch((e) =>
-      console.warn('[EO-DB] kv snapshot save failed:', e),
-    );
+    // Skip the resave when nothing changed — the on-disk snapshot is already
+    // current and re-writing it would waste the full msgpack-pack of the kv
+    // map on every refresh. In the delta-replay path, persist the new state
+    // (fire-and-forget) so the UI is unblocked immediately, and also ask the
+    // worker to refresh its init-cache so buildIndex can be skipped next time.
+    if (!nothingNew) {
+      saveKvSnapshot(workerClient, memStore.getKvEntries(), hydrated, lastSeq).catch((e) =>
+        console.warn('[EO-DB] kv snapshot save failed:', e),
+      );
+      saveInitCache(workerClient).catch((e) =>
+        console.warn('[EO-DB] init-cache save failed:', e),
+      );
+    }
   },
 
   async initLocal(dbName = 'local') {
     const workerClient = createFoldWorkerClient();
-    await initFoldWorker(workerClient, dbName);
-    await get().init(workerClient);
+    const { headSeq } = await initFoldWorker(workerClient, dbName);
+    await get().init(workerClient, headSeq);
   },
 
   setOnDispatch(fn: ((event: EoEventInput) => void) | null) {

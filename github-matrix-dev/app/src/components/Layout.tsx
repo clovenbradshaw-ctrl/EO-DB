@@ -1295,14 +1295,18 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   // startup (~100–400 ms) overlaps with the paint instead of following it.
   const eagerWorkerRef = useRef<{
     client: FoldWorkerClient;
-    initPromise: Promise<void>;
+    initPromise: Promise<{ headSeq: number } | null>;
     spaceId: string;
   } | null>(null);
   useLayoutEffect(() => {
     if (!selectedSpace || localMode || eagerWorkerRef.current) return;
     const client = createFoldWorkerClient();
-    // Swallow errors — setupSpaceStore will retry on failure.
-    const initPromise = initFoldWorker(client, selectedSpace).catch(() => {});
+    // Swallow errors — setupSpaceStore will retry on failure. On success we
+    // carry the worker's headSeq so the main-thread init can skip scanLog and
+    // snapshot-resave when the log hasn't advanced since the last snapshot.
+    const initPromise = initFoldWorker(client, selectedSpace)
+      .then(({ headSeq }) => ({ headSeq }))
+      .catch(() => null);
     eagerWorkerRef.current = { client, initPromise, spaceId: selectedSpace };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps — intentionally runs once before first paint
 
@@ -1671,10 +1675,15 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       cache.set(selectedSpace!, { workerClient, syncManager: null, peerSync: null, webrtcPeer: null, gdriveSync: null, mainRoomId: null, presence: null, spaceRooms: null });
 
       let initError: unknown;
+      // Captured from the ready message so eo-store.init can compare it
+      // against the kv-snapshot seq and skip scanLog / snapshot-resave when
+      // the log hasn't advanced since the snapshot was written.
+      let workerHeadSeq: number | undefined;
       if (usingEager) {
         // Await the pre-warmed init — often already resolved, so no wait.
         try {
-          await eager.initPromise;
+          const result = await eager.initPromise;
+          if (result) workerHeadSeq = result.headSeq;
         } catch (e) {
           initError = e;
         }
@@ -1684,7 +1693,8 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         for (let attempt = 0; attempt < 3; attempt++) {
           try {
             if (attempt > 0) await new Promise(r => setTimeout(r, attempt * 600));
-            await initFoldWorker(workerClient, selectedSpace!);
+            const { headSeq } = await initFoldWorker(workerClient, selectedSpace!);
+            workerHeadSeq = headSeq;
             initError = undefined;
             break;
           } catch (e) {
@@ -1704,7 +1714,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       // in the cache above and is about to use it. Just bail silently.
       if (isStale()) return;
 
-      await init(workerClient);
+      await init(workerClient, workerHeadSeq);
 
       // Resolve the Matrix room AFTER local data is loaded.
       // ready=true is already set above — UI is unblocked before this await.

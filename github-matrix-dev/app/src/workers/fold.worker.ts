@@ -12,8 +12,10 @@
 import { pack, unpack } from 'msgpackr';
 import { openLog, appendEvent, readEventAt, scanLog } from '../db/log-opfs';
 import type { OPFSLog } from '../db/log-opfs';
-import { buildIndex, updateIndex, getIntersection, trieQuery } from '../db/log-index';
-import type { LogIndex } from '../db/log-index';
+import { buildIndex, updateIndex, getIntersection, trieQuery, trieInsert } from '../db/log-index';
+import type { LogIndex, IndexEntry, TrieNode } from '../db/log-index';
+import { saveInitCache, loadInitCache } from '../db/init-cache';
+import type { InitCachePayload } from '../db/init-cache';
 import {
   createFoldPosition,
   applyEvent,
@@ -55,6 +57,103 @@ let bulkImportInProgress = false;
 
 function post(msg: FoldWorkerResponse): void {
   (self as unknown as DedicatedWorkerGlobalScope).postMessage(msg);
+}
+
+// ─── Init cache helpers ───────────────────────────────────────────────────────
+
+/**
+ * Rebuild a LogIndex from an init-cache payload. This is O(n) in event count,
+ * but much faster than `buildIndex(log)` because we skip the per-entry msgpack
+ * decode and the SyncAccessHandle reads — all the data is already in memory.
+ */
+function rebuildIndexFromCache(cache: InitCachePayload): LogIndex {
+  const opBuckets = new Map<LoggableOperator, { seqs: number[]; offsets: number[]; branches: number[] }>();
+  const root: TrieNode = { seqs: [], offsets: [], children: new Map() };
+  const seqToOffset = new Map<number, number>();
+
+  const { seqs, offsets, ops, targets } = cache.entries;
+  const n = seqs.length;
+  for (let i = 0; i < n; i++) {
+    const seq = seqs[i];
+    const offset = offsets[i];
+    const op = ops[i];
+    const target = targets[i];
+
+    let bucket = opBuckets.get(op);
+    if (!bucket) {
+      bucket = { seqs: [], offsets: [], branches: [] };
+      opBuckets.set(op, bucket);
+    }
+    bucket.seqs.push(seq);
+    bucket.offsets.push(offset);
+    bucket.branches.push(0);
+
+    trieInsert(root, target, seq, offset);
+    seqToOffset.set(seq, offset);
+  }
+
+  const opIndex = new Map<LoggableOperator, IndexEntry>();
+  for (const [op, m] of opBuckets) {
+    opIndex.set(op, {
+      seqs: new Uint32Array(m.seqs),
+      offsets: new Uint32Array(m.offsets),
+      branches: new Uint8Array(m.branches),
+    });
+  }
+  return { opIndex, trie: root, intersectionCache: new Map(), seqToOffset };
+}
+
+/**
+ * Build the flat per-event arrays needed to serialize the current LogIndex
+ * into the init-cache. We scan the log once to recover targets and ops
+ * (these aren't stored in the in-memory index) but the rebuild path skips
+ * this scan entirely. The log is memory-backed via SyncAccessHandle so this
+ * is still much cheaper than a full buildIndex: no index construction, no
+ * trie inserts — just decoding to capture a few fields per event.
+ */
+function buildInitCachePayload(): InitCachePayload | null {
+  if (!log || !index || !position) return null;
+  const n = index.seqToOffset.size;
+  const seqs = new Uint32Array(n);
+  const offsets = new Uint32Array(n);
+  const ops: LoggableOperator[] = new Array(n);
+  const targets: string[] = new Array(n);
+
+  // Walk the log once in seq-order to recover (op, target) per event.
+  let i = 0;
+  for (const { event, byteOffset } of scanLog(log, 0)) {
+    if (i >= n) break;
+    seqs[i] = event.seq;
+    offsets[i] = byteOffset;
+    ops[i] = event.op;
+    targets[i] = event.target;
+    i++;
+  }
+
+  return {
+    version: 1,
+    logByteSize: log.size,
+    headSeq: position.seq,
+    entries: { seqs, offsets, ops, targets },
+    computedCache: [...computedCache.entries()],
+  };
+}
+
+/**
+ * Fire-and-forget save of the current init cache. Cheap to call from the
+ * adaptive checkpoint path — if the log hasn't changed since the last save,
+ * `loadInitCache` will find a hit on the next refresh and skip buildIndex.
+ */
+let initCacheSaveInProgress = false;
+function scheduleInitCacheSave(): void {
+  if (initCacheSaveInProgress || !opfsDir) return;
+  const payload = buildInitCachePayload();
+  if (!payload) return;
+  initCacheSaveInProgress = true;
+  const dir = opfsDir;
+  saveInitCache(payload, dir)
+    .catch((e) => console.warn('[EO-DB] init-cache save failed:', e))
+    .finally(() => { initCacheSaveInProgress = false; });
 }
 
 function now(): string {
@@ -387,6 +486,10 @@ function scheduleCheckpoint(): void {
   saveCheckpoint(snap, dir).then(() => {
     eventsSinceCheckpoint = 0;
     checkpointInProgress = false;
+    // Keep the init-cache in lockstep with the fold-position checkpoint so
+    // next refresh can skip buildIndex even if the user dispatched events
+    // during this session.
+    scheduleInitCacheSave();
   }).catch(() => {
     checkpointInProgress = false;
   });
@@ -602,8 +705,29 @@ function buildFoldEntry(target: string): FoldEntry {
         log = await openLog(opfsDir);
         position = (await loadCheckpoint(opfsDir)) ?? createFoldPosition();
         nextSeq = position.seq;
+
+        // ── Fast path: restore LogIndex + computedCache from init-cache ──────
+        // If the log's byte length matches what the cache was written at, the
+        // cache is known to be complete and consistent. Rebuilding the trie
+        // and op-index from the cache's flat per-event arrays avoids the full
+        // `buildIndex(log)` walk (which msgpack-unpacks every log entry).
+        let fastPath = false;
         const t0 = performance.now();
-        index = buildIndex(log);
+        try {
+          const cached = await loadInitCache(opfsDir, log.size);
+          if (cached) {
+            index = rebuildIndexFromCache(cached);
+            for (const [k, v] of cached.computedCache) computedCache.set(k, v);
+            fastPath = true;
+          }
+        } catch (e) {
+          console.warn('[EO-DB] init-cache load failed, falling back to buildIndex:', e);
+        }
+
+        if (!index) {
+          index = buildIndex(log);
+        }
+
         const elapsed = performance.now() - t0;
         if (position.seq > 0) {
           avgProcessMicrosPerEvent = (elapsed * 1000) / position.seq;
@@ -615,11 +739,15 @@ function buildFoldEntry(target: string): FoldEntry {
         }
         // Re-evaluate all fold-mode EVA formulas so the computed cache is current.
         // The checkpoint snapshot may predate the last formula evaluation, leaving
-        // _computed fields stale until the next event touches a dependency.
-        for (const [, reg] of position.evaRegistrations) {
-          if (reg.mode === 'fold') evaluateFormula(reg);
+        // _computed fields stale until the next event touches a dependency. On the
+        // fast path the computedCache was just restored from disk, so this is a
+        // no-op — skip to keep refresh truly free when nothing changed.
+        if (!fastPath) {
+          for (const [, reg] of position.evaRegistrations) {
+            if (reg.mode === 'fold') evaluateFormula(reg);
+          }
         }
-        post({ id: -1, type: 'ready' });
+        post({ id: -1, type: 'ready', headSeq: position.seq, fastPath });
         break;
       }
 
@@ -729,6 +857,12 @@ function buildFoldEntry(target: string): FoldEntry {
       case 'scanLog': {
         // Return all events with seq > req.since, in ascending order.
         if (!log) throw new Error('Worker not initialized');
+        // Fast path: if the caller is already caught up (since >= position.seq),
+        // there is nothing new — return immediately without walking the log.
+        if (position && req.since >= position.seq) {
+          post({ id: req.id, type: 'result', value: [] });
+          break;
+        }
         const events: EoEvent[] = [];
         for (const entry of scanLog(log, 0)) {
           if (entry.event.seq > req.since) {
@@ -764,7 +898,16 @@ function buildFoldEntry(target: string): FoldEntry {
 
       case 'saveKvSnapshot': {
         if (!opfsDir) throw new Error('Worker not initialized');
-        const payload = pack({ version: 1, seq: req.seq, entries: req.entries }) as Uint8Array;
+        // Bumped to version 2: payload now carries `recentTail` alongside the
+        // kv entries so the main thread can skip `readLogSince` on refresh.
+        // v1 snapshots are ignored on load (loadKvSnapshot treats them as a
+        // miss and the main thread falls through to its existing fallback).
+        const payload = pack({
+          version: 2,
+          seq: req.seq,
+          entries: req.entries,
+          recentTail: req.recentTail,
+        }) as Uint8Array;
         const exactBuf = payload.buffer.slice(
           payload.byteOffset,
           payload.byteOffset + payload.byteLength,
@@ -791,12 +934,37 @@ function buildFoldEntry(target: string): FoldEntry {
             version: number;
             seq: number;
             entries: [string, unknown][];
+            recentTail?: EoEvent[];
           };
-          if (data.version !== 1) { post({ id: req.id, type: 'result', value: null }); break; }
-          post({ id: req.id, type: 'result', value: { seq: data.seq, entries: data.entries } });
+          // Only v2 is supported — v1 snapshots don't carry recentTail so we
+          // treat them as a miss and let the main thread rebuild via readLogSince.
+          if (data.version !== 2) { post({ id: req.id, type: 'result', value: null }); break; }
+          post({
+            id: req.id,
+            type: 'result',
+            value: {
+              seq: data.seq,
+              entries: data.entries,
+              recentTail: data.recentTail ?? [],
+            },
+          });
         } catch {
           post({ id: req.id, type: 'result', value: null });
         }
+        break;
+      }
+
+      case 'saveInitCache': {
+        if (!opfsDir) throw new Error('Worker not initialized');
+        const payload = buildInitCachePayload();
+        if (payload) {
+          try {
+            await saveInitCache(payload, opfsDir);
+          } catch (e) {
+            console.warn('[EO-DB] init-cache save failed:', e);
+          }
+        }
+        post({ id: req.id, type: 'result', value: null });
         break;
       }
 
