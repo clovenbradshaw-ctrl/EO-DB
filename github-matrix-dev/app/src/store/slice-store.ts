@@ -294,6 +294,15 @@ export const useSliceStore = create<SliceStoreState>((set, get) => ({
   },
 
   activateSlice(scope, slice) {
+    // Fast path — if the slice is already active and the user hasn't made
+    // unsaved changes, re-clicking the tab is a no-op.  Skipping the set()
+    // keeps existing config object references alive, which prevents the
+    // downstream useMemo in TableView (filter + sort over all records)
+    // from being invalidated on an effectively no-op click.
+    const existing = get().sigs[scope];
+    if (existing && existing.activeSliceId === slice.id && !existing.dirty) {
+      return;
+    }
     const sig: SliceSig = {
       scope,
       activeSliceId: slice.id,
@@ -305,6 +314,12 @@ export const useSliceStore = create<SliceStoreState>((set, get) => ({
   },
 
   resetToDefault(scope) {
+    // Same fast path as activateSlice: re-clicking the Grid tab while already
+    // on the default (and clean) view must not churn SIG references.
+    const existing = get().sigs[scope];
+    if (existing && existing.activeSliceId === null && !existing.dirty) {
+      return;
+    }
     const sig: SliceSig = {
       scope,
       activeSliceId: null,
