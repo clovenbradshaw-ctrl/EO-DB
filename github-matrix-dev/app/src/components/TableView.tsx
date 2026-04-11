@@ -847,28 +847,51 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
       result = applyTimeScrubber(result, timeScrubberFilter, useFieldsSub);
     }
 
-    // Multi-column sort
+    // Multi-column sort — decorate-sort-undecorate.
+    //
+    // Previously this was a plain Array.sort((a, b) => …) whose comparator
+    // invoked getFieldValue / resolveRecordName on BOTH operands for every
+    // pairwise compare.  resolveRecordName in particular is expensive (it
+    // builds a lowercased key map via Object.entries on every call), and
+    // Array.sort calls the comparator O(N log N) times, so the total cost
+    // was O(N log N × expensive-lookup) — which is why clicking into a
+    // slice got noticeably slower as the underlying collection grew.
+    //
+    // Instead, resolve each record's sort key once (O(N)) into a decorated
+    // array, sort the decorated array using cheap primitive comparisons
+    // (O(N log N × O(1))), then project back.  Total cost becomes
+    // O(N × lookup + N log N × primitive compare), which for realistic
+    // slice sizes is effectively linear.
     if (sorts.length > 0) {
-      result = [...result].sort((a, b) => {
-        for (const sort of sorts) {
-          const aVal = sort.field === '_record'
-            ? ((displayField ? getFieldValue(a, displayField, useFieldsSub) : null) ?? resolveRecordName(a) ?? a.target.split('.').pop() ?? '')
-            : getFieldValue(a, sort.field, useFieldsSub);
-          const bVal = sort.field === '_record'
-            ? ((displayField ? getFieldValue(b, displayField, useFieldsSub) : null) ?? resolveRecordName(b) ?? b.target.split('.').pop() ?? '')
-            : getFieldValue(b, sort.field, useFieldsSub);
-          const aStr = aVal != null ? String(aVal) : '';
-          const bStr = bVal != null ? String(bVal) : '';
-          const aNum = Number(aStr);
-          const bNum = Number(bStr);
-          const cmp = (!isNaN(aNum) && !isNaN(bNum) && aStr !== '' && bStr !== '')
-            ? aNum - bNum
-            : aStr.localeCompare(bStr);
-          const directed = sort.direction === 'asc' ? cmp : -cmp;
+      type DecoratedRow = {
+        rec: EoState;
+        keys: { str: string; num: number; isNum: boolean }[];
+      };
+      const decorated: DecoratedRow[] = result.map((rec) => {
+        const keys = sorts.map((sort) => {
+          const val = sort.field === '_record'
+            ? ((displayField ? getFieldValue(rec, displayField, useFieldsSub) : null) ?? resolveRecordName(rec) ?? rec.target.split('.').pop() ?? '')
+            : getFieldValue(rec, sort.field, useFieldsSub);
+          const str = val != null ? String(val) : '';
+          const num = Number(str);
+          const isNum = str !== '' && !isNaN(num);
+          return { str, num, isNum };
+        });
+        return { rec, keys };
+      });
+      decorated.sort((a, b) => {
+        for (let i = 0; i < sorts.length; i++) {
+          const ak = a.keys[i];
+          const bk = b.keys[i];
+          const cmp = (ak.isNum && bk.isNum)
+            ? ak.num - bk.num
+            : ak.str.localeCompare(bk.str);
+          const directed = sorts[i].direction === 'asc' ? cmp : -cmp;
           if (directed !== 0) return directed;
         }
         return 0;
       });
+      result = decorated.map((d) => d.rec);
     }
     return result;
   }, [records, debouncedFilterText, useFieldsSub, advancedFilters, filterConjunction, timeScrubberFilter, sorts, displayField]);
