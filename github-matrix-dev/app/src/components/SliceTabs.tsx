@@ -62,6 +62,7 @@ export function SliceTabs({ openScopes, activeScope, onSelectScope, onCloseScope
   const [newVisibleToTypes, setNewVisibleToTypes] = useState<string[]>([]);
   const [newReadOnlyForTypes, setNewReadOnlyForTypes] = useState<string[]>([]);
   const [newKanbanField, setNewKanbanField] = useState('');
+  const [newCalendarField, setNewCalendarField] = useState('');
   const [scopeColumns, setScopeColumns] = useState<ColumnDef[]>([]);
   const [fieldUniqueCounts, setFieldUniqueCounts] = useState<Record<string, number>>({});
   const [renaming, setRenaming] = useState<string | null>(null);
@@ -139,10 +140,12 @@ export function SliceTabs({ openScopes, activeScope, onSelectScope, onCloseScope
   async function handleSaveNew() {
     if (!newSliceName.trim()) return;
     if (newSliceType === 'kanban' && !newKanbanField) return;
+    if (newSliceType === 'calendar' && !newCalendarField) return;
     const sliceId = crypto.randomUUID().replace(/-/g, '').slice(0, 12);
     const config: TableSliceConfig = {
       ...sig.config,
       ...(newSliceType === 'kanban' && newKanbanField ? { kanbanField: newKanbanField } : {}),
+      ...(newSliceType === 'calendar' && newCalendarField ? { calendarField: newCalendarField } : {}),
     };
     const now = new Date().toISOString();
 
@@ -206,6 +209,7 @@ export function SliceTabs({ openScopes, activeScope, onSelectScope, onCloseScope
     setNewSliceName('');
     setNewSliceType('grid');
     setNewKanbanField('');
+    setNewCalendarField('');
     setNewVisibleToTypes([]);
     setNewReadOnlyForTypes([]);
   }
@@ -514,6 +518,53 @@ export function SliceTabs({ openScopes, activeScope, onSelectScope, onCloseScope
                 );
               })}
             </div>
+            {/* Calendar field selection */}
+            {newSliceType === 'calendar' && (
+              <div style={{ marginTop: 8 }}>
+                <div style={{ fontSize: 11, fontWeight: 500, color: theme.textSecondary, marginBottom: 4 }}>
+                  Date field
+                </div>
+                <select
+                  value={newCalendarField}
+                  onChange={(e) => setNewCalendarField(e.target.value)}
+                  style={{
+                    width: '100%',
+                    height: 32,
+                    fontSize: 12,
+                    padding: '0 8px',
+                    border: `1px solid ${theme.border}`,
+                    borderRadius: 4,
+                    background: theme.bgCard,
+                    color: theme.text,
+                    outline: 'none',
+                    boxSizing: 'border-box' as const,
+                    cursor: 'pointer',
+                  }}
+                >
+                  <option value="">Select a field{'\u2026'}</option>
+                  {scopeColumns
+                    .filter((col) => col.type === 'date' || col.type === 'createdTime' || col.type === 'lastModifiedTime')
+                    .map((col) => (
+                      <option key={col.key} value={col.key}>
+                        {col.label}
+                      </option>
+                    ))}
+                </select>
+                {scopeColumns.filter((col) => col.type === 'date' || col.type === 'createdTime' || col.type === 'lastModifiedTime').length === 0 && (
+                  <div style={{
+                    marginTop: 4,
+                    padding: '4px 8px',
+                    fontSize: 11,
+                    color: '#b45309',
+                    background: '#fef3c7',
+                    border: '1px solid #fde68a',
+                    borderRadius: 4,
+                  }}>
+                    No date fields detected on this table.
+                  </div>
+                )}
+              </div>
+            )}
             {/* Kanban field selection */}
             {newSliceType === 'kanban' && (
               <div style={{ marginTop: 8 }}>
@@ -646,7 +697,7 @@ export function SliceTabs({ openScopes, activeScope, onSelectScope, onCloseScope
                 </div>
               </>
             )}
-            <button style={(!newSliceName.trim() || (newSliceType === 'kanban' && !newKanbanField)) ? s.createBtnDisabled : s.createBtn} onClick={handleSaveNew} disabled={!newSliceName.trim() || (newSliceType === 'kanban' && !newKanbanField)}>
+            <button style={(!newSliceName.trim() || (newSliceType === 'kanban' && !newKanbanField) || (newSliceType === 'calendar' && !newCalendarField)) ? s.createBtnDisabled : s.createBtn} onClick={handleSaveNew} disabled={!newSliceName.trim() || (newSliceType === 'kanban' && !newKanbanField) || (newSliceType === 'calendar' && !newCalendarField)}>
               Create slice
             </button>
           </div>
