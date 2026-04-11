@@ -818,6 +818,20 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     return ordered;
   }, [columns, columnOrder]);
 
+  // Resolve each record's display name once per records change.
+  // `resolveRecordName` is expensive (it rebuilds a lowercased-key Map from
+  // Object.entries on every call), and it's used both during sort decoration
+  // and during _record cell rendering — so without this cache the cost
+  // multiplies by filter/sort/render churn.
+  const recordNameMap = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const rec of records) {
+      const name = resolveRecordName(rec);
+      if (name) m.set(rec.target, name);
+    }
+    return m;
+  }, [records]);
+
   const filtered = useMemo(() => {
     let result = records;
 
@@ -870,7 +884,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
       const decorated: DecoratedRow[] = result.map((rec) => {
         const keys = sorts.map((sort) => {
           const val = sort.field === '_record'
-            ? ((displayField ? getFieldValue(rec, displayField, useFieldsSub) : null) ?? resolveRecordName(rec) ?? rec.target.split('.').pop() ?? '')
+            ? ((displayField ? getFieldValue(rec, displayField, useFieldsSub) : null) ?? recordNameMap.get(rec.target) ?? rec.target.split('.').pop() ?? '')
             : getFieldValue(rec, sort.field, useFieldsSub);
           const str = val != null ? String(val) : '';
           const num = Number(str);
@@ -894,7 +908,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
       result = decorated.map((d) => d.rec);
     }
     return result;
-  }, [records, debouncedFilterText, useFieldsSub, advancedFilters, filterConjunction, timeScrubberFilter, sorts, displayField]);
+  }, [records, debouncedFilterText, useFieldsSub, advancedFilters, filterConjunction, timeScrubberFilter, sorts, displayField, recordNameMap]);
 
   // Report the visible ordered record targets to the parent whenever the list changes.
   useEffect(() => {
@@ -1552,53 +1566,90 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   // Computed from the loaded records whenever the user opens the panel on
   // a column. Gives the editor a headline view of what's actually in the
   // column before they start changing its settings.
-  const fieldValueStats = useMemo<FieldValueStats | null>(() => {
-    if (!fieldPanelKey) return null;
-    let filled = 0;
-    const distinctSet = new Set<string>();
-    let numMin = Infinity;
-    let numMax = -Infinity;
-    let numCount = 0;
-    const counts = new Map<string, number>();
-    let lenSum = 0;
-    let lenCount = 0;
-    const total = records.length;
-    for (const rec of records) {
-      const v = getFieldValue(rec, fieldPanelKey, useFieldsSub);
-      if (v == null || v === '' || (Array.isArray(v) && v.length === 0)) continue;
-      filled++;
-      let key: string;
-      if (typeof v === 'object') {
-        try { key = JSON.stringify(v); } catch { key = String(v); }
-      } else {
-        key = String(v);
-      }
-      distinctSet.add(key);
-      counts.set(key, (counts.get(key) ?? 0) + 1);
-      if (typeof v === 'number' && Number.isFinite(v)) {
-        numCount++;
-        if (v < numMin) numMin = v;
-        if (v > numMax) numMax = v;
-      }
-      if (typeof v === 'string') {
-        lenSum += v.length;
-        lenCount++;
-      }
+  //
+  // IMPORTANT: this runs in an effect (not a useMemo) so that the scan
+  // happens AFTER React commits the state change that opens the panel.
+  // Otherwise, double-clicking a column header on a large scope (5000+
+  // records) freezes the UI — the synchronous scan blocks the commit so
+  // the side panel can't paint until the whole loop finishes.
+  const [fieldValueStats, setFieldValueStats] = useState<FieldValueStats | null>(null);
+  useEffect(() => {
+    if (!fieldPanelKey) {
+      setFieldValueStats(null);
+      return;
     }
-    const topValues = [...counts.entries()]
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 3)
-      .map(([value, count]) => ({
-        value: value.length > 40 ? value.slice(0, 40) + '…' : value,
-        count,
-      }));
-    return {
-      total,
-      filled,
-      distinct: distinctSet.size,
-      numeric: numCount > 0 ? { min: numMin, max: numMax } : undefined,
-      textAvgLen: lenCount > 0 ? Math.round(lenSum / lenCount) : undefined,
-      topValues: topValues.length > 0 ? topValues : undefined,
+    let cancelled = false;
+
+    const w = window as typeof window & {
+      requestIdleCallback?: (cb: () => void, opts?: { timeout?: number }) => number;
+      cancelIdleCallback?: (handle: number) => void;
+    };
+    const schedule = (cb: () => void): { kind: 'idle'; id: number } | { kind: 'timeout'; id: ReturnType<typeof setTimeout> } =>
+      typeof w.requestIdleCallback === 'function'
+        ? { kind: 'idle', id: w.requestIdleCallback(cb, { timeout: 200 }) }
+        : { kind: 'timeout', id: setTimeout(cb, 0) };
+    const cancelScheduled = (h: { kind: 'idle'; id: number } | { kind: 'timeout'; id: ReturnType<typeof setTimeout> }) => {
+      if (h.kind === 'idle' && typeof w.cancelIdleCallback === 'function') {
+        w.cancelIdleCallback(h.id);
+      } else if (h.kind === 'timeout') {
+        clearTimeout(h.id);
+      }
+    };
+
+    const handle = schedule(() => {
+      if (cancelled) return;
+      let filled = 0;
+      const distinctSet = new Set<string>();
+      let numMin = Infinity;
+      let numMax = -Infinity;
+      let numCount = 0;
+      const counts = new Map<string, number>();
+      let lenSum = 0;
+      let lenCount = 0;
+      const total = records.length;
+      for (const rec of records) {
+        const v = getFieldValue(rec, fieldPanelKey, useFieldsSub);
+        if (v == null || v === '' || (Array.isArray(v) && v.length === 0)) continue;
+        filled++;
+        let key: string;
+        if (typeof v === 'object') {
+          try { key = JSON.stringify(v); } catch { key = String(v); }
+        } else {
+          key = String(v);
+        }
+        distinctSet.add(key);
+        counts.set(key, (counts.get(key) ?? 0) + 1);
+        if (typeof v === 'number' && Number.isFinite(v)) {
+          numCount++;
+          if (v < numMin) numMin = v;
+          if (v > numMax) numMax = v;
+        }
+        if (typeof v === 'string') {
+          lenSum += v.length;
+          lenCount++;
+        }
+      }
+      const topValues = [...counts.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 3)
+        .map(([value, count]) => ({
+          value: value.length > 40 ? value.slice(0, 40) + '…' : value,
+          count,
+        }));
+      if (cancelled) return;
+      setFieldValueStats({
+        total,
+        filled,
+        distinct: distinctSet.size,
+        numeric: numCount > 0 ? { min: numMin, max: numMax } : undefined,
+        textAvgLen: lenCount > 0 ? Math.round(lenSum / lenCount) : undefined,
+        topValues: topValues.length > 0 ? topValues : undefined,
+      });
+    });
+
+    return () => {
+      cancelled = true;
+      cancelScheduled(handle);
     };
   }, [fieldPanelKey, records, useFieldsSub]);
 
@@ -2085,7 +2136,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                                 }}>{(() => {
                                   const dv = displayField ? getFieldValue(rec, displayField, useFieldsSub) : null;
                                   if (dv != null && typeof dv !== 'object') return String(dv);
-                                  return resolveRecordName(rec) || formatName(rec.target.split('.').pop() || '');
+                                  return recordNameMap.get(rec.target) || formatName(rec.target.split('.').pop() || '');
                                 })()}</span>
                                 {rec.value?._type && <TypeBadge type={rec.value._type} />}
                                 <span
