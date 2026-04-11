@@ -748,12 +748,53 @@ export async function updateSync(
 
     const tables = await client.getBaseSchema(base.id);
 
+    // Refresh base container name (captures renames and repairs missing state).
+    // Uses a content-aware client_event_id so renames emit a new DEF while
+    // unchanged names stay idempotent.
+    const existingBaseState = await getState(store, baseTarget(base.id));
+    if (existingBaseState?.value?.name !== base.name) {
+      try {
+        await processEvent(store, {
+          op: 'DEF',
+          target: baseTarget(base.id),
+          operand: { name: base.name, _airtable: { type: 'base', base_id: base.id } },
+          agent,
+          ts: new Date().toISOString(),
+          acquired_ts: new Date().toISOString(),
+          client_event_id: `at-base-upd:${base.id}:${base.name}`,
+        }, opts?.onEvent);
+      } catch { /* idempotent */ }
+    }
+
     for (const table of tables) {
       // Skip tables not in the selection
       if (baseTables && !baseTables.includes(table.id)) continue;
 
       const cursor = await getCursor(store, base.id, table.id);
       if (!cursor) continue; // Not hydrated yet — skip
+
+      // Refresh table container name (captures renames and repairs missing state).
+      // Content-aware client_event_id lets renames through while keeping the
+      // steady-state fold idempotent.
+      const existingTableState = await getState(store, tableTarget(base.id, table.id));
+      if (existingTableState?.value?.name !== table.name) {
+        try {
+          await processEvent(store, {
+            op: 'DEF',
+            target: tableTarget(base.id, table.id),
+            operand: {
+              name: table.name,
+              field_count: table.fields.length,
+              fields: table.fields,
+              _airtable: { type: 'table', base_id: base.id, table_id: table.id },
+            },
+            agent,
+            ts: new Date().toISOString(),
+            acquired_ts: new Date().toISOString(),
+            client_event_id: `at-table-upd:${base.id}:${table.id}:${table.name}`,
+          }, opts?.onEvent);
+        } catch { /* idempotent */ }
+      }
 
       // Refresh per-field schema entities (handles field adds/renames)
       const tblT = tableTarget(base.id, table.id);
