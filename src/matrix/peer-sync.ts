@@ -61,6 +61,18 @@ export class PeerSync {
   private feed?: Feed;
   private toDeviceHandler?: (event: IMatrixEvent) => void;
 
+  /**
+   * Serialization chain for to-device handler invocations.
+   *
+   * Every incoming to-device message is appended to this chain so that two
+   * SYNC_EVENTS batches can never race through processIncomingPeerEvents
+   * (which writes the client_event_id idem cache inside a non-locked
+   * for-loop). Without this, a second batch can enter before the first has
+   * finished writing its idem keys, and both wind up calling processEvent
+   * on the same target — producing duplicate folds and divergent state.
+   */
+  private handlerChain: Promise<void> = Promise.resolve();
+
   constructor(
     client: IMatrixClient,
     roomId: string,
@@ -84,9 +96,27 @@ export class PeerSync {
     await this.announceToPeers();
 
     this.toDeviceHandler = (event: IMatrixEvent) => {
-      this.handleToDeviceEvent(event);
+      // Chain onto handlerChain so concurrent to-device deliveries serialize.
+      // `.catch(() => {})` keeps the chain alive after a prior rejection,
+      // and the trailing `.catch` stops unhandled-rejection noise without
+      // affecting the next enqueue (the previous tail already has its own
+      // consumer via the `prev` capture).
+      const prev = this.handlerChain;
+      const next = prev
+        .catch(() => {})
+        .then(() => this.handleToDeviceEvent(event));
+      this.handlerChain = next;
+      next.catch(() => {});
     };
     this.client.on('toDeviceEvent', this.toDeviceHandler);
+  }
+
+  /**
+   * Await any in-flight to-device handler work. Used by tests and by clean
+   * shutdown so the database isn't closed mid-fold.
+   */
+  async drainHandlers(): Promise<void> {
+    await this.handlerChain.catch(() => {});
   }
 
   /**

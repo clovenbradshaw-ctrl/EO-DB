@@ -96,26 +96,6 @@ export interface HarnessPeer {
   destroy(): Promise<void>;
 }
 
-// ─── Async lock ────────────────────────────────────────────────────────────
-
-class AsyncLock {
-  private chain: Promise<void> = Promise.resolve();
-
-  run<T>(fn: () => Promise<T>): Promise<T> {
-    let resolver!: () => void;
-    const gate = new Promise<void>((r) => {
-      resolver = r;
-    });
-    const prev = this.chain;
-    this.chain = this.chain.then(() => gate);
-    return prev.then(fn).finally(() => resolver());
-  }
-
-  async drain(): Promise<void> {
-    await this.chain;
-  }
-}
-
 export interface Harness {
   roomId: string;
   peers: HarnessPeer[];
@@ -534,31 +514,9 @@ async function buildPeer(
   const sync = new SyncManager(client, shared.roomId, db);
   const peerSync = new PeerSync(client, shared.roomId, db);
 
-  // Serialize every to-device handler invocation on this peer so two SYNC_EVENTS
-  // batches can't race through processIncomingPeerEvents (which writes the idem
-  // cache inside a non-locked for-loop in production). Without this, a second
-  // batch can enter before the first has finished writing its idem keys and
-  // both wind up trying to handleINS the same target.
-  //
-  // We patch the instance method so peer-sync's sync wrapper
-  //   this.toDeviceHandler = (event) => { this.handleToDeviceEvent(event); }
-  // picks up our locked version at call time. The production PeerSync class
-  // is not modified.
-  const toDeviceLock = new AsyncLock();
-  const origHandler = (peerSync as any).handleToDeviceEvent.bind(peerSync);
-  (peerSync as any).handleToDeviceEvent = (event: IMatrixEvent): Promise<void> => {
-    return toDeviceLock.run(async () => {
-      try {
-        await origHandler(event);
-      } catch (_err) {
-        // peer-sync's handleToDeviceEvent is fire-and-forget in production,
-        // so any rejection here would be an unhandled rejection. In the
-        // harness, offline flips make sendToDevice inside handleHello throw
-        // a transient error (by design) — swallow it so the test runner
-        // doesn't flag it as unhandled.
-      }
-    });
-  };
+  // Production PeerSync now serializes to-device handler invocations on an
+  // internal handlerChain — see src/matrix/peer-sync.ts. The harness just
+  // awaits peerSync.drainHandlers() to quiesce in-flight work.
 
   const peer: HarnessPeer = {
     userId: opts.userId,
@@ -589,7 +547,7 @@ async function buildPeer(
     snapshotPeer: () => snapshotPeer(db),
 
     drainInFlight: async () => {
-      await toDeviceLock.drain();
+      await peerSync.drainHandlers();
     },
 
     destroy: async () => {
@@ -597,7 +555,7 @@ async function buildPeer(
         peer.peerSync.stop();
       } catch {}
       try {
-        await toDeviceLock.drain();
+        await peerSync.drainHandlers();
       } catch {}
       try {
         peer.sync.destroy();
