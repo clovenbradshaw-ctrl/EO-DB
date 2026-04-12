@@ -21,6 +21,7 @@ import {
 import type { HelixStateTracker, PromotionCallbacks } from './fold-core';
 import { StoreAddressingHorizon, StoreDeclaredHorizon, StoreNulHorizon } from './addressing-horizon';
 import type { AddressingHorizon, DeclaredHorizon, NulHorizon } from './addressing-horizon';
+import { gpuInFlight } from './gpu-in-flight';
 import type { EoEvent, EoEventInput, EoState, EvaRegistration, RecResult, ExternalOperator, DerivedEntity, LoggableOperator, Resolution } from './types';
 import { nulStateToResolution } from './types';
 
@@ -40,14 +41,20 @@ const foldMutex = new AsyncMutex();
  * buffer the fold may have been reading becomes stale at the instant the
  * DEF lands.
  *
- * No-op today — no GPU dispatch is wired into the fold yet. The call site
- * exists so that Phase C can replace this with a real drain (awaiting
- * EVA/REC compute shader completions) without re-threading the wave-step
- * loop. See `WaveStep.barrier` in fold-core.ts.
+ * Phase C wiring. This delegates to `gpuInFlight.drain()` — a module-level
+ * singleton that tracks registered GPU dispatch promises. When the
+ * tracker's in-flight count is zero, drain is O(1) and returns without a
+ * microtask hop (the Phase B skip-redundant-drain optimization). No
+ * production caller registers work with the tracker yet — handleEVA and
+ * handleREC still run synchronously on the CPU — so this function is a
+ * no-op on today's code paths. The plumbing is in place so that the next
+ * slice wiring real GPU compute-shader dispatch has a single grep target
+ * (`gpuInFlight.register`) and does not need to re-thread the wave-step
+ * loop. See `GpuInFlightTracker` in gpu-in-flight.ts and
+ * `WaveStep.barrier` in fold-core.ts.
  */
 async function drainGpuInFlight(): Promise<void> {
-  // TODO(phase-c): drain any GPU work queued by prior EVA/REC dispatches
-  // before the schema-mutating op runs. No-op until GPU dispatch is wired.
+  await gpuInFlight.drain();
 }
 
 // ─── Helix Infrastructure ────────────────────────────────────────────────────
