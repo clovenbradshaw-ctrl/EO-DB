@@ -118,7 +118,6 @@ export function defaultColumnWidth(type: string): number {
     case 'url':
     case 'phone':
       return 180;
-    case 'object':
     case 'attachment':
     case 'linkedRecord':
     case 'link':
