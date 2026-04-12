@@ -22,6 +22,7 @@ import type { HelixStateTracker, PromotionCallbacks } from './fold-core';
 import { StoreAddressingHorizon, StoreDeclaredHorizon, StoreNulHorizon } from './addressing-horizon';
 import type { AddressingHorizon, DeclaredHorizon, NulHorizon } from './addressing-horizon';
 import { gpuInFlight } from './gpu-in-flight';
+import { syncDefToGpu, dispatchEvalGpu } from './gpu-dispatch';
 import type { EoEvent, EoEventInput, EoState, EvaRegistration, RecResult, ExternalOperator, DerivedEntity, LoggableOperator, Resolution } from './types';
 import { nulStateToResolution } from './types';
 
@@ -41,17 +42,18 @@ const foldMutex = new AsyncMutex();
  * buffer the fold may have been reading becomes stale at the instant the
  * DEF lands.
  *
- * Phase C wiring. This delegates to `gpuInFlight.drain()` — a module-level
+ * Phase D wiring. This delegates to `gpuInFlight.drain()` — a module-level
  * singleton that tracks registered GPU dispatch promises. When the
  * tracker's in-flight count is zero, drain is O(1) and returns without a
- * microtask hop (the Phase B skip-redundant-drain optimization). No
- * production caller registers work with the tracker yet — handleEVA and
- * handleREC still run synchronously on the CPU — so this function is a
- * no-op on today's code paths. The plumbing is in place so that the next
- * slice wiring real GPU compute-shader dispatch has a single grep target
- * (`gpuInFlight.register`) and does not need to re-thread the wave-step
- * loop. See `GpuInFlightTracker` in gpu-in-flight.ts and
- * `WaveStep.barrier` in fold-core.ts.
+ * microtask hop (the Phase B skip-redundant-drain optimization).
+ *
+ * As of Phase D, dispatchEvalGpu (in gpu-dispatch.ts) registers GPU work
+ * promises with the tracker when evaluating GPU-eligible formulas (numeric
+ * aggregation, filter, cosine similarity). The barrier is operationally
+ * live: drain awaits any in-flight GPU evaluation before DEF mutates the
+ * schema. See `GpuInFlightTracker` in gpu-in-flight.ts,
+ * `WaveStep.barrier` in fold-core.ts, and `dispatchEvalGpu` in
+ * gpu-dispatch.ts.
  */
 async function drainGpuInFlight(): Promise<void> {
   await gpuInFlight.drain();
@@ -1021,6 +1023,10 @@ async function handleDEF(store: EoStore, event: EoEvent): Promise<void> {
   if (isFormulaOperand(event.operand)) {
     await registerEvaActive(store, target, event.operand);
   }
+
+  // Phase D: mirror numeric operand values into GPU field buffers so the
+  // GPU's view of the data stays current. No-op when WebGPU is unavailable.
+  syncDefToGpu(target, event.operand);
 }
 
 // --- EVA: Evaluate ---
@@ -1538,6 +1544,29 @@ async function recomputeDependents(store: EoStore, changedTarget: string, visite
 }
 
 async function evaluateFormula(store: EoStore, registration: EvaRegistration): Promise<void> {
+  // Phase D: try GPU-accelerated evaluation first. If the formula is
+  // GPU-eligible and buffers are available, dispatchEvalGpu registers the
+  // work promise with gpuInFlight (making the wave-step barrier live) and
+  // returns the computed result. Otherwise it returns null and we fall
+  // through to the CPU path.
+  const gpuResult = await dispatchEvalGpu(registration);
+  if (gpuResult) {
+    const existing = await getState(store, registration.target);
+    const now = new Date().toISOString();
+    await setState(store, {
+      target: registration.target,
+      value: { ...existing?.value, _computed: gpuResult.result },
+      level: existing?.level ?? 1,
+      last_seq: existing?.last_seq || 0,
+      last_op: existing?.last_op || 'DEF',
+      last_agent: 'system:eva:gpu',
+      last_ts: now,
+      last_acquired_ts: now,
+    });
+    return;
+  }
+
+  // CPU fallback — gather inputs from dependencies and evaluate on CPU.
   const inputs: Record<string, any> = {};
   for (const dep of registration.dependencies) {
     const resolved = await resolveAlias(store, dep);
