@@ -27,7 +27,7 @@ export const AIRTABLE_TYPE_MAP: Record<string, string> = {
   multipleRecordLinks:    'linkedRecord',
   singleCollaborator:     'collaborator',
   multipleCollaborators:  'collaborators',
-  externalSyncSource:     'object',
+  externalSyncSource:     'link',
   formula:                'formula',
   rollup:                 'rollup',
   lookup:                 'lookup',

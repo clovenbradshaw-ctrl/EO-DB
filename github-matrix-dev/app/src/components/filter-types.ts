@@ -23,7 +23,7 @@ export type ColumnType =
   | 'select' | 'multiSelect'
   | 'date'
   | 'boolean'
-  | 'attachment' | 'linkedRecord' | 'link' | 'relationship' | 'object'
+  | 'attachment' | 'linkedRecord' | 'link' | 'relationship'
   | 'formula' | 'rollup' | 'lookup' | 'count'
   | 'autoNumber' | 'createdTime' | 'lastModifiedTime' | 'createdBy' | 'lastModifiedBy'
   | 'collaborator' | 'collaborators';
@@ -71,7 +71,6 @@ export function operatorsForType(type: ColumnDef['type']): FilterOperator[] {
       return SELECT_OPS;
     case 'boolean':
       return BOOLEAN_OPS;
-    case 'object':
     case 'attachment':
     case 'linkedRecord':
     case 'link':
@@ -146,8 +145,8 @@ export function inferColumnType(values: any[]): ColumnDef['type'] {
     return 'text';
   }
 
-  // Objects (linked arrays, nested data)
-  if (nonNull.some(v => typeof v === 'object')) return 'object';
+  // Objects (linked arrays, nested data) — auto-detect as link fields
+  if (nonNull.some(v => typeof v === 'object')) return 'link';
 
   return 'text';
 }

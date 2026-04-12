@@ -315,7 +315,7 @@ export function FigureFields({ figure, onNavigate, profileFields, recordTs, allE
 
         // Treat entity-ID array values as link fields even without an explicit schema definition
         const valIsIdArray = isEntityIdArray(parsedVal);
-        const isLinkField = fts?.type === 'link' || valIsIdArray;
+        const isLinkField = fts?.type === 'link' || fts?.type === 'linkedRecord' || valIsIdArray;
 
         // Infer linked table from resolver when no explicit schema definition exists
         const effectiveLinkedTable = fts?.linkedTable ?? (() => {

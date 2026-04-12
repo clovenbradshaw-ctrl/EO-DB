@@ -20,7 +20,6 @@ import {
   ArrowSquareOut,
   LinkSimple,
   ShareNetwork,
-  CubeTransparent,
   MathOperations,
   ArrowsClockwise,
   MagnifyingGlass,
@@ -67,7 +66,6 @@ export const COLUMN_TYPE_DEFS: ColumnTypeInfo[] = [
   { value: 'link',               label: 'Link',                icon: LinkSimple,               color: '#8b5cf6', group: 'Other' },
   { value: 'relationship',       label: 'Relationship',        icon: ShareNetwork,             color: '#06b6d4', group: 'Other' },
   { value: 'linkedRecord',       label: 'Linked Record (legacy)', icon: ArrowSquareOut,        color: '#8b5cf6', group: 'Other' },
-  { value: 'object',             label: 'Object',              icon: CubeTransparent,          color: '#6b7280', group: 'Other' },
   // Computed
   { value: 'formula',            label: 'Formula',             icon: MathOperations,          color: '#ef4444', group: 'Computed' },
   { value: 'rollup',             label: 'Rollup',              icon: ArrowsClockwise,         color: '#ef4444', group: 'Computed' },
