@@ -354,6 +354,58 @@ function renderCell(value: any, key: string, onNavigate: (t: string) => void, t:
     return <span>{value.name}</span>;
   }
 
+  // ─── Airtable-style linked record pills ────────────────────
+  if (colType === 'link' || colType === 'linkedRecord' || colType === 'relationship') {
+    // Extract linked IDs from all possible value shapes
+    const ids: string[] = [];
+    if (typeof value === 'object' && value !== null && Array.isArray(value?.linked)) {
+      ids.push(...value.linked);
+    } else if (Array.isArray(value)) {
+      ids.push(...value.filter((v: any) => typeof v === 'string'));
+    } else if (typeof value === 'string' && value) {
+      ids.push(value);
+    }
+
+    if (ids.length === 0) return <AbsentCell t={t} />;
+
+    return (
+      <span style={{ display: 'inline-flex', flexWrap: 'wrap', gap: 4, alignItems: 'center' }}>
+        {ids.map((id) => {
+          const shortId = id.includes('.') ? (id.split('.').pop() || id) : id;
+          const resolved = id.includes('.')
+            ? resolver?.resolveTarget(id)
+            : resolver?.resolve(id);
+          const displayName = resolved?.name || null;
+          const navTarget = resolved?.target || id;
+          return (
+            <span
+              key={id}
+              onClick={(e) => { e.stopPropagation(); onNavigate(navTarget); }}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 3,
+                padding: '1px 7px',
+                borderRadius: 4,
+                fontSize: 11,
+                background: `${t.purpleBg}`,
+                border: `1px solid ${t.purpleBorder}`,
+                color: t.purple,
+                cursor: 'pointer',
+                whiteSpace: 'nowrap',
+                maxWidth: 180,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+              }}
+            >
+              {displayName || shortId}
+            </span>
+          );
+        })}
+      </span>
+    );
+  }
+
   // Status pill — universal for any string value on the status column
   if (key === 'status' && typeof value === 'string') {
     return <StatusPill value={value} t={t} />;
