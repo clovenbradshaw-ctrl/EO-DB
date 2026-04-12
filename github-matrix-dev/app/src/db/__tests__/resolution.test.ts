@@ -28,6 +28,7 @@ import {
 } from '../fold-core';
 import { StoreNulHorizon } from '../addressing-horizon';
 import { processEvent } from '../fold';
+import { getRecordsByResolution } from '../horizon';
 import type { EoStore, IteratorOpts } from '../encrypted-store';
 
 // ─── Test store (shared shape with addressing-horizon.test.ts) ──────────────
@@ -339,6 +340,99 @@ describe('Resolution axis — HELIX_ORDINAL and triad boundaries', () => {
     expect(triadOf('DEF')).toBe('interpretation');
     expect(triadOf('EVA')).toBe('interpretation');
     expect(triadOf('REC')).toBe('interpretation');
+  });
+});
+
+// ─── getRecordsByResolution (Phase C read path) ────────────────────────────
+
+describe('Resolution axis — getRecordsByResolution', () => {
+  it('returns an empty Map for a site with no NUL observations', async () => {
+    const { store } = createTestStore();
+    const map = await getRecordsByResolution(store, 'site:untouched');
+    expect(map.size).toBe(0);
+  });
+
+  it('returns one record per distinct resolution on a site', async () => {
+    const { store } = createTestStore();
+    const h = new StoreNulHorizon(store);
+
+    await h.record('site:1', 'Tracing', 10);
+    await h.record('site:1', 'Clearing', 20);
+
+    const map = await getRecordsByResolution(store, 'site:1');
+    expect(map.size).toBe(2);
+
+    const tracing = map.get('Tracing')!;
+    expect(tracing.resolution).toBe('Tracing');
+    expect(tracing.seq).toBe(10);
+    expect(tracing.op).toBe('NUL');
+    expect(tracing.site).toBe('site:1');
+
+    const clearing = map.get('Clearing')!;
+    expect(clearing.resolution).toBe('Clearing');
+    expect(clearing.seq).toBe(20);
+  });
+
+  it('latest-wins: duplicate resolutions keep the highest-seq record', async () => {
+    const { store } = createTestStore();
+    const h = new StoreNulHorizon(store);
+
+    // Two Tracing observations at seq 10 and 30; the map should keep seq 30.
+    await h.record('site:1', 'Tracing', 10);
+    await h.record('site:1', 'Clearing', 20);
+    await h.record('site:1', 'Tracing', 30);
+
+    const map = await getRecordsByResolution(store, 'site:1');
+    expect(map.size).toBe(2);
+    expect(map.get('Tracing')!.seq).toBe(30);
+    expect(map.get('Clearing')!.seq).toBe(20);
+  });
+
+  it('does not leak observations from other sites', async () => {
+    const { store } = createTestStore();
+    const h = new StoreNulHorizon(store);
+
+    await h.record('site:A', 'Clearing', 1);
+    await h.record('site:B', 'Tracing', 2);
+
+    const mapA = await getRecordsByResolution(store, 'site:A');
+    expect(mapA.size).toBe(1);
+    expect(mapA.has('Clearing')).toBe(true);
+    expect(mapA.has('Tracing')).toBe(false);
+
+    const mapB = await getRecordsByResolution(store, 'site:B');
+    expect(mapB.size).toBe(1);
+    expect(mapB.has('Tracing')).toBe(true);
+  });
+
+  it('HorizonRecord carries op, ts, and value fields', async () => {
+    const { store } = createTestStore();
+    const h = new StoreNulHorizon(store);
+
+    await h.record('site:1', 'Making', 42);
+
+    const map = await getRecordsByResolution(store, 'site:1');
+    const rec = map.get('Making')!;
+
+    // NUL observations don't carry ts or value today.
+    expect(rec.op).toBe('NUL');
+    expect(rec.ts).toBeUndefined();
+    expect(rec.value).toBeUndefined();
+    // But the fields exist on the type — verified by TypeScript at compile time.
+  });
+
+  it('integration: NUL via processEvent populates getRecordsByResolution', async () => {
+    const { store } = createTestStore();
+
+    // INS first so the helix exists.
+    await processEvent(store, mkInput('INS', 'site:live'));
+    // NUL with explicit resolution.
+    await processEvent(store, { ...mkInput('NUL', 'site:live'), resolution: 'Binding' });
+
+    const map = await getRecordsByResolution(store, 'site:live');
+    expect(map.size).toBe(1);
+    expect(map.get('Binding')!.resolution).toBe('Binding');
+    expect(map.get('Binding')!.op).toBe('NUL');
   });
 });
 
