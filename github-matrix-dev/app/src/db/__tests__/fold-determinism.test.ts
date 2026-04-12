@@ -67,7 +67,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fc from 'fast-check';
-import { processEvent, processEventsBulk, processEventsBulkPooled } from '../fold';
+import { processEvent, processEventsBulk, processEventsBulkPooled, processEventsBulkIsolated } from '../fold';
 import type { FoldRunner } from '../fold-core';
 import type { EoStore, IteratorOpts } from '../encrypted-store';
 import type { EoEventInput } from '../types';
@@ -455,18 +455,34 @@ const runShardPool: FoldRunner = async (store, events) => {
   await processEventsBulkPooled(store, events, SHARD_COUNT);
 };
 
+/**
+ * Isolated-pool runner — Phase F. Same shard partitioning as Phase E,
+ * but each shard processes events against its own **isolated store clone**.
+ * Mutations are merged back to the main store after each wave step.
+ *
+ * This is the execution model that real Web Workers will use: each worker
+ * has its own memory space, and the coordinator merges results. Passing
+ * all 4 determinism properties proves that the isolation + merge protocol
+ * produces identical results to the shared-store model.
+ *
+ * The key cross-shard concern — CON reverse edges — is safe because they
+ * are additive inserts (no read-modify-write). Wave synchronization
+ * guarantees all INS events complete before any CON, so checkExists on
+ * CON destinations always succeeds against the snapshot.
+ */
+const runIsolatedPool: FoldRunner = async (store, events) => {
+  await processEventsBulkIsolated(store, events, SHARD_COUNT);
+};
+
 // ─── Runner registry ─────────────────────────────────────────────────────────
 //
 // Named runners used by the parameterized test suite. New runners added
-// in future phases (worker pool, GPU) go here and the full property
-// battery auto-applies.
+// in future phases (GPU) go here and the full property battery auto-applies.
 //
-// NOTE on shard runners. The naive partition-by-target shard runner was
-// prototyped and rejected in Phase D because CON edges create cross-shard
-// dependencies. Phase E resolved this with wave-level synchronization:
-// the helix wave model guarantees all INS events complete before any CON
-// event runs, and the pre-pass generates synthetic INS for CON
-// destinations. See processEventsBulkPooled in fold.ts.
+// NOTE on shard runners. Phase E (shard-pool) proved partitioning is
+// deterministic with shared stores. Phase F (isolated-pool) proved the
+// isolation + merge protocol is correct: each shard operates on its own
+// store clone, and mutations are merged back without conflicts.
 
 interface NamedRunner {
   name: string;
@@ -474,15 +490,16 @@ interface NamedRunner {
 }
 
 const ALL_RUNNERS: NamedRunner[] = [
-  { name: 'serial',       runner: runSerial },
-  { name: 'bulk',         runner: runBulk },
-  { name: 'chunked-bulk', runner: runChunkedBulk },
-  { name: 'shard-pool',   runner: runShardPool },
+  { name: 'serial',        runner: runSerial },
+  { name: 'bulk',          runner: runBulk },
+  { name: 'chunked-bulk',  runner: runChunkedBulk },
+  { name: 'shard-pool',    runner: runShardPool },
+  { name: 'isolated-pool', runner: runIsolatedPool },
 ];
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
-describe('Fold determinism harness (Phase 0 + Phase E runners)', () => {
+describe('Fold determinism harness (Phase 0 + Phase F runners)', () => {
   beforeEach(() => {
     // Freeze Date.now() so fold-cache.ts cadence classification is
     // deterministic across the two runs in each property check.

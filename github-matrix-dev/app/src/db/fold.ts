@@ -638,6 +638,247 @@ export async function processEventsBulkPooled(
 }
 
 /**
+ * Isolated-store shard pool — Phase F.
+ *
+ * Same wave/step/reservoir/pre-pass logic as processEventsBulkPooled, but
+ * each shard processes events against its own **isolated store clone**.
+ * After all shards complete a step, their mutations are merged back to the
+ * main store. This is the execution model that real Web Workers will use:
+ * each worker has its own memory space, and the coordinator merges results.
+ *
+ * The isolation protocol:
+ *
+ *   1. Snapshot the main store before each wave step.
+ *   2. For each shard, create a tracked clone from the snapshot.
+ *   3. Process the shard's events against the clone using
+ *      processEventCoreWithSeq (with shard-local AddressingHorizon,
+ *      DeclaredHorizon, and NulHorizon instances).
+ *   4. Collect the clone's mutation log.
+ *   5. Apply all shards' mutations to the main store.
+ *
+ * Cross-shard writes (CON reverse edges) are safe because they are
+ * additive inserts — no read-modify-write conflicts. The wave-level
+ * synchronization guarantees all INS events complete before any CON
+ * event, so checkExists calls on CON destinations always succeed (the
+ * destination was INS'd in a prior wave and is present in the snapshot).
+ *
+ * The coordinator's AddressingHorizon, DeclaredHorizon, and NulHorizon
+ * read from the main store. Shard-local instances read from the clone.
+ * After merge, the main store has all writes from all shards.
+ */
+export async function processEventsBulkIsolated(
+  store: EoStore,
+  events: EoEventInput[],
+  shardCount: number,
+  onProgress?: (current: number, total: number) => void,
+  onEvent?: (event: EoEvent) => void,
+): Promise<number> {
+  // Defer imports to avoid circular dependency at module level.
+  const { snapshotStore, createTrackedStore, applyMutations } = await import('./fold-isolate');
+
+  return foldMutex.run(async () => {
+    const touchedTargets = new Set<string>();
+    const reservoir = new SeqReservoir(store);
+    const helix = new StoreHelixStateTracker(store);
+    const addressing = new StoreAddressingHorizon(store);
+    const declared = new StoreDeclaredHorizon(store);
+    const nulHorizon = new StoreNulHorizon(store);
+    let lastSeq = 0;
+    let processed = 0;
+
+    const insedLocal = new Set<string>();
+    const insedChecked = new Set<string>();
+
+    async function markInsed(target: string): Promise<void> {
+      if (insedChecked.has(target)) {
+        insedLocal.add(target);
+        return;
+      }
+      insedChecked.add(target);
+      insedLocal.add(target);
+    }
+
+    async function needsSyntheticINS(target: string): Promise<boolean> {
+      if (insedLocal.has(target)) return false;
+      if (!insedChecked.has(target)) {
+        insedChecked.add(target);
+        const pos = await helix.getPosition(target);
+        if (pos && new Set(pos.declared ?? []).has('INS')) {
+          insedLocal.add(target);
+          return false;
+        }
+      }
+      return true;
+    }
+
+    function makeSyntheticINS(target: string): EoEventInput {
+      const now = new Date().toISOString();
+      return {
+        op: 'INS',
+        target,
+        operand: {},
+        agent: 'system:helix',
+        ts: now,
+        acquired_ts: now,
+        meta: { auto_promoted: true, reason: 'required by helix — missing INS' },
+      };
+    }
+
+    // Phase 1: wave-based ingestion — pre-pass identical to processEventsBulk
+    const waves = sortByHelixLevel(events);
+
+    for (const wave of waves) {
+      const expanded: EoEventInput[] = [];
+      for (const event of wave.events) {
+        touchedTargets.add(event.target);
+
+        if (
+          event.op !== 'NUL' && event.op !== 'SIG' &&
+          event.op !== 'REC' && event.op !== 'INS'
+        ) {
+          if (await needsSyntheticINS(event.target)) {
+            expanded.push(makeSyntheticINS(event.target));
+            await markInsed(event.target);
+          }
+        } else if (event.op === 'INS') {
+          await markInsed(event.target);
+        }
+
+        if (event.op === 'CON' && event.operand?.added) {
+          for (const item of event.operand.added as ConEdgeAddItem[]) {
+            const dest = typeof item === 'string' ? item : item.dest;
+            touchedTargets.add(dest);
+            if (await needsSyntheticINS(dest)) {
+              expanded.push(makeSyntheticINS(dest));
+              await markInsed(dest);
+            }
+          }
+        }
+
+        expanded.push(event);
+      }
+
+      if (expanded.length === 0) continue;
+
+      const steps = splitWaveIntoSteps({ level: wave.level, events: expanded });
+      await reservoir.reserve(expanded.length);
+
+      // Phase F dispatch: isolated-store shard pool with post-merge.
+      for (const step of steps) {
+        if (step.barrier) {
+          await drainGpuInFlight();
+        }
+
+        // Assign seqs in step-event order (same as shared-store paths).
+        const planned: { event: EoEventInput; seq: number }[] = step.events.map((event) => ({
+          event,
+          seq: reservoir.take(),
+        }));
+
+        // Group by target.
+        const byTarget = new Map<string, { event: EoEventInput; seq: number }[]>();
+        for (const p of planned) {
+          const bucket = byTarget.get(p.event.target);
+          if (bucket) bucket.push(p);
+          else byTarget.set(p.event.target, [p]);
+        }
+        const sortedTargetKeys = [...byTarget.keys()].sort();
+
+        // Partition into shards.
+        const shards = partitionTargets(sortedTargetKeys, shardCount);
+
+        // Collect CON destinations for post-merge reconciliation.
+        // In the isolated model, handleCON calls refreshGraphMetrics on
+        // destinations, but each shard only sees its own reverse edges.
+        // After merge, the main store has ALL edges, so we re-run the
+        // metrics to get the correct degree/role counts.
+        const conDestinations = new Set<string>();
+        for (const p of planned) {
+          if (p.event.op === 'CON' && p.event.operand?.added) {
+            for (const item of p.event.operand.added as ConEdgeAddItem[]) {
+              conDestinations.add(typeof item === 'string' ? item : item.dest);
+            }
+          }
+        }
+
+        // Snapshot the main store BEFORE shard dispatch.
+        const snapshot = await snapshotStore(store);
+        const currentSeq = await store.getCurrentSeq();
+
+        // Dispatch: each shard gets its own isolated clone.
+        const shardResults = await Promise.all(
+          shards.map(async (shardTargets) => {
+            if (shardTargets.length === 0) return { mutations: [] as import('./fold-isolate').StoreMutation[], lastSeq: 0 };
+
+            // Create isolated store from snapshot.
+            const tracked = createTrackedStore(snapshot, currentSeq);
+
+            // Shard-local horizon instances backed by the clone.
+            const shardAddressing = new StoreAddressingHorizon(tracked.store);
+            const shardDeclared = new StoreDeclaredHorizon(tracked.store);
+            const shardNulHorizon = new StoreNulHorizon(tracked.store);
+
+            let shardLastSeq = 0;
+            for (const target of shardTargets) {
+              const targetEvents = byTarget.get(target)!;
+              for (const { event, seq } of targetEvents) {
+                await processEventCoreWithSeq(
+                  tracked.store, event, seq,
+                  shardAddressing, shardDeclared, shardNulHorizon,
+                  onEvent,
+                );
+                if (seq > shardLastSeq) shardLastSeq = seq;
+                processed++;
+                onProgress?.(processed, events.length);
+              }
+            }
+
+            return { mutations: tracked.mutations, lastSeq: shardLastSeq };
+          })
+        );
+
+        // Merge: apply all shard mutations to the main store.
+        for (const { mutations, lastSeq: shardLast } of shardResults) {
+          await applyMutations(store, mutations);
+          if (shardLast > lastSeq) lastSeq = shardLast;
+        }
+
+        // Post-merge reconciliation: re-compute graph metrics for CON
+        // destinations on the merged store. Each shard's handleCON only
+        // saw its own reverse edges, so destination metrics were partial.
+        // This pass sees ALL edges and produces correct degree/role values.
+        for (const dest of conDestinations) {
+          await refreshGraphMetrics(store, dest);
+        }
+      }
+    }
+
+    // Phase 2: deferred recomputation on the main (merged) store.
+    for (const target of touchedTargets) {
+      await recomputeDependents(store, target, new Set());
+    }
+
+    // Phase 3: detect cycles.
+    const now = new Date().toISOString();
+    const syntheticTrigger: EoEvent = {
+      seq: lastSeq,
+      op: 'INS',
+      target: '__bulk_import__',
+      operand: {},
+      agent: 'system:bulk',
+      ts: now,
+      acquired_ts: now,
+    };
+    for (const target of touchedTargets) {
+      await detectAndEmitREC(store, target, syntheticTrigger, onEvent);
+      await cascadeUpward(store, target, syntheticTrigger, onEvent);
+    }
+
+    return lastSeq;
+  });
+}
+
+/**
  * Process an event with a pre-assigned seq. Used by the bulk path after
  * SeqReservoir has reserved and ordered seqs. Skips nextSeq() and
  * checkAndPromote — both are handled by the bulk dispatcher's pre-pass.
@@ -647,7 +888,7 @@ export async function processEventsBulkPooled(
  * → helix.recordOperator → updateFoldCache → onEvent) run exactly as they
  * do in the serial processEventCore.
  */
-async function processEventCoreWithSeq(
+export async function processEventCoreWithSeq(
   store: EoStore,
   event: EoEventInput,
   seq: number,
