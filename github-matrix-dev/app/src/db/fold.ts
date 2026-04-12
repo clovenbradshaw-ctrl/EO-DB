@@ -23,6 +23,7 @@ import { StoreAddressingHorizon, StoreDeclaredHorizon, StoreNulHorizon } from '.
 import type { AddressingHorizon, DeclaredHorizon, NulHorizon } from './addressing-horizon';
 import { gpuInFlight } from './gpu-in-flight';
 import { syncDefToGpu, dispatchEvalGpu } from './gpu-dispatch';
+import { partitionTargets } from './fold-pool';
 import type { EoEvent, EoEventInput, EoState, EvaRegistration, RecResult, ExternalOperator, DerivedEntity, LoggableOperator, Resolution } from './types';
 import { nulStateToResolution } from './types';
 
@@ -199,6 +200,104 @@ export async function processEvent(
   return foldMutex.run(() => processEventInner(store, event, onEvent));
 }
 
+// ─── Shared step-dispatch helper ──────────────────────────────────────────
+//
+// Phase E: extracted from the inline dispatch in processEventsBulk so that
+// processEventsBulkPooled (shard-pool path) can reuse the same seq-
+// assignment, target grouping, and barrier logic with a different target
+// grouping strategy.
+
+/**
+ * Context object for the step-dispatch helper. Carries the shared state
+ * that the wave-step loop mutates.
+ */
+interface StepDispatchContext {
+  store: EoStore;
+  reservoir: SeqReservoir;
+  addressing: AddressingHorizon;
+  declared: DeclaredHorizon;
+  nulHorizon: NulHorizon;
+  onEvent?: (event: EoEvent) => void;
+  onProgress?: (current: number, total: number) => void;
+  totalEvents: number;
+  /** Mutable counter — incremented by the dispatch. */
+  processed: number;
+  /** Mutable high-water mark — updated by the dispatch. */
+  lastSeq: number;
+}
+
+/**
+ * Process a sequence of WaveSteps, dispatching events to targets grouped
+ * by `groupTargets`. Before each barrier step, drains in-flight GPU work.
+ *
+ * `groupTargets` controls parallelism:
+ *   - Default (one group per target): maximum concurrency — one Promise per
+ *     target. This is the existing bulk-path behavior.
+ *   - Shard pool (N groups): bounded concurrency — one Promise per shard,
+ *     targets within a shard are processed sequentially.
+ *
+ * Mutates `ctx.processed` and `ctx.lastSeq` as side effects.
+ */
+async function dispatchWaveSteps(
+  steps: import('./fold-core').WaveStep[],
+  ctx: StepDispatchContext,
+  groupTargets: (sortedTargets: string[]) => string[][],
+): Promise<void> {
+  for (const step of steps) {
+    if (step.barrier) {
+      await drainGpuInFlight();
+    }
+
+    // Assign seqs in step-event order — the same order in which the
+    // pre-pass saw events. Synthetic INS events receive a seq BEFORE
+    // any event that depends on them.
+    const planned: { event: EoEventInput; seq: number }[] = step.events.map((event) => ({
+      event,
+      seq: ctx.reservoir.take(),
+    }));
+
+    // Group by target while preserving the pre-assigned seqs.
+    const byTarget = new Map<string, { event: EoEventInput; seq: number }[]>();
+    for (const p of planned) {
+      const bucket = byTarget.get(p.event.target);
+      if (bucket) bucket.push(p);
+      else byTarget.set(p.event.target, [p]);
+    }
+    const sortedTargetKeys = [...byTarget.keys()].sort();
+
+    // Apply the grouping strategy and dispatch.
+    const groups = groupTargets(sortedTargetKeys);
+    const stepSeqs = await Promise.all(
+      groups.map(async (groupTargetList) => {
+        let groupLastSeq = 0;
+        for (const target of groupTargetList) {
+          const targetEvents = byTarget.get(target)!;
+          for (const { event, seq } of targetEvents) {
+            await processEventCoreWithSeq(
+              ctx.store, event, seq,
+              ctx.addressing, ctx.declared, ctx.nulHorizon,
+              ctx.onEvent,
+            );
+            if (seq > groupLastSeq) groupLastSeq = seq;
+            ctx.processed++;
+            ctx.onProgress?.(ctx.processed, ctx.totalEvents);
+          }
+        }
+        return groupLastSeq;
+      })
+    );
+
+    for (const seq of stepSeqs) {
+      if (seq > ctx.lastSeq) ctx.lastSeq = seq;
+    }
+  }
+}
+
+/** Default grouping: one target per group (maximum parallelism). */
+function oneTargetPerGroup(targets: string[]): string[][] {
+  return targets.map(t => [t]);
+}
+
 /**
  * Bulk-import mode: process events quickly by:
  *
@@ -344,55 +443,15 @@ export async function processEventsBulk(
       // assigned are identical to the pre-barrier-extraction behavior.
       await reservoir.reserve(expanded.length);
 
-      // Step 4: Process each wave-step sequentially. Before each barrier
-      // step, drain any in-flight GPU work (no-op today; Phase C hook).
-      // Within a step, keep the existing shard-by-target + Promise.all
-      // dispatch (parallel-across-targets, sequential-within-target),
-      // scoped to step.events instead of the full wave.
-      for (const step of steps) {
-        if (step.barrier) {
-          await drainGpuInFlight();
-        }
-
-        // Assign seqs in step-event order — the same order in which the
-        // pre-pass saw events. Synthetic INS events receive a seq BEFORE
-        // any event that depends on them.
-        const planned: { event: EoEventInput; seq: number }[] = step.events.map((event) => ({
-          event,
-          seq: reservoir.take(),
-        }));
-
-        // Shard by target while preserving the pre-assigned seqs. Iterate
-        // sortedTargetKeys for deterministic Promise.all dispatch order
-        // (no semantic effect, but keeps the test's byte-identical
-        // assertion robust against Map iteration order drift).
-        const byTarget = new Map<string, { event: EoEventInput; seq: number }[]>();
-        for (const p of planned) {
-          const bucket = byTarget.get(p.event.target);
-          if (bucket) bucket.push(p);
-          else byTarget.set(p.event.target, [p]);
-        }
-        const sortedTargetKeys = [...byTarget.keys()].sort();
-
-        // Process targets in parallel, sequential within each target.
-        const stepSeqs = await Promise.all(
-          sortedTargetKeys.map(async (target) => {
-            const targetEvents = byTarget.get(target)!;
-            let targetLastSeq = 0;
-            for (const { event, seq } of targetEvents) {
-              await processEventCoreWithSeq(store, event, seq, addressing, declared, nulHorizon, onEvent);
-              if (seq > targetLastSeq) targetLastSeq = seq;
-              processed++;
-              onProgress?.(processed, events.length);
-            }
-            return targetLastSeq;
-          })
-        );
-
-        for (const seq of stepSeqs) {
-          if (seq > lastSeq) lastSeq = seq;
-        }
-      }
+      // Step 4: Process each wave-step sequentially via the shared helper.
+      // Default grouping: one target per group (maximum parallelism).
+      const ctx: StepDispatchContext = {
+        store, reservoir, addressing, declared, nulHorizon, onEvent, onProgress,
+        totalEvents: events.length, processed, lastSeq,
+      };
+      await dispatchWaveSteps(steps, ctx, oneTargetPerGroup);
+      processed = ctx.processed;
+      lastSeq = ctx.lastSeq;
     }
 
     // Phase 2: run deferred recomputation once per unique target
@@ -401,6 +460,164 @@ export async function processEventsBulk(
     }
 
     // Phase 3: detect cycles once per unique target
+    const now = new Date().toISOString();
+    const syntheticTrigger: EoEvent = {
+      seq: lastSeq,
+      op: 'INS',
+      target: '__bulk_import__',
+      operand: {},
+      agent: 'system:bulk',
+      ts: now,
+      acquired_ts: now,
+    };
+    for (const target of touchedTargets) {
+      await detectAndEmitREC(store, target, syntheticTrigger, onEvent);
+      await cascadeUpward(store, target, syntheticTrigger, onEvent);
+    }
+
+    return lastSeq;
+  });
+}
+
+/**
+ * Shard-pool bulk import — Phase E.
+ *
+ * Identical to processEventsBulk in every way except the dispatch strategy:
+ * instead of one Promise per target (maximum concurrency), targets are
+ * partitioned into `shardCount` fixed shards via a deterministic hash
+ * (see partitionTargets in fold-pool.ts). Each shard processes its targets
+ * sequentially; shards run concurrently via Promise.all.
+ *
+ * The wave-level synchronization model resolves the cross-shard CON
+ * dependency that blocked the naive shard runner in Phase D:
+ *
+ *   1. Helix waves enforce operator precedence: all INS events (level 1)
+ *      complete across ALL shards before any CON event (level 2) starts.
+ *
+ *   2. The pre-pass generates synthetic INS events for CON destinations,
+ *      so every target referenced by a CON is guaranteed to exist by the
+ *      time the CON's wave runs.
+ *
+ *   3. The shared-store model makes cross-shard writes (e.g. CON reverse
+ *      edges in the destination's key space) immediately visible. For real
+ *      Web Workers with isolated stores, a merge phase would be needed —
+ *      deferred to the worker-transport phase.
+ *
+ * The pooled path exists to prove that the partitioning strategy is
+ * deterministic: the fold-determinism harness runs all 4 properties against
+ * the shard-pool runner alongside serial, bulk, and chunked-bulk.
+ */
+export async function processEventsBulkPooled(
+  store: EoStore,
+  events: EoEventInput[],
+  shardCount: number,
+  onProgress?: (current: number, total: number) => void,
+  onEvent?: (event: EoEvent) => void,
+): Promise<number> {
+  return foldMutex.run(async () => {
+    const touchedTargets = new Set<string>();
+    const reservoir = new SeqReservoir(store);
+    const helix = new StoreHelixStateTracker(store);
+    const addressing = new StoreAddressingHorizon(store);
+    const declared = new StoreDeclaredHorizon(store);
+    const nulHorizon = new StoreNulHorizon(store);
+    let lastSeq = 0;
+    let processed = 0;
+
+    const insedLocal = new Set<string>();
+    const insedChecked = new Set<string>();
+
+    async function markInsed(target: string): Promise<void> {
+      if (insedChecked.has(target)) {
+        insedLocal.add(target);
+        return;
+      }
+      insedChecked.add(target);
+      insedLocal.add(target);
+    }
+
+    async function needsSyntheticINS(target: string): Promise<boolean> {
+      if (insedLocal.has(target)) return false;
+      if (!insedChecked.has(target)) {
+        insedChecked.add(target);
+        const pos = await helix.getPosition(target);
+        if (pos && new Set(pos.declared ?? []).has('INS')) {
+          insedLocal.add(target);
+          return false;
+        }
+      }
+      return true;
+    }
+
+    function makeSyntheticINS(target: string): EoEventInput {
+      const now = new Date().toISOString();
+      return {
+        op: 'INS',
+        target,
+        operand: {},
+        agent: 'system:helix',
+        ts: now,
+        acquired_ts: now,
+        meta: { auto_promoted: true, reason: 'required by helix — missing INS' },
+      };
+    }
+
+    // Phase 1: wave-based ingestion — identical to processEventsBulk
+    const waves = sortByHelixLevel(events);
+
+    for (const wave of waves) {
+      const expanded: EoEventInput[] = [];
+      for (const event of wave.events) {
+        touchedTargets.add(event.target);
+
+        if (
+          event.op !== 'NUL' && event.op !== 'SIG' &&
+          event.op !== 'REC' && event.op !== 'INS'
+        ) {
+          if (await needsSyntheticINS(event.target)) {
+            expanded.push(makeSyntheticINS(event.target));
+            await markInsed(event.target);
+          }
+        } else if (event.op === 'INS') {
+          await markInsed(event.target);
+        }
+
+        if (event.op === 'CON' && event.operand?.added) {
+          for (const item of event.operand.added as ConEdgeAddItem[]) {
+            const dest = typeof item === 'string' ? item : item.dest;
+            touchedTargets.add(dest);
+            if (await needsSyntheticINS(dest)) {
+              expanded.push(makeSyntheticINS(dest));
+              await markInsed(dest);
+            }
+          }
+        }
+
+        expanded.push(event);
+      }
+
+      if (expanded.length === 0) continue;
+
+      const steps = splitWaveIntoSteps({ level: wave.level, events: expanded });
+      await reservoir.reserve(expanded.length);
+
+      // Phase E dispatch: shard-pool grouping instead of one-per-target.
+      const shardGrouper = (targets: string[]) => partitionTargets(targets, shardCount);
+      const ctx: StepDispatchContext = {
+        store, reservoir, addressing, declared, nulHorizon, onEvent, onProgress,
+        totalEvents: events.length, processed, lastSeq,
+      };
+      await dispatchWaveSteps(steps, ctx, shardGrouper);
+      processed = ctx.processed;
+      lastSeq = ctx.lastSeq;
+    }
+
+    // Phase 2: deferred recomputation — identical to processEventsBulk
+    for (const target of touchedTargets) {
+      await recomputeDependents(store, target, new Set());
+    }
+
+    // Phase 3: detect cycles
     const now = new Date().toISOString();
     const syntheticTrigger: EoEvent = {
       seq: lastSeq,
