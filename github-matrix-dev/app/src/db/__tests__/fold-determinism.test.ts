@@ -67,7 +67,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fc from 'fast-check';
-import { processEvent, processEventsBulk } from '../fold';
+import { processEvent, processEventsBulk, processEventsBulkPooled } from '../fold';
 import type { FoldRunner } from '../fold-core';
 import type { EoStore, IteratorOpts } from '../encrypted-store';
 import type { EoEventInput } from '../types';
@@ -431,21 +431,42 @@ const runChunkedBulk: FoldRunner = async (store, events) => {
   }
 };
 
+/**
+ * Shard-pool runner — Phase E. Partitions targets into N fixed shards via
+ * deterministic hashing and processes each shard's targets sequentially,
+ * with shards running concurrently. Wave-level synchronization ensures all
+ * shards complete wave N before any shard starts wave N+1, which resolves
+ * the cross-shard CON dependency that blocked the naive shard runner in
+ * Phase D:
+ *
+ *   - All INS events (wave level 1) complete before any CON (wave level 2)
+ *   - The pre-pass generates synthetic INS for CON destinations
+ *   - The shared store makes cross-shard reverse-edge writes visible
+ *
+ * SHARD_COUNT is 3 — same as CHUNK_COUNT — enough to exercise multi-shard
+ * boundaries while keeping test runtime reasonable. With 4 targets in the
+ * arbitrary, 3 shards guarantees at least one shard has >1 target (proving
+ * intra-shard sequential dispatch) and at least one shard may be empty
+ * (proving empty-shard tolerance).
+ */
+const SHARD_COUNT = 3;
+
+const runShardPool: FoldRunner = async (store, events) => {
+  await processEventsBulkPooled(store, events, SHARD_COUNT);
+};
+
 // ─── Runner registry ─────────────────────────────────────────────────────────
 //
 // Named runners used by the parameterized test suite. New runners added
-// in future phases (worker pool, shard pool, GPU) go here and the full
-// property battery auto-applies.
+// in future phases (worker pool, GPU) go here and the full property
+// battery auto-applies.
 //
-// NOTE on shard runners. A naive partition-by-target shard runner was
+// NOTE on shard runners. The naive partition-by-target shard runner was
 // prototyped and rejected in Phase D because CON edges create cross-shard
-// dependencies: a destination target may not yet be INS'd when the shard
-// containing the CON runs ahead of the shard containing the destination's
-// INS. Solving this requires either (a) a global INS pre-pass before
-// sharding, or (b) dependency-aware shard scheduling. Both are deferred
-// to the worker-pool phase, which will need to solve the same problem
-// over real Web Workers. The chunked-bulk runner (which preserves arrival
-// order across chunks) is the correct incremental-import runner today.
+// dependencies. Phase E resolved this with wave-level synchronization:
+// the helix wave model guarantees all INS events complete before any CON
+// event runs, and the pre-pass generates synthetic INS for CON
+// destinations. See processEventsBulkPooled in fold.ts.
 
 interface NamedRunner {
   name: string;
@@ -456,11 +477,12 @@ const ALL_RUNNERS: NamedRunner[] = [
   { name: 'serial',       runner: runSerial },
   { name: 'bulk',         runner: runBulk },
   { name: 'chunked-bulk', runner: runChunkedBulk },
+  { name: 'shard-pool',   runner: runShardPool },
 ];
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
-describe('Fold determinism harness (Phase 0 + Phase D runners)', () => {
+describe('Fold determinism harness (Phase 0 + Phase E runners)', () => {
   beforeEach(() => {
     // Freeze Date.now() so fold-cache.ts cadence classification is
     // deterministic across the two runs in each property check.
