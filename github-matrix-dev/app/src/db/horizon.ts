@@ -3,6 +3,7 @@ import { getState, getStateByPrefix } from './state';
 import { getEdgesFrom, getEdgesTo } from './graph';
 import { resolveAlias } from './helpers';
 import { readLogForTarget } from './log';
+import { StoreNulHorizon } from './addressing-horizon';
 import type {
   EoEvent, EoState, EvaRegistration, HorizonResponse, GroundEntry, SignalEntry,
   SimilarRecord, SimilarityReason, Observation,
@@ -832,38 +833,72 @@ async function getRecCycleInfo(store: EoStore, figure: EoState): Promise<RecCycl
   };
 }
 
-// ─── Resolution-axis read path (Phase A slice 6 stub) ───────────────────────
+// ─── Resolution-axis read path (Phase C) ────────────────────────────────────
 
 /**
- * A single fold record indexed by resolution coordinate. Placeholder type for
- * the Phase C resolution-aware read path; intentionally opaque today because
- * no production callers consume it yet. Phase C will widen this to include
- * value, seq, ts, and any projection-specific fields.
+ * A single fold record indexed by resolution coordinate. Phase C widened
+ * this from the Phase A slice 6 placeholder to include value, ts, and
+ * operator — the fields callers need to render resolution-tagged state
+ * without re-walking the log.
+ *
+ * Today only NUL observations populate these records (via NulHorizon).
+ * When future slices index non-NUL resolution-stamped events (e.g.
+ * DEF × Making), the same shape carries without a type change.
  */
 export interface HorizonRecord {
   site: string;
   resolution: Resolution;
   seq: number;
+  /** Operator that produced this record. Currently always 'NUL'. */
+  op: LoggableOperator;
+  /** Timestamp (ISO 8601) of the event that produced this record. */
+  ts: string | undefined;
+  /**
+   * The operand/value the event carried. For NUL events this is
+   * undefined — NUL is a pure observation with no payload. For future
+   * non-NUL resolution records (e.g. DEF × Making), this will carry
+   * the operand.
+   */
+  value: unknown;
 }
 
 /**
  * getRecordsByResolution — resolution-aware read path for a site.
  *
- * STUB. Returns an empty Map for every site. Exists in this slice to lock in
- * the API contract so Phase C callers — and any adjacent planning work — do
- * not invent their own shape. The resolution axis is being populated for the
- * first time in this slice; until events with non-zero resolution nibbles
- * accumulate, there is nothing meaningful to return here.
+ * Returns a Map keyed by Resolution, where each entry is the **latest**
+ * HorizonRecord at that resolution coordinate. "Latest" means highest-seq
+ * observation — if a site has been NUL'd at 'Clearing' twice, only the
+ * most recent one appears in the map.
  *
- * Phase C will wire this up to the resolution-aware Horizon layers
- * (currently a design sketch, not yet an implementation) and return a real
- * Map keyed by Resolution value.
+ * Data source: NulHorizon. This is the only resolution-indexed store today.
+ * When future slices add non-NUL resolution tracking (e.g. DEF × Making
+ * indexed by resolution), they will extend this function to merge records
+ * from additional stores. The public API (Map<Resolution, HorizonRecord>)
+ * is designed to absorb that without a breaking change.
+ *
+ * Performance: O(k) where k is the number of NUL observations on the site
+ * (typically small — a site accumulates one NUL per explicit absence
+ * observation). No log scan required.
  */
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-export function getRecordsByResolution(
-  _store: EoStore,
-  _site: string,
-): Map<Resolution, HorizonRecord> {
-  // TODO Phase C: populate from resolution-aware Horizon layers.
-  return new Map();
+export async function getRecordsByResolution(
+  store: EoStore,
+  site: string,
+): Promise<Map<Resolution, HorizonRecord>> {
+  const nulHorizon = new StoreNulHorizon(store);
+  const observations = await nulHorizon.getObservations(site);
+  const map = new Map<Resolution, HorizonRecord>();
+
+  // Walk in seq-ascending order so the last write at each resolution wins.
+  for (const obs of observations) {
+    map.set(obs.resolution, {
+      site: obs.site,
+      resolution: obs.resolution,
+      seq: obs.seq,
+      op: 'NUL',
+      ts: undefined,  // NulObservation does not carry ts; future slices may enrich
+      value: undefined, // NUL is a pure observation — no payload
+    });
+  }
+
+  return map;
 }
