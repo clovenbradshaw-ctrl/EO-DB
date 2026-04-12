@@ -41,6 +41,25 @@
 import type { EoStore } from './encrypted-store';
 import type { ConEdgeAddItem, EoEventInput, LoggableOperator, HelixPosition } from './types';
 
+// ─── FoldRunner contract ───────────────────────────────────────────────────
+//
+// Promoted from the Phase 0 determinism harness. Every fold implementation
+// (serial, bulk, chunked, shard-pool, worker-pool, GPU) conforms to this
+// signature so the property-based tests in fold-determinism.test.ts can be
+// re-instantiated against each.
+//
+// The contract: given a store and a list of events, apply the events to the
+// store. The caller owns the store lifecycle; the runner owns only the fold
+// dispatch. No return value — observable effects are measured by reading
+// the store's keys/values after the run.
+
+/**
+ * A fold implementation. Takes a store and a batch of events and folds them
+ * into the store. Every runner that satisfies this contract can be plugged
+ * into the determinism harness.
+ */
+export type FoldRunner = (store: EoStore, events: EoEventInput[]) => Promise<void>;
+
 // ─── Helix constants & wave grouping ────────────────────────────────────────
 
 /**

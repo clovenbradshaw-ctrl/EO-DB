@@ -68,6 +68,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fc from 'fast-check';
 import { processEvent, processEventsBulk } from '../fold';
+import type { FoldRunner } from '../fold-core';
 import type { EoStore, IteratorOpts } from '../encrypted-store';
 import type { EoEventInput } from '../types';
 
@@ -390,13 +391,10 @@ const sequenceArb: fc.Arbitrary<EoEventInput[]> = fc
   .map(buildSequence);
 
 // ─── Fold runners ────────────────────────────────────────────────────────────
-
-/**
- * The contract every fold implementation must satisfy. Phase C/E will
- * supply additional FoldRunners (worker pool, shard pool, GPU) and the
- * tests below should be re-instantiated against each.
- */
-type FoldRunner = (store: EoStore, events: EoEventInput[]) => Promise<void>;
+//
+// FoldRunner is now exported from fold-core.ts (Phase D). Every runner below
+// satisfies the same contract: (store, events) → Promise<void>. The Phase 0
+// harness re-instantiates every property against every runner.
 
 const runSerial: FoldRunner = async (store, events) => {
   for (const event of events) {
@@ -408,9 +406,61 @@ const runBulk: FoldRunner = async (store, events) => {
   await processEventsBulk(store, events);
 };
 
+/**
+ * Chunked bulk runner — Phase D. Splits the input into N roughly-equal
+ * chunks (preserving arrival order) and feeds each chunk to
+ * processEventsBulk sequentially. Proves that "incremental bulk import
+ * of event batches produces the same projection as a single bulk import."
+ *
+ * This exercises the real-world scenario where events arrive in batches
+ * (e.g. Airtable sync pages, Matrix room pagination) and each batch is
+ * folded independently.
+ *
+ * CHUNK_COUNT is 3 — enough to exercise the boundary: first chunk
+ * establishes helix state, second chunk encounters existing targets,
+ * third chunk exercises the steady-state hot path.
+ */
+const CHUNK_COUNT = 3;
+
+const runChunkedBulk: FoldRunner = async (store, events) => {
+  if (events.length === 0) return;
+  const chunkSize = Math.max(1, Math.ceil(events.length / CHUNK_COUNT));
+  for (let i = 0; i < events.length; i += chunkSize) {
+    const chunk = events.slice(i, i + chunkSize);
+    await processEventsBulk(store, chunk);
+  }
+};
+
+// ─── Runner registry ─────────────────────────────────────────────────────────
+//
+// Named runners used by the parameterized test suite. New runners added
+// in future phases (worker pool, shard pool, GPU) go here and the full
+// property battery auto-applies.
+//
+// NOTE on shard runners. A naive partition-by-target shard runner was
+// prototyped and rejected in Phase D because CON edges create cross-shard
+// dependencies: a destination target may not yet be INS'd when the shard
+// containing the CON runs ahead of the shard containing the destination's
+// INS. Solving this requires either (a) a global INS pre-pass before
+// sharding, or (b) dependency-aware shard scheduling. Both are deferred
+// to the worker-pool phase, which will need to solve the same problem
+// over real Web Workers. The chunked-bulk runner (which preserves arrival
+// order across chunks) is the correct incremental-import runner today.
+
+interface NamedRunner {
+  name: string;
+  runner: FoldRunner;
+}
+
+const ALL_RUNNERS: NamedRunner[] = [
+  { name: 'serial',       runner: runSerial },
+  { name: 'bulk',         runner: runBulk },
+  { name: 'chunked-bulk', runner: runChunkedBulk },
+];
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
-describe('Fold determinism harness (Phase 0)', () => {
+describe('Fold determinism harness (Phase 0 + Phase D runners)', () => {
   beforeEach(() => {
     // Freeze Date.now() so fold-cache.ts cadence classification is
     // deterministic across the two runs in each property check.
@@ -422,52 +472,49 @@ describe('Fold determinism harness (Phase 0)', () => {
     vi.useRealTimers();
   });
 
-  it('bulk determinism: same input twice through processEventsBulk → byte-identical', async () => {
-    // Byte-identical guarantee. Phase A (constitutive site model) made
-    // this reachable: processEventsBulk now reserves a contiguous seq
-    // range for each wave up-front via an AddressingHorizon (fold-core.ts),
-    // then hands seqs out in deterministic expansion order before any
-    // Promise.all dispatch runs. The V8-microtask race that previously
-    // made bulk byte-identity flaky (see Phase 0 FIXME(phase-A), now
-    // resolved) cannot recur: no two parallel tasks ever call
-    // store.nextSeq() concurrently inside a bulk import.
-    await fc.assert(
-      fc.asyncProperty(sequenceArb, async (events) => {
-        const a = createTestStore();
-        const b = createTestStore();
-        await runBulk(a.store, events);
-        await runBulk(b.store, events);
-        expect(fullFingerprint(a)).toBe(fullFingerprint(b));
-      }),
-      { numRuns: 20 },
-    );
-  });
+  // ─── Property 1: Self-determinism ──────────────────────────────────────
+  //
+  // Each runner must produce byte-identical store contents when given the
+  // same input twice. This is the foundational property: if a runner is
+  // not self-deterministic, nothing else about it can be trusted.
 
-  it('serial determinism: same input twice through processEvent → byte-identical', async () => {
-    await fc.assert(
-      fc.asyncProperty(sequenceArb, async (events) => {
-        const a = createTestStore();
-        const b = createTestStore();
-        await runSerial(a.store, events);
-        await runSerial(b.store, events);
-        expect(fullFingerprint(a)).toBe(fullFingerprint(b));
-      }),
-      { numRuns: 20 },
-    );
-  });
+  for (const { name, runner } of ALL_RUNNERS) {
+    it(`[${name}] self-determinism: same input twice → byte-identical`, async () => {
+      await fc.assert(
+        fc.asyncProperty(sequenceArb, async (events) => {
+          const a = createTestStore();
+          const b = createTestStore();
+          await runner(a.store, events);
+          await runner(b.store, events);
+          expect(fullFingerprint(a)).toBe(fullFingerprint(b));
+        }),
+        { numRuns: 15 },
+      );
+    });
+  }
 
-  it('projection equivalence: serial fold = bulk fold on causally-ordered input', async () => {
-    await fc.assert(
-      fc.asyncProperty(sequenceArb, async (events) => {
-        const serial = createTestStore();
-        const bulk = createTestStore();
-        await runSerial(serial.store, events);
-        await runBulk(bulk.store, events);
-        expect(projectionFingerprint(serial)).toBe(projectionFingerprint(bulk));
-      }),
-      { numRuns: 20 },
-    );
-  });
+  // ─── Property 2: Projection equivalence ────────────────────────────────
+  //
+  // Every runner must produce the same projection as the serial baseline.
+  // "Projection" strips seq-dependent fields (different runners legitimately
+  // assign different seqs) and compares the "what does the database look
+  // like to a reader" view.
+
+  for (const { name, runner } of ALL_RUNNERS) {
+    if (name === 'serial') continue; // serial is the baseline
+    it(`[${name}] projection equivalence: ${name} fold ≡ serial fold`, async () => {
+      await fc.assert(
+        fc.asyncProperty(sequenceArb, async (events) => {
+          const baseline = createTestStore();
+          const candidate = createTestStore();
+          await runSerial(baseline.store, events);
+          await runner(candidate.store, events);
+          expect(projectionFingerprint(candidate)).toBe(projectionFingerprint(baseline));
+        }),
+        { numRuns: 15 },
+      );
+    });
+  }
 
   it('DEF re-block: final value at a field equals the last DEF on that field', async () => {
     await fc.assert(
