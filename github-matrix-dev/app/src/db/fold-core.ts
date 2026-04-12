@@ -178,6 +178,11 @@ export interface OperatorProcessingClass {
  * CON × Tracing → provisional edge) is reserved for Phase C.5. Do not add
  * resolution-awareness here until compound glyphs have been populated in
  * real workloads and profiling reveals which ones actually matter.
+ *
+ * NOTE: `sync: 'flush-gpu'` is load-bearing for `splitWaveIntoSteps` below —
+ * every row marked `flush-gpu` becomes a wave-step boundary. Adding another
+ * `flush-gpu` operator will silently reshape every wave into more (smaller)
+ * steps; verify the determinism harness and any Phase C GPU dispatch first.
  */
 export const OPERATOR_PROCESSING_CLASS: Record<LoggableOperator, OperatorProcessingClass> = {
   NUL: { layer: 'cpu',      memory: 'constituted-set', sync: 'none'      },
@@ -221,6 +226,59 @@ export function sortByHelixLevel(events: EoEventInput[]): HelixWave[] {
   return Array.from(byLevel.entries())
     .sort(([a], [b]) => a - b)
     .map(([level, evts]) => ({ level, events: evts }));
+}
+
+/**
+ * A wave-step is a contiguous slice of a HelixWave that can execute without
+ * a GPU-drain boundary in the middle. Waves are split into steps at every
+ * flush-gpu operator (currently DEF): a flush-gpu op gets its own
+ * single-event step with `barrier: true`, and non-flush events accumulate
+ * into a single step with `barrier: false`.
+ *
+ * The `barrier` flag says "drain any in-flight GPU work BEFORE applying
+ * this step's events." Today the drain is a no-op (no GPU dispatch is
+ * wired into the fold), but the structure gives Phase C a single dispatch
+ * boundary to bind to without re-threading the wave loop.
+ *
+ * Rule: each flush-gpu op is its own single-event step. We deliberately do
+ * NOT coalesce consecutive flush-gpus into one step, because the barrier
+ * abstraction stays locally testable ("a barrier step has exactly one
+ * event"), and the "skip a drain if nothing has been dispatched"
+ * optimization belongs inside the drain function itself (tracked by a
+ * Phase C in-flight counter), not in the splitter.
+ *
+ * `level` is NOT duplicated on WaveStep — the parent HelixWave owns it as
+ * the single source of truth.
+ */
+export interface WaveStep {
+  events: EoEventInput[];
+  barrier: boolean;
+}
+
+/**
+ * Split a HelixWave into a sequence of WaveSteps at flush-gpu boundaries.
+ * Pure function: no state, no side effects, total event order preserved.
+ *
+ * Invariant: the flattened `steps.flatMap(s => s.events)` equals the input
+ * `wave.events` exactly, and every step where `barrier === true` contains
+ * exactly one event whose operator returns `requiresGpuFlush(op) === true`.
+ */
+export function splitWaveIntoSteps(wave: HelixWave): WaveStep[] {
+  const steps: WaveStep[] = [];
+  let current: WaveStep = { events: [], barrier: false };
+  for (const event of wave.events) {
+    if (requiresGpuFlush(event.op as LoggableOperator)) {
+      if (current.events.length > 0) {
+        steps.push(current);
+        current = { events: [], barrier: false };
+      }
+      steps.push({ events: [event], barrier: true });
+    } else {
+      current.events.push(event);
+    }
+  }
+  if (current.events.length > 0) steps.push(current);
+  return steps;
 }
 
 /**

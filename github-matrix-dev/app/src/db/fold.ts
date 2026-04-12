@@ -13,6 +13,7 @@ import {
   StoreHelixStateTracker,
   checkAndPromote as checkAndPromoteHelix,
   sortByHelixLevel,
+  splitWaveIntoSteps,
   mergeOperand,
   isFormulaOperand,
   deepEqual,
@@ -28,6 +29,26 @@ export type { HelixWave } from './fold-core';
 
 /** Fold mutex — ensures only one processEvent executes at a time. */
 const foldMutex = new AsyncMutex();
+
+/**
+ * Drain any in-flight GPU work before applying a schema-mutating op.
+ *
+ * Called before every wave-step whose `barrier` flag is set — today that
+ * means every step containing a `DEF`, which is the only `sync: 'flush-gpu'`
+ * operator in OPERATOR_PROCESSING_CLASS. The drain is semantically required
+ * because DEF changes the schema dimensionality, and every dense-vector GPU
+ * buffer the fold may have been reading becomes stale at the instant the
+ * DEF lands.
+ *
+ * No-op today — no GPU dispatch is wired into the fold yet. The call site
+ * exists so that Phase C can replace this with a real drain (awaiting
+ * EVA/REC compute shader completions) without re-threading the wave-step
+ * loop. See `WaveStep.barrier` in fold-core.ts.
+ */
+async function drainGpuInFlight(): Promise<void> {
+  // TODO(phase-c): drain any GPU work queued by prior EVA/REC dispatches
+  // before the schema-mutating op runs. No-op until GPU dispatch is wired.
+}
 
 // ─── Helix Infrastructure ────────────────────────────────────────────────────
 //
@@ -295,48 +316,73 @@ export async function processEventsBulk(
 
       if (expanded.length === 0) continue;
 
-      // Step 2: Reserve a contiguous seq range for the expanded wave. This is
-      // the ONLY control-flow site that advances store.nextSeq() during bulk
-      // ingestion, so there is no race.
+      // Step 2: Split the expanded wave into wave-steps at flush-gpu
+      // boundaries (Phase B — Barrier extraction). Each flush-gpu op
+      // (currently only DEF) becomes its own single-event step with
+      // `barrier: true`; non-flush events accumulate into `barrier: false`
+      // steps. The splitter is pure — no side effects, no seq allocation.
+      //
+      // CRITICAL: this runs BEFORE reservoir.reserve() so the single
+      // reservation call below remains the sole control-flow site that
+      // advances store.nextSeq() during bulk ingestion. Moving reserve()
+      // inside the step loop would reintroduce the V8 microtask race that
+      // Phase A closed by serializing seq allocation.
+      const steps = splitWaveIntoSteps({ level: wave.level, events: expanded });
+
+      // Step 3: Reserve a contiguous seq range for the WHOLE expanded wave
+      // (not per-step). reservoir.take() carries across step boundaries
+      // within a wave — same reservoir, same arrival order — so the seqs
+      // assigned are identical to the pre-barrier-extraction behavior.
       await reservoir.reserve(expanded.length);
 
-      // Step 3: Assign seqs in expanded-stream order — the same order in
-      // which the pre-pass saw events. Synthetic INS events receive a seq
-      // BEFORE any event that depends on them.
-      const planned: { event: EoEventInput; seq: number }[] = expanded.map((event) => ({
-        event,
-        seq: reservoir.take(),
-      }));
+      // Step 4: Process each wave-step sequentially. Before each barrier
+      // step, drain any in-flight GPU work (no-op today; Phase C hook).
+      // Within a step, keep the existing shard-by-target + Promise.all
+      // dispatch (parallel-across-targets, sequential-within-target),
+      // scoped to step.events instead of the full wave.
+      for (const step of steps) {
+        if (step.barrier) {
+          await drainGpuInFlight();
+        }
 
-      // Step 4: Shard by target while preserving the pre-assigned seqs.
-      // Iterate sortedTargetKeys for deterministic Promise.all dispatch order
-      // (no semantic effect, but keeps the test's byte-identical assertion
-      // robust against Map iteration order drift).
-      const byTarget = new Map<string, { event: EoEventInput; seq: number }[]>();
-      for (const p of planned) {
-        const bucket = byTarget.get(p.event.target);
-        if (bucket) bucket.push(p);
-        else byTarget.set(p.event.target, [p]);
-      }
-      const sortedTargetKeys = [...byTarget.keys()].sort();
+        // Assign seqs in step-event order — the same order in which the
+        // pre-pass saw events. Synthetic INS events receive a seq BEFORE
+        // any event that depends on them.
+        const planned: { event: EoEventInput; seq: number }[] = step.events.map((event) => ({
+          event,
+          seq: reservoir.take(),
+        }));
 
-      // Step 5: Process targets in parallel, sequential within each target.
-      const waveSeqs = await Promise.all(
-        sortedTargetKeys.map(async (target) => {
-          const targetEvents = byTarget.get(target)!;
-          let targetLastSeq = 0;
-          for (const { event, seq } of targetEvents) {
-            await processEventCoreWithSeq(store, event, seq, addressing, declared, nulHorizon, onEvent);
-            if (seq > targetLastSeq) targetLastSeq = seq;
-            processed++;
-            onProgress?.(processed, events.length);
-          }
-          return targetLastSeq;
-        })
-      );
+        // Shard by target while preserving the pre-assigned seqs. Iterate
+        // sortedTargetKeys for deterministic Promise.all dispatch order
+        // (no semantic effect, but keeps the test's byte-identical
+        // assertion robust against Map iteration order drift).
+        const byTarget = new Map<string, { event: EoEventInput; seq: number }[]>();
+        for (const p of planned) {
+          const bucket = byTarget.get(p.event.target);
+          if (bucket) bucket.push(p);
+          else byTarget.set(p.event.target, [p]);
+        }
+        const sortedTargetKeys = [...byTarget.keys()].sort();
 
-      for (const seq of waveSeqs) {
-        if (seq > lastSeq) lastSeq = seq;
+        // Process targets in parallel, sequential within each target.
+        const stepSeqs = await Promise.all(
+          sortedTargetKeys.map(async (target) => {
+            const targetEvents = byTarget.get(target)!;
+            let targetLastSeq = 0;
+            for (const { event, seq } of targetEvents) {
+              await processEventCoreWithSeq(store, event, seq, addressing, declared, nulHorizon, onEvent);
+              if (seq > targetLastSeq) targetLastSeq = seq;
+              processed++;
+              onProgress?.(processed, events.length);
+            }
+            return targetLastSeq;
+          })
+        );
+
+        for (const seq of stepSeqs) {
+          if (seq > lastSeq) lastSeq = seq;
+        }
       }
     }
 
