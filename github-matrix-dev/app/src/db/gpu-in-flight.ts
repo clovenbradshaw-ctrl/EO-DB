@@ -23,11 +23,12 @@
  *      starts is NOT awaited by that drain call — the barrier semantic is
  *      "flush everything dispatched strictly before the barrier."
  *
- * Scope boundary. Phase C wires up the tracker and the drain plumbing. It
- * does NOT wire handleEVA or handleREC to call `register()` — that is the
- * next slice. The Phase C contract is exactly: the skip-redundant-drain
- * optimization is live, and any caller that wants to participate in the
- * barrier has a single grep target (`gpuInFlight.register`) to plumb into.
+ * Scope boundary. Phase C wired up the tracker and the drain plumbing.
+ * Phase D (gpu-dispatch.ts) closed the loop by wiring dispatchEvalGpu to
+ * call `gpuInFlight.register()` for GPU-eligible EVA formulas, and
+ * syncDefToGpu to keep GPU field buffers current on every DEF. The barrier
+ * is now operationally live: drain actually awaits GPU work when WebGPU is
+ * available and a GPU-eligible formula has been dispatched.
  *
  * Concurrency model. The fold path is already serialized by foldMutex, so
  * `drainGpuInFlight()` is never called concurrently with another
