@@ -37,6 +37,7 @@ import {
 import { useAirtableStore, DEFAULT_SYNC_SETTINGS, type AirtableSyncSettings, type SyncLogEntry } from './airtable-store';
 import { airtableSyncEventTypes } from '../lib/matrix-domain';
 import type { GDriveSyncService } from '../google-drive/gdrive-sync';
+import { createImportProgressListener } from '../store/eo-store';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -435,27 +436,41 @@ export class AirtableSyncService {
       let result: HydrationResult | UpdateSyncResult;
       let ranHydration = false;
 
-      if (!isHydrated) {
-        result = await hydrationSync(this.store, client, this.agent, {
-          customization: effectiveCustomization,
-          onRawImport: (bundle) => this.persistBulkImportProvenance(bundle),
-        });
-        ranHydration = true;
-      } else {
-        // 'fullDiff' strategy: pass null cursor by re-hydrating with
-        // preserveExisting=false, so every field is compared.
-        // 'lastModified' strategy (default): incremental via LAST_MODIFIED_TIME cursor.
-        if (syncSettings.syncStrategy === 'fullDiff') {
+      // Bridge per-event fold output into Zustand so subscribers like
+      // TableView (which re-fetches on `lastSeq` change) refresh as the
+      // continuous sync lands records. Without this the events fold into
+      // the MemoryStore + OPFS log but the UI never repaints until reload.
+      const progressListener = createImportProgressListener();
+      try {
+        if (!isHydrated) {
           result = await hydrationSync(this.store, client, this.agent, {
-            customization: { ...effectiveCustomization, preserveExisting: false },
+            customization: effectiveCustomization,
+            onEvent: progressListener.onEvent,
             onRawImport: (bundle) => this.persistBulkImportProvenance(bundle),
           });
           ranHydration = true;
         } else {
-          result = await updateSync(this.store, client, this.agent, {
-            customization: effectiveCustomization,
-          });
+          // 'fullDiff' strategy: pass null cursor by re-hydrating with
+          // preserveExisting=false, so every field is compared.
+          // 'lastModified' strategy (default): incremental via LAST_MODIFIED_TIME cursor.
+          if (syncSettings.syncStrategy === 'fullDiff') {
+            result = await hydrationSync(this.store, client, this.agent, {
+              customization: { ...effectiveCustomization, preserveExisting: false },
+              onEvent: progressListener.onEvent,
+              onRawImport: (bundle) => this.persistBulkImportProvenance(bundle),
+            });
+            ranHydration = true;
+          } else {
+            result = await updateSync(this.store, client, this.agent, {
+              customization: effectiveCustomization,
+              onEvent: progressListener.onEvent,
+            });
+          }
         }
+      } finally {
+        // Flush any pending throttled Zustand update so the UI sees the
+        // final lastSeq even if the sync ended on an in-flight timer.
+        progressListener.finalize();
       }
 
       // After a bulk hydration completes, rewrite the .eodb log file on
