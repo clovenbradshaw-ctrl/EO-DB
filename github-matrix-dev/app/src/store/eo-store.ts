@@ -1,7 +1,13 @@
 import { create } from 'zustand';
 import type { EoStore } from '../db/encrypted-store';
 import { createMemoryStore, type MemoryStore } from '../db/memory-store';
-import { replayFromLog, processEvent, processEventsBulk } from '../db/fold';
+import {
+  replayFromLog,
+  processEvent,
+  processEventsBulk,
+  processEventsBulkWithDispatcher,
+} from '../db/fold';
+import { createWorkerShardPool, type WorkerShardPool } from '../db/fold-worker-transport';
 import { horizonGet, type HorizonOpts } from '../db/horizon';
 import { getState, getStateByPrefix, getStateByPrefixPage, type StatePage } from '../db/state';
 import { readLogSince } from '../db/log';
@@ -21,6 +27,82 @@ import type { GDriveSyncService } from '../google-drive/gdrive-sync';
 import type { ResolvedPermissions } from '../permissions/types';
 import type { ManifestState as UserManifest } from '../google-drive/space-permissions';
 import { eventHash } from '../db/hash';
+
+// ─── Shard worker pool (Phase G/H wiring) ──────────────────────────────────
+//
+// A single WorkerShardPool is lazily spawned on the first large bulk import
+// and re-used for the lifetime of the module. The pool is store-agnostic —
+// every ShardRequest carries its own snapshot over the wire, so the same
+// workers can service back-to-back imports across space switches without
+// ever being terminated. `teardown()` tears the pool down alongside the
+// fold worker client for a clean shutdown.
+//
+// `MIN_EVENTS_FOR_WORKER` is the threshold below which the legacy
+// `processEventsBulk` path (single-threaded, in-process) stays faster than
+// spinning up / marshalling across the worker boundary. 500 events lands
+// roughly at the break-even on a 4-core laptop — below that the snapshot
+// serialization + structured-clone overhead dominates the actual fold work.
+// Above it, the worker path wins as soon as `navigator.hardwareConcurrency`
+// is ≥ 2.
+const MIN_EVENTS_FOR_WORKER = 500;
+const MAX_SHARDS = 8;
+
+let cachedWorkerPool: WorkerShardPool | null = null;
+let cachedPoolShardCount = 0;
+
+/** Return the preferred shard/worker count for the host, or 0 if the
+ *  worker path is unavailable (no `Worker` global, hardware says one core,
+ *  or running under a test runtime without `navigator`). */
+function preferredShardCount(): number {
+  if (typeof Worker === 'undefined') return 0;
+  const nav: Navigator | undefined =
+    typeof navigator !== 'undefined' ? navigator : undefined;
+  const hc = nav?.hardwareConcurrency;
+  if (typeof hc !== 'number' || hc < 2) return 0;
+  return Math.min(hc, MAX_SHARDS);
+}
+
+/** Lazy-spawn (and cache) the worker pool at `shardCount` workers. Returns
+ *  null if the environment doesn't support workers. */
+function getOrCreateWorkerPool(shardCount: number): WorkerShardPool | null {
+  if (shardCount < 1) return null;
+  if (cachedWorkerPool && cachedPoolShardCount === shardCount) {
+    return cachedWorkerPool;
+  }
+  // If the cached pool exists at a different size, tear it down before
+  // spawning a replacement. In practice `preferredShardCount()` is stable
+  // across a session, so this branch is mostly defensive.
+  if (cachedWorkerPool) {
+    cachedWorkerPool.terminate();
+    cachedWorkerPool = null;
+    cachedPoolShardCount = 0;
+  }
+  try {
+    // Vite's Worker plugin rewrites `new Worker(new URL(..., import.meta.url))`
+    // into a bundle-aware URL at build time; under Vitest / Node, this will
+    // throw synchronously and we fall through to the catch → serial path.
+    const workerFactory = (): Worker =>
+      new Worker(new URL('../workers/fold-shard.worker.ts', import.meta.url), {
+        type: 'module',
+      });
+    const pool = createWorkerShardPool({ workerCount: shardCount, workerFactory });
+    cachedWorkerPool = pool;
+    cachedPoolShardCount = shardCount;
+    return pool;
+  } catch (e) {
+    console.warn('[EO-DB] Failed to spawn shard worker pool, falling back to in-process bulk:', e);
+    return null;
+  }
+}
+
+/** Terminate and drop the cached worker pool. Called from `teardown`. */
+function terminateCachedWorkerPool(): void {
+  if (cachedWorkerPool) {
+    cachedWorkerPool.terminate();
+    cachedWorkerPool = null;
+    cachedPoolShardCount = 0;
+  }
+}
 
 interface EoDbState {
   /** The in-memory store (set after space init) */
@@ -311,11 +393,30 @@ export const useEoStore = create<EoDbState>((set, get) => ({
       }));
     };
 
-    const lastSeq = await processEventsBulk(store, events, onProgress, (fullEvent) => {
+    const onFoldedEvent = (fullEvent: EoEvent): void => {
       imported.push(fullEvent);
       pendingBatch.push(fullEvent);
       if (pendingBatch.length >= BATCH_SIZE) flushBatch();
-    });
+    };
+
+    // ── Route to the shard-pool worker path above the threshold ──────────────
+    // Phase E–H shipped the shard-pool + worker transport; this is the wiring
+    // that actually exercises it. Below the threshold, or when the host can't
+    // spawn workers (Node / Vitest, single-core, no `Worker`), the legacy
+    // in-process bulk path is faster because it skips snapshot serialization
+    // and the structured-clone round-trip per wave-step.
+    const shardCount = preferredShardCount();
+    const useWorkerPath = events.length >= MIN_EVENTS_FOR_WORKER && shardCount >= 2;
+    const pool = useWorkerPath ? getOrCreateWorkerPool(shardCount) : null;
+
+    let lastSeq: number;
+    if (pool) {
+      lastSeq = await processEventsBulkWithDispatcher(
+        store, events, shardCount, pool.dispatcher, onProgress, onFoldedEvent,
+      );
+    } else {
+      lastSeq = await processEventsBulk(store, events, onProgress, onFoldedEvent);
+    }
 
     // Drain any remaining events and do one final set() so HolonNav gets a clean
     // lastSeq update after all events are committed — fixing nav auto-update.
@@ -394,6 +495,9 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     const { store, workerClient } = get();
     if (store) store.close();
     if (workerClient) workerClient.worker.terminate();
+    // Drop the shard-worker pool alongside the fold worker so teardown is
+    // a clean shutdown with no lingering OS threads.
+    terminateCachedWorkerPool();
     set({
       store: null,
       workerClient: null,

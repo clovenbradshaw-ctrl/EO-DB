@@ -669,7 +669,7 @@ export async function processEventsBulkPooled(
  * event, so checkExists calls on CON destinations always succeed (the
  * destination was INS'd in a prior wave and is present in the snapshot).
  */
-async function processEventsBulkViaDispatcher(
+export async function processEventsBulkViaDispatcher(
   store: EoStore,
   events: EoEventInput[],
   shardCount: number,
@@ -833,7 +833,7 @@ async function processEventsBulkViaDispatcher(
         const shardResults = await Promise.all(
           shards.map(async (shardTargets, shardIdx) => {
             if (shardTargets.length === 0) {
-              return { mutations: [], shardLastSeq: 0, processedCount: 0 };
+              return { mutations: [], shardLastSeq: 0, processedCount: 0, emittedEvents: [] };
             }
             // Restrict the target→planned payload to just this shard's
             // targets — the snapshot is filtered to this shard's relevant
@@ -858,8 +858,19 @@ async function processEventsBulkViaDispatcher(
         // Merge: apply every shard's mutation log to the main store in
         // shard order. Each shard's writes to its own target key space
         // are conflict-free; CON reverse-edge writes are additive.
-        for (const { mutations, shardLastSeq, processedCount } of shardResults) {
+        //
+        // Fan out the shard's `emittedEvents` through `onEvent` AFTER the
+        // mutations are merged — this is how the worker transport delivers
+        // the same event stream the in-process bulk paths deliver
+        // (UI bookkeeping, Drive saveOp batching, PeerSync broadcast queue).
+        // The function-valued `onEvent` can't cross postMessage, so the
+        // shard collected events on its side and the coordinator replays
+        // them here in shard order.
+        for (const { mutations, shardLastSeq, processedCount, emittedEvents } of shardResults) {
           await applyMutations(store, mutations);
+          if (onEvent) {
+            for (const ev of emittedEvents) onEvent(ev);
+          }
           if (shardLastSeq > lastSeq) lastSeq = shardLastSeq;
           processed += processedCount;
           onProgress?.(processed, events.length);
@@ -917,9 +928,9 @@ export async function processEventsBulkIsolated(
   onEvent?: (event: EoEvent) => void,
 ): Promise<number> {
   const { dispatchShardInProcess } = await import('./fold-worker-transport');
-  const dispatcher = (req: import('./fold-worker-transport').ShardRequest) =>
-    dispatchShardInProcess(req, onEvent);
-  return processEventsBulkViaDispatcher(store, events, shardCount, dispatcher, onProgress, onEvent);
+  return processEventsBulkViaDispatcher(
+    store, events, shardCount, dispatchShardInProcess, onProgress, onEvent,
+  );
 }
 
 /**
@@ -962,6 +973,31 @@ export async function processEventsBulkWorker(
   } finally {
     pool.terminate();
   }
+}
+
+/**
+ * Dispatcher-backed bulk fold with a caller-owned dispatcher. Same wave
+ * pipeline as `processEventsBulkWorker`, but the coordinator does NOT
+ * spawn or terminate the pool — ownership is the caller's.
+ *
+ * This is the entry point to use when the caller wants to amortize
+ * worker-spawn cost across back-to-back imports (e.g. the EoDB store
+ * caches a single pool for the lifetime of a space and reuses it).
+ *
+ * `dispatcher` can be any ShardDispatcher — `dispatchShardInProcess`,
+ * a long-lived `WorkerShardPool.dispatcher`, or a test double.
+ */
+export async function processEventsBulkWithDispatcher(
+  store: EoStore,
+  events: EoEventInput[],
+  shardCount: number,
+  dispatcher: import('./fold-worker-transport').ShardDispatcher,
+  onProgress?: (current: number, total: number) => void,
+  onEvent?: (event: EoEvent) => void,
+): Promise<number> {
+  return processEventsBulkViaDispatcher(
+    store, events, shardCount, dispatcher, onProgress, onEvent,
+  );
 }
 
 /**
