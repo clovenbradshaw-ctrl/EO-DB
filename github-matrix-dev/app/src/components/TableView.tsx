@@ -554,6 +554,24 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
 
   const [records, setRecords] = useState<EoState[]>([]);
   const [recordsLoaded, setRecordsLoaded] = useState(false);
+  // --- Update indicator state ---
+  // isUpdating: true briefly while a sync-triggered re-fetch is in flight.
+  // lastUpdate: summary of the most recent non-empty diff (added/modified/removed
+  //   record targets). Null until the first observed change.
+  // showUpdateDetail: toggles the detail popup listing the changed records.
+  const [isUpdating, setIsUpdating] = useState(false);
+  const [lastUpdate, setLastUpdate] = useState<{
+    added: string[];
+    modified: string[];
+    removed: string[];
+    ts: number;
+    // Whether the indicator was just set in this render cycle (for the pulse animation).
+    fresh: boolean;
+  } | null>(null);
+  const [showUpdateDetail, setShowUpdateDetail] = useState(false);
+  // Map of target → last_seq for the previous record set, used to compute diffs
+  // when a sync-triggered re-fetch replaces the record list.
+  const prevRecordsMapRef = useRef<Map<string, number>>(new Map());
   const [fieldNameMap, setFieldNameMap] = useState<Map<string, string>>(new Map());
   const [scopeName, setScopeName] = useState<string | null>(null);
   const [auditableDisplayField, setAuditableDisplayField] = useState<string | null>(null);
@@ -720,18 +738,46 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
         }
         // Final fingerprint for future sync-triggered re-fetches
         prevRecordsKeyRef.current = accumulated.map(r => r.target + ':' + r.last_seq).join('|');
+        // Seed the target→last_seq map so the first sync re-fetch after initial
+        // load can produce a correct diff.
+        prevRecordsMapRef.current = new Map(accumulated.map(r => [r.target, r.last_seq]));
       });
     } else {
-      // Sync-triggered re-fetch: reload full set but only re-render if something changed
+      // Sync-triggered re-fetch: reload full set but only re-render if something changed.
+      // Mark the indicator as in-flight while the fetch is pending so the UI can
+      // show a brief "updating" state.
+      setIsUpdating(true);
       getStateByPrefix(scope + '.').then((states) => {
         if (gen !== fetchGenRef.current) return;
         const direct = filterDirect(states);
         const key = direct.map(r => r.target + ':' + r.last_seq).join('|');
         if (key !== prevRecordsKeyRef.current) {
+          // Compute the diff against the previously-observed record set so the
+          // user can click through to see exactly what changed.
+          const oldMap = prevRecordsMapRef.current;
+          const newMap = new Map(direct.map(r => [r.target, r.last_seq]));
+          const added: string[] = [];
+          const modified: string[] = [];
+          const removed: string[] = [];
+          for (const [t, seq] of newMap) {
+            const prev = oldMap.get(t);
+            if (prev === undefined) added.push(t);
+            else if (prev !== seq) modified.push(t);
+          }
+          for (const t of oldMap.keys()) {
+            if (!newMap.has(t)) removed.push(t);
+          }
           prevRecordsKeyRef.current = key;
+          prevRecordsMapRef.current = newMap;
           setRecords(direct);
+          if (added.length || modified.length || removed.length) {
+            setLastUpdate({ added, modified, removed, ts: Date.now(), fresh: true });
+          }
         }
+        setIsUpdating(false);
         setRecordsLoaded(true);
+      }).catch(() => {
+        setIsUpdating(false);
       });
     }
 
@@ -817,6 +863,12 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     prevSchemaKeyRef.current = '';
     prevScopeNameRef.current = null;
     setAuditableDisplayField(null);
+    // Clear update indicator state so switching tables doesn't carry over a
+    // stale "updated" badge from the previous scope.
+    prevRecordsMapRef.current = new Map();
+    setIsUpdating(false);
+    setLastUpdate(null);
+    setShowUpdateDetail(false);
   }, [scope]);
 
   // Debounce filterText so that keystroke latency is bounded by a short
@@ -825,6 +877,17 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     const id = setTimeout(() => setDebouncedFilterText(filterText), 150);
     return () => clearTimeout(id);
   }, [filterText]);
+
+  // Clear the `fresh` pulse flag shortly after a new update arrives so the
+  // attention-grabbing animation is transient; the badge itself remains so
+  // the user can click through to see what changed.
+  useEffect(() => {
+    if (!lastUpdate?.fresh) return;
+    const id = setTimeout(() => {
+      setLastUpdate((prev) => (prev ? { ...prev, fresh: false } : prev));
+    }, 2500);
+    return () => clearTimeout(id);
+  }, [lastUpdate?.ts, lastUpdate?.fresh]);
 
   // Detect if records use the Airtable-style fields sub-object
   const useFieldsSub = useMemo(() => hasFieldsSubObject(records), [records]);
@@ -1764,6 +1827,14 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
         <div style={s.toolbarLeft}>
           <div style={s.scopeName}>{scopeName || formatScopeName(scope)}</div>
           <span style={s.recordCount}>{filtered.length}</span>
+          <TableUpdateIndicator
+            isUpdating={isUpdating}
+            lastUpdate={lastUpdate}
+            records={records}
+            scope={scope}
+            onOpenDetail={() => setShowUpdateDetail(true)}
+            theme={theme}
+          />
           {!isMobile && (() => {
             const totalDefs = Array.from(fieldSchemas.values()).reduce(
               (sum, fs) => sum + (fs.typeDef ? 1 : 0) + fs.constraints.length, 0);
@@ -2660,6 +2731,405 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
           </div>
         </>
       )}
+      {showUpdateDetail && lastUpdate && (
+        <TableUpdateDetail
+          lastUpdate={lastUpdate}
+          records={records}
+          scope={scope}
+          onClose={() => setShowUpdateDetail(false)}
+          onSelectRecord={(target) => {
+            setShowUpdateDetail(false);
+            onSelectRecord(target);
+          }}
+          onClear={() => {
+            setShowUpdateDetail(false);
+            setLastUpdate(null);
+          }}
+          theme={theme}
+        />
+      )}
+    </div>
+  );
+}
+
+// --- Update Indicator ---
+//
+// A small pulsing badge rendered in the table toolbar that signals when the
+// underlying record set has just been updated by sync. Clicking the badge
+// opens the `TableUpdateDetail` modal so the user can see exactly which
+// records were added, modified, or removed.
+
+interface TableUpdateIndicatorProps {
+  isUpdating: boolean;
+  lastUpdate: {
+    added: string[];
+    modified: string[];
+    removed: string[];
+    ts: number;
+    fresh: boolean;
+  } | null;
+  records: EoState[];
+  scope: string;
+  onOpenDetail: () => void;
+  theme: Theme;
+}
+
+function TableUpdateIndicator({ isUpdating, lastUpdate, onOpenDetail, theme }: TableUpdateIndicatorProps) {
+  // Nothing to show until we've either seen an in-flight update or captured a diff.
+  if (!isUpdating && !lastUpdate) return null;
+
+  const totalChanged = lastUpdate
+    ? lastUpdate.added.length + lastUpdate.modified.length + lastUpdate.removed.length
+    : 0;
+  const pulse = isUpdating || !!lastUpdate?.fresh;
+
+  // In-flight with no diff yet: show a muted "updating" pill.
+  if (isUpdating && !lastUpdate) {
+    return (
+      <span
+        title="Table is updating…"
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 6,
+          fontSize: 11,
+          color: theme.textMuted,
+          background: theme.bgMuted,
+          padding: '2px 8px',
+          borderRadius: 10,
+          border: `1px solid ${theme.border}`,
+        }}
+      >
+        <span
+          style={{
+            display: 'inline-block',
+            width: 6,
+            height: 6,
+            borderRadius: '50%',
+            background: theme.accent,
+            animation: 'eo-update-pulse 1.1s ease-in-out infinite',
+          }}
+        />
+        Updating…
+        <style>{`
+          @keyframes eo-update-pulse {
+            0%, 100% { opacity: 0.35; transform: scale(0.9); }
+            50%      { opacity: 1;    transform: scale(1.15); }
+          }
+        `}</style>
+      </span>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={onOpenDetail}
+      title={`Table updated — click to see ${totalChanged} changed record${totalChanged === 1 ? '' : 's'}`}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 6,
+        fontSize: 11,
+        fontWeight: 500,
+        color: theme.accent,
+        background: theme.accentBg,
+        padding: '2px 8px',
+        borderRadius: 10,
+        border: `1px solid ${theme.accentBorder}`,
+        cursor: 'pointer',
+      }}
+    >
+      <span
+        style={{
+          display: 'inline-block',
+          width: 6,
+          height: 6,
+          borderRadius: '50%',
+          background: theme.accent,
+          animation: pulse ? 'eo-update-pulse 1.1s ease-in-out infinite' : 'none',
+        }}
+      />
+      Updated
+      {totalChanged > 0 && <span style={{ opacity: 0.75 }}>· {totalChanged}</span>}
+      <style>{`
+        @keyframes eo-update-pulse {
+          0%, 100% { opacity: 0.35; transform: scale(0.9); }
+          50%      { opacity: 1;    transform: scale(1.15); }
+        }
+      `}</style>
+    </button>
+  );
+}
+
+// --- Update Detail Popup ---
+//
+// Modal listing the records that changed in the most recent update. Entries
+// are clickable — selecting one navigates to the record detail view so the
+// user can audit the actual change.
+
+interface TableUpdateDetailProps {
+  lastUpdate: {
+    added: string[];
+    modified: string[];
+    removed: string[];
+    ts: number;
+  };
+  records: EoState[];
+  scope: string;
+  onClose: () => void;
+  onSelectRecord: (target: string) => void;
+  onClear: () => void;
+  theme: Theme;
+}
+
+function TableUpdateDetail({ lastUpdate, records, onClose, onSelectRecord, onClear, theme }: TableUpdateDetailProps) {
+  const byTarget = useMemo(() => {
+    const m = new Map<string, EoState>();
+    for (const r of records) m.set(r.target, r);
+    return m;
+  }, [records]);
+
+  const displayName = (target: string): string => {
+    const rec = byTarget.get(target);
+    if (rec) {
+      const name = resolveRecordName(rec);
+      if (name) return name;
+    }
+    const parts = target.split('.');
+    return parts[parts.length - 1] || target;
+  };
+
+  const sections: { label: string; color: string; items: string[]; clickable: boolean }[] = [
+    { label: 'Added',    color: '#2b8a3e', items: lastUpdate.added,    clickable: true  },
+    { label: 'Modified', color: theme.accent, items: lastUpdate.modified, clickable: true  },
+    { label: 'Removed',  color: '#c92a2a', items: lastUpdate.removed,  clickable: false },
+  ];
+
+  // Close on Escape so the modal feels responsive.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  const total = lastUpdate.added.length + lastUpdate.modified.length + lastUpdate.removed.length;
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: 'fixed',
+        inset: 0,
+        background: 'rgba(0,0,0,0.35)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        zIndex: 1000,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: 'min(480px, 90vw)',
+          maxHeight: '80vh',
+          background: theme.bgCard,
+          border: `1px solid ${theme.border}`,
+          borderRadius: 8,
+          boxShadow: '0 16px 48px rgba(0,0,0,0.25)',
+          display: 'flex',
+          flexDirection: 'column',
+          overflow: 'hidden',
+        }}
+      >
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            padding: '12px 16px',
+            borderBottom: `1px solid ${theme.border}`,
+          }}
+        >
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 600, color: theme.textHeading }}>
+              Table update
+            </div>
+            <div style={{ fontSize: 11, color: theme.textMuted, marginTop: 2 }}>
+              {total} record{total === 1 ? '' : 's'} changed · {formatRelativeTime(new Date(lastUpdate.ts).toISOString())}
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            style={{
+              background: 'transparent',
+              border: 'none',
+              color: theme.textMuted,
+              fontSize: 18,
+              cursor: 'pointer',
+              lineHeight: 1,
+              padding: 4,
+            }}
+          >
+            ×
+          </button>
+        </div>
+        <div style={{ overflowY: 'auto', padding: '8px 0' }}>
+          {sections.every(sec => sec.items.length === 0) && (
+            <div style={{ padding: '16px', fontSize: 12, color: theme.textMuted }}>
+              No changes detected.
+            </div>
+          )}
+          {sections.map((sec) => {
+            if (sec.items.length === 0) return null;
+            return (
+              <div key={sec.label} style={{ padding: '4px 16px 8px' }}>
+                <div
+                  style={{
+                    fontSize: 10,
+                    fontWeight: 600,
+                    color: sec.color,
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.04em',
+                    padding: '6px 0',
+                  }}
+                >
+                  {sec.label} · {sec.items.length}
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                  {sec.items.map((target) => {
+                    const name = displayName(target);
+                    const content = (
+                      <>
+                        <span
+                          style={{
+                            display: 'inline-block',
+                            width: 4,
+                            height: 4,
+                            borderRadius: '50%',
+                            background: sec.color,
+                            flexShrink: 0,
+                          }}
+                        />
+                        <span
+                          style={{
+                            flex: 1,
+                            fontSize: 12,
+                            color: theme.textHeading,
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          {name}
+                        </span>
+                        <span
+                          style={{
+                            fontSize: 10,
+                            color: theme.textMuted,
+                            fontFamily: "'JetBrains Mono', monospace",
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                            maxWidth: 180,
+                          }}
+                        >
+                          {target}
+                        </span>
+                      </>
+                    );
+                    if (sec.clickable) {
+                      return (
+                        <button
+                          key={target}
+                          type="button"
+                          onClick={() => onSelectRecord(target)}
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: 8,
+                            padding: '6px 8px',
+                            background: 'transparent',
+                            border: `1px solid transparent`,
+                            borderRadius: 4,
+                            cursor: 'pointer',
+                            textAlign: 'left',
+                          }}
+                          onMouseEnter={(e) => {
+                            e.currentTarget.style.background = theme.bgMuted;
+                            e.currentTarget.style.borderColor = theme.border;
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.background = 'transparent';
+                            e.currentTarget.style.borderColor = 'transparent';
+                          }}
+                        >
+                          {content}
+                        </button>
+                      );
+                    }
+                    return (
+                      <div
+                        key={target}
+                        title="Removed records can't be opened"
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 8,
+                          padding: '6px 8px',
+                          opacity: 0.7,
+                        }}
+                      >
+                        {content}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        <div
+          style={{
+            display: 'flex',
+            justifyContent: 'flex-end',
+            gap: 8,
+            padding: '10px 16px',
+            borderTop: `1px solid ${theme.border}`,
+            background: theme.bgMuted,
+          }}
+        >
+          <button
+            onClick={onClear}
+            style={{
+              fontSize: 11,
+              padding: '4px 10px',
+              border: `1px solid ${theme.border}`,
+              borderRadius: 4,
+              background: 'transparent',
+              color: theme.textMuted,
+              cursor: 'pointer',
+            }}
+          >
+            Dismiss
+          </button>
+          <button
+            onClick={onClose}
+            style={{
+              fontSize: 11,
+              padding: '4px 10px',
+              border: `1px solid ${theme.accentBorder}`,
+              borderRadius: 4,
+              background: theme.accent,
+              color: '#fff',
+              cursor: 'pointer',
+            }}
+          >
+            Done
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
