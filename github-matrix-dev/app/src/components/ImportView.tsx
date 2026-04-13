@@ -3,6 +3,7 @@ import { useEoStore } from '../store/eo-store';
 import { useTheme, type Theme } from '../theme';
 import type { ExternalOperator } from '../db/types';
 import { buildTree, formatName, type TreeNode } from './scope-picker-utils';
+import { generateGenericRowTargetId, genericRowIdWidth } from './import-target-id';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -640,20 +641,16 @@ export function ImportView({ onImportComplete }: ImportViewProps) {
 
     // Prepare all events upfront
     const prefix = targetPrefix.trim().replace(/\.+$/, '');
-    // Generic-row target IDs combine the row index with a 12-hex-char random
-    // suffix. The index guarantees no within-import collision (critical for
-    // large imports — an 8-hex slice of crypto.randomUUID is only 32 bits,
-    // which birthday-collides at ~100% for 1M rows and throws
-    // "Target already instantiated" from the fold's helix check). The random
-    // suffix keeps back-to-back imports of the same CSV from colliding with
-    // each other (~2^48 headroom after the index).
-    const genericIdWidth = Math.max(6, String(Math.max(0, rows.length - 1)).length);
+    // Generic-row targets use `generateGenericRowTargetId` so the row index
+    // guarantees uniqueness within an import (see import-target-id.ts for
+    // the rationale and the historical bug it fixes).
+    const genericIdWidth = genericRowIdWidth(rows.length);
     const rawEvents = rows.map((row, idx) => ({
       op: row.op as ExternalOperator,
       target: row._keyed
         ? `${prefix}.${row.target}`
         : row._generic
-        ? `${prefix}.rec_${String(idx).padStart(genericIdWidth, '0')}_${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`
+        ? `${prefix}.${generateGenericRowTargetId(idx, genericIdWidth, crypto.randomUUID().replace(/-/g, ''))}`
         : row.target!,
       operand: row._keyed && row.op === 'CON' && row.operand?.added
         ? { ...row.operand, added: row.operand.added.map((t: string) => `${prefix}.${t}`) }
