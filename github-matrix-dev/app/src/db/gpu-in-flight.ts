@@ -99,6 +99,20 @@ export class GpuInFlightTracker {
   inFlightCount(): number {
     return this.inFlight.size;
   }
+
+  /**
+   * Clear the in-flight set without awaiting. For test teardown only —
+   * production callers should always `drain()` instead. Provided so a
+   * test whose predecessor leaked a registered promise can hard-reset
+   * the module singleton in `afterEach` and avoid cross-test bleed.
+   *
+   * The cleared promises' `.then` handlers still fire when they settle,
+   * but will be operating on an already-gone Set entry (delete is a
+   * no-op on a missing key), so this is safe.
+   */
+  clear(): void {
+    this.inFlight.clear();
+  }
 }
 
 /**

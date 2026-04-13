@@ -640,12 +640,20 @@ export function ImportView({ onImportComplete }: ImportViewProps) {
 
     // Prepare all events upfront
     const prefix = targetPrefix.trim().replace(/\.+$/, '');
-    const rawEvents = rows.map((row) => ({
+    // Generic-row target IDs combine the row index with a 12-hex-char random
+    // suffix. The index guarantees no within-import collision (critical for
+    // large imports — an 8-hex slice of crypto.randomUUID is only 32 bits,
+    // which birthday-collides at ~100% for 1M rows and throws
+    // "Target already instantiated" from the fold's helix check). The random
+    // suffix keeps back-to-back imports of the same CSV from colliding with
+    // each other (~2^48 headroom after the index).
+    const genericIdWidth = Math.max(6, String(Math.max(0, rows.length - 1)).length);
+    const rawEvents = rows.map((row, idx) => ({
       op: row.op as ExternalOperator,
       target: row._keyed
         ? `${prefix}.${row.target}`
         : row._generic
-        ? `${prefix}.rec_${crypto.randomUUID().slice(0, 8)}`
+        ? `${prefix}.rec_${String(idx).padStart(genericIdWidth, '0')}_${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`
         : row.target!,
       operand: row._keyed && row.op === 'CON' && row.operand?.added
         ? { ...row.operand, added: row.operand.added.map((t: string) => `${prefix}.${t}`) }

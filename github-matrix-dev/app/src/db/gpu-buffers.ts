@@ -49,6 +49,20 @@ export interface GpuFieldBuffers {
     cpu: Uint32Array;
     gpu: GPUBuffer;
   }>;
+  /**
+   * LRU touch order for numeric fields — field name at the tail is
+   * most-recently-touched, head is least. Used by `evictNumericFieldsIfOverCapacity`
+   * to bound memory under long-running folds. Presence here mirrors presence
+   * in `numericFields`; the two are kept in lockstep by uploadNumericField,
+   * writeFieldValue, and the eviction pass.
+   */
+  numericFieldOrder: string[];
+  /**
+   * Maximum numeric fields to keep resident on the GPU. Zero or negative
+   * means unbounded (opt-out). Set at init time via `initGpuBuffers` and
+   * can be tuned later with `setNumericFieldCapacity`.
+   */
+  numericFieldCapacity: number;
 }
 
 // ─── WGSL filter shader ───────────────────────────────────────────────────────
@@ -103,17 +117,83 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 // ─── initGpuBuffers ───────────────────────────────────────────────────────────
 
 /**
+ * Default numeric-field cap for long-running folds. Chosen to comfortably
+ * hold a working-set for typical apps (a few dozen aggregated columns) while
+ * still bounding memory for adversarial workloads that DEF into thousands of
+ * distinct fields. Callers can override at init time.
+ */
+export const DEFAULT_NUMERIC_FIELD_CAPACITY = 256;
+
+/**
  * Initialise an empty GpuFieldBuffers from a GPUDevice.
  * Use the device acquisition from gpu/graph-compute.ts to obtain the device.
+ *
+ * `options.numericFieldCapacity` caps the number of numeric fields kept
+ * resident on the GPU. When the cap is exceeded, the least-recently-touched
+ * field is destroyed. Pass 0 or a negative value to disable eviction.
  */
-export function initGpuBuffers(device: GPUDevice): GpuFieldBuffers {
+export function initGpuBuffers(
+  device: GPUDevice,
+  options: { numericFieldCapacity?: number } = {},
+): GpuFieldBuffers {
   return {
     device,
     targetIndex: [],
     targetToSlot: new Map(),
     numericFields: new Map(),
     categoricalFields: new Map(),
+    numericFieldOrder: [],
+    numericFieldCapacity:
+      options.numericFieldCapacity !== undefined
+        ? options.numericFieldCapacity
+        : DEFAULT_NUMERIC_FIELD_CAPACITY,
   };
+}
+
+/**
+ * Update the numeric-field capacity at runtime, evicting LRU fields as
+ * needed to respect the new bound. Zero or negative disables eviction.
+ */
+export function setNumericFieldCapacity(
+  buffers: GpuFieldBuffers,
+  capacity: number,
+): void {
+  buffers.numericFieldCapacity = capacity;
+  evictNumericFieldsIfOverCapacity(buffers);
+}
+
+/**
+ * Mark a numeric field as most-recently-used. Cheap O(1) in practice:
+ * a single array remove + push. Called by every read/write path on a
+ * numeric field so the LRU order tracks real usage.
+ */
+function touchNumericField(buffers: GpuFieldBuffers, field: string): void {
+  const order = buffers.numericFieldOrder;
+  // Fast path: already at the tail.
+  if (order.length > 0 && order[order.length - 1] === field) return;
+  const idx = order.indexOf(field);
+  if (idx >= 0) order.splice(idx, 1);
+  order.push(field);
+}
+
+/**
+ * Drop the least-recently-used numeric fields until the resident count
+ * fits under `numericFieldCapacity`. No-op when capacity is zero/negative
+ * or the count is already under the bound.
+ */
+export function evictNumericFieldsIfOverCapacity(buffers: GpuFieldBuffers): void {
+  const cap = buffers.numericFieldCapacity;
+  if (cap <= 0) return;
+  while (buffers.numericFieldOrder.length > cap) {
+    const victim = buffers.numericFieldOrder.shift();
+    if (victim === undefined) return;
+    const data = buffers.numericFields.get(victim);
+    if (data) {
+      data.gpu.destroy();
+      data.stagingBuffer.destroy();
+      buffers.numericFields.delete(victim);
+    }
+  }
 }
 
 /**
@@ -183,6 +263,8 @@ export function uploadNumericField(
   });
 
   buffers.numericFields.set(field, { cpu, gpu: gpuBuf, stagingBuffer: staging });
+  touchNumericField(buffers, field);
+  evictNumericFieldsIfOverCapacity(buffers);
 }
 
 // ─── uploadCategoricalField ───────────────────────────────────────────────────
@@ -417,4 +499,5 @@ export function writeFieldValue(
   fieldData.cpu[slot] = value;
   // Write just the 4 bytes for this slot
   buffers.device.queue.writeBuffer(fieldData.gpu, slot * 4, fieldData.cpu.buffer, slot * 4, 4);
+  touchNumericField(buffers, field);
 }

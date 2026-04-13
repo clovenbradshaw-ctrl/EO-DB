@@ -53,6 +53,7 @@ import {
   StoreNulHorizon,
 } from './addressing-horizon';
 import { createTrackedStore } from './fold-isolate';
+import { SHARDING_HASH_VERSION } from './fold-pool';
 
 // ─── Wire types ─────────────────────────────────────────────────────────────
 
@@ -83,6 +84,15 @@ export interface PlannedEvent {
  *     already partitioned by targetShardIndex and sorted.
  */
 export interface ShardRequest {
+  /**
+   * Stamped sharding-hash version from the coordinator's `fold-pool.ts`.
+   * The shard verifies this matches its own `SHARDING_HASH_VERSION` so a
+   * seed or algorithm change in `targetShardIndex` is caught loudly
+   * instead of silently producing a misaligned partition. Optional for
+   * backwards compatibility with pre-versioning requests (treated as
+   * "assume matching" when absent), but the coordinator always sets it.
+   */
+  shardingHashVersion?: number;
   snapshot: [string, unknown][];
   currentSeq: number;
   shardTargets: string[];
@@ -150,6 +160,19 @@ export type ShardDispatcher = (req: ShardRequest) => Promise<ShardResponse>;
 export async function dispatchShardInProcess(
   req: ShardRequest,
 ): Promise<ShardResponse> {
+  // Sharding-hash version gate. If the coordinator's fold-pool and this
+  // module's fold-pool disagree on the hash, the snapshot was partitioned
+  // with a different algorithm than this shard would use — fail loudly.
+  if (
+    req.shardingHashVersion !== undefined &&
+    req.shardingHashVersion !== SHARDING_HASH_VERSION
+  ) {
+    throw new Error(
+      `fold-shard: sharding-hash version mismatch (coordinator=${req.shardingHashVersion}, shard=${SHARDING_HASH_VERSION}). ` +
+      `This indicates a seed or algorithm change in fold-pool.ts was rolled out to only one side of the transport.`,
+    );
+  }
+
   if (req.shardTargets.length === 0) {
     return { mutations: [], shardLastSeq: 0, processedCount: 0, emittedEvents: [] };
   }
@@ -431,6 +454,13 @@ export async function snapshotStoreAsEntries(store: EoStore): Promise<[string, u
  * per-shard filter.
  */
 export interface StoreSnapshotBundle {
+  /**
+   * Stamped sharding-hash version from fold-pool.ts. The shard side
+   * verifies this matches its own `SHARDING_HASH_VERSION` so a seed or
+   * algorithm change in `targetShardIndex` can never silently misalign a
+   * snapshot's partition from the shard processing it.
+   */
+  shardingHashVersion: number;
   /** All store entries (the same payload snapshotStoreAsEntries returns). */
   entries: [string, unknown][];
   /**
@@ -466,6 +496,7 @@ export async function snapshotStoreWithEdgeIndex(store: EoStore): Promise<StoreS
   const seq = await store.getCurrentSeq();
   entries.push(['meta:seq', seq]);
 
+  const shardingHashVersion = SHARDING_HASH_VERSION;
   const edgesFrom = new Map<string, Set<string>>();
   const rdepFrom = new Map<string, Set<string>>();
   const constituentsOf = new Map<string, Set<string>>();
@@ -512,7 +543,7 @@ export async function snapshotStoreWithEdgeIndex(store: EoStore): Promise<StoreS
     }
   }
 
-  return { entries, edgesFrom, rdepFrom, constituentsOf };
+  return { shardingHashVersion, entries, edgesFrom, rdepFrom, constituentsOf };
 }
 
 /**
@@ -546,23 +577,34 @@ export function filterSnapshotForShard(
   // cascadeUpward reads rdep:<t>:<D> to discover derived entity D, then needs
   // derived:D, state:D, helix:D, and state:c for every co-constituent c of D.
   // D may itself be a constituent of another derived — so iterate until fixed.
+  //
+  // Cycle-safety: the set-membership check (`relevantTargets.has`) prevents
+  // re-entering a node, which guarantees termination even if the rdep +
+  // derived.constituents relation contains a cycle (which would be invalid
+  // at the semantic level but must not hang the worker). The additional
+  // `visited` set below formalizes that guarantee: every node is popped
+  // from the worklist at most once, so the closure is strictly O(V + E)
+  // regardless of cycles.
   const rdepWorklist: string[] = [...relevantTargets];
+  const visitedByClosure = new Set<string>();
   while (rdepWorklist.length > 0) {
     const t = rdepWorklist.pop()!;
+    if (visitedByClosure.has(t)) continue;
+    visitedByClosure.add(t);
     const deriveds = bundle.rdepFrom.get(t);
     if (!deriveds) continue;
     for (const d of deriveds) {
       if (!relevantTargets.has(d)) {
         relevantTargets.add(d);
-        rdepWorklist.push(d);
       }
+      if (!visitedByClosure.has(d)) rdepWorklist.push(d);
       const coConstituents = bundle.constituentsOf.get(d);
       if (!coConstituents) continue;
       for (const c of coConstituents) {
         if (!relevantTargets.has(c)) {
           relevantTargets.add(c);
-          rdepWorklist.push(c);
         }
+        if (!visitedByClosure.has(c)) rdepWorklist.push(c);
       }
     }
   }

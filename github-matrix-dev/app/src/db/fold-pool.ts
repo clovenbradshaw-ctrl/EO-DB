@@ -39,11 +39,33 @@
 // ─── Deterministic target hashing ──────────────────────────────────────────
 
 /**
+ * Version stamp for the sharding hash. The worker-transport path ships
+ * snapshots partitioned by `targetShardIndex`; if the hash algorithm,
+ * seed, or modulus strategy ever changes, shards processed against an
+ * older snapshot would be misaligned. This constant is written into the
+ * snapshot bundle (see `snapshotStoreWithEdgeIndex`) and verified on the
+ * consuming side so that a seed/hash change is loud, not silent.
+ *
+ * Bump this whenever any of `SHARDING_HASH_SEED`, the djb2 loop, or the
+ * `% shardCount` partitioning strategy in `targetShardIndex` changes.
+ */
+export const SHARDING_HASH_VERSION = 1 as const;
+
+/**
+ * The initial seed for djb2. Split out as a named constant so (a) call
+ * sites can see it, (b) the version gate above has something concrete to
+ * point at, and (c) any future seed change is visible in a diff.
+ */
+export const SHARDING_HASH_SEED = 5381 as const;
+
+/**
  * djb2 string hash. Returns a non-negative integer. Deterministic: same
  * input always produces the same output regardless of runtime or platform.
+ *
+ * If you change this function, bump `SHARDING_HASH_VERSION`.
  */
 function djb2(str: string): number {
-  let hash = 5381;
+  let hash: number = SHARDING_HASH_SEED;
   for (let i = 0; i < str.length; i++) {
     hash = ((hash << 5) + hash + str.charCodeAt(i)) | 0;
   }
