@@ -2237,6 +2237,36 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       background: roleTint ? roleTint.bg : themedBg.bg,
       transition: 'background 0.5s cubic-bezier(.4,0,.2,1)',
     }}>
+      {/* Persona strip — always visible at the very top when a persona is
+          active so the user has a persistent at-a-glance indicator of the
+          persona they're currently in (works on mobile and desktop). */}
+      {activeTypeDef && roleAccentColor && (
+        <div
+          title={`Active persona: ${activeTypeDef.label}`}
+          style={{
+            flexShrink: 0,
+            background: roleAccentColor,
+            color: '#fff',
+            fontFamily: mono,
+            fontSize: 10,
+            fontWeight: 700,
+            letterSpacing: 0.6,
+            textTransform: 'uppercase' as const,
+            padding: '3px 12px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            boxShadow: `0 1px 0 0 ${roleAccentColor}40`,
+          }}
+        >
+          <span style={{
+            width: 6, height: 6, borderRadius: '50%',
+            background: '#fff', opacity: 0.9, flexShrink: 0,
+          }} />
+          <span>{activeTypeDef.label}</span>
+          <span style={{ opacity: 0.7, fontWeight: 500 }}>persona active</span>
+        </div>
+      )}
       {/* Top bar */}
       <header style={{
         ...s.topBar,
@@ -2271,12 +2301,33 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           {/* Space selector — opens file-browser panel */}
           <button
             onClick={() => setSpaceOpen(!spaceOpen)}
-            style={s.spaceBadge}
+            style={{
+              ...s.spaceBadge,
+              ...(roleAccentColor ? {
+                borderColor: `${roleAccentColor}60`,
+                background: `${roleAccentColor}10`,
+              } : {}),
+            }}
           >
-            <span style={{ width: 6, height: 6, borderRadius: '50%', background: theme.accent, flexShrink: 0 }} />
+            <span style={{
+              width: 6, height: 6, borderRadius: '50%',
+              background: roleAccentColor || theme.accent,
+              flexShrink: 0,
+            }} />
             {selectedSpace
               ? formatSpaceName(selectedSpace.split('.').pop() || '')
               : 'All Spaces'}
+            {activeTypeDef && (
+              <span style={{
+                fontSize: 9, fontWeight: 600,
+                color: roleAccentColor || theme.accent,
+                background: roleAccentColor ? `${roleAccentColor}20` : theme.accentBg,
+                padding: '1px 6px', borderRadius: 4,
+                marginLeft: 2,
+              }}>
+                {activeTypeDef.label}
+              </span>
+            )}
             <span style={{ fontSize: 8, opacity: 0.5, marginLeft: 2 }}>{spaceOpen ? '\u25B4' : '\u25BE'}</span>
           </button>
 
