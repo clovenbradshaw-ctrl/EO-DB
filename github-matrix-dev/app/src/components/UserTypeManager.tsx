@@ -7,16 +7,32 @@
 
 import { useState, useMemo } from 'react';
 import { useTheme, type Theme } from '../theme';
-import type { AccessRole, UserTypeDefinition, HeadlineMetric, PersonaHome, QuickAction, TerminologyKey } from '../permissions/types';
+import type { AccessRole, UserTypeDefinition, UserTypeAssignment, HeadlineMetric, PersonaHome, QuickAction, TerminologyKey } from '../permissions/types';
 import { ROLE_LABELS, ROLE_DESCRIPTIONS, TERMINOLOGY_KEYS, TERMINOLOGY_DEFAULTS } from '../permissions/types';
 import { UserTypeBadge } from './UserTypeBadge';
 import { useSliceStore } from '../store/slice-store';
+
+/** Member reference passed to the user-assignment panel. */
+export interface PersonaMemberRef {
+  user_id: string;
+  /** Optional display label (for the owner pill). */
+  roleLabel?: string;
+}
 
 interface UserTypeManagerProps {
   typeDefinitions: UserTypeDefinition[];
   availableFields: string[];
   onUpdate: (updated: UserTypeDefinition[]) => void;
   canManage: boolean;
+  /**
+   * All members of the space (owner + share entries) that can be tagged with
+   * a persona. When omitted, the "users" panel is hidden.
+   */
+  members?: PersonaMemberRef[];
+  /** Current user-to-persona assignments. */
+  userTypeAssignments?: UserTypeAssignment[];
+  /** Callback to update the persona assignments for a specific user. */
+  onUpdateAssignment?: (userId: string, typeIds: string[]) => void;
 }
 
 const DEFAULT_COLORS = [
@@ -69,7 +85,15 @@ function slugify(label: string): string {
     .slice(0, 40);
 }
 
-export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, canManage }: UserTypeManagerProps) {
+export function UserTypeManager({
+  typeDefinitions,
+  availableFields,
+  onUpdate,
+  canManage,
+  members,
+  userTypeAssignments,
+  onUpdateAssignment,
+}: UserTypeManagerProps) {
   const { theme } = useTheme();
   const mono = "'JetBrains Mono', monospace";
   const [adding, setAdding] = useState(false);
@@ -84,6 +108,33 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
   const [editingSlicesId, setEditingSlicesId] = useState<string | null>(null);
   const [editingActionsId, setEditingActionsId] = useState<string | null>(null);
   const [editingTermsId, setEditingTermsId] = useState<string | null>(null);
+  const [editingUsersId, setEditingUsersId] = useState<string | null>(null);
+
+  const canManageUsers = !!members && !!onUpdateAssignment;
+
+  /** Get the current type_ids for a given user (from assignments prop). */
+  function getTypeIdsForUser(userId: string): string[] {
+    return userTypeAssignments?.find((a) => a.user_id === userId)?.type_ids ?? [];
+  }
+
+  /** Toggle membership of a single user in a single persona. */
+  function handleToggleUserInPersona(userId: string, typeId: string) {
+    if (!onUpdateAssignment) return;
+    const current = getTypeIdsForUser(userId);
+    const next = current.includes(typeId)
+      ? current.filter((id) => id !== typeId)
+      : [...current, typeId];
+    onUpdateAssignment(userId, next);
+  }
+
+  /** How many members are tagged with a given persona. */
+  function countMembersInPersona(typeId: string): number {
+    if (!userTypeAssignments) return 0;
+    return userTypeAssignments.reduce(
+      (n, a) => (a.type_ids.includes(typeId) ? n + 1 : n),
+      0,
+    );
+  }
 
   // Read saved slices for the default-slice editor. Group by scope.
   const savedSlices = useSliceStore((s) => s.savedSlices);
@@ -476,6 +527,36 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
               {/* Column 5: Configure buttons */}
               {canManage ? (
                 <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' as const, justifyContent: 'flex-end' as const }}>
+                  {canManageUsers && (
+                    <button
+                      onClick={() => setEditingUsersId(editingUsersId === def.id ? null : def.id)}
+                      title="Manage which members are tagged as this persona"
+                      style={{
+                        fontFamily: mono, fontSize: 9,
+                        color: editingUsersId === def.id ? '#fff' : (def.color || theme.textSecondary),
+                        background: editingUsersId === def.id ? (def.color || theme.accent) : 'none',
+                        border: 'none', cursor: 'pointer',
+                        padding: '2px 6px', borderRadius: 4,
+                        display: 'flex', alignItems: 'center', gap: 4,
+                      }}
+                      onMouseEnter={(e) => {
+                        if (editingUsersId !== def.id) e.currentTarget.style.background = theme.bgMuted;
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.background = editingUsersId === def.id ? (def.color || theme.accent) : 'none';
+                      }}
+                    >
+                      users
+                      <span style={{
+                        fontSize: 8, fontWeight: 600,
+                        background: editingUsersId === def.id ? 'rgba(255,255,255,0.25)' : (def.color ? `${def.color}26` : theme.bgMuted),
+                        color: editingUsersId === def.id ? '#fff' : (def.color || theme.textSecondary),
+                        padding: '0 4px', borderRadius: 6, minWidth: 12, textAlign: 'center' as const,
+                      }}>
+                        {countMembersInPersona(def.id)}
+                      </span>
+                    </button>
+                  )}
                   <button
                     onClick={() => handleStartEditMetrics(def)}
                     style={{
@@ -617,6 +698,84 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
                 <div />
               )}
               </div>
+              {/* Users panel — inline, expands when "users" button is clicked */}
+              {canManage && canManageUsers && editingUsersId === def.id && (
+                <div style={{
+                  padding: '10px 12px',
+                  background: theme.bgMuted,
+                  borderRadius: 6,
+                  marginBottom: 6,
+                }}>
+                  <div style={{
+                    fontFamily: mono, fontSize: 10, fontWeight: 600,
+                    color: theme.textSecondary, marginBottom: 8,
+                  }}>
+                    Members tagged as "{def.label}"
+                    <span style={{ fontWeight: 400, color: theme.textMuted, marginLeft: 6 }}>
+                      (toggle to add or remove this persona from a member)
+                    </span>
+                  </div>
+                  {(!members || members.length === 0) ? (
+                    <div style={{ fontFamily: mono, fontSize: 10, color: theme.textMuted }}>
+                      No members to assign yet. Invite members from the section above.
+                    </div>
+                  ) : (
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4 }}>
+                      {members!.map((m) => {
+                        const tagged = getTypeIdsForUser(m.user_id).includes(def.id);
+                        const shortId = m.user_id.startsWith('@')
+                          ? m.user_id.slice(1).split(':')[0]
+                          : m.user_id;
+                        return (
+                          <label
+                            key={m.user_id}
+                            title={m.user_id}
+                            style={{
+                              display: 'flex', alignItems: 'center', gap: 6,
+                              padding: '5px 8px', borderRadius: 6, cursor: 'pointer',
+                              background: tagged ? (def.color ? `${def.color}12` : theme.accentBg) : theme.bgCard,
+                              border: `1px solid ${tagged ? (def.color ? `${def.color}30` : theme.accentBorder) : theme.border}`,
+                              minWidth: 0,
+                            }}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={tagged}
+                              onChange={() => handleToggleUserInPersona(m.user_id, def.id)}
+                              style={{ accentColor: def.color || theme.accent, width: 12, height: 12, flexShrink: 0 }}
+                            />
+                            <span style={{
+                              fontFamily: mono, fontSize: 10,
+                              color: tagged ? (def.color || theme.accent) : theme.text,
+                              fontWeight: tagged ? 600 : 400,
+                              overflow: 'hidden' as const,
+                              textOverflow: 'ellipsis' as const,
+                              whiteSpace: 'nowrap' as const,
+                              minWidth: 0,
+                            }}>
+                              {shortId}
+                            </span>
+                            {m.roleLabel && (
+                              <span style={{
+                                fontFamily: mono, fontSize: 8,
+                                color: theme.textMuted,
+                                background: theme.bg,
+                                padding: '1px 4px', borderRadius: 3,
+                                flexShrink: 0,
+                              }}>
+                                {m.roleLabel}
+                              </span>
+                            )}
+                          </label>
+                        );
+                      })}
+                    </div>
+                  )}
+                  <div style={{ fontFamily: mono, fontSize: 9, color: theme.textMuted, marginTop: 6 }}>
+                    {countMembersInPersona(def.id)} member{countMembersInPersona(def.id) !== 1 ? 's' : ''} in this persona
+                  </div>
+                </div>
+              )}
               {/* Views config panel — inline, expands when "views" button is clicked */}
               {canManage && editingViewsId === def.id && (
                 <div style={{

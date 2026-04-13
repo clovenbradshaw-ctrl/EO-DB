@@ -61,6 +61,8 @@ export function SpaceMembers({ spaceTarget, currentUserId, onClose, matrixClient
   // Add member form
   const [newMatrixId, setNewMatrixId] = useState('');
   const [newAccess, setNewAccess] = useState<Exclude<AccessRole, 'owner'>>('viewer');
+  /** Persona IDs to tag the invited user with on invite. */
+  const [inviteTypeIds, setInviteTypeIds] = useState<string[]>([]);
   const [addError, setAddError] = useState('');
   const [addSuccess, setAddSuccess] = useState('');
   const [inviting, setInviting] = useState(false);
@@ -306,11 +308,21 @@ export function SpaceMembers({ spaceTarget, currentUserId, onClose, matrixClient
       return;
     }
 
-    await addMemberById(targetId, newAccess);
+    await addMemberById(targetId, newAccess, inviteTypeIds);
   }
 
-  /** Add a member by Matrix user ID — dispatches EO sharing + Matrix room invite */
-  async function addMemberById(targetId: string, access: Exclude<AccessRole, 'owner'> = newAccess) {
+  /**
+   * Add a member by Matrix user ID — dispatches EO sharing, persona
+   * assignment (if `typeIds` is non-empty), and a Matrix room invite.
+   *
+   * The sharing update and persona assignment are written to the same DEF
+   * event so the invited user shows up with their persona tags immediately.
+   */
+  async function addMemberById(
+    targetId: string,
+    access: Exclude<AccessRole, 'owner'> = newAccess,
+    typeIds: string[] = inviteTypeIds,
+  ) {
     setAddError('');
     setAddSuccess('');
     setInviting(true);
@@ -324,17 +336,37 @@ export function SpaceMembers({ spaceTarget, currentUserId, onClose, matrixClient
 
     const updatedSharing = [...members, newEntry];
 
+    // Build next persona-assignment state if caller specified any tags.
+    const trimmedTypeIds = typeIds.filter((id) => userTypeDefinitions.some((d) => d.id === id));
+    const willAssignPersonas = trimmedTypeIds.length > 0;
+    const updatedAssignments: UserTypeAssignment[] = willAssignPersonas
+      ? (() => {
+          const existing = userTypeAssignments.find((a) => a.user_id === targetId);
+          if (existing) {
+            const merged = Array.from(new Set([...existing.type_ids, ...trimmedTypeIds]));
+            return userTypeAssignments.map((a) =>
+              a.user_id === targetId ? { ...a, type_ids: merged } : a,
+            );
+          }
+          return [...userTypeAssignments, { user_id: targetId, type_ids: trimmedTypeIds }];
+        })()
+      : userTypeAssignments;
+
     try {
-      // 1. Update the EO sharing list
+      // 1. Update the EO sharing list (and persona assignments together if needed)
       await dispatch({
         op: 'DEF',
         target: spaceTarget,
-        operand: { _sharing: updatedSharing },
+        operand: {
+          _sharing: updatedSharing,
+          ...(willAssignPersonas ? { _user_type_assignments: updatedAssignments } : {}),
+        },
         agent: currentUserId,
         ts: new Date().toISOString(),
         acquired_ts: new Date().toISOString(),
       });
       setMembers(updatedSharing);
+      if (willAssignPersonas) setUserTypeAssignments(updatedAssignments);
 
       // 2. Send a Matrix room invitation so the user discovers the space
       if (matrixClient && mainRoomId) {
@@ -348,7 +380,12 @@ export function SpaceMembers({ spaceTarget, currentUserId, onClose, matrixClient
       }
 
       setNewMatrixId('');
-      setAddSuccess(`${formatUserId(targetId)} invited`);
+      const personaNote = willAssignPersonas
+        ? ` as ${trimmedTypeIds
+            .map((id) => userTypeDefinitions.find((d) => d.id === id)?.label ?? id)
+            .join(', ')}`
+        : '';
+      setAddSuccess(`${formatUserId(targetId)} invited${personaNote}`);
       setTimeout(() => setAddSuccess(''), 3000);
     } catch (e: any) {
       setAddError('Failed: ' + e.message);
@@ -429,7 +466,7 @@ export function SpaceMembers({ spaceTarget, currentUserId, onClose, matrixClient
               <SpaceInvite
                 matrixClient={matrixClient}
                 existingMemberIds={[owner, ...members.map((m) => m.user_id)]}
-                onInvite={(userId) => addMemberById(userId, newAccess)}
+                onInvite={(userId) => addMemberById(userId, newAccess, inviteTypeIds)}
                 inviting={inviting}
               />
             ) : (
@@ -447,6 +484,14 @@ export function SpaceMembers({ spaceTarget, currentUserId, onClose, matrixClient
               onChange={setNewAccess}
               compact
             />
+            {userTypeDefinitions.length > 0 && (
+              <PersonaPicker
+                theme={theme}
+                typeDefinitions={userTypeDefinitions}
+                selected={inviteTypeIds}
+                onChange={setInviteTypeIds}
+              />
+            )}
             {!matrixClient && (
               <button
                 style={{
@@ -544,6 +589,15 @@ export function SpaceMembers({ spaceTarget, currentUserId, onClose, matrixClient
           availableFields={availableFields}
           onUpdate={handleUpdateUserTypeDefinitions}
           canManage={currentPermissions.can_set_governance}
+          members={[
+            { user_id: owner, roleLabel: 'Owner' },
+            ...members.map((m) => ({
+              user_id: m.user_id,
+              roleLabel: ROLE_LABELS[m.access],
+            })),
+          ]}
+          userTypeAssignments={userTypeAssignments}
+          onUpdateAssignment={handleUpdateUserTypeAssignment}
         />
       </div>
       </div>
@@ -651,6 +705,166 @@ function RolePicker({
               }}>{opt.desc}</div>
             </button>
           ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---- Persona picker for the invite bar ----
+ *
+ * Lets the admin tag the invited user with one or more personas at
+ * invite time. Stores a selected persona-ID list; selecting none is a
+ * valid choice (no persona tagging). */
+
+function PersonaPicker({
+  theme,
+  typeDefinitions,
+  selected,
+  onChange,
+}: {
+  theme: Theme;
+  typeDefinitions: UserTypeDefinition[];
+  selected: string[];
+  onChange: (ids: string[]) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const mono = "'JetBrains Mono', monospace";
+
+  useEffect(() => {
+    function handleClick(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, []);
+
+  function toggle(id: string) {
+    onChange(selected.includes(id) ? selected.filter(x => x !== id) : [...selected, id]);
+  }
+
+  const selectedDefs = selected
+    .map((id) => typeDefinitions.find((d) => d.id === id))
+    .filter((d): d is UserTypeDefinition => d != null);
+
+  const label = selectedDefs.length === 0
+    ? 'No persona'
+    : selectedDefs.length === 1
+    ? selectedDefs[0].label
+    : `${selectedDefs.length} personas`;
+
+  const anchorColor = selectedDefs.length === 1 ? selectedDefs[0].color : null;
+
+  return (
+    <div ref={ref} style={{ position: 'relative' }}>
+      <button
+        onClick={() => setOpen(!open)}
+        title="Tag the invited user with one or more personas"
+        style={{
+          fontFamily: mono,
+          fontSize: 11,
+          color: anchorColor || theme.textSecondary,
+          background: anchorColor ? `${anchorColor}14` : theme.bgMuted,
+          border: `1px solid ${anchorColor ? `${anchorColor}30` : theme.border}`,
+          borderRadius: 6,
+          padding: '6px 10px',
+          cursor: 'pointer',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          whiteSpace: 'nowrap' as const,
+        }}
+      >
+        {anchorColor && (
+          <span style={{
+            width: 6, height: 6, borderRadius: '50%',
+            background: anchorColor, flexShrink: 0,
+          }} />
+        )}
+        {label}
+        <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+          <path d="M2.5 4L5 6.5L7.5 4" stroke={theme.textMuted} strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
+        </svg>
+      </button>
+
+      {open && (
+        <div style={{
+          position: 'absolute',
+          top: '100%',
+          right: 0,
+          marginTop: 4,
+          background: theme.bgCard,
+          border: `1px solid ${theme.border}`,
+          borderRadius: 8,
+          boxShadow: `0 8px 24px ${theme.shadow}`,
+          minWidth: 220,
+          zIndex: 100,
+          overflow: 'hidden',
+          padding: '4px 0',
+        }}>
+          <div style={{
+            fontFamily: mono, fontSize: 9, fontWeight: 600,
+            color: theme.textMuted, padding: '6px 12px 4px',
+            textTransform: 'uppercase' as const, letterSpacing: 0.5,
+          }}>
+            Tag invited user as
+          </div>
+          {typeDefinitions.map((def) => {
+            const isSelected = selected.includes(def.id);
+            return (
+              <label
+                key={def.id}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 8,
+                  padding: '6px 12px', cursor: 'pointer',
+                  background: isSelected ? (def.color ? `${def.color}14` : theme.accentBg) : 'transparent',
+                }}
+                onMouseEnter={(e) => {
+                  if (!isSelected) e.currentTarget.style.background = theme.bgHover;
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = isSelected ? (def.color ? `${def.color}14` : theme.accentBg) : 'transparent';
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={isSelected}
+                  onChange={() => toggle(def.id)}
+                  style={{ accentColor: def.color || theme.accent, width: 12, height: 12, flexShrink: 0 }}
+                />
+                <span style={{
+                  width: 8, height: 8, borderRadius: '50%',
+                  background: def.color || '#6b7280', flexShrink: 0,
+                }} />
+                <span style={{
+                  fontFamily: mono, fontSize: 11,
+                  color: isSelected ? (def.color || theme.accent) : theme.text,
+                  fontWeight: isSelected ? 600 : 500,
+                }}>
+                  {def.label}
+                </span>
+              </label>
+            );
+          })}
+          {selected.length > 0 && (
+            <button
+              onClick={() => { onChange([]); }}
+              style={{
+                fontFamily: mono, fontSize: 10,
+                color: theme.textMuted,
+                background: 'none', border: 'none',
+                borderTop: `1px solid ${theme.border}`,
+                cursor: 'pointer',
+                padding: '6px 12px', width: '100%',
+                textAlign: 'left' as const,
+              }}
+            >
+              Clear selection
+            </button>
+          )}
         </div>
       )}
     </div>
