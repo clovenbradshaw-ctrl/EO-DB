@@ -258,6 +258,7 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
       borderRadius: 8,
       background: theme.bgCard,
       overflow: 'hidden' as const,
+      minWidth: 0,
     }}>
       {/* Section header — always visible */}
       <div style={{
@@ -303,7 +304,7 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
       {typeDefinitions.length > 0 && (
         <div style={{
           display: 'grid',
-          gridTemplateColumns: 'minmax(160px, 2fr) 90px minmax(120px, 1.4fr) minmax(160px, 2fr) auto',
+          gridTemplateColumns: 'minmax(130px, 2fr) 80px minmax(90px, 1.2fr) minmax(120px, 1.6fr) auto',
           gap: 12,
           padding: '8px 14px',
           background: theme.bg,
@@ -350,7 +351,7 @@ export function UserTypeManager({ typeDefinitions, availableFields, onUpdate, ca
               {/* Type row — grid layout for table-like columns */}
               <div style={{
                 display: 'grid',
-                gridTemplateColumns: 'minmax(160px, 2fr) 90px minmax(120px, 1.4fr) minmax(160px, 2fr) auto',
+                gridTemplateColumns: 'minmax(130px, 2fr) 80px minmax(90px, 1.2fr) minmax(120px, 1.6fr) auto',
                 gap: 12,
                 alignItems: 'start',
                 padding: '10px 14px',
