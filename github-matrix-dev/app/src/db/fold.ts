@@ -847,6 +847,7 @@ export async function processEventsBulkViaDispatcher(
               perShardConDests[shardIdx],
             );
             return dispatcher({
+              shardingHashVersion: snapshotBundle.shardingHashVersion,
               snapshot: shardSnapshot,
               currentSeq,
               shardTargets,

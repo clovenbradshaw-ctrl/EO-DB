@@ -27,6 +27,7 @@ import {
   snapshotStoreWithEdgeIndex,
   type StoreSnapshotBundle,
 } from '../fold-worker-transport';
+import { SHARDING_HASH_VERSION } from '../fold-pool';
 import type { EoStore, IteratorOpts } from '../encrypted-store';
 
 function makeBundle(entries: [string, unknown][]): StoreSnapshotBundle {
@@ -74,7 +75,13 @@ function makeBundle(entries: [string, unknown][]): StoreSnapshotBundle {
       }
     }
   }
-  return { entries, edgesFrom, rdepFrom, constituentsOf };
+  return {
+    shardingHashVersion: SHARDING_HASH_VERSION,
+    entries,
+    edgesFrom,
+    rdepFrom,
+    constituentsOf,
+  };
 }
 
 function keys(pairs: [string, unknown][]): string[] {

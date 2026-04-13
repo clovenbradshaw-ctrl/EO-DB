@@ -14,9 +14,9 @@
  *
  *   2. SeqReservoir — the seq-allocation primitive used by bulk-import paths.
  *      Pre-reserves a contiguous range of seqs per wave, then hands them out
- *      in a deterministic per-target order. Replaces the previous
- *      Promise.all/per-target nextSeq race documented in
- *      fold-determinism.test.ts (FIXME(phase-A)).
+ *      in a deterministic per-target order. Phase A replaced the previous
+ *      Promise.all/per-target nextSeq race; see the file-header rationale in
+ *      fold-determinism.test.ts for the property that now holds.
  *
  *      NOTE: this used to be called `AddressingHorizon`, but the Phase A
  *      roadmap reserves that name for the constitutive site model in
