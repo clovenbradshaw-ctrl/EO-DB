@@ -374,6 +374,22 @@ export function AirtableSettingsSection({
         );
       }
 
+      // Persist the kv-snapshot (including `meta:at_cursor:*` keys written by
+      // setCursor) and flush the init-cache to OPFS. Without this the cursors
+      // live only in the in-memory MemoryStore map — MemoryStore.put only
+      // forwards `log:*` keys to the fold worker, so a page refresh after
+      // sync would drop the cursors even though the log events survived.
+      // Losing the cursors makes getSyncedTableIds() report the table as
+      // never synced, which is how the user sees sync data "not saving".
+      // Await so sync status only flips to "done" once durability is real.
+      if (result.total_records_ingested > 0) {
+        try {
+          await useEoStore.getState().manualSnapshot();
+        } catch (e) {
+          console.warn('[EO-DB] post-sync manualSnapshot failed:', e);
+        }
+      }
+
       const ingested = result.total_records_ingested;
       const skipped = result.total_records_skipped;
       const duration = `${(result.duration_ms / 1000).toFixed(1)}s`;

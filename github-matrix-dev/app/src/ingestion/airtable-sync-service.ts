@@ -37,7 +37,7 @@ import {
 import { useAirtableStore, DEFAULT_SYNC_SETTINGS, type AirtableSyncSettings, type SyncLogEntry } from './airtable-store';
 import { airtableSyncEventTypes } from '../lib/matrix-domain';
 import type { GDriveSyncService } from '../google-drive/gdrive-sync';
-import { createImportProgressListener } from '../store/eo-store';
+import { createImportProgressListener, useEoStore } from '../store/eo-store';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -485,6 +485,21 @@ export class AirtableSyncService {
       }
 
       useAirtableStore.getState().setLastSyncResult(result);
+
+      // Persist the kv-snapshot (including `meta:at_cursor:*` keys written by
+      // setCursor during the sync) to OPFS. MemoryStore.put only forwards
+      // `log:*` keys to the fold worker for durability; meta keys live in
+      // the in-memory map and are only persisted when saveKvSnapshot runs.
+      // Without this, a page refresh after a successful sync would drop the
+      // cursors — getSyncedTableIds() would report the table as never
+      // synced, and the UI would appear to have lost the sync progress.
+      if (result.total_records_ingested > 0) {
+        try {
+          await useEoStore.getState().manualSnapshot();
+        } catch (e) {
+          console.warn('[EO-DB] post-sync manualSnapshot failed:', e);
+        }
+      }
 
       await this.signalCompletion(result, !isHydrated);
     } catch (e: any) {
