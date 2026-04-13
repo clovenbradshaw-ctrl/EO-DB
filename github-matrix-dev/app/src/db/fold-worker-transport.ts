@@ -330,12 +330,196 @@ export function createWorkerShardPool(options: {
  * fold-isolate.ts, but returns the wire-shaped `[key, value][]` directly
  * (Map → array) so the coordinator doesn't allocate a Map it immediately
  * throws away.
+ *
+ * This builder ships the ENTIRE store to every shard. `snapshotStoreWithEdgeIndex`
+ * + `filterSnapshotForShard` are the selective-seed variants used by
+ * `processEventsBulkViaDispatcher`; this function is retained for callers
+ * that want the full snapshot (e.g. tests that deliberately exercise the
+ * whole-store path or inspect the full entries list directly).
  */
 export async function snapshotStoreAsEntries(store: EoStore): Promise<[string, unknown][]> {
   const entries = await store.iterator('');
   const seq = await store.getCurrentSeq();
   entries.push(['meta:seq', seq]);
   return entries;
+}
+
+// ─── Selective seeding (Phase H) ───────────────────────────────────────────
+//
+// `snapshotStoreAsEntries` ships every entry to every shard, so a 100-target
+// store with 8 shards puts ~800× the store size on the wire. The shard body
+// (dispatchShardInProcess → processEventCoreWithSeq → executeOperator) only
+// reaches for a bounded slice of that data, so most of the payload is dead
+// weight that still has to pay structured-clone cost at the worker boundary.
+//
+// `snapshotStoreWithEdgeIndex` + `filterSnapshotForShard` reduce each shard's
+// wire payload to the keys that shard can actually observe. The filter
+// rules are derived from the read sites reachable from processEventCoreWithSeq
+// (see audit in fold.ts; handleINS/SEG/CON/SYN/DEF/EVA/SIG/NUL +
+// touchAddressingForEvent + declareForEvent + recordNulForEvent +
+// StoreHelixStateTracker.recordOperator + updateFoldCache):
+//
+//   Pruned unconditionally (write-only from the shard's perspective):
+//     • log:*    appendToLog writes; horizon/invariant-scanner read later
+//                against the merged main store, never during shard fold
+//     • error:*  written on operator throw; never read in-shard
+//
+//   Filtered by per-shard `relevantTargets`:
+//     • state:<t>, helix:<t>, eva:<t>, derived:<t>
+//     • graph:fwd:<source>:<dest>   (keep when source ∈ relevantTargets)
+//     • graph:rev:<dest>:<source>   (keep when dest   ∈ relevantTargets)
+//     • rdep:<constituent>:<derived> (keep when constituent ∈ relevantTargets)
+//
+//   Passed through unconditionally (small or opaque; shard may read them):
+//     • idem:*   checked by processEventCoreWithSeq for every event
+//     • meta:*   seq metadata, tiny
+//     • card:*, chunk:*, proto:* and any unknown prefix
+//                opaque to the fold; the card-encoder module-level
+//                singleton may be null in a worker anyway, but we pass
+//                the entries through so in-process dispatch stays a
+//                no-op superset of the worker view
+//
+// `relevantTargets` for a shard is:
+//     shardTargets ∪ conDestinations ∪ existingEdgeNeighbors(shardTargets)
+//
+// The first two terms are known at shard-planning time; the third covers
+// handleCON's deferred-EVA activation path, which invokes evaluateFormula
+// on the source's FULL dependency set (= every existing graph:fwd edge
+// destination), and handleCON/refreshGraphMetrics which reads incident
+// edges. Pre-indexing those once per wave-step keeps per-shard filter
+// work linear in the snapshot size, not quadratic.
+
+/**
+ * A wave-step snapshot plus the outgoing-edge index that
+ * `filterSnapshotForShard` needs to expand each shard's relevant-targets
+ * set. Built once per wave-step; the same bundle drives every shard's
+ * per-shard filter.
+ */
+export interface StoreSnapshotBundle {
+  /** All store entries (the same payload snapshotStoreAsEntries returns). */
+  entries: [string, unknown][];
+  /**
+   * Source target → set of destination targets, derived from
+   * `graph:fwd:<source>:<dest>` keys in `entries`. Used to expand
+   * `relevantTargets` to include existing edge endpoints that
+   * evaluateFormula / refreshGraphMetrics would read during CON/EVA.
+   */
+  edgesFrom: Map<string, Set<string>>;
+}
+
+/**
+ * Snapshot the store and index outgoing edges in one pass. Same cost as
+ * `snapshotStoreAsEntries` plus an O(E) scan of the graph:fwd prefix
+ * already present in the entries.
+ */
+export async function snapshotStoreWithEdgeIndex(store: EoStore): Promise<StoreSnapshotBundle> {
+  const entries = await store.iterator('');
+  const seq = await store.getCurrentSeq();
+  entries.push(['meta:seq', seq]);
+
+  const edgesFrom = new Map<string, Set<string>>();
+  const FWD = 'graph:fwd:';
+  for (let i = 0; i < entries.length; i++) {
+    const key = entries[i][0];
+    if (!key.startsWith(FWD)) continue;
+    const rest = key.slice(FWD.length);
+    const sep = rest.indexOf(':');
+    if (sep < 0) continue;
+    const source = rest.slice(0, sep);
+    const dest = rest.slice(sep + 1);
+    let set = edgesFrom.get(source);
+    if (!set) {
+      set = new Set<string>();
+      edgesFrom.set(source, set);
+    }
+    set.add(dest);
+  }
+
+  return { entries, edgesFrom };
+}
+
+/**
+ * Produce the per-shard snapshot entries — the wire payload for one shard.
+ *
+ * `shardTargets` is the set of targets this shard owns; `conDestinations`
+ * is the set of destinations referenced by CON events scheduled on this
+ * shard (the coordinator already computes this for post-merge graph-metric
+ * reconciliation — we reuse it here).
+ *
+ * Returns a new entries array filtered according to the rules in the
+ * module header comment. Callers pass this array as `ShardRequest.snapshot`.
+ */
+export function filterSnapshotForShard(
+  bundle: StoreSnapshotBundle,
+  shardTargets: Iterable<string>,
+  conDestinations: Iterable<string>,
+): [string, unknown][] {
+  const relevantTargets = new Set<string>();
+  for (const t of shardTargets) relevantTargets.add(t);
+  for (const t of conDestinations) relevantTargets.add(t);
+  // 1-hop closure over existing outgoing edges — see module header.
+  // Snapshotted copy so later mutations to `shardTargets` can't re-enter.
+  const sourceTargets = [...relevantTargets];
+  for (const t of sourceTargets) {
+    const dests = bundle.edgesFrom.get(t);
+    if (!dests) continue;
+    for (const d of dests) relevantTargets.add(d);
+  }
+
+  const kept: [string, unknown][] = [];
+  for (const entry of bundle.entries) {
+    const key = entry[0];
+
+    // log:*, error:* — never read during shard fold; drop unconditionally.
+    if (key.startsWith('log:') || key.startsWith('error:')) continue;
+
+    // Per-target single-component keys: state:<t>, helix:<t>, eva:<t>, derived:<t>
+    if (
+      key.startsWith('state:') ||
+      key.startsWith('helix:') ||
+      key.startsWith('eva:') ||
+      key.startsWith('derived:')
+    ) {
+      const target = key.slice(key.indexOf(':') + 1);
+      if (relevantTargets.has(target)) kept.push(entry);
+      continue;
+    }
+
+    // graph:fwd:<source>:<dest> — keep when source is relevant.
+    // graph:rev:<dest>:<source> — keep when dest is relevant.
+    if (key.startsWith('graph:fwd:')) {
+      const rest = key.slice('graph:fwd:'.length);
+      const sep = rest.indexOf(':');
+      const primary = sep < 0 ? rest : rest.slice(0, sep);
+      if (relevantTargets.has(primary)) kept.push(entry);
+      continue;
+    }
+    if (key.startsWith('graph:rev:')) {
+      const rest = key.slice('graph:rev:'.length);
+      const sep = rest.indexOf(':');
+      const primary = sep < 0 ? rest : rest.slice(0, sep);
+      if (relevantTargets.has(primary)) kept.push(entry);
+      continue;
+    }
+
+    // rdep:<constituent>:<derived> — only read by recomputeDependents
+    // on the merged store, but kept for symmetry with the full snapshot
+    // when `constituent` is relevant (otherwise the shard never touches it).
+    if (key.startsWith('rdep:')) {
+      const rest = key.slice('rdep:'.length);
+      const sep = rest.indexOf(':');
+      const primary = sep < 0 ? rest : rest.slice(0, sep);
+      if (relevantTargets.has(primary)) kept.push(entry);
+      continue;
+    }
+
+    // Anything else (idem:, meta:, card:, chunk:, proto:, unknown) passes
+    // through. These are either universally read (idem, meta) or opaque
+    // to the shard body (card-encoder persistence — the writer singleton
+    // in a Worker is independent of the coordinator's anyway).
+    kept.push(entry);
+  }
+  return kept;
 }
 
 // Re-export EoStore so callers can build stores without importing both modules.
