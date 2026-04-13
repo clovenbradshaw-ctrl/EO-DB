@@ -368,7 +368,9 @@ export async function snapshotStoreAsEntries(store: EoStore): Promise<[string, u
 //     • state:<t>, helix:<t>, eva:<t>, derived:<t>
 //     • graph:fwd:<source>:<dest>   (keep when source ∈ relevantTargets)
 //     • graph:rev:<dest>:<source>   (keep when dest   ∈ relevantTargets)
-//     • rdep:<constituent>:<derived> (keep when constituent ∈ relevantTargets)
+//     • rdep:<constituent>:<derived> (keep when constituent ∈ relevantTargets;
+//                                     read in-shard by cascadeUpward →
+//                                     getReverseDeps after every event)
 //
 //   Passed through unconditionally (small or opaque; shard may read them):
 //     • idem:*   checked by processEventCoreWithSeq for every event
@@ -502,9 +504,11 @@ export function filterSnapshotForShard(
       continue;
     }
 
-    // rdep:<constituent>:<derived> — only read by recomputeDependents
-    // on the merged store, but kept for symmetry with the full snapshot
-    // when `constituent` is relevant (otherwise the shard never touches it).
+    // rdep:<constituent>:<derived> — read in-shard by cascadeUpward via
+    // getReverseDeps(constituent) after every event in processEventCoreWithSeq
+    // (see fold.ts:1235 → cascadeUpward → getReverseDeps → `rdep:${constituent}:`
+    // iterator). Required when the constituent is relevant; do NOT drop.
+    // Note: recomputeDependents uses graph:rev (getEdgesTo), not rdep.
     if (key.startsWith('rdep:')) {
       const rest = key.slice('rdep:'.length);
       const sep = rest.indexOf(':');
