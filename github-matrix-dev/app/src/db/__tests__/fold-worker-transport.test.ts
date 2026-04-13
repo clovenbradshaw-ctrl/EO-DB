@@ -31,22 +31,50 @@ import type { EoStore, IteratorOpts } from '../encrypted-store';
 
 function makeBundle(entries: [string, unknown][]): StoreSnapshotBundle {
   const edgesFrom = new Map<string, Set<string>>();
+  const rdepFrom = new Map<string, Set<string>>();
+  const constituentsOf = new Map<string, Set<string>>();
   const FWD = 'graph:fwd:';
-  for (const [key] of entries) {
-    if (!key.startsWith(FWD)) continue;
-    const rest = key.slice(FWD.length);
-    const sep = rest.indexOf(':');
-    if (sep < 0) continue;
-    const source = rest.slice(0, sep);
-    const dest = rest.slice(sep + 1);
-    let set = edgesFrom.get(source);
-    if (!set) {
-      set = new Set();
-      edgesFrom.set(source, set);
+  const RDEP = 'rdep:';
+  const DERIVED = 'derived:';
+  for (const [key, value] of entries) {
+    if (key.startsWith(FWD)) {
+      const rest = key.slice(FWD.length);
+      const sep = rest.indexOf(':');
+      if (sep < 0) continue;
+      const source = rest.slice(0, sep);
+      const dest = rest.slice(sep + 1);
+      let set = edgesFrom.get(source);
+      if (!set) {
+        set = new Set();
+        edgesFrom.set(source, set);
+      }
+      set.add(dest);
+    } else if (key.startsWith(RDEP)) {
+      const rest = key.slice(RDEP.length);
+      const sep = rest.indexOf(':');
+      if (sep < 0) continue;
+      const constituent = rest.slice(0, sep);
+      const derived = rest.slice(sep + 1);
+      let set = rdepFrom.get(constituent);
+      if (!set) {
+        set = new Set();
+        rdepFrom.set(constituent, set);
+      }
+      set.add(derived);
+    } else if (key.startsWith(DERIVED)) {
+      const derived = key.slice(DERIVED.length);
+      const v = value as { constituents?: unknown } | null;
+      const constituents = v?.constituents;
+      if (Array.isArray(constituents)) {
+        const set = new Set<string>();
+        for (const c of constituents) {
+          if (typeof c === 'string') set.add(c);
+        }
+        if (set.size > 0) constituentsOf.set(derived, set);
+      }
     }
-    set.add(dest);
   }
-  return { entries, edgesFrom };
+  return { entries, edgesFrom, rdepFrom, constituentsOf };
 }
 
 function keys(pairs: [string, unknown][]): string[] {
@@ -168,6 +196,66 @@ describe('filterSnapshotForShard', () => {
     expect(keys(out)).toEqual(['idem:h', 'meta:seq']);
   });
 
+  it('expands relevantTargets via rdep reverse-closure so cascadeUpward finds derived rows', () => {
+    // Shard owns constituent "a". Derived "D" has constituents {a, b}.
+    // cascadeUpward reads rdep:a:D → derived:D.constituents → state:a, state:b,
+    // then setState/recordOperator/updateFoldCache on D. All of those keys must
+    // survive the filter even though D and b are not in shardTargets/conDests.
+    const bundle = makeBundle([
+      ['state:a', { v: 1 }],
+      ['state:b', { v: 2 }],
+      ['state:D', { v: 'derived' }],
+      ['helix:D', { level: 2 }],
+      ['derived:D', { target: 'D', constituents: ['a', 'b'] }],
+      ['rdep:a:D', 'D'],
+      ['rdep:b:D', 'D'],
+      // Unrelated derived entity whose constituents are not shard-owned
+      // and that has no rdep path back to a — must stay dropped.
+      ['derived:E', { target: 'E', constituents: ['x', 'y'] }],
+      ['state:x', { v: 'x' }],
+      ['rdep:x:E', 'E'],
+    ]);
+    const out = filterSnapshotForShard(bundle, ['a'], []);
+    expect(keys(out)).toEqual([
+      'derived:D',
+      'helix:D',
+      'rdep:a:D',
+      'rdep:b:D',
+      'state:D',
+      'state:a',
+      'state:b',
+    ]);
+  });
+
+  it('closes rdep reverse-closure transitively across chained derivations', () => {
+    // a is a constituent of D1. D1 is itself a constituent of D2.
+    // Cascade chains a → D1 → D2 via rdep; every row along the chain
+    // must be in the shard's snapshot.
+    const bundle = makeBundle([
+      ['state:a', { v: 1 }],
+      ['state:b', { v: 2 }],
+      ['state:D1', { v: 'd1' }],
+      ['state:D2', { v: 'd2' }],
+      ['derived:D1', { target: 'D1', constituents: ['a', 'b'] }],
+      ['derived:D2', { target: 'D2', constituents: ['D1'] }],
+      ['rdep:a:D1', 'D1'],
+      ['rdep:b:D1', 'D1'],
+      ['rdep:D1:D2', 'D2'],
+    ]);
+    const out = filterSnapshotForShard(bundle, ['a'], []);
+    expect(keys(out)).toEqual([
+      'derived:D1',
+      'derived:D2',
+      'rdep:D1:D2',
+      'rdep:a:D1',
+      'rdep:b:D1',
+      'state:D1',
+      'state:D2',
+      'state:a',
+      'state:b',
+    ]);
+  });
+
   it('does not duplicate entries when shardTargets and conDestinations overlap', () => {
     const bundle = makeBundle([
       ['state:a', { v: 1 }],
@@ -231,5 +319,21 @@ describe('snapshotStoreWithEdgeIndex', () => {
     expect([...bundle.edgesFrom.get('a')!].sort()).toEqual(['x', 'y']);
     expect([...bundle.edgesFrom.get('b')!]).toEqual(['z']);
     expect(bundle.edgesFrom.has('x')).toBe(false);
+  });
+
+  it('builds the rdep and derived-constituents indices for rdep reverse-closure', async () => {
+    const store = createTestStore([
+      ['rdep:a:D1', 'D1'],
+      ['rdep:b:D1', 'D1'],
+      ['rdep:c:D2', 'D2'],
+      ['derived:D1', { target: 'D1', constituents: ['a', 'b'] }],
+      ['derived:D2', { target: 'D2', constituents: ['c'] }],
+    ]);
+    const bundle = await snapshotStoreWithEdgeIndex(store);
+    expect([...bundle.rdepFrom.get('a')!]).toEqual(['D1']);
+    expect([...bundle.rdepFrom.get('b')!]).toEqual(['D1']);
+    expect([...bundle.rdepFrom.get('c')!]).toEqual(['D2']);
+    expect([...bundle.constituentsOf.get('D1')!].sort()).toEqual(['a', 'b']);
+    expect([...bundle.constituentsOf.get('D2')!]).toEqual(['c']);
   });
 });
