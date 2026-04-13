@@ -15,7 +15,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { pack } from 'msgpackr';
 import type { MatrixClient } from 'matrix-js-sdk';
-import { useEoStore } from '../store/eo-store';
+import { useEoStore, createImportProgressListener } from '../store/eo-store';
 import type { MatrixSession } from '../matrix/client';
 import { AirtableClient } from '../ingestion/airtable-client';
 import {
@@ -335,17 +335,35 @@ export function AirtableSettingsSection({
         detail: modeLabel,
       });
 
-      const result = mode === 'hydrate'
-        ? await hydrationSync(store, client, session.userId, {
-            onProgress,
-            customization,
-            // Provenance-first bulk import: upload the raw bundle to Drive
-            // BEFORE anything gets folded, then emit an import record that
-            // links to the blob. If gdriveSync isn't hooked up yet, the hook
-            // is a no-op and the old behaviour is preserved.
-            onRawImport: (bundle) => uploadBulkImportProvenance(bundle, gdriveSync),
-          })
-        : await updateSync(store, client, session.userId, { onProgress, customization });
+      // Bridge per-event fold output into Zustand so subscribers like
+      // TableView (which re-fetches on `lastSeq` change) refresh as records
+      // land. Without this, hydration / update-sync write straight to the
+      // MemoryStore + OPFS log but the UI never knows anything moved.
+      const progressListener = createImportProgressListener();
+
+      let result;
+      try {
+        result = mode === 'hydrate'
+          ? await hydrationSync(store, client, session.userId, {
+              onProgress,
+              onEvent: progressListener.onEvent,
+              customization,
+              // Provenance-first bulk import: upload the raw bundle to Drive
+              // BEFORE anything gets folded, then emit an import record that
+              // links to the blob. If gdriveSync isn't hooked up yet, the hook
+              // is a no-op and the old behaviour is preserved.
+              onRawImport: (bundle) => uploadBulkImportProvenance(bundle, gdriveSync),
+            })
+          : await updateSync(store, client, session.userId, {
+              onProgress,
+              onEvent: progressListener.onEvent,
+              customization,
+            });
+      } finally {
+        // Flush any pending throttled update so the UI sees the final
+        // lastSeq even if the sync ended on an in-flight timer.
+        progressListener.finalize();
+      }
 
       // After a successful hydration, rewrite the on-Drive .eodb log file so
       // the cumulative log reflects the freshly-folded state (step (3) of the

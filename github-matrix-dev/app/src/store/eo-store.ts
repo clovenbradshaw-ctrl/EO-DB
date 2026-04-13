@@ -603,3 +603,62 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     });
   },
 }));
+
+/**
+ * Throttled per-event listener for bulk-import paths that fold events
+ * directly through `processEvent` (e.g. Airtable hydration / update sync,
+ * which iterate records one at a time rather than calling `batchImport`).
+ *
+ * Without this, the events land in the MemoryStore + OPFS log, but the
+ * Zustand `recentEvents` / `lastSeq` state is never bumped — so subscribers
+ * like TableView (which re-fetches on `lastSeq` change, see TableView.tsx
+ * deps array) never refresh and the import appears to vanish until the next
+ * page reload.
+ *
+ * Returns `{ onEvent, finalize }`. Pass `onEvent` as the per-event hook to
+ * the import flow, and call `finalize()` after the import settles to flush
+ * any pending update so the UI sees the final state immediately.
+ *
+ * Updates are throttled to ~10 Hz and the recents tail is capped at 100
+ * events (mirroring `batchImport`'s RECENTS_WINDOW) so a 30k-event Airtable
+ * hydration causes at most a few hundred Zustand updates rather than 30k.
+ */
+export function createImportProgressListener(): {
+  onEvent: (event: EoEvent) => void;
+  finalize: () => void;
+} {
+  const RECENTS_WINDOW = 100;
+  const FLUSH_MS = 100;
+  let recentsTail: EoEvent[] = [];
+  let maxSeq = 0;
+  let dirty = false;
+  let pending: ReturnType<typeof setTimeout> | null = null;
+
+  const flush = () => {
+    if (pending !== null) {
+      clearTimeout(pending);
+      pending = null;
+    }
+    if (!dirty) return;
+    const snapshot = recentsTail;
+    const seq = maxSeq;
+    recentsTail = [];
+    dirty = false;
+    useEoStore.setState((state) => ({
+      recentEvents: [...state.recentEvents, ...snapshot].slice(-RECENTS_WINDOW),
+      lastSeq: Math.max(state.lastSeq, seq),
+    }));
+  };
+
+  const onEvent = (event: EoEvent): void => {
+    recentsTail.push(event);
+    if (recentsTail.length > RECENTS_WINDOW) recentsTail.shift();
+    if (event.seq > maxSeq) maxSeq = event.seq;
+    dirty = true;
+    if (pending === null) {
+      pending = setTimeout(flush, FLUSH_MS);
+    }
+  };
+
+  return { onEvent, finalize: flush };
+}
