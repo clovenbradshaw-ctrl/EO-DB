@@ -375,33 +375,87 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     const { store } = get();
     if (!store) throw new Error('Store not initialized');
 
-    // Batch Zustand updates to avoid flooding React with one set() per event.
-    // With 3000+ imports, per-event set() triggers 3000+ re-render cycles on every
-    // lastSeq subscriber (TableView, HolonNav, Layout), freezing the browser and
-    // preventing the nav from settling to the correct final state.
-    const BATCH_SIZE = 50;
-    const imported: EoEvent[] = [];
-    let pendingBatch: EoEvent[] = [];
+    // Memory-safe large-import strategy.
+    //
+    // A naive single-shot call into processEventsBulk with 1M events OOMs
+    // the browser:
+    //   - every event is allocated up-front by the caller
+    //   - the fold's wave-reservation and sort each duplicate the event list
+    //   - the worker path structured-clones a full snapshot per wave-step
+    //   - an accumulator of all folded events doubled peak memory for the
+    //     dubious benefit of checking `.length > 0` at the end
+    //
+    // Three things fix this:
+    //
+    //   1. We chunk the input. CHUNK_SIZE is the quantum passed to
+    //      processEventsBulk{,WithDispatcher}. Each chunk's internal
+    //      allocations are collectable as soon as the call returns, so
+    //      peak memory is O(chunk) not O(total).
+    //
+    //   2. We don't accumulate folded events. Previously `imported` grew
+    //      to a 1M-entry array just so we could gate a fullPushToGDrive on
+    //      whether anything was imported. Replaced with a boolean.
+    //
+    //   3. We throttle progress and recent-events updates. React doesn't
+    //      need 20,000 re-renders to show a progress bar — ~30/second is
+    //      plenty, and `requestAnimationFrame`-paced updates align with
+    //      the browser paint cycle for free.
+    const CHUNK_SIZE = 10_000;
+    const RECENTS_WINDOW = 100;
+    const PROGRESS_THROTTLE_MS = 33; // ~30 Hz
 
-    const flushBatch = () => {
-      if (pendingBatch.length === 0) return;
-      const toFlush = pendingBatch;
-      pendingBatch = [];
-      set((state) => ({
-        recentEvents: [...state.recentEvents, ...toFlush].slice(-100),
-        lastSeq: toFlush[toFlush.length - 1].seq,
-      }));
-    };
+    let anyImported = false;
+    // Rolling window of the most-recent folded events. Bounded to
+    // RECENTS_WINDOW so it never grows past 100 entries regardless of
+    // import size — the Zustand `recentEvents` selector only ever surfaces
+    // the last 100 events anyway, so buffering more is waste.
+    const recentsTail: EoEvent[] = [];
+    let maxFoldedSeq = 0;
+    let lastProgressAt = 0;
+    let lastReportedCurrent = 0;
 
     const onFoldedEvent = (fullEvent: EoEvent): void => {
-      imported.push(fullEvent);
-      pendingBatch.push(fullEvent);
-      if (pendingBatch.length >= BATCH_SIZE) flushBatch();
+      anyImported = true;
+      recentsTail.push(fullEvent);
+      if (recentsTail.length > RECENTS_WINDOW) {
+        recentsTail.shift();
+      }
+      if (fullEvent.seq > maxFoldedSeq) maxFoldedSeq = fullEvent.seq;
     };
 
-    // ── Route to the shard-pool worker path above the threshold ──────────────
-    // Phase E–H shipped the shard-pool + worker transport; this is the wiring
-    // that actually exercises it. Below the threshold, or when the host can't
+    // Emit a single Zustand update combining the current recents tail
+    // with the latest seq. Called at chunk boundaries (not per event) so
+    // React only re-renders subscribers once per ~10k-event chunk — two
+    // orders of magnitude fewer renders than the previous 50-event batch.
+    const emitStoreUpdate = (finalSeq: number) => {
+      const snapshot = recentsTail.slice();
+      set((state) => ({
+        recentEvents: [...state.recentEvents, ...snapshot].slice(-RECENTS_WINDOW),
+        lastSeq: Math.max(state.lastSeq, finalSeq),
+      }));
+      // Start the next chunk with a clean recents buffer so the update
+      // after it doesn't re-publish events already added to the store.
+      recentsTail.length = 0;
+    };
+
+    const throttledProgress = onProgress
+      ? (current: number, total: number) => {
+          const now = Date.now();
+          if (
+            current === total ||
+            current - lastReportedCurrent >= 1000 ||
+            now - lastProgressAt >= PROGRESS_THROTTLE_MS
+          ) {
+            lastProgressAt = now;
+            lastReportedCurrent = current;
+            onProgress(current, total);
+          }
+        }
+      : undefined;
+
+    // Route to the shard-pool worker path above the threshold. Phase E–H
+    // shipped the shard-pool + worker transport; this is the wiring that
+    // actually exercises it. Below the threshold, or when the host can't
     // spawn workers (Node / Vitest, single-core, no `Worker`), the legacy
     // in-process bulk path is faster because it skips snapshot serialization
     // and the structured-clone round-trip per wave-step.
@@ -409,22 +463,58 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     const useWorkerPath = events.length >= MIN_EVENTS_FOR_WORKER && shardCount >= 2;
     const pool = useWorkerPath ? getOrCreateWorkerPool(shardCount) : null;
 
-    let lastSeq: number;
-    if (pool) {
-      lastSeq = await processEventsBulkWithDispatcher(
-        store, events, shardCount, pool.dispatcher, onProgress, onFoldedEvent,
-      );
-    } else {
-      lastSeq = await processEventsBulk(store, events, onProgress, onFoldedEvent);
+    let lastSeq = 0;
+    const totalEvents = events.length;
+    let eventsProcessed = 0;
+
+    // Chunk loop. Each chunk is folded as its own bulk pass — the
+    // determinism harness's `chunked-bulk` runner proves this produces
+    // identical projections to a single-shot bulk fold. Between chunks we
+    // yield to the event loop so the UI can paint and the JS engine can
+    // run GC on the just-released chunk allocations.
+    for (let offset = 0; offset < totalEvents; offset += CHUNK_SIZE) {
+      const chunk = events.slice(offset, offset + CHUNK_SIZE);
+
+      const chunkProgress = throttledProgress
+        ? (current: number, _total: number) => {
+            throttledProgress(eventsProcessed + current, totalEvents);
+          }
+        : undefined;
+
+      let chunkLastSeq: number;
+      if (pool) {
+        chunkLastSeq = await processEventsBulkWithDispatcher(
+          store, chunk, shardCount, pool.dispatcher, chunkProgress, onFoldedEvent,
+        );
+      } else {
+        chunkLastSeq = await processEventsBulk(store, chunk, chunkProgress, onFoldedEvent);
+      }
+
+      lastSeq = Math.max(lastSeq, chunkLastSeq);
+      eventsProcessed += chunk.length;
+
+      // One store update per chunk — picks up the rolling recents window
+      // and the current lastSeq. HolonNav / Layout re-render at chunk
+      // cadence, not per event.
+      emitStoreUpdate(lastSeq);
+
+      // Let the UI paint and let the JS engine reclaim per-chunk allocations
+      // (the snapshot, the wave groupings, the mutation logs) before the
+      // next chunk starts. Without this yield, 1M-row imports hold the main
+      // thread for the entire fold and the browser kills the tab for
+      // unresponsiveness.
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
     }
 
-    // Drain any remaining events and do one final set() so HolonNav gets a clean
-    // lastSeq update after all events are committed — fixing nav auto-update.
-    flushBatch();
-    set((state) => ({ lastSeq: Math.max(state.lastSeq, lastSeq) }));
+    // Final update: in the single-chunk case, emitStoreUpdate already ran
+    // inside the loop. Call once more with maxFoldedSeq to guarantee any
+    // straggler events picked up by onFoldedEvent after the last chunk's
+    // update are reflected in recentEvents.
+    if (anyImported) emitStoreUpdate(Math.max(lastSeq, maxFoldedSeq));
+    onProgress?.(totalEvents, totalEvents);
 
     const { gdriveSync } = get();
-    if (gdriveSync && imported.length > 0) {
+    if (gdriveSync && anyImported) {
       // Write the full log immediately so the log file is up-to-date on Drive
       // (not just the recent buffer). This ensures a reload from a cleared OPFS
       // always finds the imported data in the log file.
