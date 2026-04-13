@@ -638,51 +638,52 @@ export async function processEventsBulkPooled(
 }
 
 /**
- * Isolated-store shard pool — Phase F.
+ * Dispatcher-backed shard fold — Phases F + G.
  *
  * Same wave/step/reservoir/pre-pass logic as processEventsBulkPooled, but
- * each shard processes events against its own **isolated store clone**.
- * After all shards complete a step, their mutations are merged back to the
- * main store. This is the execution model that real Web Workers will use:
- * each worker has its own memory space, and the coordinator merges results.
+ * the actual shard body is delegated to a pluggable `ShardDispatcher`
+ * (see fold-worker-transport.ts). Phase F proved the isolation+merge
+ * protocol correct when the dispatcher ran in-process; Phase G lifts the
+ * same body onto a real Web Worker pool by swapping the dispatcher.
+ *
+ * The dispatcher-based design is what turns Phase E + F's shard work
+ * into actual multi-core parallelism. Nothing else about the coordinator
+ * changes — the wave model, the pre-pass, the seq reservation, the
+ * per-step barrier, and the post-merge graph-metric reconciliation all
+ * behave identically regardless of which dispatcher is plugged in.
  *
  * The isolation protocol:
  *
  *   1. Snapshot the main store before each wave step.
- *   2. For each shard, create a tracked clone from the snapshot.
- *   3. Process the shard's events against the clone using
- *      processEventCoreWithSeq (with shard-local AddressingHorizon,
- *      DeclaredHorizon, and NulHorizon instances).
- *   4. Collect the clone's mutation log.
- *   5. Apply all shards' mutations to the main store.
+ *   2. Ship (snapshot, shardTargets, planned events) to each shard via
+ *      the dispatcher. In-process: run the work on the current thread.
+ *      Worker: postMessage to a worker and await the reply.
+ *   3. Each shard returns a mutation log recorded on its isolated clone.
+ *   4. Apply all shards' mutations to the main store in shard order.
+ *   5. Re-run refreshGraphMetrics on every CON destination to reconcile
+ *      reverse-edge degree counts that each shard saw only partially.
  *
  * Cross-shard writes (CON reverse edges) are safe because they are
  * additive inserts — no read-modify-write conflicts. The wave-level
  * synchronization guarantees all INS events complete before any CON
  * event, so checkExists calls on CON destinations always succeed (the
  * destination was INS'd in a prior wave and is present in the snapshot).
- *
- * The coordinator's AddressingHorizon, DeclaredHorizon, and NulHorizon
- * read from the main store. Shard-local instances read from the clone.
- * After merge, the main store has all writes from all shards.
  */
-export async function processEventsBulkIsolated(
+async function processEventsBulkViaDispatcher(
   store: EoStore,
   events: EoEventInput[],
   shardCount: number,
+  dispatcher: import('./fold-worker-transport').ShardDispatcher,
   onProgress?: (current: number, total: number) => void,
   onEvent?: (event: EoEvent) => void,
 ): Promise<number> {
-  // Defer imports to avoid circular dependency at module level.
-  const { snapshotStore, createTrackedStore, applyMutations } = await import('./fold-isolate');
+  const { applyMutations } = await import('./fold-isolate');
+  const { snapshotStoreAsEntries } = await import('./fold-worker-transport');
 
   return foldMutex.run(async () => {
     const touchedTargets = new Set<string>();
     const reservoir = new SeqReservoir(store);
     const helix = new StoreHelixStateTracker(store);
-    const addressing = new StoreAddressingHorizon(store);
-    const declared = new StoreDeclaredHorizon(store);
-    const nulHorizon = new StoreNulHorizon(store);
     let lastSeq = 0;
     let processed = 0;
 
@@ -763,7 +764,7 @@ export async function processEventsBulkIsolated(
       const steps = splitWaveIntoSteps({ level: wave.level, events: expanded });
       await reservoir.reserve(expanded.length);
 
-      // Phase F dispatch: isolated-store shard pool with post-merge.
+      // Dispatcher-backed shard dispatch with post-merge reconciliation.
       for (const step of steps) {
         if (step.barrier) {
           await drainGpuInFlight();
@@ -801,46 +802,41 @@ export async function processEventsBulkIsolated(
           }
         }
 
-        // Snapshot the main store BEFORE shard dispatch.
-        const snapshot = await snapshotStore(store);
+        // Snapshot the main store BEFORE shard dispatch. Same snapshot
+        // goes to every shard — the wire shape is the entries array.
+        const snapshotEntries = await snapshotStoreAsEntries(store);
         const currentSeq = await store.getCurrentSeq();
 
-        // Dispatch: each shard gets its own isolated clone.
+        // Dispatch: each shard gets its own isolated clone via the
+        // transport-agnostic dispatcher. In-process path runs locally;
+        // worker path postMessages to a Worker thread.
         const shardResults = await Promise.all(
           shards.map(async (shardTargets) => {
-            if (shardTargets.length === 0) return { mutations: [] as import('./fold-isolate').StoreMutation[], lastSeq: 0 };
-
-            // Create isolated store from snapshot.
-            const tracked = createTrackedStore(snapshot, currentSeq);
-
-            // Shard-local horizon instances backed by the clone.
-            const shardAddressing = new StoreAddressingHorizon(tracked.store);
-            const shardDeclared = new StoreDeclaredHorizon(tracked.store);
-            const shardNulHorizon = new StoreNulHorizon(tracked.store);
-
-            let shardLastSeq = 0;
-            for (const target of shardTargets) {
-              const targetEvents = byTarget.get(target)!;
-              for (const { event, seq } of targetEvents) {
-                await processEventCoreWithSeq(
-                  tracked.store, event, seq,
-                  shardAddressing, shardDeclared, shardNulHorizon,
-                  onEvent,
-                );
-                if (seq > shardLastSeq) shardLastSeq = seq;
-                processed++;
-                onProgress?.(processed, events.length);
-              }
+            if (shardTargets.length === 0) {
+              return { mutations: [], shardLastSeq: 0, processedCount: 0 };
             }
-
-            return { mutations: tracked.mutations, lastSeq: shardLastSeq };
+            // Restrict the target→planned payload to just this shard's
+            // targets — the snapshot is shared but planned events are
+            // shard-specific. Shrinks wire size on the worker path.
+            const targetsToPlanned: [string, { event: EoEventInput; seq: number }[]][] =
+              shardTargets.map((t) => [t, byTarget.get(t)!]);
+            return dispatcher({
+              snapshot: snapshotEntries,
+              currentSeq,
+              shardTargets,
+              targetsToPlanned,
+            });
           })
         );
 
-        // Merge: apply all shard mutations to the main store.
-        for (const { mutations, lastSeq: shardLast } of shardResults) {
+        // Merge: apply every shard's mutation log to the main store in
+        // shard order. Each shard's writes to its own target key space
+        // are conflict-free; CON reverse-edge writes are additive.
+        for (const { mutations, shardLastSeq, processedCount } of shardResults) {
           await applyMutations(store, mutations);
-          if (shardLast > lastSeq) lastSeq = shardLast;
+          if (shardLastSeq > lastSeq) lastSeq = shardLastSeq;
+          processed += processedCount;
+          onProgress?.(processed, events.length);
         }
 
         // Post-merge reconciliation: re-compute graph metrics for CON
@@ -876,6 +872,70 @@ export async function processEventsBulkIsolated(
 
     return lastSeq;
   });
+}
+
+/**
+ * Isolated-store shard pool — Phase F (now dispatcher-backed).
+ *
+ * Equivalent to `processEventsBulkViaDispatcher` with the in-process
+ * dispatcher. Retained as a named entry point so the determinism harness
+ * and any existing caller continue to work unchanged — the refactor
+ * moved the shard body onto the ShardDispatcher contract without
+ * altering the observable behavior.
+ */
+export async function processEventsBulkIsolated(
+  store: EoStore,
+  events: EoEventInput[],
+  shardCount: number,
+  onProgress?: (current: number, total: number) => void,
+  onEvent?: (event: EoEvent) => void,
+): Promise<number> {
+  const { dispatchShardInProcess } = await import('./fold-worker-transport');
+  const dispatcher = (req: import('./fold-worker-transport').ShardRequest) =>
+    dispatchShardInProcess(req, onEvent);
+  return processEventsBulkViaDispatcher(store, events, shardCount, dispatcher, onProgress, onEvent);
+}
+
+/**
+ * Real Web Worker transport — Phase G.
+ *
+ * Runs the same dispatcher-backed shard fold as `processEventsBulkIsolated`,
+ * but each shard is dispatched to a dedicated Worker thread via postMessage.
+ * The caller supplies a `workerFactory` (because the way a Worker is
+ * constructed is bundler-specific):
+ *
+ *   new Worker(
+ *     new URL('../workers/fold-shard.worker.ts', import.meta.url),
+ *     { type: 'module' },
+ *   )
+ *
+ * The pool is sized to `shardCount` by default — one worker per shard.
+ * Callers importing at a fan-in threshold should size shardCount to
+ * `navigator.hardwareConcurrency` (capped) so the pool matches the
+ * available cores.
+ *
+ * The pool is terminated when the fold completes (or throws), so callers
+ * don't need a long-lived pool unless they're doing many back-to-back
+ * bulk imports. A future optimization can cache the pool at the EoDB
+ * level to amortize worker-spawn cost across multiple imports.
+ */
+export async function processEventsBulkWorker(
+  store: EoStore,
+  events: EoEventInput[],
+  shardCount: number,
+  workerFactory: () => Worker,
+  onProgress?: (current: number, total: number) => void,
+  onEvent?: (event: EoEvent) => void,
+): Promise<number> {
+  const { createWorkerShardPool } = await import('./fold-worker-transport');
+  const pool = createWorkerShardPool({ workerCount: shardCount, workerFactory });
+  try {
+    return await processEventsBulkViaDispatcher(
+      store, events, shardCount, pool.dispatcher, onProgress, onEvent,
+    );
+  } finally {
+    pool.terminate();
+  }
 }
 
 /**
