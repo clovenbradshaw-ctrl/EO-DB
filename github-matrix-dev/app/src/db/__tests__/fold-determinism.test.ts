@@ -67,8 +67,13 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fc from 'fast-check';
-import { processEvent, processEventsBulk, processEventsBulkPooled, processEventsBulkIsolated } from '../fold';
+import { processEvent, processEventsBulk, processEventsBulkPooled, processEventsBulkIsolated, processEventsBulkWorker } from '../fold';
 import type { FoldRunner } from '../fold-core';
+import {
+  dispatchShardInProcess,
+  type WorkerDispatchMessage,
+  type WorkerResultMessage,
+} from '../fold-worker-transport';
 import type { EoStore, IteratorOpts } from '../encrypted-store';
 import type { EoEventInput } from '../types';
 
@@ -474,6 +479,100 @@ const runIsolatedPool: FoldRunner = async (store, events) => {
   await processEventsBulkIsolated(store, events, SHARD_COUNT);
 };
 
+/**
+ * Mock Worker implementing the Phase G postMessage protocol on the
+ * current thread. Used by the worker-transport runner to exercise the
+ * full dispatch / postMessage / response-merge round-trip without
+ * spinning up a real DedicatedWorkerGlobalScope (which Vitest's Node
+ * test environment does not provide natively).
+ *
+ * The mock:
+ *
+ *   - Buffers message/error listeners exactly like a real Worker.
+ *   - On `postMessage(request)`, runs `dispatchShardInProcess` on a
+ *     microtask queue and dispatches the result back as a MessageEvent.
+ *   - Round-trips through `structuredClone` so the test surfaces any
+ *     non-serializable value the coordinator or shard may have tried
+ *     to put on the wire. This is the same serialization boundary a
+ *     real Worker would enforce.
+ *   - Honors `terminate()` by flipping a flag — further dispatches
+ *     never fire.
+ *
+ * Passing all 4 determinism properties against this runner proves the
+ * Phase G transport is correct independent of the Worker runtime: a
+ * real browser Worker can only go wrong where this mock does, modulo
+ * structured-clone limits that structuredClone() already enforces.
+ */
+class MockShardWorker implements Partial<Worker> {
+  private listeners = new Map<string, Set<EventListenerOrEventListenerObject>>();
+  private terminated = false;
+
+  addEventListener(type: string, listener: EventListenerOrEventListenerObject): void {
+    if (!this.listeners.has(type)) this.listeners.set(type, new Set());
+    this.listeners.get(type)!.add(listener);
+  }
+
+  removeEventListener(type: string, listener: EventListenerOrEventListenerObject): void {
+    this.listeners.get(type)?.delete(listener);
+  }
+
+  postMessage(message: unknown): void {
+    if (this.terminated) return;
+    const msg = structuredClone(message) as WorkerDispatchMessage;
+    if (!msg || msg.type !== 'dispatch') return;
+
+    // Kick off async dispatch on a microtask so the coordinator's
+    // listener registration has a chance to complete before the reply.
+    void (async () => {
+      try {
+        const response = await dispatchShardInProcess(msg.request);
+        if (this.terminated) return;
+        const cloned = structuredClone({
+          type: 'result', id: msg.id, response,
+        } as WorkerResultMessage);
+        this.deliver('message', new MessageEvent('message', { data: cloned }));
+      } catch (err) {
+        if (this.terminated) return;
+        const error = err instanceof Error ? err.message : String(err);
+        const cloned = structuredClone({ type: 'error', id: msg.id, error } as WorkerResultMessage);
+        this.deliver('message', new MessageEvent('message', { data: cloned }));
+      }
+    })();
+  }
+
+  terminate(): void {
+    this.terminated = true;
+    this.listeners.clear();
+  }
+
+  private deliver(type: string, event: Event): void {
+    const set = this.listeners.get(type);
+    if (!set) return;
+    for (const l of set) {
+      if (typeof l === 'function') l(event);
+      else l.handleEvent(event);
+    }
+  }
+}
+
+/**
+ * Worker-transport runner — Phase G. Runs the fold via
+ * `processEventsBulkWorker` against a pool of MockShardWorker instances
+ * that execute `dispatchShardInProcess` behind the real postMessage
+ * protocol. This is the final link that closes the shard scaling story:
+ * the coordinator, the ShardRequest/Response wire shape, the pool-pick
+ * round-robin, and the response merge all get exercised end-to-end on
+ * every property in the harness.
+ *
+ * A real browser Worker substitutes transparently: the only difference
+ * is that the dispatch runs on a separate OS thread. The protocol and
+ * the merged result are identical.
+ */
+const runWorkerTransport: FoldRunner = async (store, events) => {
+  const workerFactory = (): Worker => new MockShardWorker() as unknown as Worker;
+  await processEventsBulkWorker(store, events, SHARD_COUNT, workerFactory);
+};
+
 // ─── Runner registry ─────────────────────────────────────────────────────────
 //
 // Named runners used by the parameterized test suite. New runners added
@@ -482,7 +581,10 @@ const runIsolatedPool: FoldRunner = async (store, events) => {
 // NOTE on shard runners. Phase E (shard-pool) proved partitioning is
 // deterministic with shared stores. Phase F (isolated-pool) proved the
 // isolation + merge protocol is correct: each shard operates on its own
-// store clone, and mutations are merged back without conflicts.
+// store clone, and mutations are merged back without conflicts. Phase G
+// (worker-transport) proves the protocol survives the postMessage
+// serialization boundary — same isolation + merge, but shards ride a
+// real Worker transport instead of Promise.all on the coordinator thread.
 
 interface NamedRunner {
   name: string;
@@ -490,11 +592,12 @@ interface NamedRunner {
 }
 
 const ALL_RUNNERS: NamedRunner[] = [
-  { name: 'serial',        runner: runSerial },
-  { name: 'bulk',          runner: runBulk },
-  { name: 'chunked-bulk',  runner: runChunkedBulk },
-  { name: 'shard-pool',    runner: runShardPool },
-  { name: 'isolated-pool', runner: runIsolatedPool },
+  { name: 'serial',           runner: runSerial },
+  { name: 'bulk',             runner: runBulk },
+  { name: 'chunked-bulk',     runner: runChunkedBulk },
+  { name: 'shard-pool',       runner: runShardPool },
+  { name: 'isolated-pool',    runner: runIsolatedPool },
+  { name: 'worker-transport', runner: runWorkerTransport },
 ];
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
