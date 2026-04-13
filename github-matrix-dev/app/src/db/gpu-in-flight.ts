@@ -116,12 +116,35 @@ export class GpuInFlightTracker {
 }
 
 /**
- * Module-level singleton used by the fold barrier (`drainGpuInFlight` in
- * fold.ts). External callers that dispatch GPU work inside the fold path
- * should call `gpuInFlight.register(promise)` exactly once per dispatch.
+ * Module-level tracker used by the fold barrier (`drainGpuInFlight` in
+ * fold.ts) and by GPU dispatch sites (`gpu-dispatch.ts`). Callers register
+ * their work with the *current* tracker; tests can swap in their own via
+ * `setGpuInFlightTracker` (or hard-reset with `resetGpuInFlightTracker`)
+ * for isolation between cases.
  *
- * Tests should instantiate their own `GpuInFlightTracker` rather than
- * reaching for this singleton — the singleton is intentionally mutable
- * state and does not reset between test cases.
+ * Why `let` rather than `const`. ES-module imports are live bindings, so
+ * every `import { gpuInFlight } from './gpu-in-flight'` automatically sees
+ * replacements made here. Swapping the tracker from a test's `beforeEach`
+ * is therefore safe — no callers cache the previous reference — as long
+ * as callers always read `gpuInFlight.x` at the call site (they do) and
+ * never stash the reference in a closure variable (they don't).
  */
-export const gpuInFlight = new GpuInFlightTracker();
+export let gpuInFlight = new GpuInFlightTracker();
+
+/**
+ * Replace the module-level tracker. Intended for tests that need their
+ * own isolation or that want to observe register/drain activity without
+ * leaking into the next test. Production code should not call this.
+ */
+export function setGpuInFlightTracker(tracker: GpuInFlightTracker): void {
+  gpuInFlight = tracker;
+}
+
+/**
+ * Replace the module-level tracker with a fresh instance. Equivalent to
+ * `setGpuInFlightTracker(new GpuInFlightTracker())` but clearer at call
+ * sites. Use in `afterEach` to guarantee no cross-test bleed.
+ */
+export function resetGpuInFlightTracker(): void {
+  gpuInFlight = new GpuInFlightTracker();
+}

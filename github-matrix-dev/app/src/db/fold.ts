@@ -676,9 +676,17 @@ export async function processEventsBulkViaDispatcher(
   dispatcher: import('./fold-worker-transport').ShardDispatcher,
   onProgress?: (current: number, total: number) => void,
   onEvent?: (event: EoEvent) => void,
+  options?: { useFullSnapshot?: boolean },
 ): Promise<number> {
   const { applyMutations } = await import('./fold-isolate');
   const { snapshotStoreWithEdgeIndex, filterSnapshotForShard } = await import('./fold-worker-transport');
+  // Escape hatch for the determinism harness: when `useFullSnapshot` is set,
+  // every shard receives the unfiltered snapshot. Proves that selective-seed
+  // filtering is lossless — any filter regression that drops a key the shard
+  // body reads would show up as a projection divergence against the full
+  // path. Production paths always leave this undefined so shards get the
+  // narrowed payload.
+  const useFullSnapshot = options?.useFullSnapshot === true;
 
   return foldMutex.run(async () => {
     const touchedTargets = new Set<string>();
@@ -841,11 +849,13 @@ export async function processEventsBulkViaDispatcher(
             // wire size on the worker path.
             const targetsToPlanned: [string, { event: EoEventInput; seq: number }[]][] =
               shardTargets.map((t) => [t, byTarget.get(t)!]);
-            const shardSnapshot = filterSnapshotForShard(
-              snapshotBundle,
-              shardTargets,
-              perShardConDests[shardIdx],
-            );
+            const shardSnapshot = useFullSnapshot
+              ? snapshotBundle.entries.slice()
+              : filterSnapshotForShard(
+                  snapshotBundle,
+                  shardTargets,
+                  perShardConDests[shardIdx],
+                );
             return dispatcher({
               shardingHashVersion: snapshotBundle.shardingHashVersion,
               snapshot: shardSnapshot,

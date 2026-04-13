@@ -21,7 +21,12 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { GpuInFlightTracker } from '../gpu-in-flight';
+import {
+  GpuInFlightTracker,
+  gpuInFlight,
+  setGpuInFlightTracker,
+  resetGpuInFlightTracker,
+} from '../gpu-in-flight';
 
 /**
  * A manually-settleable deferred. Used to model a GPU dispatch whose
@@ -227,6 +232,61 @@ describe('GpuInFlightTracker', () => {
       tracker.register(Promise.resolve({ bytesWritten: 1024 }));
 
       await tracker.drain();
+      expect(tracker.inFlightCount()).toBe(0);
+    });
+  });
+
+  // ─── Module-level tracker injection ───────────────────────────────────────
+
+  describe('setGpuInFlightTracker / resetGpuInFlightTracker', () => {
+    it('setGpuInFlightTracker replaces the module tracker — live binding', async () => {
+      const original = gpuInFlight;
+      const injected = new GpuInFlightTracker();
+
+      // Pre-condition: the module default is the current tracker.
+      const beforeInject = (await import('../gpu-in-flight')).gpuInFlight;
+      expect(beforeInject).toBe(original);
+
+      try {
+        setGpuInFlightTracker(injected);
+
+        // Post-inject: a fresh import sees the replacement (live binding).
+        const afterInject = (await import('../gpu-in-flight')).gpuInFlight;
+        expect(afterInject).toBe(injected);
+
+        // And register/drain operate on the new tracker only.
+        injected.register(Promise.resolve());
+        expect(original.inFlightCount()).toBe(0);
+      } finally {
+        setGpuInFlightTracker(original);
+      }
+    });
+
+    it('resetGpuInFlightTracker installs a fresh empty tracker', async () => {
+      const original = gpuInFlight;
+      try {
+        // Dirty the current tracker so the reset is observable.
+        gpuInFlight.register(new Promise(() => { /* never settles */ }));
+        expect(gpuInFlight.inFlightCount()).toBe(1);
+
+        resetGpuInFlightTracker();
+
+        const fresh = (await import('../gpu-in-flight')).gpuInFlight;
+        expect(fresh).not.toBe(original);
+        expect(fresh.inFlightCount()).toBe(0);
+      } finally {
+        setGpuInFlightTracker(original);
+      }
+    });
+
+    it('clear() on the tracker drops in-flight entries without awaiting', () => {
+      const tracker = new GpuInFlightTracker();
+      // Register two never-settling promises so clear has work to do.
+      tracker.register(new Promise(() => { /* never */ }));
+      tracker.register(new Promise(() => { /* never */ }));
+      expect(tracker.inFlightCount()).toBe(2);
+
+      tracker.clear();
       expect(tracker.inFlightCount()).toBe(0);
     });
   });

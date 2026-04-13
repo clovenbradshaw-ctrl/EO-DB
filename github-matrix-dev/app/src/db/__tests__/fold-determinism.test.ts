@@ -67,7 +67,14 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fc from 'fast-check';
-import { processEvent, processEventsBulk, processEventsBulkPooled, processEventsBulkIsolated, processEventsBulkWorker } from '../fold';
+import {
+  processEvent,
+  processEventsBulk,
+  processEventsBulkPooled,
+  processEventsBulkIsolated,
+  processEventsBulkWorker,
+  processEventsBulkViaDispatcher,
+} from '../fold';
 import type { FoldRunner } from '../fold-core';
 import {
   dispatchShardInProcess,
@@ -480,6 +487,30 @@ const runIsolatedPool: FoldRunner = async (store, events) => {
 };
 
 /**
+ * Full-snapshot isolated-pool runner — Phase H guard. Identical to
+ * `runIsolatedPool` except that every shard receives the **unfiltered**
+ * snapshot via `processEventsBulkViaDispatcher`'s `useFullSnapshot`
+ * escape hatch. Production paths always use the filtered snapshot
+ * (`filterSnapshotForShard`) for wire efficiency; this runner exists so
+ * the property suite can prove the filter is lossless:
+ *
+ *   projectionFingerprint(selective) === projectionFingerprint(full)
+ *
+ * If `filterSnapshotForShard` ever drops a key that the shard body
+ * actually reads — an rdep cascade target, a derived entity's
+ * co-constituent, a graph:fwd endpoint — this runner diverges from
+ * `runIsolatedPool` and the harness catches the regression. Without
+ * this runner, a filter regression could manifest only as a subtle
+ * cascadeUpward skip and slip past the property check.
+ */
+const runFullSnapshotPool: FoldRunner = async (store, events) => {
+  await processEventsBulkViaDispatcher(
+    store, events, SHARD_COUNT, dispatchShardInProcess,
+    undefined, undefined, { useFullSnapshot: true },
+  );
+};
+
+/**
  * Mock Worker implementing the Phase G postMessage protocol on the
  * current thread. Used by the worker-transport runner to exercise the
  * full dispatch / postMessage / response-merge round-trip without
@@ -592,12 +623,13 @@ interface NamedRunner {
 }
 
 const ALL_RUNNERS: NamedRunner[] = [
-  { name: 'serial',           runner: runSerial },
-  { name: 'bulk',             runner: runBulk },
-  { name: 'chunked-bulk',     runner: runChunkedBulk },
-  { name: 'shard-pool',       runner: runShardPool },
-  { name: 'isolated-pool',    runner: runIsolatedPool },
-  { name: 'worker-transport', runner: runWorkerTransport },
+  { name: 'serial',             runner: runSerial },
+  { name: 'bulk',               runner: runBulk },
+  { name: 'chunked-bulk',       runner: runChunkedBulk },
+  { name: 'shard-pool',         runner: runShardPool },
+  { name: 'isolated-pool',      runner: runIsolatedPool },
+  { name: 'full-snapshot-pool', runner: runFullSnapshotPool },
+  { name: 'worker-transport',   runner: runWorkerTransport },
 ];
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
