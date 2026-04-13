@@ -420,6 +420,7 @@ export function SpaceMembers({ spaceTarget, currentUserId, onClose, matrixClient
         <button style={s.closeBtn} onClick={onClose}>&times;</button>
       </div>
 
+      <div style={s.body}>
       {/* Invite bar */}
       {canManageMembers() && (
         <div style={s.inviteSection}>
@@ -544,6 +545,7 @@ export function SpaceMembers({ spaceTarget, currentUserId, onClose, matrixClient
           onUpdate={handleUpdateUserTypeDefinitions}
           canManage={currentPermissions.can_set_governance}
         />
+      </div>
       </div>
     </div>
   );
@@ -984,9 +986,17 @@ function styles(t: Theme): Record<string, React.CSSProperties> {
       background: t.bgCard,
       border: `1px solid ${t.border}`,
       borderRadius: 12,
-      overflow: 'visible',
-      maxHeight: 560,
+      overflow: 'hidden',
+      maxHeight: 'min(85vh, 720px)',
+      minHeight: 0,
       boxShadow: `0 12px 40px ${t.shadow}`,
+    },
+    body: {
+      display: 'flex',
+      flexDirection: 'column' as const,
+      flex: 1,
+      minHeight: 0,
+      overflowY: 'auto' as const,
     },
     header: {
       display: 'flex',
@@ -1059,7 +1069,6 @@ function styles(t: Theme): Record<string, React.CSSProperties> {
 
     peopleSection: {
       padding: '14px 20px 16px',
-      overflowY: 'auto' as const,
     },
     peopleSectionHeader: {
       fontFamily: mono,
