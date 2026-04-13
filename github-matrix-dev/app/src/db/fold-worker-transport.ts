@@ -381,15 +381,34 @@ export async function snapshotStoreAsEntries(store: EoStore): Promise<[string, u
 //                the entries through so in-process dispatch stays a
 //                no-op superset of the worker view
 //
-// `relevantTargets` for a shard is:
-//     shardTargets ∪ conDestinations ∪ existingEdgeNeighbors(shardTargets)
+// `relevantTargets` for a shard is built in two closures:
 //
-// The first two terms are known at shard-planning time; the third covers
-// handleCON's deferred-EVA activation path, which invokes evaluateFormula
-// on the source's FULL dependency set (= every existing graph:fwd edge
-// destination), and handleCON/refreshGraphMetrics which reads incident
-// edges. Pre-indexing those once per wave-step keeps per-shard filter
-// work linear in the snapshot size, not quadratic.
+//   (1) Forward-edge 1-hop closure:
+//         seed = shardTargets ∪ conDestinations
+//         for t ∈ seed: add edgesFrom[t]
+//
+//       This covers handleCON's deferred-EVA activation path, which invokes
+//       evaluateFormula on the source's FULL dependency set (= every existing
+//       graph:fwd edge destination), and handleCON/refreshGraphMetrics which
+//       reads incident edges.
+//
+//   (2) Reverse-dependency transitive closure (rdep + derived.constituents):
+//         worklist = current relevantTargets
+//         while t ∈ worklist:
+//           for D ∈ rdepFrom[t]:      (t is a constituent of derived D)
+//             add D to relevantTargets, enqueue D
+//             for c ∈ constituentsOf[D]: add c (D's co-constituents), enqueue c
+//
+//       This covers cascadeUpward, which fires after every event in
+//       processEventCoreWithSeq (fold.ts:1235). When a shard-owned constituent
+//       C has `rdep:C:D`, the cascade reads derived:D, state:D, helix:D, and
+//       state:c' for every co-constituent c' of D — then recurses on D's own
+//       rdeps. Without this closure, the derived entity and its sibling
+//       constituents would be absent from the shard's snapshot, silently
+//       skipping the re-evaluation.
+//
+// Pre-indexing both edge directions and the rdep/constituents relation once
+// per wave-step keeps per-shard filter work linear in the snapshot size.
 
 /**
  * A wave-step snapshot plus the outgoing-edge index that
@@ -407,6 +426,20 @@ export interface StoreSnapshotBundle {
    * evaluateFormula / refreshGraphMetrics would read during CON/EVA.
    */
   edgesFrom: Map<string, Set<string>>;
+  /**
+   * Constituent target → set of derived targets it belongs to, derived
+   * from `rdep:<constituent>:<derived>` keys in `entries`. Used to expand
+   * `relevantTargets` so cascadeUpward on an in-shard constituent finds
+   * the derived entity's own rows (derived/state/helix) in the snapshot.
+   */
+  rdepFrom: Map<string, Set<string>>;
+  /**
+   * Derived target → set of its constituents, decoded from `derived:<t>`
+   * entries (DerivedEntity.constituents). Used alongside `rdepFrom` to
+   * pull every co-constituent's state into the snapshot when cascadeUpward
+   * re-evaluates a derived entity.
+   */
+  constituentsOf: Map<string, Set<string>>;
 }
 
 /**
@@ -420,24 +453,52 @@ export async function snapshotStoreWithEdgeIndex(store: EoStore): Promise<StoreS
   entries.push(['meta:seq', seq]);
 
   const edgesFrom = new Map<string, Set<string>>();
+  const rdepFrom = new Map<string, Set<string>>();
+  const constituentsOf = new Map<string, Set<string>>();
   const FWD = 'graph:fwd:';
+  const RDEP = 'rdep:';
+  const DERIVED = 'derived:';
   for (let i = 0; i < entries.length; i++) {
     const key = entries[i][0];
-    if (!key.startsWith(FWD)) continue;
-    const rest = key.slice(FWD.length);
-    const sep = rest.indexOf(':');
-    if (sep < 0) continue;
-    const source = rest.slice(0, sep);
-    const dest = rest.slice(sep + 1);
-    let set = edgesFrom.get(source);
-    if (!set) {
-      set = new Set<string>();
-      edgesFrom.set(source, set);
+    if (key.startsWith(FWD)) {
+      const rest = key.slice(FWD.length);
+      const sep = rest.indexOf(':');
+      if (sep < 0) continue;
+      const source = rest.slice(0, sep);
+      const dest = rest.slice(sep + 1);
+      let set = edgesFrom.get(source);
+      if (!set) {
+        set = new Set<string>();
+        edgesFrom.set(source, set);
+      }
+      set.add(dest);
+    } else if (key.startsWith(RDEP)) {
+      const rest = key.slice(RDEP.length);
+      const sep = rest.indexOf(':');
+      if (sep < 0) continue;
+      const constituent = rest.slice(0, sep);
+      const derived = rest.slice(sep + 1);
+      let set = rdepFrom.get(constituent);
+      if (!set) {
+        set = new Set<string>();
+        rdepFrom.set(constituent, set);
+      }
+      set.add(derived);
+    } else if (key.startsWith(DERIVED)) {
+      const derived = key.slice(DERIVED.length);
+      const value = entries[i][1] as { constituents?: unknown } | null;
+      const constituents = value?.constituents;
+      if (Array.isArray(constituents)) {
+        const set = new Set<string>();
+        for (const c of constituents) {
+          if (typeof c === 'string') set.add(c);
+        }
+        if (set.size > 0) constituentsOf.set(derived, set);
+      }
     }
-    set.add(dest);
   }
 
-  return { entries, edgesFrom };
+  return { entries, edgesFrom, rdepFrom, constituentsOf };
 }
 
 /**
@@ -459,13 +520,37 @@ export function filterSnapshotForShard(
   const relevantTargets = new Set<string>();
   for (const t of shardTargets) relevantTargets.add(t);
   for (const t of conDestinations) relevantTargets.add(t);
-  // 1-hop closure over existing outgoing edges — see module header.
+  // (1) 1-hop closure over existing outgoing edges — see module header.
   // Snapshotted copy so later mutations to `shardTargets` can't re-enter.
   const sourceTargets = [...relevantTargets];
   for (const t of sourceTargets) {
     const dests = bundle.edgesFrom.get(t);
     if (!dests) continue;
     for (const d of dests) relevantTargets.add(d);
+  }
+  // (2) Reverse-dependency transitive closure over rdep + derived.constituents.
+  // cascadeUpward reads rdep:<t>:<D> to discover derived entity D, then needs
+  // derived:D, state:D, helix:D, and state:c for every co-constituent c of D.
+  // D may itself be a constituent of another derived — so iterate until fixed.
+  const rdepWorklist: string[] = [...relevantTargets];
+  while (rdepWorklist.length > 0) {
+    const t = rdepWorklist.pop()!;
+    const deriveds = bundle.rdepFrom.get(t);
+    if (!deriveds) continue;
+    for (const d of deriveds) {
+      if (!relevantTargets.has(d)) {
+        relevantTargets.add(d);
+        rdepWorklist.push(d);
+      }
+      const coConstituents = bundle.constituentsOf.get(d);
+      if (!coConstituents) continue;
+      for (const c of coConstituents) {
+        if (!relevantTargets.has(c)) {
+          relevantTargets.add(c);
+          rdepWorklist.push(c);
+        }
+      }
+    }
   }
 
   const kept: [string, unknown][] = [];
