@@ -422,15 +422,14 @@ export class SyncManager {
 
   /**
    * Manual delta snapshot — captures log events since the last snapshot,
-   * uploads to Matrix media, and records the mxc URI in a NUL log event.
+   * uploads to Matrix media, and saves the mxc URI to room state so other
+   * devices can find and hydrate from it on next load.
    *
    * Each delta carries up to 25 previous snapshot URIs so hydrating
-   * devices can jump back in large strides.
+   * devices can jump back in large strides. The room state event
+   * (EO_SNAPSHOT_STATE_TYPE) is written by uploadDeltaSnapshot().
    */
   async manualSnapshot(): Promise<{ mxc: string; seq: number }> {
-    // Matrix media snapshot saves are disabled — Filen is the primary store.
-    throw new Error('Matrix media snapshots are disabled — use Filen backup instead');
-
     const currentSeq = await this.store.getCurrentSeq();
     const lastSnapshotSeq: number = (await this.store.get('meta:snapshot_seq')) || 0;
 
