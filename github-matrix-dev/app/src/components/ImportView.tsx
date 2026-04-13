@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { useEoStore } from '../store/eo-store';
 import { useTheme, type Theme } from '../theme';
-import type { ExternalOperator } from '../db/types';
+import type { ExternalOperator, EoEventInput } from '../db/types';
 import { buildTree, formatName, type TreeNode } from './scope-picker-utils';
 import { generateGenericRowTargetId, genericRowIdWidth } from './import-target-id';
 
@@ -639,97 +639,158 @@ export function ImportView({ onImportComplete }: ImportViewProps) {
     setStatus('importing');
     setProgress({ current: 0, total: rows.length, errors: 0 });
 
-    // Prepare all events upfront
     const prefix = targetPrefix.trim().replace(/\.+$/, '');
     // Generic-row targets use `generateGenericRowTargetId` so the row index
     // guarantees uniqueness within an import (see import-target-id.ts for
     // the rationale and the historical bug it fixes).
     const genericIdWidth = genericRowIdWidth(rows.length);
-    const rawEvents = rows.map((row, idx) => ({
-      op: row.op as ExternalOperator,
-      target: row._keyed
-        ? `${prefix}.${row.target}`
-        : row._generic
-        ? `${prefix}.${generateGenericRowTargetId(idx, genericIdWidth, crypto.randomUUID().replace(/-/g, ''))}`
-        : row.target!,
-      operand: row._keyed && row.op === 'CON' && row.operand?.added
-        ? { ...row.operand, added: row.operand.added.map((t: string) => `${prefix}.${t}`) }
-        : row.operand ?? {},
-      agent: 'import',
-      ts: creationDate
-        ? new Date(creationDate + 'T00:00:00Z').toISOString()
-        : (row.ts || new Date().toISOString()),
-      acquired_ts: new Date().toISOString(),
-      client_event_id: row.client_event_id,
-      meta: row.meta,
-    }));
 
-    // Apply duplicate strategies (only when meaningful)
-    let events = rawEvents;
+    // Chunked construction + dispatch.
+    //
+    // Previously this function ran `rows.map(...)` over all 1M rows in a
+    // single synchronous pass — ~10s of `crypto.randomUUID()` calls and
+    // object allocations blocking the main thread before batchImport even
+    // started. The browser never got to paint the progress bar and looked
+    // frozen. Now we:
+    //
+    //   1. Build events in RUN_CHUNK_SIZE-row chunks.
+    //   2. Dispatch each chunk through `batchImport` (which does its own
+    //      internal chunking for the fold).
+    //   3. `await setTimeout(0)` between chunks so the UI paints and React
+    //      commits the per-chunk setProgress update.
+    //
+    // Peak memory at any moment is bounded to one chunk of events plus
+    // whatever batchImport's internal chunk holds, not the full input.
+    const RUN_CHUNK_SIZE = 10_000;
+
+    // Duplicate-check state — computed once (if needed) before the chunk
+    // loop so the per-chunk filter has a consistent view of the pre-import
+    // store state.
     const needsDupCheck = dupTable !== 'merge' || dupRecord !== 'update' || dupField !== 'keep';
+    let existingTargets: Set<string> | null = null;
+    let existingValueMap: Map<string, unknown> | null = null;
+    let existingCollections: Set<string> | null = null;
+    let prefixDepth = 0;
     if (needsDupCheck && prefix) {
       const existingStates = await getStateByPrefix(prefix);
-      const existingTargets = new Set(existingStates.map(s => s.target));
-      const existingValueMap = new Map(existingStates.map(s => [s.target, s.value]));
-
-      // Determine which collection-level paths exist (one level below prefix)
-      const prefixDepth = prefix.split('.').length;
-      const existingCollections = new Set<string>();
+      existingTargets = new Set(existingStates.map(s => s.target));
+      existingValueMap = new Map(existingStates.map(s => [s.target, s.value]));
+      prefixDepth = prefix.split('.').length;
+      existingCollections = new Set<string>();
       for (const s of existingStates) {
         const depth = s.target.split('.').length;
         if (depth === prefixDepth + 1) existingCollections.add(s.target);
       }
-
-      const finalEvents: typeof rawEvents = [];
-      for (let evt of rawEvents) {
-        if (evt.op !== 'INS') { finalEvents.push(evt); continue; }
-
-        // Table-level: skip entire collection if it already exists
-        if (dupTable === 'skip') {
-          const targetParts = evt.target.split('.');
-          const collectionPath = targetParts.slice(0, prefixDepth + 1).join('.');
-          if (existingCollections.has(collectionPath)) continue;
-        }
-
-        // Record-level: handle existing record at this exact target
-        if (existingTargets.has(evt.target)) {
-          if (dupRecord === 'skip') continue;
-          if (dupRecord === 'replace') {
-            // Nullify the existing record first, then re-insert
-            finalEvents.push({ ...evt, op: 'NUL' as ExternalOperator, operand: {} });
-          }
-          if (dupRecord === 'update') continue; // skip INS; DEF events will update the record
-        }
-
-        // Field-level: keep existing field values, only import new ones
-        if (dupField === 'keep' && existingTargets.has(evt.target)) {
-          const existing = existingValueMap.get(evt.target);
-          if (existing && typeof existing === 'object') {
-            const trimmed: Record<string, unknown> = {};
-            for (const [k, v] of Object.entries(evt.operand as Record<string, unknown>)) {
-              if (!(k in (existing as object))) trimmed[k] = v;
-            }
-            if (Object.keys(trimmed).length === 0) continue; // nothing new to add
-            evt = { ...evt, operand: trimmed };
-          }
-        }
-
-        finalEvents.push(evt);
-      }
-      events = finalEvents;
     }
 
-    try {
-      // Batch import: fold locally for progress, send as single Matrix message
-      await batchImport(events, (current, total) => {
-        setProgress({ current, total, errors: 0 });
-      });
+    // Per-event builder. Inlined so the hot loop below doesn't pay a
+    // function-call cost on every row — at 1M rows that's measurable.
+    const acquiredTsCache = new Date().toISOString();
+    const pinnedTs = creationDate
+      ? new Date(creationDate + 'T00:00:00Z').toISOString()
+      : null;
 
-      const skipped = rawEvents.length - events.filter(e => e.op !== 'NUL').length;
+    let dispatched = 0;
+    let skippedAsDuplicates = 0;
+    let totalEmitted = 0;
+
+    try {
+      for (let start = 0; start < rows.length; start += RUN_CHUNK_SIZE) {
+        const end = Math.min(start + RUN_CHUNK_SIZE, rows.length);
+        const chunkEvents: EoEventInput[] = [];
+
+        for (let i = start; i < end; i++) {
+          const row = rows[i];
+          const target = row._keyed
+            ? `${prefix}.${row.target}`
+            : row._generic
+            ? `${prefix}.${generateGenericRowTargetId(i, genericIdWidth, crypto.randomUUID().replace(/-/g, ''))}`
+            : row.target!;
+          const operand = row._keyed && row.op === 'CON' && row.operand?.added
+            ? { ...row.operand, added: row.operand.added.map((t: string) => `${prefix}.${t}`) }
+            : row.operand ?? {};
+          const ts = pinnedTs ?? row.ts ?? new Date().toISOString();
+          const evt = {
+            op: row.op as ExternalOperator,
+            target,
+            operand,
+            agent: 'import',
+            ts,
+            acquired_ts: acquiredTsCache,
+            client_event_id: row.client_event_id,
+            meta: row.meta,
+          };
+
+          // Duplicate-strategy filter. Only INS events are eligible — DEF
+          // and friends always pass through.
+          if (needsDupCheck && evt.op === 'INS' && existingTargets) {
+            // Table-level: skip the whole collection if it already exists
+            if (dupTable === 'skip' && existingCollections) {
+              const parts = evt.target.split('.');
+              const collectionPath = parts.slice(0, prefixDepth + 1).join('.');
+              if (existingCollections.has(collectionPath)) {
+                skippedAsDuplicates++;
+                continue;
+              }
+            }
+            // Record-level: handle existing record at this exact target
+            if (existingTargets.has(evt.target)) {
+              if (dupRecord === 'skip') { skippedAsDuplicates++; continue; }
+              if (dupRecord === 'replace') {
+                // Nullify existing, then re-insert
+                chunkEvents.push({ ...evt, op: 'NUL' as ExternalOperator, operand: {} });
+              }
+              if (dupRecord === 'update') { skippedAsDuplicates++; continue; }
+            }
+            // Field-level: keep existing fields, import only new ones
+            if (dupField === 'keep' && existingValueMap && existingTargets.has(evt.target)) {
+              const existing = existingValueMap.get(evt.target);
+              if (existing && typeof existing === 'object') {
+                const trimmed: Record<string, unknown> = {};
+                for (const [k, v] of Object.entries(evt.operand as Record<string, unknown>)) {
+                  if (!(k in (existing as object))) trimmed[k] = v;
+                }
+                if (Object.keys(trimmed).length === 0) { skippedAsDuplicates++; continue; }
+                chunkEvents.push({ ...evt, operand: trimmed });
+                continue;
+              }
+            }
+          }
+
+          chunkEvents.push(evt);
+        }
+
+        if (chunkEvents.length === 0) {
+          dispatched = end;
+          setProgress({ current: dispatched, total: rows.length, errors: 0 });
+          // Yield between chunks even if nothing dispatched — keeps the UI
+          // responsive during all-duplicate-skip scenarios.
+          await new Promise<void>((resolve) => setTimeout(resolve, 0));
+          continue;
+        }
+
+        await batchImport(chunkEvents, (current, _total) => {
+          // Report progress in terms of input-row count, not chunk-local count.
+          setProgress({
+            current: dispatched + current,
+            total: rows.length,
+            errors: 0,
+          });
+        });
+
+        totalEmitted += chunkEvents.filter(e => e.op !== 'NUL').length;
+        dispatched = end;
+        setProgress({ current: dispatched, total: rows.length, errors: 0 });
+        // Yield between chunks so React commits the setProgress update and
+        // the browser paints. Without this, the main thread runs the next
+        // chunk immediately and the UI stays frozen.
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      }
+
       setStatus('done');
       setMessage({
         type: 'success',
-        text: `Successfully imported ${events.filter(e => e.op !== 'NUL').length} event${events.length !== 1 ? 's' : ''}${skipped > 0 ? ` (${skipped} skipped as duplicates)` : ''}`,
+        text: `Successfully imported ${totalEmitted} event${totalEmitted !== 1 ? 's' : ''}${skippedAsDuplicates > 0 ? ` (${skippedAsDuplicates} skipped as duplicates)` : ''}`,
       });
     } catch (e: any) {
       setStatus('error');
