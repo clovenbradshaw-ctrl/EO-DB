@@ -678,7 +678,7 @@ async function processEventsBulkViaDispatcher(
   onEvent?: (event: EoEvent) => void,
 ): Promise<number> {
   const { applyMutations } = await import('./fold-isolate');
-  const { snapshotStoreAsEntries } = await import('./fold-worker-transport');
+  const { snapshotStoreWithEdgeIndex, filterSnapshotForShard } = await import('./fold-worker-transport');
 
   return foldMutex.run(async () => {
     const touchedTargets = new Set<string>();
@@ -802,26 +802,52 @@ async function processEventsBulkViaDispatcher(
           }
         }
 
-        // Snapshot the main store BEFORE shard dispatch. Same snapshot
-        // goes to every shard — the wire shape is the entries array.
-        const snapshotEntries = await snapshotStoreAsEntries(store);
+        // Snapshot the main store BEFORE shard dispatch, with the outgoing
+        // edge index pre-built so per-shard filtering is linear in the
+        // snapshot size. Selective seeding (Phase H) then narrows each
+        // shard's wire payload to the keys it can actually observe —
+        // see `filterSnapshotForShard` in fold-worker-transport.ts.
+        const snapshotBundle = await snapshotStoreWithEdgeIndex(store);
         const currentSeq = await store.getCurrentSeq();
+
+        // Pre-compute per-shard CON destinations so the filter can include
+        // their rows. `conDestinations` above is the UNION across shards
+        // (needed for post-merge graph-metric reconciliation); here we
+        // need the partition so each shard only sees its own dests.
+        const perShardConDests: Set<string>[] = shards.map(() => new Set<string>());
+        for (let shardIdx = 0; shardIdx < shards.length; shardIdx++) {
+          const targetSet = new Set(shards[shardIdx]);
+          for (const p of planned) {
+            if (!targetSet.has(p.event.target)) continue;
+            if (p.event.op === 'CON' && p.event.operand?.added) {
+              for (const item of p.event.operand.added as ConEdgeAddItem[]) {
+                perShardConDests[shardIdx].add(typeof item === 'string' ? item : item.dest);
+              }
+            }
+          }
+        }
 
         // Dispatch: each shard gets its own isolated clone via the
         // transport-agnostic dispatcher. In-process path runs locally;
         // worker path postMessages to a Worker thread.
         const shardResults = await Promise.all(
-          shards.map(async (shardTargets) => {
+          shards.map(async (shardTargets, shardIdx) => {
             if (shardTargets.length === 0) {
               return { mutations: [], shardLastSeq: 0, processedCount: 0 };
             }
             // Restrict the target→planned payload to just this shard's
-            // targets — the snapshot is shared but planned events are
-            // shard-specific. Shrinks wire size on the worker path.
+            // targets — the snapshot is filtered to this shard's relevant
+            // targets, and planned events are shard-specific. Shrinks
+            // wire size on the worker path.
             const targetsToPlanned: [string, { event: EoEventInput; seq: number }[]][] =
               shardTargets.map((t) => [t, byTarget.get(t)!]);
+            const shardSnapshot = filterSnapshotForShard(
+              snapshotBundle,
+              shardTargets,
+              perShardConDests[shardIdx],
+            );
             return dispatcher({
-              snapshot: snapshotEntries,
+              snapshot: shardSnapshot,
               currentSeq,
               shardTargets,
               targetsToPlanned,
