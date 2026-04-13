@@ -102,11 +102,21 @@ export interface ShardRequest {
  *
  *   - `processedCount` is how many events the shard processed — used
  *     by the coordinator to drive `onProgress`.
+ *
+ *   - `emittedEvents` is the ordered list of fully-normalized `EoEvent`s
+ *     the shard produced (one per call to `processEventCoreWithSeq`).
+ *     Functions cannot cross the structured-clone boundary, so the
+ *     coordinator collects them on the shard side and replays them on
+ *     its own side as `onEvent` callbacks post-merge — this is how the
+ *     worker path delivers the same `onEvent` stream the in-process
+ *     bulk path delivers (UI-side bookkeeping, Drive saveOp batching,
+ *     PeerSync broadcast queues).
  */
 export interface ShardResponse {
   mutations: StoreMutation[];
   shardLastSeq: number;
   processedCount: number;
+  emittedEvents: EoEvent[];
 }
 
 /**
@@ -131,15 +141,17 @@ export type ShardDispatcher = (req: ShardRequest) => Promise<ShardResponse>;
  * `processEventsBulkIsolated` pre-Phase-G — by pulling it out as a named
  * function, we make the contract the coordinator and the Worker share.
  *
- * `onEvent` is only meaningful on the in-process path (postMessage can
- * not round-trip a function). Workers always receive `undefined`.
+ * Emitted events are collected into `emittedEvents` on the response. The
+ * coordinator is the single site that fans them out to the caller's
+ * `onEvent` callback (post-merge, in shard order) — this gives both the
+ * in-process and the worker transports identical observable behavior,
+ * because `postMessage` can not round-trip a function.
  */
 export async function dispatchShardInProcess(
   req: ShardRequest,
-  onEvent?: (event: EoEvent) => void,
 ): Promise<ShardResponse> {
   if (req.shardTargets.length === 0) {
-    return { mutations: [], shardLastSeq: 0, processedCount: 0 };
+    return { mutations: [], shardLastSeq: 0, processedCount: 0, emittedEvents: [] };
   }
 
   // Defer the fold.ts import to break a module cycle:
@@ -166,6 +178,8 @@ export async function dispatchShardInProcess(
 
   let shardLastSeq = 0;
   let processedCount = 0;
+  const emittedEvents: EoEvent[] = [];
+  const collect = (ev: EoEvent): void => { emittedEvents.push(ev); };
 
   for (const target of req.shardTargets) {
     const targetEvents = byTarget.get(target);
@@ -174,14 +188,14 @@ export async function dispatchShardInProcess(
       await processEventCoreWithSeq(
         tracked.store, event, seq,
         shardAddressing, shardDeclared, shardNulHorizon,
-        onEvent,
+        collect,
       );
       if (seq > shardLastSeq) shardLastSeq = seq;
       processedCount++;
     }
   }
 
-  return { mutations: tracked.mutations, shardLastSeq, processedCount };
+  return { mutations: tracked.mutations, shardLastSeq, processedCount, emittedEvents };
 }
 
 // ─── Worker-pool dispatcher ────────────────────────────────────────────────
