@@ -1867,7 +1867,14 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             };
           }
 
-          await gdriveSync.start();
+          // Don't await — let GDrive hydration race in the background with
+          // peer-sync timeline events. Whichever source produces events first
+          // appends them; fold dedup by client_event_id keeps the result
+          // identical regardless of arrival order. Awaiting here would gate
+          // setup completion on a single source coming online first.
+          gdriveSync.start().catch(e =>
+            console.warn('[EO-DB] Google Drive sync start failed for space', selectedSpace, e),
+          );
         } catch (e) {
           console.warn('[EO-DB] Google Drive sync start failed for space', selectedSpace, e);
           gdriveSync = null;

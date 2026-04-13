@@ -282,42 +282,20 @@ export class SyncManager {
   /**
    * Initialize sync — call after login and store setup.
    *
-   * On a fresh device (seq === 0), hydrates from the latest snapshot stored
-   * in Matrix media, then replays any EO events already present in the room
-   * timeline (from the initial sync) that the snapshot didn't covered.
+   * Attaches the live timeline listener immediately, then kicks off snapshot
+   * hydration, timeline replay, and offline-queue flush concurrently. There
+   * is no preferred source: whichever lane (live events, Matrix media
+   * snapshot, room-timeline replay) returns events first appends them; later
+   * arrivals deduplicate against the fold engine's client_event_id index.
    */
   async initialize(): Promise<void> {
-    // Wait for the room to be available in the SDK store before hydrating
+    // Wait for the room to be available in the SDK store before listening
     await this.waitForRoom();
 
-    const currentSeq = await this.store.getCurrentSeq();
-
-    // On a fresh device, restore from the latest Matrix media snapshot.
-    // Non-fatal: a missing or corrupt snapshot shouldn't block sync —
-    // timeline replay will still pick up events from the room.
-    if (currentSeq === 0) {
-      try {
-        await withTimeout(this.hydrateFromSnapshot(), 30_000, 'Snapshot hydration');
-      } catch (e) {
-        console.warn('[EO-DB] Snapshot hydration failed, continuing with timeline replay:', e);
-      }
-    }
-
-    // Restore any offline-queued events that survived a page reload from IDB.
-    await this.restoreQueueFromIdb();
-
-    // Replay EO events already in the room timeline (from initial sync).
-    // The snapshot may not exist or may be stale — the room timeline is the
-    // source of truth. The fold engine deduplicates via client_event_id so
-    // replaying events already covered by the snapshot is harmless.
-    await this.replayTimelineEvents();
-
-    // Flush unsynced events BEFORE attaching the live listener — if flush
-    // fails, no dangling listener is left behind for the caller to clean up.
-    await this.flushUnsyncedEvents();
-
-    // Listen for new room events in real-time (main + additional rooms).
-    // Attached last so a failure in any earlier step doesn't leak a listener.
+    // Listen for new room events in real-time FIRST so events arriving while
+    // hydration is in flight are captured. The fold engine deduplicates via
+    // client_event_id, so concurrent appends from snapshot hydration,
+    // timeline replay, and live events all converge on the same state.
     this.handleTimelineEvent = (event: MatrixEvent) => {
       if (this.destroyed) return;
       const eventRoomId = event.getRoomId();
@@ -338,6 +316,39 @@ export class SyncManager {
       }
     };
     this.client.on('sync' as any, this.syncStateHandler);
+
+    // Race the hydration sources in parallel — no source is preferred.
+    const currentSeq = await this.store.getCurrentSeq();
+    const hydrationLanes: Promise<unknown>[] = [];
+
+    // Lane 1: Matrix media snapshot (only on fresh device — once we have any
+    // local data, the timeline + peer sync handle the delta).
+    if (currentSeq === 0) {
+      hydrationLanes.push(
+        withTimeout(this.hydrateFromSnapshot(), 30_000, 'Snapshot hydration')
+          .catch(e => console.warn('[EO-DB] Snapshot hydration failed:', e)),
+      );
+    }
+
+    // Lane 2: Replay EO events already present in the room timeline from the
+    // initial Matrix sync. These aren't re-emitted through Room.timeline.
+    hydrationLanes.push(
+      this.replayTimelineEvents().catch(e =>
+        console.warn('[EO-DB] Timeline replay failed:', e),
+      ),
+    );
+
+    // Lane 3: Restore + flush the offline queue from the previous session.
+    hydrationLanes.push(
+      this.restoreQueueFromIdb()
+        .then(() => this.flushUnsyncedEvents())
+        .catch(e => console.warn('[EO-DB] Offline queue restore/flush failed:', e)),
+    );
+
+    // Don't await — the live listener is already capturing new events. Lanes
+    // continue in the background; callers shouldn't gate UI on any one of
+    // them returning first.
+    void Promise.allSettled(hydrationLanes);
   }
 
   /**
