@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import type { MatrixClient } from 'matrix-js-sdk';
 import { useEoStore } from '../store/eo-store';
 import { useTheme, type Theme } from '../theme';
@@ -14,6 +14,18 @@ import { GCalendarSettingsSection } from './GCalendarSettings';
 import { useGDriveStore } from '../google-drive/gdrive-store';
 import { clearTokens, startOAuthFlow, getAccessToken } from '../google-drive/gdrive-oauth';
 import { usePresencePrefs } from '../lib/presence-prefs';
+import { useNLPrefs } from '../lib/nl-prefs';
+import {
+  getClassifierStatus,
+  initClassifier,
+  subscribeClassifierStatus,
+  type ClassifierStatus,
+} from '../nl/eo-classifier';
+import {
+  downloadBundle,
+  downloadClassifiedClauses,
+  downloadUserCorrections,
+} from '../nl/nl-export';
 
 interface SettingsViewProps {
   session: MatrixSession;
@@ -590,6 +602,11 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
           </div>
         </Section>
 
+        {/* Natural Language */}
+        <Section title="Natural Language" theme={theme}>
+          <NaturalLanguageSettingsSection theme={theme} />
+        </Section>
+
         {/* Danger Zone */}
         <Section title="Danger Zone" theme={theme} danger>
           <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 8 }}>
@@ -801,4 +818,135 @@ function styles(t: Theme): Record<string, React.CSSProperties> {
       cursor: 'pointer',
     },
   };
+}
+
+// ─── Natural Language ─────────────────────────────────────────────────────
+
+function NaturalLanguageSettingsSection({ theme }: { theme: Theme }) {
+  const [prefs, setPrefs] = useNLPrefs();
+  const [status, setStatus] = useState<ClassifierStatus>(getClassifierStatus);
+  const [exportMsg, setExportMsg] = useState<string | null>(null);
+  const s = styles(theme);
+
+  useEffect(() => subscribeClassifierStatus(setStatus), []);
+
+  const handleToggleEnable = useCallback(
+    (next: boolean) => {
+      setPrefs({ enabled: next });
+      if (next) void initClassifier();
+    },
+    [setPrefs],
+  );
+
+  const centroidStatusText = useMemo(() => {
+    if (status.state === 'error' && status.message?.startsWith('centroids.json missing')) {
+      return status.message;
+    }
+    if (status.centroidCount > 0) return `${status.centroidCount}/27 cells loaded`;
+    if (status.state === 'idle') return 'not loaded';
+    return status.message ?? '—';
+  }, [status]);
+
+  const modelStatusText = useMemo(() => {
+    switch (status.state) {
+      case 'ready':
+        return `ready (${status.backend})`;
+      case 'loading':
+        return `${status.message ?? 'loading'} · ${Math.round(status.progress * 100)}%`;
+      case 'error':
+        return status.message ?? 'error';
+      default:
+        return prefs.enabled ? 'waiting' : 'disabled';
+    }
+  }, [status, prefs.enabled]);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <ToggleRow
+        theme={theme}
+        label="Expose NL features"
+        detail="Adds a Natural Language nav item + document explorer for local classification."
+        checked={prefs.enabled}
+        onChange={handleToggleEnable}
+      />
+      <ToggleRow
+        theme={theme}
+        label="Auto-classify on upload"
+        detail="Start embedding immediately once a document is dropped."
+        checked={prefs.autoClassifyOnUpload}
+        onChange={(v) => setPrefs({ autoClassifyOnUpload: v })}
+      />
+      <ToggleRow
+        theme={theme}
+        label="Clause↔clause similarity edges"
+        detail="Expensive: lazy top-k similarity graph edges. Off by default."
+        checked={prefs.emitSimilarityEdges}
+        onChange={(v) => setPrefs({ emitSimilarityEdges: v })}
+      />
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+        <Field label="Model" value={modelStatusText} theme={theme} />
+        <Field label="Centroids" value={centroidStatusText} theme={theme} />
+        <Field label="Backend" value={status.backend} theme={theme} />
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        <div style={{
+          fontFamily: "'JetBrains Mono', monospace",
+          fontSize: 9,
+          fontWeight: 700,
+          letterSpacing: '0.08em',
+          textTransform: 'uppercase',
+          color: theme.textMuted,
+        }}>
+          Export for /nl/ folder
+        </div>
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+          <button
+            style={s.actionBtn}
+            onClick={() => {
+              const n = downloadClassifiedClauses();
+              setExportMsg(`Exported ${n} classified clauses.`);
+            }}
+          >
+            Download clauses
+          </button>
+          <button
+            style={s.actionBtn}
+            onClick={() => {
+              const n = downloadUserCorrections();
+              setExportMsg(`Exported ${n} corrections.`);
+            }}
+          >
+            Download corrections
+          </button>
+          <button
+            style={s.actionBtn}
+            onClick={() => {
+              const r = downloadBundle();
+              setExportMsg(`Bundle: ${r.clauses} clauses, ${r.corrections} corrections.`);
+            }}
+          >
+            Download bundle
+          </button>
+        </div>
+        {exportMsg && (
+          <div style={{
+            fontFamily: "'JetBrains Mono', monospace",
+            fontSize: 10,
+            color: theme.textMuted,
+          }}>
+            {exportMsg}
+          </div>
+        )}
+        <div style={{
+          fontFamily: "'JetBrains Mono', monospace",
+          fontSize: 9,
+          color: theme.textMuted,
+        }}>
+          Drop the JSON into <code>nl/training_data/</code> and re-run <code>generate_centroids.py</code>.
+        </div>
+      </div>
+    </div>
+  );
 }
