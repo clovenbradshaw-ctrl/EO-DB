@@ -8,7 +8,7 @@
 
 import { create } from 'zustand';
 import { AirtableClient } from './airtable-client';
-import type { HydrationManifest, HydrationResult, UpdateSyncResult } from './airtable-sync';
+import type { HydrationManifest, HydrationResult, UpdateSyncResult, SyncStrategy } from './airtable-sync';
 
 // ─── Sync activity log ──────────────────────────────────────────────────────
 
@@ -34,6 +34,64 @@ export interface SyncLogEntry {
   device?: string;
   /** Human-readable summary, e.g. "12 ingested, 3 unchanged". */
   detail?: string;
+
+  // ── Richer context (optional — older entries may be missing these) ──
+  /** Airtable base ID this entry refers to, e.g. "appXYZ". */
+  baseId?: string;
+  /** Human-readable base name. */
+  baseName?: string;
+  /** List of selected table IDs that were synced in this run. */
+  tables?: string[];
+  /** Strategy that drove this run. */
+  strategy?: SyncStrategy;
+  /** ISO timestamp of the LAST_MODIFIED_TIME cursor used (empty for full hydrates). */
+  cursorUsed?: string;
+  /** Actual Airtable API endpoint hit (the last one for multi-table runs). */
+  endpoint?: string;
+  /** Whether this run had preserve-existing enabled. */
+  preserveExisting?: boolean;
+  /** Per-table roll-up for completion entries. */
+  perTable?: Array<{
+    table: string;
+    ingested: number;
+    overwritten: number;
+    skipped: number;
+  }>;
+  /** Wall-clock duration in ms for completion entries. */
+  durationMs?: number;
+}
+
+// ─── Live "what's happening right now" snapshot ────────────────────────────
+
+/**
+ * Fine-grained snapshot of the current sync run, driven by SyncProgress events
+ * emitted from the sync engine. Persisted to IndexedDB so the UI can restore
+ * immediately after a refresh — `startedAt` is used to detect crashed runs.
+ */
+export interface CurrentSyncSnapshot {
+  /** Unix ms when the sync started. */
+  startedAt: number;
+  phase: 'preparing' | 'discovering' | 'collecting' | 'fetching' | 'folding' | 'syncing' | 'table_done';
+  strategy: SyncStrategy;
+  preserveExisting: boolean;
+  baseId?: string;
+  baseName?: string;
+  table?: string;
+  tableId?: string;
+  /** Records observed so far for the current table. */
+  recordsSoFar: number;
+  /** Airtable API URL currently being queried, when known. */
+  endpoint?: string;
+  /** ISO cursor used for this table's fetch. */
+  cursorUsed?: string;
+  /** Per-table roll-up accumulated during the run so the UI can show a live table. */
+  perTable: Array<{
+    table: string;
+    tableId?: string;
+    ingested: number;
+    overwritten: number;
+    skipped: number;
+  }>;
 }
 
 /**
@@ -83,9 +141,15 @@ export interface AirtableSyncState {
   /** Whether a remote device currently holds the sync lock (via to-device signal). */
   remoteLockHeld: boolean;
 
-  // ── Sync activity log (in-memory, newest first, capped at 100) ──
+  // ── Sync activity log (newest first, capped at 100, persisted to IndexedDB) ──
   /** Ring-buffer of recent sync coordination events for all devices. */
   syncLog: SyncLogEntry[];
+
+  // ── Live progress snapshot (null when idle) ──
+  /** Granular snapshot of the currently-running sync — phase, table, endpoint, cursor, per-table counts. */
+  currentSync: CurrentSyncSnapshot | null;
+  /** Unix ms when the next continuous-sync tick is scheduled to fire (null if not scheduled). */
+  nextTickAt: number | null;
 
   // ── Sync settings (shared across room via Matrix state) ──
   /** Configurable sync parameters. */
@@ -113,6 +177,10 @@ export interface AirtableSyncState {
   setError: (e: string | null) => void;
   addSyncLogEntry: (entry: SyncLogEntry) => void;
   clearSyncLog: () => void;
+  /** Replace the in-memory log with `entries` — used to restore from IndexedDB on mount. */
+  hydrateSyncLog: (entries: SyncLogEntry[]) => void;
+  setCurrentSync: (snapshot: CurrentSyncSnapshot | null) => void;
+  setNextTickAt: (ts: number | null) => void;
 }
 
 export const useAirtableStore = create<AirtableSyncState>((set, get) => ({
@@ -129,6 +197,8 @@ export const useAirtableStore = create<AirtableSyncState>((set, get) => ({
   syncSettings: { ...DEFAULT_SYNC_SETTINGS },
   manifest: null,
   syncLog: [],
+  currentSync: null,
+  nextTickAt: null,
 
   async connectFromWebhook(matrixAccessToken: string): Promise<void> {
     set({ connecting: true, error: null });
@@ -180,6 +250,8 @@ export const useAirtableStore = create<AirtableSyncState>((set, get) => ({
       remoteLockHeld: false,
       syncSettings: { ...DEFAULT_SYNC_SETTINGS },
       manifest: null,
+      currentSync: null,
+      nextTickAt: null,
     });
   },
 
@@ -200,4 +272,12 @@ export const useAirtableStore = create<AirtableSyncState>((set, get) => ({
     set((state) => ({ syncLog: [entry, ...state.syncLog].slice(0, 100) }));
   },
   clearSyncLog() { set({ syncLog: [] }); },
+  hydrateSyncLog(entries) {
+    // Sort newest-first and cap to the ring-buffer size just in case the
+    // caller passed an unsorted or oversized array.
+    const sorted = [...entries].sort((a, b) => b.ts - a.ts).slice(0, 100);
+    set({ syncLog: sorted });
+  },
+  setCurrentSync(snapshot) { set({ currentSync: snapshot }); },
+  setNextTickAt(ts) { set({ nextTickAt: ts }); },
 }));
