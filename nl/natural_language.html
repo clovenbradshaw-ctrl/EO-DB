@@ -1044,14 +1044,23 @@ async function bakeCentroids(onProgress) {
   // model resolution.
   const tasks = [];
   const perCellTop = {};
+  let skipped = 0;
   for (const key of cellKeys) {
-    const english = cells[key].filter(e => (e.lang || 'en') === 'en');
+    const english = cells[key]
+      .filter(e => (e.lang || 'en') === 'en')
+      .filter(e => {
+        const ok = typeof e.text === 'string' && e.text.trim().length > 0;
+        if (!ok) skipped++;
+        return ok;
+      });
     const ranked  = english.sort((a, b) => (b.margin || 0) - (a.margin || 0));
     let top = ranked.filter(e => (e.margin || 0) >= MIN_MARGIN).slice(0, TOP_N);
     if (!top.length) top = ranked.slice(0, Math.min(10, ranked.length));
     perCellTop[key] = top;
     for (const ex of top) tasks.push({ key, text: ex.text });
   }
+  if (skipped) console.warn(`bakeCentroids: skipped ${skipped} exemplars with missing/empty text`);
+  if (!tasks.length) throw new Error('No usable exemplars (all entries missing text)');
 
   // Embed in chunks with barriers — same wave-fold pattern as classify
   const BATCH  = 16;
