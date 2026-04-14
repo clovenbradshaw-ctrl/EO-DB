@@ -15,6 +15,7 @@
 import type { EoStore } from '../db/encrypted-store';
 import { processEvent } from '../db/fold';
 import { getState } from '../db/state';
+import { markDeleted } from '../db/tombstone';
 import type { Resolution } from '../db/types';
 import {
   AirtableClient,
@@ -1019,12 +1020,27 @@ async function webhookIncrementalSyncBase(
           }
         }
 
-        // Deletes: EO-DB's event log doesn't currently have a tombstone
-        // op we can emit, so we just count them for the UI. Handling true
-        // deletes is a separate design decision — noted here so a future
-        // change can wire this up without re-reading webhook docs.
-        const destroyed = change.destroyedRecordIds?.length ?? 0;
-        if (destroyed) counter.fetched += destroyed;
+        // Deletes: emit a tombstone marker for every destroyed record id.
+        // We use DEF under the hood (see db/tombstone.ts for rationale) so
+        // this propagates over Matrix like any other mutation and survives
+        // replay via a stable client_event_id. Counted as both fetched
+        // (we processed it) and overwritten (we mutated existing state).
+        for (const recordId of change.destroyedRecordIds ?? []) {
+          counter.fetched++;
+          const target = recordTarget(baseId, tableId, recordId);
+          const existing = await getState(store, target);
+          // Skip targets we never had — destroyed ids for records that
+          // never reached this device are a normal consequence of
+          // incremental webhook delivery; no need to write a stub.
+          if (!existing) continue;
+          await markDeleted(store, target, agent, {
+            clientEventId: `at-del:${baseId}:${tableId}:${recordId}`,
+            source: 'airtable-webhook',
+            onEvent,
+          });
+          counter.ingested++;
+          counter.overwritten++;
+        }
       }
     }
 

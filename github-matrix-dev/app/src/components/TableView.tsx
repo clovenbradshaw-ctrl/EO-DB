@@ -16,6 +16,7 @@ import { defaultColumnWidth, MIN_COLUMN_WIDTH } from './slice-types';
 import { formatName } from './scope-picker-utils';
 import { useIdResolver, isEntityId, isEntityIdArray, type IdResolver } from '../hooks/useIdResolver';
 import { groupSchemaStates, extractColumnTypeOverrides, schemaTypeTarget, schemaConstraintTarget, schemaResolveTarget, type FieldSchema } from '../db/schema-rules';
+import { isDeleted } from '../db/tombstone';
 import { ColumnTypeSelector, COLUMN_TYPE_ICON_MAP } from './ColumnTypeSelector';
 import { ResolutionPolicyComposer, summarizePolicy, normalizeResolvePolicy, type ResolvePolicy } from './ResolutionPolicyComposer';
 import { buildNulClearingEvent, buildMakingDefEvent } from './cell-events';
@@ -697,13 +698,21 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     if (!ready) return;
     const gen = ++fetchGenRef.current;
 
-    // Helper to filter raw states down to visible direct-child records
+    // Helper to filter raw states down to visible direct-child records.
+    // Excludes:
+    //   - rows at the wrong depth (sub-targets like `.fields.name`)
+    //   - SYN-merged aliases (folded into another record)
+    //   - underscore-prefixed system rows (_schema, _slices, ...)
+    //   - tombstoned records — soft-deleted via db/tombstone.ts so deletes
+    //     from the source-of-truth (e.g. Airtable webhook payloads) take
+    //     effect in the grid without hard-removing the event-log history.
     function filterDirect(states: EoState[]): EoState[] {
       return states.filter((st) => {
         const parts = st.target.split('.');
         if (parts.length !== scopeDepth + 1 || st.value?._alias) return false;
         const segment = parts[parts.length - 1];
         if (segment.startsWith('_')) return false;
+        if (isDeleted(st)) return false;
         return true;
       });
     }
