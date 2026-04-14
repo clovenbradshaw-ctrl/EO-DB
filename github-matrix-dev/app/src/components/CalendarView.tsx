@@ -12,6 +12,7 @@ import {
   type ColumnDef,
 } from './filter-types';
 import { groupSchemaStates, extractColumnTypeOverrides } from '../db/schema-rules';
+import { isDeleted } from '../db/tombstone';
 import { resolveRecordName } from './TableView';
 import type { ResolvedPermissions } from '../permissions/types';
 
@@ -117,6 +118,7 @@ export function CalendarView({
         if (parts.length !== scopeDepth + 1 || st.value?._alias) return false;
         const segment = parts[parts.length - 1];
         if (segment.startsWith('_')) return false;
+        if (isDeleted(st)) return false;
         return true;
       });
     }

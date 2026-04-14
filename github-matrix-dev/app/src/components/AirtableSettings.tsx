@@ -1032,9 +1032,10 @@ export function AirtableSettingsSection({
                       <OverwritePill preserveExisting={preserveExisting} theme={theme} />
                     </div>
                     <div style={s.syncModeDesc}>
-                      Pull only records modified since last sync ({' '}
-                      <code style={{ fontSize: 10 }}>LAST_MODIFIED_TIME</code> filter against{' '}
-                      <code style={{ fontSize: 10 }}>api.airtable.com</code>). Requires a prior Full Sync
+                      Pull only records that changed since last sync via the{' '}
+                      <code style={{ fontSize: 10 }}>/bases/&#123;id&#125;/webhooks/&#123;id&#125;/payloads</code>{' '}
+                      endpoint on <code style={{ fontSize: 10 }}>api.airtable.com</code> — Airtable's
+                      authoritative change feed. Requires a prior Full Sync
                       {preserveExisting ? '. Never overwrites existing data' : ''}.
                     </div>
                     <button
@@ -1138,12 +1139,12 @@ export function AirtableSettingsSection({
                         }}
                         style={s.settingSelect}
                       >
-                        <option value="lastModified">Last modified time (incremental)</option>
+                        <option value="lastModified">Webhook payloads (incremental)</option>
                         <option value="fullDiff">Full field diff (thorough)</option>
                       </select>
                       <span style={s.settingHint}>
                         {syncSettings.syncStrategy === 'lastModified'
-                          ? 'Uses Airtable\'s LAST_MODIFIED_TIME to fetch only records changed since last sync. Fast and lightweight.'
+                          ? 'Drains Airtable\'s webhooks-payloads API — the authoritative change feed. Registers one webhook per base on first use and advances an integer cursor on every poll. Falls back to a LAST_MODIFIED_TIME filter if the token lacks webhooks:manage.'
                           : 'Re-fetches all records and compares field-by-field against EO-DB state. Catches changes that timestamps might miss, but heavier on API quota.'}
                       </span>
                     </div>

@@ -10,6 +10,7 @@ import { useState, useEffect, useMemo } from 'react';
 import { useEoStore } from '../store/eo-store';
 import { useTheme } from '../theme';
 import type { EoState } from '../db/types';
+import { isDeleted } from '../db/tombstone';
 import { formatName } from './scope-picker-utils';
 import { X, MagnifyingGlass } from '@phosphor-icons/react';
 
@@ -49,11 +50,16 @@ export function LinkFieldPicker({ fieldKey, linkedTable, currentIds, onClose, on
     setLoading(true);
     getStateByPrefix(linkedTable + '.').then(states => {
       if (cancelled) return;
-      // Only direct children (record level), skip schema and sub-targets
+      // Only direct children (record level), skip schema, sub-targets, and
+      // tombstoned records — a link target that was deleted upstream should
+      // not be pickable as a new edge.
       const depth = linkedTable.split('.').length + 1;
       const records = states.filter(s => {
         const parts = s.target.split('.');
-        return parts.length === depth && !parts[parts.length - 1].startsWith('_');
+        if (parts.length !== depth) return false;
+        if (parts[parts.length - 1].startsWith('_')) return false;
+        if (isDeleted(s)) return false;
+        return true;
       });
       setRecords(records);
       setLoading(false);

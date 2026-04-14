@@ -17,6 +17,7 @@ import { useState, useEffect, useMemo } from 'react';
 import { useEoStore } from '../store/eo-store';
 import { useTheme, type Theme } from '../theme';
 import type { EoState, EdgeAttrDef } from '../db/types';
+import { isDeleted } from '../db/tombstone';
 import { formatName } from './scope-picker-utils';
 import { MagnifyingGlass, Plus, X, PencilSimple, Check } from '@phosphor-icons/react';
 
@@ -143,7 +144,10 @@ function RecordSearch({ linkedTable, excludeDests, onSelect, onClose, t }: Recor
     getStateByPrefix(linkedTable + '.').then(states => {
       setRecords(states.filter(s => {
         const parts = s.target.split('.');
-        return parts.length === depth && !parts[parts.length - 1].startsWith('_');
+        if (parts.length !== depth) return false;
+        if (parts[parts.length - 1].startsWith('_')) return false;
+        if (isDeleted(s)) return false;
+        return true;
       }));
     });
   }, [linkedTable, getStateByPrefix]);
