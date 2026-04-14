@@ -899,6 +899,27 @@ function NaturalLanguageSettingsSection({ theme }: { theme: Theme }) {
           textTransform: 'uppercase',
           color: theme.textMuted,
         }}>
+          Standalone tool
+        </div>
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+          <button
+            style={s.actionBtn}
+            onClick={() => window.open('./nl/natural_language.html', '_blank', 'noopener,noreferrer')}
+          >
+            Open Natural Language form
+          </button>
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        <div style={{
+          fontFamily: "'JetBrains Mono', monospace",
+          fontSize: 9,
+          fontWeight: 700,
+          letterSpacing: '0.08em',
+          textTransform: 'uppercase',
+          color: theme.textMuted,
+        }}>
           Export for /nl/ folder
         </div>
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
