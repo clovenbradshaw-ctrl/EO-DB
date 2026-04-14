@@ -49,6 +49,99 @@ interface AirtableBasesResponse {
   offset?: string;
 }
 
+// ─── Webhook types ─────────────────────────────────────────────────────────
+//
+// The Airtable Webhooks API is the authoritative "what changed" endpoint for
+// a base. We register a webhook (no notificationUrl — we poll), then read
+// `listWebhookPayloads` with a monotonically-increasing cursor to get every
+// change event since the last poll. This replaces the scan-the-whole-table
+// `filterByFormula=IS_AFTER(LAST_MODIFIED_TIME(), ...)` approach, which has
+// no server-side index and misses changes to computed/linked fields.
+
+/** A single webhook as returned by GET /v0/bases/{baseId}/webhooks. */
+export interface AirtableWebhook {
+  id: string;
+  specification?: AirtableWebhookSpecification;
+  notificationUrl?: string | null;
+  cursorForNextPayload?: number;
+  lastNotificationResult?: unknown;
+  areNotificationsEnabled?: boolean;
+  expirationTime?: string;
+  isHookEnabled?: boolean;
+}
+
+export interface AirtableWebhookSpecification {
+  options?: {
+    filters?: {
+      dataTypes?: Array<'tableData' | 'tableFields' | 'tableMetadata'>;
+      recordChangeScope?: string;
+      watchDataInFieldIds?: string[];
+      fromSources?: string[];
+    };
+    includes?: {
+      includeCellValuesInFieldIds?: string[] | 'all';
+      includePreviousCellValues?: boolean;
+      includePreviousFieldDefinitions?: boolean;
+    };
+  };
+}
+
+export interface AirtableCreateWebhookResponse {
+  id: string;
+  /** Server-assigned cursor we should poll FROM on the next listPayloads call. */
+  cursorForNextPayload?: number;
+  expirationTime?: string;
+  macSecretBase64?: string;
+}
+
+/**
+ * A single change payload from the list-payloads endpoint. Payloads are
+ * delivered in ascending baseTransactionNumber order; the list response's
+ * top-level `cursor` is the value the *next* poll should use.
+ */
+export interface AirtableWebhookPayload {
+  timestamp: string;
+  baseTransactionNumber?: number;
+  actionMetadata?: { source?: string; sourceMetadata?: Record<string, unknown> };
+  payloadFormat?: string;
+  changedTablesById?: Record<string, AirtableWebhookTableChange>;
+  createdTablesById?: Record<string, unknown>;
+  destroyedTableIds?: string[];
+  error?: boolean;
+  code?: string;
+}
+
+export interface AirtableWebhookTableChange {
+  /** Newly-inserted records keyed by record id. Contains every cell value. */
+  createdRecordsById?: Record<string, {
+    createdTime?: string;
+    cellValuesByFieldId?: Record<string, unknown>;
+  }>;
+  /**
+   * Edited records keyed by record id. Only the CHANGED fields are present
+   * in `current.cellValuesByFieldId`; we refetch the full record so folds
+   * see a complete snapshot rather than a sparse diff.
+   */
+  changedRecordsById?: Record<string, {
+    current?: { cellValuesByFieldId?: Record<string, unknown> };
+    previous?: { cellValuesByFieldId?: Record<string, unknown> };
+    unchanged?: { cellValuesByFieldId?: Record<string, unknown> };
+  }>;
+  destroyedRecordIds?: string[];
+  createdFieldsById?: Record<string, unknown>;
+  changedFieldsById?: Record<string, unknown>;
+  destroyedFieldIds?: string[];
+  changedMetadata?: unknown;
+}
+
+export interface AirtableWebhookPayloadsResponse {
+  payloads: AirtableWebhookPayload[];
+  /** Cursor to use on the *next* call — always advance to this. */
+  cursor: number;
+  mightHaveMore?: boolean;
+  payloadFormat?: string;
+}
+
 // ─── Rate limiter ───────────────────────────────────────────────────────────
 
 class TokenBucket {
@@ -119,7 +212,11 @@ export class AirtableClient {
 
       if (!res.ok) {
         const body = await res.text();
-        throw new Error(`Airtable API ${res.status}: ${body}`);
+        // Preserve the HTTP status so callers can branch on 404 (webhook
+        // expired / cursor too stale) without parsing the error message.
+        const err = new Error(`Airtable API ${res.status}: ${body}`) as Error & { status?: number };
+        err.status = res.status;
+        throw err;
       }
 
       return await res.json() as T;
@@ -170,6 +267,83 @@ export class AirtableClient {
       method: 'PATCH',
       body: JSON.stringify({ fields }),
     });
+  }
+
+  /**
+   * Fetch a single record by id. Used after a webhook payload tells us a
+   * record changed — the payload only carries the diff, so we refetch to
+   * get the full current field set before folding.
+   */
+  async getRecord(
+    baseId: string,
+    tableIdOrName: string,
+    recordId: string,
+    opts?: { returnFieldsByFieldId?: boolean },
+  ): Promise<AirtableRecord> {
+    const params = new URLSearchParams();
+    if (opts?.returnFieldsByFieldId) params.set('returnFieldsByFieldId', 'true');
+    const qs = params.toString();
+    const url = `${AIRTABLE_API}/${baseId}/${encodeURIComponent(tableIdOrName)}/${recordId}${qs ? `?${qs}` : ''}`;
+    return this.request<AirtableRecord>(url);
+  }
+
+  // ─── Webhooks API ────────────────────────────────────────────────────────
+
+  /** GET /v0/bases/{baseId}/webhooks — list all webhooks on a base. */
+  async listWebhooks(baseId: string): Promise<AirtableWebhook[]> {
+    const url = `${AIRTABLE_API}/bases/${baseId}/webhooks`;
+    const res = await this.request<{ webhooks: AirtableWebhook[] }>(url);
+    return res.webhooks ?? [];
+  }
+
+  /**
+   * POST /v0/bases/{baseId}/webhooks — register a new webhook.
+   * We omit `notificationUrl` so Airtable queues payloads for us to poll
+   * (browser-only app; no server to receive pushes).
+   */
+  async createWebhook(
+    baseId: string,
+    specification: AirtableWebhookSpecification,
+  ): Promise<AirtableCreateWebhookResponse> {
+    const url = `${AIRTABLE_API}/bases/${baseId}/webhooks`;
+    return this.request<AirtableCreateWebhookResponse>(url, {
+      method: 'POST',
+      body: JSON.stringify({ specification }),
+    });
+  }
+
+  /** DELETE /v0/bases/{baseId}/webhooks/{id} — deregister a webhook. */
+  async deleteWebhook(baseId: string, webhookId: string): Promise<void> {
+    const url = `${AIRTABLE_API}/bases/${baseId}/webhooks/${webhookId}`;
+    await this.request<unknown>(url, { method: 'DELETE' });
+  }
+
+  /**
+   * POST /v0/bases/{baseId}/webhooks/{id}/refresh — reset the 7-day
+   * expiration clock. Call periodically or the webhook (and its queued
+   * payloads) will be garbage-collected.
+   */
+  async refreshWebhook(baseId: string, webhookId: string): Promise<{ expirationTime?: string }> {
+    const url = `${AIRTABLE_API}/bases/${baseId}/webhooks/${webhookId}/refresh`;
+    return this.request<{ expirationTime?: string }>(url, { method: 'POST' });
+  }
+
+  /**
+   * GET /v0/bases/{baseId}/webhooks/{id}/payloads — stream change events
+   * since `cursor`. The response's top-level `cursor` is what the next call
+   * should use; `mightHaveMore=true` means keep polling in a loop to drain.
+   */
+  async listWebhookPayloads(
+    baseId: string,
+    webhookId: string,
+    opts?: { cursor?: number; limit?: number },
+  ): Promise<AirtableWebhookPayloadsResponse> {
+    const params = new URLSearchParams();
+    if (opts?.cursor != null) params.set('cursor', String(opts.cursor));
+    if (opts?.limit != null) params.set('limit', String(opts.limit));
+    const qs = params.toString();
+    const url = `${AIRTABLE_API}/bases/${baseId}/webhooks/${webhookId}/payloads${qs ? `?${qs}` : ''}`;
+    return this.request<AirtableWebhookPayloadsResponse>(url);
   }
 
   async *paginateRecords(
