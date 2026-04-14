@@ -4625,6 +4625,11 @@ function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g
 function resolveSpans(srcId){
   const t=DOCS[srcId].text;
   return SPANS.filter(sp=>sp.src===srcId).map(sp=>{
+    // If the span carries real char offsets (from the ingest bridge), trust them —
+    // otherwise repeated matches would all collapse onto the first indexOf().
+    if(typeof sp.start==='number'&&typeof sp.end==='number'&&sp.end>sp.start&&sp.end<=t.length){
+      return {...sp};
+    }
     const s=t.indexOf(sp.match);
     return {...sp,start:s,end:s>=0?s+sp.match.length:-1};
   }).filter(sp=>sp.start>=0).sort((a,b)=>a.start-b.start);
@@ -5217,6 +5222,7 @@ function syncExplorerFromIngest(){
 
   // ── DOCS ────────────────────────────────────────────────────
   const newDocs = {};
+  const docByAnchor = {};
   state.docs.forEach((d, i) => {
     const id = 'd' + i;
     newDocs[id] = {
@@ -5226,23 +5232,28 @@ function syncExplorerFromIngest(){
       text: d.text,
       _anchor: d.doc_anchor,
     };
+    docByAnchor[d.doc_anchor] = id;
   });
   DOCS = newDocs;
 
-  // ── Entities (SIG/INS create anchors; DEF resolves display names) ──
   const entries = state.combined ? state.combined.entries() : [];
 
-  // Map entity_anchor → entity record
-  const entMap = new Map();
+  // ── Entities ────────────────────────────────────────────────
+  // In the real ingest log, entities are created by INS entries of the form
+  //   { op:'INS', anchor: <entity_anchor>, target: 'entity-registry', ... }
+  // so e.anchor IS the canonical entity anchor. The older checks looked for
+  // operand.kind==='NP' or targets starting with '@e:' — neither exists in
+  // practice, which is why ENT stayed empty and the explorer rendered 0 spans.
+  const entMap = new Map(); // entity_anchor → record
   let entSeq = 0;
-  const ensureEnt = (anchor) => {
-    if (!anchor) return null;
-    if (entMap.has(anchor)) return entMap.get(anchor);
+  const ensureEnt = (anc) => {
+    if (!anc || typeof anc !== 'string') return null;
+    if (entMap.has(anc)) return entMap.get(anc);
     const name = (typeof resolveDisplayName === 'function')
-      ? resolveDisplayName(anchor) : anchor.slice(0,16);
+      ? resolveDisplayName(anc) : anc.slice(0,16);
     const rec = {
       id: 'e' + (++entSeq),
-      _anchor: anchor,
+      _anchor: anc,
       name,
       type: 'ENTITY',
       ops: [],
@@ -5251,93 +5262,119 @@ function syncExplorerFromIngest(){
       desc: '',
       evs: [],
     };
-    entMap.set(anchor, rec);
+    entMap.set(anc, rec);
     return rec;
   };
 
-  // Seed entities from SIG/INS np entries
+  // Primary: any INS whose target is the entity-registry creates an entity.
   for (const e of entries) {
-    if (e.op === 'SIG' && e.operand && (e.operand.kind === 'NP' || e.operand.type === 'entity')) {
-      ensureEnt(e.anchor);
-    } else if (e.op === 'INS' && e.operand && e.operand.type === 'entity') {
-      ensureEnt(e.anchor);
-    }
+    if (e.op === 'INS' && e.target === 'entity-registry') ensureEnt(e.anchor);
   }
-
-  // Also seed from any entry whose target looks like an entity anchor
+  // Fallback: accumulation SIGs target the canonical np:X anchor — promote
+  // them so documents that never crossed the INS threshold still render.
   for (const e of entries) {
-    if (e.target && typeof e.target === 'string' && e.target.startsWith('@e:')) {
+    if (e.op === 'SIG' && e.operand && e.operand.detector === 'ACCUMULATION') {
       ensureEnt(e.target);
     }
   }
 
-  // ── SPANS: every entry with a char span becomes an explorer span ──
+  // Pull display_name / canonical_name DEFs and use type hints if present.
+  for (const e of entries) {
+    if (e.op !== 'DEF' || !entMap.has(e.target)) continue;
+    const rec = entMap.get(e.target);
+    const p = e.operand?.param, v = e.operand?.value;
+    if (p === 'display_name' && typeof v === 'string') rec.name = v;
+    else if (p === 'canonical_name' && typeof v === 'string' && !rec.name) rec.name = v;
+    else if (p === 'definition' && typeof v === 'string' && !rec.desc) rec.desc = v;
+  }
+
+  // Helper: find the entity anchor an entry belongs to.
+  const entAnchorFor = (e) => {
+    // Most ops (INS-create, DEF, EVA, REC, SYN, CON, NUL) target the entity.
+    if (typeof e.target === 'string' && entMap.has(e.target)) return e.target;
+    // Entity-creation INS carries the anchor itself.
+    if (e.op === 'INS' && entMap.has(e.anchor)) return e.anchor;
+    // NP-occurrence SIGs carry the canonical form in operand.normalized —
+    // reconstruct the canonical entity anchor via anchor('np:' + normalized).
+    if (e.op === 'SIG' && e.operand?.detector === 'NP' &&
+        typeof e.operand.normalized === 'string' &&
+        typeof anchor === 'function') {
+      const ca = anchor('np:' + e.operand.normalized);
+      if (entMap.has(ca)) return ca;
+    }
+    return null;
+  };
+
+  // ── SPANS: every entry with a provenance char range → one explorer span ──
   const newSpans = [];
   let spanSeq = 0;
-  // Build doc_anchor → doc id
-  const docByAnchor = {};
-  state.docs.forEach((d,i)=>{ docByAnchor[d.doc_anchor] = 'd'+i; });
-
   for (const e of entries) {
     const prov = e.provenance || {};
-    const da = prov.doc_anchor;
-    const src = docByAnchor[da];
+    const src = docByAnchor[prov.doc_anchor];
     if (!src) continue;
     const start = prov.span_start, end = prov.span_end;
     if (typeof start !== 'number' || typeof end !== 'number' || end <= start) continue;
+    // Cap span width — sentence-level CON/SYN spans otherwise eat every NP
+    // span they contain because annotateText builds a flat non-overlapping
+    // string. 220 chars is wide enough for curated SYN quotes, narrow enough
+    // that entity-mention spans inside a paragraph survive.
+    if (end - start > 220) continue;
 
-    // Try to attach to an entity
-    let eid = null;
-    if (e.target && typeof e.target === 'string' && e.target.startsWith('@e:') && entMap.has(e.target)) {
-      eid = entMap.get(e.target).id;
-    } else if (e.anchor && entMap.has(e.anchor)) {
-      eid = entMap.get(e.anchor).id;
-    }
-    if (!eid) continue; // spans only render when tied to an entity
+    const entAnc = entAnchorFor(e);
+    if (!entAnc) continue;
+    const ent = entMap.get(entAnc);
 
-    const opLower = (e.op || '').toLowerCase();
-    const docText = DOCS[src]?.text || '';
+    const docText = DOCS[src].text;
+    if (end > docText.length) continue;
     const match = docText.slice(start, end);
     if (!match) continue;
 
-    const note = (e.operand && (e.operand.note || e.operand.text || e.operand.detector || e.operand.param)) || e.op;
+    const opLower = (e.op || '').toLowerCase();
+    const opd = e.operand || {};
+    const noteRaw =
+      opd.note ||
+      opd.text ||
+      opd.raw ||
+      (opd.param && opd.value != null ? `${opd.param} = ${opd.value}` : null) ||
+      (opd.relation_type && opd.object_text ? `${opd.relation_type} → ${opd.object_text}` : null) ||
+      opd.detector ||
+      e.op;
+    const note = typeof noteRaw === 'string'
+      ? noteRaw.slice(0,140)
+      : String(noteRaw).slice(0,140);
+
     newSpans.push({
       id: 'sp' + (++spanSeq),
-      eid, op: opLower, src, match,
-      note: typeof note === 'string' ? note.slice(0,140) : String(note).slice(0,140),
+      eid: ent.id, op: opLower, src, match, note,
+      start, end, // carry real offsets so resolveSpans honors them
     });
 
-    // Record op on the entity (for badges)
-    const ent = Array.from(entMap.values()).find(r => r.id === eid);
-    if (ent && !ent.ops.includes(opLower)) ent.ops.push(opLower);
-
-    // Record an event row (used by Inspect / Events tabs and provenance)
-    const doc = DOCS[src];
-    ent?.evs.push({
+    if (!ent.ops.includes(opLower)) ent.ops.push(opLower);
+    ent.evs.push({
       op: opLower,
       site: match.length > 48 ? match.slice(0,48) + '…' : match,
-      res: typeof note === 'string' ? note.slice(0,96) : String(note).slice(0,96),
-      ref: `${doc.title} · [${start}:${end}]`,
+      res: note.slice(0,96),
+      ref: `${DOCS[src].title} · [${start}:${end}]`,
     });
   }
 
   SPANS.length = 0;
   newSpans.forEach(sp => SPANS.push(sp));
 
-  // Compute links count from CON targets (approximate)
+  // Approximate link counts from CON targets (both subject + object sides).
   for (const e of entries) {
-    if (e.op === 'CON' && e.anchor && entMap.has(e.anchor)) {
-      entMap.get(e.anchor).links += 1;
-    }
+    if (e.op !== 'CON') continue;
+    if (typeof e.target === 'string' && entMap.has(e.target)) entMap.get(e.target).links += 1;
+    const ob = e.operand?.object_anchor;
+    if (typeof ob === 'string' && entMap.has(ob)) entMap.get(ob).links += 1;
   }
 
-  // Flush entities into ENT
   ENT.length = 0;
   entMap.forEach(r => ENT.push(r));
 
-  // ── Graph: SIG→nodes, CON→edges, layout in a circle ──
+  // ── Graph: entities → nodes (radial layout), CON → edges ──
   GNODES.length = 0; GEDGES.length = 0;
-  const nodesList = ENT.slice(0, 30); // cap
+  const nodesList = ENT.slice(0, 30);
   const cx=135, cy=115, R=85;
   nodesList.forEach((r,i)=>{
     const ang = (i / Math.max(1,nodesList.length)) * Math.PI*2 - Math.PI/2;
@@ -5347,15 +5384,14 @@ function syncExplorerFromIngest(){
     const op = r.ops[0] || 'ins';
     GNODES.push({id:r.id, x, y, r:10, op, lbl});
   });
-  const entByAnchor = new Map(Array.from(entMap.entries()));
   for (const e of entries) {
     if (e.op !== 'CON') continue;
-    const a = entByAnchor.get(e.anchor)?.id;
-    const t = entByAnchor.get(e.target)?.id;
-    if (!a || !t || a === t) continue;
-    // Dedupe edges
-    if (GEDGES.find(x => (x.f===a && x.t===t) || (x.f===t && x.t===a))) continue;
-    GEDGES.push({f:a, t, op:'con', dash:''});
+    const subj = typeof e.target === 'string' ? entMap.get(e.target)?.id : null;
+    const obj  = typeof e.operand?.object_anchor === 'string'
+      ? entMap.get(e.operand.object_anchor)?.id : null;
+    if (!subj || !obj || subj === obj) continue;
+    if (GEDGES.find(x => (x.f===subj && x.t===obj) || (x.f===obj && x.t===subj))) continue;
+    GEDGES.push({f:subj, t:obj, op:'con', dash:''});
   }
 
   // ── Active selections ──
