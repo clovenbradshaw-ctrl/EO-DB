@@ -772,6 +772,26 @@ mark.span-def    { background: rgba(34,211,238,0.15); }
     <span id="classifier-status" style="font-size:11px;color:var(--muted);margin-left:10px;">
       Loading classifier…
     </span>
+    <button id="classifier-bake" onclick="bakeCentroidsUI()"
+            style="display:none;margin-left:6px;font-size:11px;padding:3px 8px;
+                   background:var(--surface);border:1px solid var(--border2);
+                   color:var(--sig);cursor:pointer;border-radius:3px;">
+      ⚙ Bake centroids
+    </button>
+    <button id="classifier-download" onclick="downloadCentroidsJSON()"
+            title="Save baked centroids.json — commit to nl/ in the repo so future visitors don't need to bake"
+            style="display:none;margin-left:6px;font-size:11px;padding:3px 8px;
+                   background:var(--surface);border:1px solid var(--border2);
+                   color:var(--text);cursor:pointer;border-radius:3px;">
+      ↓ centroids.json
+    </button>
+    <button id="classifier-reset" onclick="resetCentroidsUI()"
+            title="Delete OPFS-cached centroids and re-bake"
+            style="margin-left:6px;font-size:11px;padding:3px 8px;
+                   background:var(--surface);border:1px solid var(--border2);
+                   color:var(--muted);cursor:pointer;border-radius:3px;">
+      ↻
+    </button>
   </header>
 
   <div class="body">
@@ -937,10 +957,18 @@ function hashKey(script, text) {
 }
 
 async function initClassifier(centroidsUrl, alignmentUrl) {
-  _embedder  = await pipeline('feature-extraction', MODEL_ID, { quantized: true });
-  const cRes = await fetch(centroidsUrl);
-  if (!cRes.ok) throw new Error('centroids fetch failed: ' + cRes.status);
-  _centroids = await cRes.json();
+  _embedder = await pipeline('feature-extraction', MODEL_ID, { quantized: true });
+  await initCache();                          // OPFS dir handle + embed cache
+
+  // Fallback order: OPFS (user-baked) → bundled URL → none
+  _centroids = await loadCentroidsFromOPFS();
+  if (!_centroids && centroidsUrl) {
+    try {
+      const cRes = await fetch(centroidsUrl);
+      if (cRes.ok) _centroids = await cRes.json();
+    } catch { /* ignore — bake UI will offer to build them */ }
+  }
+
   if (alignmentUrl) {
     try {
       const d = await (await fetch(alignmentUrl)).json();
@@ -950,8 +978,138 @@ async function initClassifier(centroidsUrl, alignmentUrl) {
           _alignMatrix[i * DIM + j] = d.R[i][j];
     } catch (e) { console.warn('No alignment matrix'); }
   }
-  await initCache();
+  _ready = !!_centroids;
+  return _ready;
+}
+
+// ── OPFS-persisted centroids ────────────────────────────────────
+async function loadCentroidsFromOPFS() {
+  if (!_opfsDir) return null;
+  try {
+    const fh = await _opfsDir.getFileHandle('centroids.json');
+    const blob = await fh.getFile();
+    return JSON.parse(await blob.text());
+  } catch { return null; }
+}
+
+async function saveCentroidsToOPFS(centroids) {
+  if (!_opfsDir) return;
+  const fh = await _opfsDir.getFileHandle('centroids.json', { create: true });
+  const w  = await fh.createWritable();
+  await w.write(new Blob([JSON.stringify(centroids)]));
+  await w.close();
+}
+
+// ── In-app centroid generation ──────────────────────────────────
+// Fetches the public exemplars corpus, embeds top-N per cell with the
+// same small model used for inference (so no Procrustes alignment is
+// needed), mean-pools, normalises, writes to OPFS, and returns the
+// record set. Same schema as generate_centroids.py so a dumped JSON
+// drops straight into the repo as nl/centroids.json.
+const EXEMPLARS_URL =
+  'https://raw.githubusercontent.com/clovenbradshaw-ctrl/eo-lexical-analysis/main/data/exemplars.json';
+const TOP_N      = 100;
+const MIN_MARGIN = 0.03;
+
+const OP_MAP = {
+  NUL: { mode: 'Differentiating', domain: 'Existence'    },
+  SIG: { mode: 'Relating',        domain: 'Existence'    },
+  INS: { mode: 'Generating',      domain: 'Existence'    },
+  SEG: { mode: 'Differentiating', domain: 'Structure'    },
+  CON: { mode: 'Relating',        domain: 'Structure'    },
+  SYN: { mode: 'Generating',      domain: 'Structure'    },
+  EVA: { mode: 'Differentiating', domain: 'Significance' },
+  DEF: { mode: 'Relating',        domain: 'Significance' },
+  REC: { mode: 'Generating',      domain: 'Significance' },
+};
+
+async function bakeCentroids(onProgress) {
+  if (!_embedder) {
+    onProgress?.('Loading embedding model…', 0);
+    _embedder = await pipeline('feature-extraction', MODEL_ID, { quantized: true });
+  }
+  onProgress?.('Fetching exemplars corpus…', 0.01);
+  const res = await fetch(EXEMPLARS_URL);
+  if (!res.ok) throw new Error('exemplars fetch failed: ' + res.status);
+  const data = await res.json();
+  const cells = data['27cell'];
+  if (!cells) throw new Error('exemplars.json missing "27cell"');
+  const cellKeys = Object.keys(cells);
+
+  // Flatten embedding work (SeqReservoir: deterministic indices)
+  const tasks = [];
+  const perCellTop = {};
+  for (const key of cellKeys) {
+    const ranked = [...cells[key]].sort((a, b) => (b.margin || 0) - (a.margin || 0));
+    let top = ranked.filter(e => (e.margin || 0) >= MIN_MARGIN).slice(0, TOP_N);
+    if (!top.length) top = ranked.slice(0, Math.min(10, ranked.length));
+    perCellTop[key] = top;
+    for (const ex of top) tasks.push({ key, text: ex.text });
+  }
+
+  // Embed in chunks with barriers — same wave-fold pattern as classify
+  const BATCH  = 16;
+  const byCell = Object.fromEntries(cellKeys.map(k => [k, []]));
+  for (let i = 0; i < tasks.length; i++) {
+    const t   = tasks[i];
+    const out = await _embedder(t.text, { pooling: 'mean', normalize: true });
+    byCell[t.key].push(Array.from(out.data));
+    if (i % BATCH === 0 || i === tasks.length - 1) {
+      onProgress?.(`Embedding ${i + 1}/${tasks.length}…`, 0.05 + 0.9 * (i / tasks.length));
+      await new Promise(r => setTimeout(r, 0));
+    }
+  }
+
+  // Mean-pool + normalise → centroids
+  const records = [];
+  for (const key of cellKeys) {
+    const vecs = byCell[key];
+    if (!vecs.length) continue;
+    const D = vecs[0].length;
+    const mean = new Float32Array(D);
+    for (const v of vecs) for (let j = 0; j < D; j++) mean[j] += v[j];
+    let norm = 0;
+    for (let j = 0; j < D; j++) { mean[j] /= vecs.length; norm += mean[j] * mean[j]; }
+    norm = Math.sqrt(norm) || 1;
+    for (let j = 0; j < D; j++) mean[j] /= norm;
+
+    let intra = 0;
+    for (const v of vecs) {
+      let d = 0; for (let j = 0; j < D; j++) d += v[j] * mean[j];
+      intra += 1 - d;
+    }
+    intra /= vecs.length;
+
+    const op    = key.split('(')[0];
+    const inner = key.slice(op.length + 1, -1);
+    const parts = inner.split(',').map(s => s.trim());
+    const cell_id = key.replace('(', '_').replace(')', '').replace(', ', '_').replace(' ', '_');
+    const margins = perCellTop[key].map(e => e.margin || 0);
+
+    records.push({
+      cell_id, cell_key: key, operator: op,
+      resolution: parts[0] || '', site: parts[1] || '',
+      ...(OP_MAP[op] || {}),
+      vector: Array.from(mean),
+      exemplar_count: vecs.length,
+      mean_margin: margins.reduce((a, b) => a + b, 0) / (margins.length || 1),
+      intra_variance: intra,
+    });
+  }
+
+  await saveCentroidsToOPFS(records);
+  _centroids = records;
+  _alignMatrix = null;   // baking with inference model → no alignment needed
   _ready = true;
+  onProgress?.(`Baked ${records.length} centroids`, 1);
+  return records;
+}
+
+async function clearBakedCentroids() {
+  if (!_opfsDir) return;
+  try { await _opfsDir.removeEntry('centroids.json'); } catch {}
+  _centroids = null;
+  _ready = false;
 }
 
 function isReady() { return _ready; }
@@ -1076,19 +1234,34 @@ async function classifyClauses(clauses, script, mechOps, onProgress) {
   return results;
 }
 
-// Expose API on window for the non-module script block
-window.EOClassifier = { initClassifier, isReady, classifyClause, classifyClauses };
+function centroidsJSON() {
+  return _centroids ? JSON.stringify(_centroids) : null;
+}
 
-// Auto-init on load. centroids.json + alignment_matrix.json are produced by
-// generate_centroids.py (Phase 1). If absent, the classifier stays unavailable
-// and the mechanical-only pipeline continues to work.
-initClassifier('centroids.json', 'alignment_matrix.json').then(() => {
-  const el = document.getElementById('classifier-status');
-  if (el) el.textContent = '○ Classifier ready';
+// Expose API on window for the non-module script block
+window.EOClassifier = {
+  initClassifier, isReady, classifyClause, classifyClauses,
+  bakeCentroids, clearBakedCentroids, centroidsJSON,
+};
+
+// Auto-init on load.
+// Fallback order: OPFS (user-baked) → bundled nl/centroids.json → offer to bake.
+initClassifier('centroids.json', 'alignment_matrix.json').then((ready) => {
+  const status = document.getElementById('classifier-status');
+  const bake   = document.getElementById('classifier-bake');
+  const dl     = document.getElementById('classifier-download');
+  if (ready) {
+    if (status) status.textContent = '○ Classifier ready';
+    if (bake)   bake.style.display = 'none';
+    if (dl)     dl.style.display   = 'inline-block';
+  } else {
+    if (status) status.textContent = '○ No centroids — bake once from corpus';
+    if (bake)   bake.style.display = 'inline-block';
+  }
 }).catch((e) => {
-  console.warn('Classifier unavailable:', e);
-  const el = document.getElementById('classifier-status');
-  if (el) el.textContent = '○ Classifier unavailable';
+  console.warn('Classifier init failed:', e);
+  const status = document.getElementById('classifier-status');
+  if (status) status.textContent = '○ Classifier unavailable';
 });
 </script>
 
@@ -2290,6 +2463,50 @@ function stageREC_superposition(combinedLog) {
 // ═══════════════════════════════════════════════════════
 // FULL INGEST
 // ═══════════════════════════════════════════════════════
+
+// ── Centroid bake / download UI (calls into window.EOClassifier) ──
+async function bakeCentroidsUI() {
+  if (!window.EOClassifier) return;
+  const status = document.getElementById('classifier-status');
+  const bake   = document.getElementById('classifier-bake');
+  const dl     = document.getElementById('classifier-download');
+  if (bake) bake.disabled = true;
+  try {
+    await window.EOClassifier.bakeCentroids((msg, pct) => {
+      if (status) status.textContent = msg + (pct != null ? ` (${Math.round(pct*100)}%)` : '');
+    });
+    if (status) status.textContent = '○ Classifier ready';
+    if (bake) bake.style.display = 'none';
+    if (dl)   dl.style.display   = 'inline-block';
+  } catch (err) {
+    console.error('bake failed', err);
+    if (status) status.textContent = '○ Bake failed: ' + (err?.message || err);
+  } finally {
+    if (bake) bake.disabled = false;
+  }
+}
+
+function downloadCentroidsJSON() {
+  const json = window.EOClassifier?.centroidsJSON();
+  if (!json) return;
+  const blob = new Blob([json], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'centroids.json';
+  a.click();
+}
+
+async function resetCentroidsUI() {
+  if (!window.EOClassifier) return;
+  if (!confirm('Delete OPFS-cached centroids and re-bake from corpus?')) return;
+  await window.EOClassifier.clearBakedCentroids();
+  const status = document.getElementById('classifier-status');
+  const bake   = document.getElementById('classifier-bake');
+  const dl     = document.getElementById('classifier-download');
+  if (status) status.textContent = '○ No centroids — bake once from corpus';
+  if (bake)   bake.style.display = 'inline-block';
+  if (dl)     dl.style.display   = 'none';
+}
 
 async function stageEmbeddingClassify(log, da) {
   if (!window.EOClassifier || !window.EOClassifier.isReady()) return;
