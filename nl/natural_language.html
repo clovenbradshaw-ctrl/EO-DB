@@ -1036,11 +1036,17 @@ async function bakeCentroids(onProgress) {
   if (!cells) throw new Error('exemplars.json missing "27cell"');
   const cellKeys = Object.keys(cells);
 
-  // Flatten embedding work (SeqReservoir: deterministic indices)
+  // Flatten embedding work (SeqReservoir: deterministic indices).
+  // English-only: we use a single small model for both baking and
+  // inference, so there's no Procrustes alignment step. Keeping the
+  // exemplar set monolingual (best-margin English clauses) gives a
+  // cleaner centroid than averaging across 5+ languages at inference-
+  // model resolution.
   const tasks = [];
   const perCellTop = {};
   for (const key of cellKeys) {
-    const ranked = [...cells[key]].sort((a, b) => (b.margin || 0) - (a.margin || 0));
+    const english = cells[key].filter(e => (e.lang || 'en') === 'en');
+    const ranked  = english.sort((a, b) => (b.margin || 0) - (a.margin || 0));
     let top = ranked.filter(e => (e.margin || 0) >= MIN_MARGIN).slice(0, TOP_N);
     if (!top.length) top = ranked.slice(0, Math.min(10, ranked.length));
     perCellTop[key] = top;
@@ -1246,7 +1252,9 @@ window.EOClassifier = {
 
 // Auto-init on load.
 // Fallback order: OPFS (user-baked) → bundled nl/centroids.json → offer to bake.
-initClassifier('centroids.json', 'alignment_matrix.json').then((ready) => {
+// No alignment matrix: centroids are baked with the same small model
+// used at inference, so Procrustes alignment is a no-op.
+initClassifier('centroids.json').then((ready) => {
   const status = document.getElementById('classifier-status');
   const bake   = document.getElementById('classifier-bake');
   const dl     = document.getElementById('classifier-download');
