@@ -42,9 +42,12 @@ jobs:
           VITE_GOOGLE_CLIENT_ID: ${{ vars.VITE_GOOGLE_CLIENT_ID }}
 
       - name: Copy standalone /nl/ assets into build output
+        # Ships the self-contained HTML plus any baked centroids/alignment
+        # JSON committed at nl/ (skips .py / .md which are build-time only).
         run: |
           mkdir -p docs/nl
-          cp nl/natural_language.html docs/nl/natural_language.html
+          cp nl/*.html docs/nl/ 2>/dev/null || true
+          cp nl/*.json docs/nl/ 2>/dev/null || true
 
       - name: Add .nojekyll
         run: touch docs/.nojekyll
