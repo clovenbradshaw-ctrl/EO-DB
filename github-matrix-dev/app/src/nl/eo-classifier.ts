@@ -35,6 +35,8 @@ export interface ClassifierStatus {
   centroidCount: number;
 }
 
+export type ResolutionTier = 'paragraph' | 'sentence' | 'clause';
+
 export interface Classification {
   clause_ix: number;
   cell_id: string;
@@ -48,6 +50,13 @@ export interface Classification {
   similarity_profile: Array<{ cell_id: string; score: number }>;
   flags: string[];
   script: string;
+  /**
+   * Which lattice position this classification was made from. Added for
+   * Document Explorer: the same text classified at paragraph vs clause
+   * tier answers different questions (what is this about / what changed
+   * what). Optional so legacy callers keep compiling.
+   */
+  resolution_tier?: ResolutionTier;
 }
 
 const CONFIDENCE_THRESHOLD: Record<string, number> = {
@@ -185,22 +194,34 @@ export async function classifyBatch(
   texts: string[],
   script: string,
 ): Promise<Classification[]> {
+  const result = await classifyBatchWithEmbeddings(texts, script);
+  return result.classifications;
+}
+
+/**
+ * Like classifyBatch, but returns the per-text embedding alongside the
+ * classification. Used by the ingest pipeline so the same forward pass
+ * produces both the classification and the cached vector — no double work.
+ */
+export async function classifyBatchWithEmbeddings(
+  texts: string[],
+  script: string,
+): Promise<{ classifications: Classification[]; embeddings: Float32Array[] }> {
   if (!_worker || _status.state !== 'ready' || !_centroids) {
     throw new Error('Classifier not ready; call initClassifier() first');
   }
-  const embeddings = await embedBatch(texts);
+  const flat = await embedBatchFlat(texts);
   const dim = EMBEDDING_DIM;
   const out: Classification[] = [];
+  const vectors: Float32Array[] = [];
   const threshold = CONFIDENCE_THRESHOLD[script] ?? CONFIDENCE_THRESHOLD.default;
   for (let i = 0; i < texts.length; i++) {
-    // Copy this row out of the shared batch buffer so the big buffer can be
-    // released; also normalizes the TypedArray generic parameter to a fresh
-    // ArrayBuffer.
     let query: Float32Array = new Float32Array(dim);
-    for (let k = 0; k < dim; k++) query[k] = embeddings[i * dim + k];
+    for (let k = 0; k < dim; k++) query[k] = flat[i * dim + k];
     if (_alignment) {
       query = applyAlignment(query, _alignment);
     }
+    vectors.push(query);
     const ranked = rankAgainstCentroids(query, _centroids);
     const top = ranked[0];
     const gap = top.score - (ranked[1]?.score ?? 0);
@@ -225,11 +246,29 @@ export async function classifyBatch(
       script,
     });
   }
-  return out;
+  return { classifications: out, embeddings: vectors };
+}
+
+/**
+ * Public single-text embed. Used by the query path: only the query needs
+ * embedding, no centroid ranking.
+ */
+export async function embedQuery(text: string): Promise<Float32Array> {
+  if (!_worker || _status.state !== 'ready') {
+    throw new Error('Classifier not ready; call initClassifier() first');
+  }
+  const flat = await embedBatchFlat([text]);
+  const dim = EMBEDDING_DIM;
+  // Typed as the loose variant so re-assignment to applyAlignment's return
+  // value doesn't trip TS strict's ArrayBuffer / ArrayBufferLike split.
+  let vec: Float32Array<ArrayBufferLike> = new Float32Array(dim);
+  for (let k = 0; k < dim; k++) vec[k] = flat[k];
+  if (_alignment) vec = applyAlignment(vec, _alignment);
+  return vec as Float32Array;
 }
 
 /** Round-trip to the worker for embeddings. Returns a flat Float32Array. */
-function embedBatch(texts: string[]): Promise<Float32Array> {
+function embedBatchFlat(texts: string[]): Promise<Float32Array> {
   return new Promise((resolve, reject) => {
     if (!_worker) return reject(new Error('No classifier worker'));
     const requestId = Math.random().toString(36).slice(2);
