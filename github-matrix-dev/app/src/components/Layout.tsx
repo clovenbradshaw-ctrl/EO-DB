@@ -10,7 +10,6 @@ import { PeerSync } from '../matrix/peer-sync';
 import { WebRTCPeer } from '../matrix/webrtc-peer';
 import { Presence, type PresenceUser } from '../matrix/presence';
 import { usePresencePrefs } from '../lib/presence-prefs';
-import { useNLPrefs } from '../lib/nl-prefs';
 import { OnlineUsers } from './OnlineUsers';
 import { GDriveSyncService } from '../google-drive/gdrive-sync';
 import { useGDriveStore } from '../google-drive/gdrive-store';
@@ -552,7 +551,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   const [presence, setPresence] = useState<Presence | null>(null);
   const [presencePeers, setPresencePeers] = useState<PresenceUser[]>([]);
   const [presencePrefs] = usePresencePrefs();
-  const [nlPrefs] = useNLPrefs();
   // Reactive room ID for the current space — drives SettingsView, MultiUserTestView, etc.
   // Updated by setupSpaceStore when room resolution completes (including retries).
   const [spaceRoomId, setSpaceRoomId] = useState<string | null>(null);
@@ -2788,15 +2786,15 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               <span style={s.navIcon}>{NAV_ICONS.branch}</span>
               Branches
             </button>
-            {nlPrefs.enabled && (
-              <button
-                onClick={() => { navigate({ view: 'nl' }); }}
-                style={navItemStyle('nl')}
-              >
-                <span style={s.navIcon}>{NAV_ICONS.nl}</span>
-                Natural Language
-              </button>
-            )}
+            <a
+              href={`${import.meta.env.BASE_URL}nl/natural_language.html`}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{ ...navItemStyle('nl'), textDecoration: 'none' }}
+            >
+              <span style={s.navIcon}>{NAV_ICONS.nl}</span>
+              Natural Language
+            </a>
             <div style={s.navGroupLabel}>Testing</div>
             <button
               onClick={() => { navigate({ view: 'multiuser' }); }}

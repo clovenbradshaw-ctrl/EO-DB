@@ -41,6 +41,11 @@ jobs:
         env:
           VITE_GOOGLE_CLIENT_ID: ${{ vars.VITE_GOOGLE_CLIENT_ID }}
 
+      - name: Copy standalone /nl/ assets into build output
+        run: |
+          mkdir -p docs/nl
+          cp nl/natural_language.html docs/nl/natural_language.html
+
       - name: Add .nojekyll
         run: touch docs/.nojekyll
 
