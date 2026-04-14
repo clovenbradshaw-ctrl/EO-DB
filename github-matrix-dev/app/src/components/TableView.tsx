@@ -643,6 +643,18 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   const tableRef = useRef<HTMLTableElement>(null);
   const [activeDragId, setActiveDragId] = useState<string | null>(null);
 
+  // --- Row selection state ---
+  const [selectedRows, setSelectedRows] = useState<Set<string>>(new Set());
+  const toggleRowSelection = useCallback((target: string) => {
+    setSelectedRows((prev) => {
+      const next = new Set(prev);
+      if (next.has(target)) next.delete(target);
+      else next.add(target);
+      return next;
+    });
+  }, []);
+  const deselectAllRows = useCallback(() => setSelectedRows(new Set()), []);
+
   // --- DnD sensors (delay-based to prevent accidental drags while resizing) ---
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { delay: 200, tolerance: 5 } }),
@@ -1039,6 +1051,19 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   useEffect(() => {
     onVisibleRecordTargets?.(filtered.map((r) => r.target));
   }, [filtered, onVisibleRecordTargets]);
+
+  // --- Row selection helpers derived from `filtered` ---
+  const selectAllVisible = useCallback(() => {
+    setSelectedRows(new Set(filtered.map((r) => r.target)));
+  }, [filtered]);
+  const visibleSelectedCount = useMemo(() => {
+    if (selectedRows.size === 0) return 0;
+    let n = 0;
+    for (const r of filtered) if (selectedRows.has(r.target)) n++;
+    return n;
+  }, [filtered, selectedRows]);
+  const allVisibleSelected = filtered.length > 0 && visibleSelectedCount === filtered.length;
+  const someVisibleSelected = visibleSelectedCount > 0 && !allVisibleSelected;
 
   // --- Virtual scroll window ---
   const rowPx = ROW_HEIGHT_PX[rowHeight] ?? 44;
@@ -1836,6 +1861,28 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
         <div style={s.toolbarLeft}>
           <div style={s.scopeName}>{scopeName || formatScopeName(scope)}</div>
           <span style={s.recordCount}>{filtered.length}</span>
+          {selectedRows.size > 0 && (
+            <span style={{
+              display: 'inline-flex', alignItems: 'center', gap: 6,
+              padding: '2px 8px', borderRadius: 10,
+              background: theme.accentBg, color: theme.accent,
+              border: `1px solid ${theme.accentBorder}`,
+              fontSize: 11, fontWeight: 600,
+            }}>
+              {selectedRows.size} selected
+              <button
+                onClick={deselectAllRows}
+                title="Clear selection"
+                aria-label="Clear selection"
+                style={{
+                  background: 'none', border: 'none', color: theme.accent,
+                  cursor: 'pointer', padding: 0, fontSize: 12, lineHeight: 1,
+                }}
+              >
+                {'\u2715'}
+              </button>
+            </span>
+          )}
           <TableUpdateIndicator
             isUpdating={isUpdating}
             lastUpdate={lastUpdate}
@@ -1893,6 +1940,29 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
               ...(isMobile ? { width: 100, flex: '1 1 100px', minWidth: 80 } : {}),
             }}
           />
+
+          {/* Select all / deselect all toggle */}
+          <button
+            onClick={allVisibleSelected ? deselectAllRows : selectAllVisible}
+            disabled={filtered.length === 0}
+            title={allVisibleSelected ? 'Deselect all visible rows' : 'Select all visible rows'}
+            aria-label={allVisibleSelected ? 'Deselect all visible rows' : 'Select all visible rows'}
+            aria-pressed={allVisibleSelected}
+            style={{
+              ...s.toggleBtn,
+              padding: '0 8px',
+              minWidth: 28,
+              fontWeight: allVisibleSelected || someVisibleSelected ? 600 : 400,
+              background: allVisibleSelected || someVisibleSelected ? theme.accentBg : 'transparent',
+              color: allVisibleSelected || someVisibleSelected ? theme.accent : theme.textMuted,
+              border: `1px solid ${allVisibleSelected || someVisibleSelected ? theme.accentBorder : theme.border}`,
+              borderRadius: 4,
+              cursor: filtered.length === 0 ? 'not-allowed' : 'pointer',
+              opacity: filtered.length === 0 ? 0.5 : 1,
+            }}
+          >
+            {allVisibleSelected ? 'Deselect all' : someVisibleSelected ? `Select all (${visibleSelectedCount}/${filtered.length})` : 'Select all'}
+          </button>
 
           {/* Row height toggle — hidden on mobile */}
           {!isMobile && (
@@ -2109,7 +2179,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
         <DndContext sensors={sensors} collisionDetection={closestCenter} onDragStart={handleColumnDragStart} onDragEnd={handleColumnDragEnd} onDragCancel={() => setActiveDragId(null)}>
           <table ref={tableRef} style={{ ...s.table, tableLayout: 'fixed', contain: 'layout style' as React.CSSProperties['contain'] }}>
             <colgroup>
-              <col style={{ width: 40 }} />
+              <col style={{ width: 56 }} />
               {orderedColumns.map((col) => (
                 <col key={col.key} style={{ width: columnWidths[col.key] || defaultColumnWidth(col.type) }} />
               ))}
@@ -2117,7 +2187,23 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
             <thead>
               <SortableContext items={orderedColumns.map((c) => c.key)} strategy={horizontalListSortingStrategy}>
                 <tr>
-                  <th style={{ ...s.th, width: 40, textAlign: 'center', padding: '0 4px', userSelect: 'none', color: theme.textMuted, fontSize: 11 }}>#</th>
+                  <th
+                    style={{ ...s.th, width: 56, textAlign: 'center', padding: '0 4px', userSelect: 'none', color: theme.textMuted, fontSize: 11 }}
+                    title={allVisibleSelected ? 'Deselect all visible rows' : 'Select all visible rows'}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={allVisibleSelected}
+                      ref={(el) => { if (el) el.indeterminate = someVisibleSelected; }}
+                      onChange={() => {
+                        if (allVisibleSelected) deselectAllRows();
+                        else selectAllVisible();
+                      }}
+                      disabled={filtered.length === 0}
+                      aria-label={allVisibleSelected ? 'Deselect all visible rows' : 'Select all visible rows'}
+                      style={{ cursor: filtered.length === 0 ? 'not-allowed' : 'pointer', margin: 0 }}
+                    />
+                  </th>
                   {orderedColumns.map((col) => (
                     <SortableColumnHeader
                       key={col.key}
@@ -2179,22 +2265,27 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
               )}
               {virtualRows.map((rec, rowIndex) => {
                 const isActive = rec.target === activeRecord;
+                const isSelected = selectedRows.has(rec.target);
+                const rowBg = isSelected
+                  ? theme.accentBg
+                  : isActive ? theme.accentBg : theme.bgCard;
                 return (
                   <tr
                     key={rec.target}
-                    style={{ background: isActive ? theme.accentBg : theme.bgCard }}
+                    style={{ background: rowBg }}
                     onClick={() => onSelectRecord(rec.target)}
                     onContextMenu={(e) => handleContextMenu(e, rec.target)}
                     onMouseEnter={(e) => {
-                      if (!isActive) (e.currentTarget as HTMLElement).style.background = theme.bgHover;
+                      if (!isActive && !isSelected) (e.currentTarget as HTMLElement).style.background = theme.bgHover;
                     }}
                     onMouseLeave={(e) => {
-                      if (!isActive) (e.currentTarget as HTMLElement).style.background = theme.bgCard;
+                      if (!isActive && !isSelected) (e.currentTarget as HTMLElement).style.background = theme.bgCard;
+                      else if (isSelected && !isActive) (e.currentTarget as HTMLElement).style.background = theme.accentBg;
                     }}
                   >
                     <td style={{
                       ...s.td,
-                      width: 40,
+                      width: 56,
                       textAlign: 'center',
                       padding: `${rowHeight === 'compact' ? 4 : rowHeight === 'tall' ? 18 : 10}px 4px`,
                       fontFamily: "'JetBrains Mono', monospace",
@@ -2202,7 +2293,19 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                       color: theme.textMuted,
                       userSelect: 'none',
                       background: 'inherit',
-                    }}>{virtualStart + rowIndex + 1}</td>
+                    }}>
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, justifyContent: 'center' }}>
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onClick={(e) => e.stopPropagation()}
+                          onChange={() => toggleRowSelection(rec.target)}
+                          aria-label={isSelected ? `Deselect row ${virtualStart + rowIndex + 1}` : `Select row ${virtualStart + rowIndex + 1}`}
+                          style={{ cursor: 'pointer', margin: 0 }}
+                        />
+                        <span>{virtualStart + rowIndex + 1}</span>
+                      </span>
+                    </td>
                     {orderedColumns.map((col, colIndex) => {
                       const isRedacted = permissions?.redacted_fields?.includes(col.key);
                       const isLocked = permissions?.locked_fields?.includes(col.key);
