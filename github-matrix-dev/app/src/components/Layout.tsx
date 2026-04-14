@@ -10,6 +10,7 @@ import { PeerSync } from '../matrix/peer-sync';
 import { WebRTCPeer } from '../matrix/webrtc-peer';
 import { Presence, type PresenceUser } from '../matrix/presence';
 import { usePresencePrefs } from '../lib/presence-prefs';
+import { useNLPrefs } from '../lib/nl-prefs';
 import { OnlineUsers } from './OnlineUsers';
 import { GDriveSyncService } from '../google-drive/gdrive-sync';
 import { useGDriveStore } from '../google-drive/gdrive-store';
@@ -74,6 +75,7 @@ const MessagesView = lazyWithRetry(() => import('./MessagesView').then(m => ({ d
 const PeopleView = lazyWithRetry(() => import('./PeopleView').then(m => ({ default: m.PeopleView })));
 const RecordPageView = lazyWithRetry(() => import('./builder/RecordPageView').then(m => ({ default: m.RecordPageView })));
 const BranchExplorerPanel = lazyWithRetry(() => import('./branch/BranchExplorerPanel').then(m => ({ default: m.BranchExplorerPanel })));
+const NaturalLanguageView = lazyWithRetry(() => import('./NaturalLanguageView').then(m => ({ default: m.NaturalLanguageView })));
 import { PermissionBadge } from './PermissionBadge';
 import { ViewOnlyBanner } from './ViewOnlyBanner';
 import { HeadlineMetrics } from './HeadlineMetrics';
@@ -550,6 +552,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   const [presence, setPresence] = useState<Presence | null>(null);
   const [presencePeers, setPresencePeers] = useState<PresenceUser[]>([]);
   const [presencePrefs] = usePresencePrefs();
+  const [nlPrefs] = useNLPrefs();
   // Reactive room ID for the current space — drives SettingsView, MultiUserTestView, etc.
   // Updated by setupSpaceStore when room resolution completes (including retries).
   const [spaceRoomId, setSpaceRoomId] = useState<string | null>(null);
@@ -2100,6 +2103,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     members: '\u2736', // star/members icon
     multiuser: '\u2194', // left-right arrow
     branch: '\u22EE',   // vertical ellipsis (branch fork)
+    nl: '\u2766',       // floral heart — natural-language / documents
   };
 
   // --- Permission resolution ---
@@ -2784,6 +2788,15 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               <span style={s.navIcon}>{NAV_ICONS.branch}</span>
               Branches
             </button>
+            {nlPrefs.enabled && (
+              <button
+                onClick={() => { navigate({ view: 'nl' }); }}
+                style={navItemStyle('nl')}
+              >
+                <span style={s.navIcon}>{NAV_ICONS.nl}</span>
+                Natural Language
+              </button>
+            )}
             <div style={s.navGroupLabel}>Testing</div>
             <button
               onClick={() => { navigate({ view: 'multiuser' }); }}
@@ -3037,6 +3050,8 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               <ApiConnectionsView />
             ) : activeView === 'branch' ? (
               <BranchExplorerPanel />
+            ) : activeView === 'nl' ? (
+              <NaturalLanguageView userId={session.userId} />
             ) : null}
             </Suspense>
           </ErrorBoundary>}

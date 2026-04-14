@@ -1,0 +1,542 @@
+/**
+ * Document explorer — upload a document, watch its clauses classify against
+ * the 27 EO cells, correct individual classifications (cascades via REC),
+ * inspect links to neighboring clauses through the brain database.
+ *
+ * Feature-gated by useNLPrefs().enabled; mounted from Layout's view switch.
+ */
+
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
+import { useTheme } from '../theme';
+import { OP_COLORS } from './LogView';
+import { EOCellPicker } from './EOCellPicker';
+import { cellById } from '../nl/eo-cells';
+import {
+  extractDocument,
+  type ExtractedDocument,
+  type RawClause,
+} from '../nl/clause-extractor';
+import {
+  ingestDocument,
+  recordCorrection,
+  type IngestProgress,
+} from '../nl/ingest-queue';
+import {
+  initClassifier,
+  subscribeClassifierStatus,
+  getClassifierStatus,
+  type ClassifierStatus,
+  type Classification,
+} from '../nl/eo-classifier';
+import { useNLPrefs } from '../lib/nl-prefs';
+
+interface NaturalLanguageViewProps {
+  userId: string;
+}
+
+export function NaturalLanguageView({ userId }: NaturalLanguageViewProps) {
+  const { theme } = useTheme();
+  const [prefs] = useNLPrefs();
+  const [doc, setDoc] = useState<ExtractedDocument | null>(null);
+  const [progress, setProgress] = useState<IngestProgress | null>(null);
+  const [status, setStatus] = useState<ClassifierStatus>(getClassifierStatus);
+  const [selectedIx, setSelectedIx] = useState<number | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [isIngesting, setIsIngesting] = useState(false);
+  const parentRef = useRef<HTMLDivElement | null>(null);
+
+  // Status subscription.
+  useEffect(() => subscribeClassifierStatus(setStatus), []);
+
+  // Prewarm classifier the moment this view mounts so the model download
+  // happens before the user picks a file.
+  useEffect(() => {
+    if (prefs.enabled) void initClassifier();
+  }, [prefs.enabled]);
+
+  const classificationsByIx = progress?.classificationsByIx ?? {};
+  const clauses: RawClause[] = doc?.clauses ?? [];
+
+  const virtualizer = useVirtualizer({
+    count: clauses.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 64,
+    overscan: 16,
+  });
+
+  const handleFile = useCallback(
+    async (file: File) => {
+      setError(null);
+      setSelectedIx(null);
+      setProgress(null);
+      try {
+        const extracted = await extractDocument(file);
+        setDoc(extracted);
+        if (!prefs.autoClassifyOnUpload) return;
+        setIsIngesting(true);
+        try {
+          await ingestDocument(extracted, userId, (p) => {
+            setProgress({ ...p, classificationsByIx: { ...p.classificationsByIx } });
+          });
+        } finally {
+          setIsIngesting(false);
+        }
+      } catch (err) {
+        setError((err as Error).message);
+        setIsIngesting(false);
+      }
+    },
+    [prefs.autoClassifyOnUpload, userId],
+  );
+
+  const onDrop = useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault();
+      const file = e.dataTransfer.files?.[0];
+      if (file) void handleFile(file);
+    },
+    [handleFile],
+  );
+
+  const selectedClause = selectedIx !== null ? clauses[selectedIx] : null;
+  const selectedClassification =
+    selectedIx !== null ? classificationsByIx[selectedIx] : undefined;
+
+  const handleCorrect = useCallback(
+    async (toCellId: string) => {
+      if (!selectedClause || !selectedClassification || !doc) return;
+      await recordCorrection({
+        doc_id: doc.doc_id,
+        clause_ix: selectedClause.clause_ix,
+        from_cell_id: selectedClassification.cell_id,
+        to_cell_id: toCellId,
+        text: selectedClause.text,
+        agent: userId,
+      });
+      // Reflect the correction locally by overwriting the top cell.
+      if (progress) {
+        const overwritten: Classification = {
+          ...selectedClassification,
+          cell_id: toCellId,
+          cell_key: cellById(toCellId)?.cell_key ?? selectedClassification.cell_key,
+          operator: cellById(toCellId)?.operator ?? selectedClassification.operator,
+          flags: [...selectedClassification.flags, 'user_corrected'],
+        };
+        setProgress({
+          ...progress,
+          classificationsByIx: {
+            ...progress.classificationsByIx,
+            [selectedClause.clause_ix]: overwritten,
+          },
+        });
+      }
+    },
+    [doc, progress, selectedClassification, selectedClause, userId],
+  );
+
+  const progressPct =
+    progress && progress.total > 0
+      ? Math.round((progress.processed / progress.total) * 100)
+      : 0;
+
+  return (
+    <div
+      style={{
+        display: 'grid',
+        gridTemplateColumns: 'minmax(260px, 320px) 1fr minmax(320px, 420px)',
+        height: '100%',
+        overflow: 'hidden',
+        background: theme.bg,
+        color: theme.text,
+      }}
+    >
+      {/* ── Left: upload + status ─────────────────────────────────────── */}
+      <aside
+        style={{
+          borderRight: `1px solid ${theme.border}`,
+          padding: 16,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 12,
+          overflow: 'auto',
+        }}
+      >
+        <div
+          style={{
+            fontFamily: "'JetBrains Mono', monospace",
+            fontSize: 10,
+            letterSpacing: '0.08em',
+            textTransform: 'uppercase',
+            color: theme.textMuted,
+          }}
+        >
+          Natural Language
+        </div>
+
+        <div
+          onDrop={onDrop}
+          onDragOver={(e) => e.preventDefault()}
+          style={{
+            border: `1.5px dashed ${theme.border}`,
+            borderRadius: 6,
+            padding: 16,
+            textAlign: 'center',
+            background: theme.bgMuted,
+            cursor: 'pointer',
+          }}
+          onClick={() => {
+            const input = document.createElement('input');
+            input.type = 'file';
+            input.accept = '.txt,.md,.markdown,.pdf,.docx';
+            input.onchange = () => {
+              const f = input.files?.[0];
+              if (f) void handleFile(f);
+            };
+            input.click();
+          }}
+        >
+          <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>
+            Drop a document
+          </div>
+          <div style={{ fontSize: 10, color: theme.textMuted }}>
+            .txt · .md · .pdf · .docx
+          </div>
+        </div>
+
+        <StatusPanel status={status} theme={theme} />
+
+        {doc && (
+          <div
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 4,
+              fontFamily: "'JetBrains Mono', monospace",
+              fontSize: 10,
+            }}
+          >
+            <div style={{ color: theme.textMuted }}>DOC</div>
+            <div style={{ color: theme.text, fontWeight: 600 }}>{doc.title}</div>
+            <div style={{ color: theme.textMuted }}>
+              {doc.clauses.length} clauses · {doc.char_count.toLocaleString()} chars
+            </div>
+          </div>
+        )}
+
+        {isIngesting && progress && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <div
+              style={{
+                fontFamily: "'JetBrains Mono', monospace",
+                fontSize: 10,
+                color: theme.textMuted,
+              }}
+            >
+              {progress.phase.toUpperCase()} · {progress.processed}/{progress.total}
+            </div>
+            <div
+              style={{
+                height: 4,
+                background: theme.bgActive,
+                borderRadius: 2,
+                overflow: 'hidden',
+              }}
+            >
+              <div
+                style={{
+                  width: `${progressPct}%`,
+                  height: '100%',
+                  background: theme.accent,
+                  transition: 'width 0.2s',
+                }}
+              />
+            </div>
+          </div>
+        )}
+
+        {error && (
+          <div
+            style={{
+              fontSize: 11,
+              color: theme.danger,
+              fontFamily: "'JetBrains Mono', monospace",
+            }}
+          >
+            {error}
+          </div>
+        )}
+      </aside>
+
+      {/* ── Center: clause list ──────────────────────────────────────── */}
+      <main
+        ref={parentRef}
+        style={{
+          overflow: 'auto',
+          padding: '0 0 40px',
+        }}
+      >
+        {clauses.length === 0 ? (
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              height: '100%',
+              color: theme.textMuted,
+              fontFamily: "'JetBrains Mono', monospace",
+              fontSize: 12,
+            }}
+          >
+            Drop a document to begin.
+          </div>
+        ) : (
+          <div
+            style={{
+              height: virtualizer.getTotalSize(),
+              position: 'relative',
+              width: '100%',
+            }}
+          >
+            {virtualizer.getVirtualItems().map((vi) => {
+              const c = clauses[vi.index];
+              const cls = classificationsByIx[c.clause_ix];
+              const color = cls ? OP_COLORS[cls.operator] : null;
+              const isSelected = selectedIx === c.clause_ix;
+              return (
+                <div
+                  key={vi.key}
+                  onClick={() => setSelectedIx(c.clause_ix)}
+                  style={{
+                    position: 'absolute',
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                    transform: `translateY(${vi.start}px)`,
+                    padding: '10px 16px',
+                    borderBottom: `1px solid ${theme.borderLight}`,
+                    background: isSelected ? theme.bgActive : 'transparent',
+                    cursor: 'pointer',
+                    display: 'grid',
+                    gridTemplateColumns: '80px 1fr 80px',
+                    gap: 12,
+                    alignItems: 'center',
+                  }}
+                >
+                  <div
+                    style={{
+                      fontFamily: "'JetBrains Mono', monospace",
+                      fontSize: 10,
+                      color: color ? color.text : theme.textMuted,
+                      background: color ? color.bg : 'transparent',
+                      border: color ? `1px solid ${color.border}40` : `1px solid ${theme.border}`,
+                      borderRadius: 3,
+                      padding: '2px 6px',
+                      textAlign: 'center',
+                      fontWeight: 700,
+                    }}
+                  >
+                    {cls ? cls.operator : '···'}
+                  </div>
+                  <div
+                    style={{
+                      fontSize: 12,
+                      lineHeight: 1.45,
+                      whiteSpace: 'nowrap',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                    }}
+                  >
+                    {c.text}
+                  </div>
+                  <div
+                    style={{
+                      fontFamily: "'JetBrains Mono', monospace",
+                      fontSize: 10,
+                      color: theme.textMuted,
+                      textAlign: 'right',
+                    }}
+                  >
+                    {cls ? `gap ${cls.confidence_gap.toFixed(2)}` : ''}
+                    {cls?.flags.includes('boundary') ? ' ⚑' : ''}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </main>
+
+      {/* ── Right: detail + correction ────────────────────────────── */}
+      <aside
+        style={{
+          borderLeft: `1px solid ${theme.border}`,
+          padding: 16,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 16,
+          overflow: 'auto',
+        }}
+      >
+        {!selectedClause && (
+          <div
+            style={{
+              fontFamily: "'JetBrains Mono', monospace",
+              fontSize: 11,
+              color: theme.textMuted,
+            }}
+          >
+            Select a clause to inspect its classification.
+          </div>
+        )}
+        {selectedClause && (
+          <>
+            <div
+              style={{
+                fontSize: 12,
+                lineHeight: 1.5,
+                padding: 10,
+                background: theme.bgMuted,
+                borderRadius: 4,
+                border: `1px solid ${theme.border}`,
+              }}
+            >
+              {selectedClause.text}
+            </div>
+            {selectedClassification && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <Label text="Top cell" theme={theme} />
+                <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12 }}>
+                  {selectedClassification.cell_key}
+                </div>
+                <Label text="Top-5 similarity" theme={theme} />
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                  {selectedClassification.similarity_profile.map((s) => (
+                    <div
+                      key={s.cell_id}
+                      style={{
+                        fontFamily: "'JetBrains Mono', monospace",
+                        fontSize: 10,
+                        color: theme.textMuted,
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                      }}
+                    >
+                      <span>{s.cell_id}</span>
+                      <span>{s.score.toFixed(3)}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <Label text="Correct to" theme={theme} />
+              <EOCellPicker
+                selected={selectedClassification?.cell_id}
+                disabled={
+                  selectedClassification ? [selectedClassification.cell_id] : []
+                }
+                onPick={(cell) => void handleCorrect(cell.cell_id)}
+              />
+            </div>
+          </>
+        )}
+      </aside>
+    </div>
+  );
+}
+
+function StatusPanel({ status, theme }: { status: ClassifierStatus; theme: any }) {
+  const color =
+    status.state === 'ready'
+      ? theme.success
+      : status.state === 'error'
+      ? theme.danger
+      : theme.textMuted;
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 4,
+        padding: 8,
+        borderRadius: 4,
+        border: `1px solid ${theme.border}`,
+        background: theme.bgMuted,
+      }}
+    >
+      <div
+        style={{
+          fontFamily: "'JetBrains Mono', monospace",
+          fontSize: 9,
+          letterSpacing: '0.08em',
+          textTransform: 'uppercase',
+          color: theme.textMuted,
+        }}
+      >
+        Classifier
+      </div>
+      <div
+        style={{
+          fontFamily: "'JetBrains Mono', monospace",
+          fontSize: 11,
+          color,
+        }}
+      >
+        {status.state === 'ready'
+          ? `ready (${status.backend})`
+          : status.state === 'loading'
+          ? status.message ?? 'loading…'
+          : status.state === 'error'
+          ? status.message ?? 'error'
+          : 'idle'}
+      </div>
+      {status.state === 'loading' && (
+        <div
+          style={{
+            height: 3,
+            background: theme.bgActive,
+            borderRadius: 2,
+            overflow: 'hidden',
+          }}
+        >
+          <div
+            style={{
+              width: `${Math.round(status.progress * 100)}%`,
+              height: '100%',
+              background: theme.accent,
+              transition: 'width 0.2s',
+            }}
+          />
+        </div>
+      )}
+      <div
+        style={{
+          fontFamily: "'JetBrains Mono', monospace",
+          fontSize: 9,
+          color: theme.textMuted,
+        }}
+      >
+        {status.centroidCount}/27 cells
+      </div>
+    </div>
+  );
+}
+
+function Label({ text, theme }: { text: string; theme: any }) {
+  return (
+    <div
+      style={{
+        fontFamily: "'JetBrains Mono', monospace",
+        fontSize: 9,
+        fontWeight: 700,
+        letterSpacing: '0.08em',
+        textTransform: 'uppercase',
+        color: theme.textMuted,
+      }}
+    >
+      {text}
+    </div>
+  );
+}
