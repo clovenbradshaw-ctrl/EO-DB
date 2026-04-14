@@ -2800,6 +2800,17 @@ function runIngest() {
     document.getElementById('doc-input').style.display = 'none';
     document.getElementById('doc-viewer').style.display = 'block';
     renderDocViewer();
+
+    // Push the new doc into the Document Explorer presentation layer.
+    // (The explorer is a separate view; user flips to it via the switcher,
+    // but we pre-sync so data is ready when they do.)
+    try {
+      if (typeof window.syncExplorerFromIngest === 'function') {
+        window.syncExplorerFromIngest();
+      }
+    } catch (err) {
+      console.error('explorer sync failed', err);
+    }
   }).catch((err) => {
     console.error('ingest failed', err);
     document.getElementById('btn-process').disabled = false;
@@ -3866,18 +3877,15 @@ function escapeHtml(str) {
   return (str || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 </script>
-</body>
-</html>
 
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>EO-DB · Document Store + Entity Inspector</title>
+<!-- ═══════════════════════════════════════════════════════════════
+     DOCUMENT EXPLORER — presentation layer for ingested docs
+     Scoped to .explorer-shell so its CSS variables and body rules
+     don't collide with the ingest workspace above.
+     ═══════════════════════════════════════════════════════════════ -->
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;1,400&family=Spectral:ital,wght@0,300;0,400;0,600;1,300;1,400&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
 <style>
-:root {
+.explorer-shell {
   --bg:#090b09; --s0:#0d0f0d; --s1:#111311; --s2:#171a17; --s3:#1d211d; --s4:#222622;
   --b0:#212521; --b1:#191c19; --b2:#141714;
   --tp:#cdc9be; --ts:#7d7a72; --td:#474542; --tx:#2e302e;
@@ -3887,9 +3895,15 @@ function escapeHtml(str) {
   --seg:#8f6e4a; --con:#b87632; --syn:#8a6a9a;
   --def:#5a9494; --eva:#b04040; --rec:#b09030;
   --split:#c45a8a; --splitD:rgba(196,90,138,.12);
+  background:var(--bg);color:var(--tp);font-family:'IBM Plex Sans',sans-serif;font-size:13px;height:100vh;overflow:hidden;display:flex;flex-direction:column;
 }
-*{box-sizing:border-box;margin:0;padding:0;}
-body{background:var(--bg);color:var(--tp);font-family:'IBM Plex Sans',sans-serif;font-size:13px;height:100vh;overflow:hidden;display:flex;flex-direction:column;}
+.explorer-shell *{box-sizing:border-box;margin:0;padding:0;}
+
+/* All explorer rules below are nested under .explorer-shell so they
+   never leak to the ingest workspace (which shares some class names
+   like .doc-tab). Requires CSS nesting support (Chrome 112+ / FF 117+ /
+   Safari 16.5+). */
+.explorer-shell {
 
 /* HEADER */
 .hdr{background:var(--s0);border-bottom:1px solid var(--b0);height:44px;display:flex;align-items:center;padding:0 16px;gap:12px;flex-shrink:0;}
@@ -4146,9 +4160,17 @@ body{background:var(--bg);color:var(--tp);font-family:'IBM Plex Sans',sans-serif
 .tip{position:fixed;background:var(--s3);border:1px solid var(--b0);padding:5px 9px;border-radius:3px;font-size:10px;pointer-events:none;z-index:9999;opacity:0;transition:opacity .1s;max-width:220px;line-height:1.5;font-family:'IBM Plex Mono',monospace;}
 .tip.vis{opacity:1;}
 .nlbl{font-family:'IBM Plex Sans',sans-serif;pointer-events:none;user-select:none;}
+
+} /* ← close .explorer-shell nesting wrapper */
+
+/* View-switcher pill that lets the user flip between ingest + explorer */
+.view-switcher{position:fixed;top:8px;right:14px;z-index:10000;display:flex;gap:2px;background:#0b0c0e;border:1px solid #2a2d38;border-radius:4px;overflow:hidden;font-family:'JetBrains Mono',monospace;font-size:10px;}
+.view-switcher button{background:transparent;border:none;color:#4a5068;padding:5px 10px;cursor:pointer;letter-spacing:.08em;}
+.view-switcher button.active{background:#1e2128;color:#e8ecf5;}
 </style>
-</head>
-<body>
+
+<!-- Document Explorer view — hidden until user flips to it -->
+<div class="explorer-shell" id="explorer-shell" style="display:none">
 
 <div class="hdr">
   <div class="hdr-logo">EO-DB</div>
@@ -4247,9 +4269,9 @@ const OPS=[
 ];
 
 // ═══════════════════════════════════════════════════
-// DOCUMENTS
+// DOCUMENTS  (mutable — replaced live by syncExplorerFromIngest)
 // ═══════════════════════════════════════════════════
-const DOCS={
+let DOCS={
   s1:{id:'s1',title:'NDP Contract Analysis',type:'PDF',date:'2024-11-12',text:
 `SERVICE AGREEMENT — PUBLIC SAFETY SERVICES
 
@@ -4306,9 +4328,9 @@ Nashville Downtown Partnership has declined to comment on the authorization ques
 };
 
 // ═══════════════════════════════════════════════════
-// ENTITIES  (ops, evs, splitFrom?, splitInto?[])
+// ENTITIES  (mutable — replaced live by syncExplorerFromIngest)
 // ═══════════════════════════════════════════════════
-const ENT=[
+let ENT=[
   {id:'e1',name:'Nashville Downtown Partnership',type:'ORG',ops:['ins','des','con'],conf:.97,links:6,
    desc:'Private nonprofit managing downtown security. Authorized $60M+ via shell since 2004.',
    evs:[
@@ -4371,9 +4393,9 @@ const ENT=[
 ];
 
 // ═══════════════════════════════════════════════════
-// SPANS  — text-match → char offsets resolved at runtime
+// SPANS  (mutable — replaced live by syncExplorerFromIngest)
 // ═══════════════════════════════════════════════════
-const SPANS=[
+let SPANS=[
   // s1
   {id:'sp01',eid:'e1',op:'ins',src:'s1',match:'Nashville Downtown Partnership',  note:'Entity instantiated — contract party listing'},
   {id:'sp02',eid:'e2',op:'con',src:'s1',match:'Solaren International LLC',       note:'Connection: contract counterparty'},
@@ -4403,8 +4425,8 @@ const SPANS=[
   {id:'sp23',eid:'e1',op:'des',src:'s4',match:'Nashville Downtown Partnership has declined to comment',note:'NDP described as non-responsive institutional actor'},
 ];
 
-// GRAPH
-const GNODES=[
+// GRAPH  (mutable — replaced live by syncExplorerFromIngest)
+let GNODES=[
   {id:'e1',x:75, y:75, r:13,op:'ins',lbl:'NDP'},
   {id:'e2',x:148,y:66, r:12,op:'con',lbl:'Solaren'},
   {id:'e3',x:194,y:130,r:9, op:'seg',lbl:'NDMC PSO'},
@@ -4415,7 +4437,7 @@ const GNODES=[
   {id:'e8',x:150,y:128,r:10,op:'seg',lbl:'THP Off.'},
   {id:'e9',x:70, y:215,r:12,op:'eva',lbl:'$60M'},
 ];
-const GEDGES=[
+let GEDGES=[
   {f:'e1',t:'e2',op:'con',dash:''},{f:'e1',t:'e3',op:'seg',dash:'4,2'},
   {f:'e2',t:'e3',op:'con',dash:''},{f:'e2',t:'e8',op:'con',dash:''},
   {f:'e4',t:'e5',op:'con',dash:''},{f:'e5',t:'e6',op:'syn',dash:''},
@@ -4979,5 +5001,220 @@ function rLegend(){
   document.getElementById('gleg').innerHTML=used.map(id=>{const o=opOf(id);return `<div class="gl-item"><div class="gl-dot" style="background:${o.col};opacity:.7;"></div><span style="color:${o.col};">${o.sym}</span></div>`;}).join('');
 }
 </script>
+
+</div> <!-- /.explorer-shell -->
+
+<!-- View switcher lives outside both shells so it can toggle them -->
+<div class="view-switcher" id="view-switcher">
+  <button id="view-ingest" class="active" onclick="showView('ingest')">INGEST</button>
+  <button id="view-explorer" onclick="showView('explorer')">EXPLORER</button>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════
+// View switching + bridge from ingest engine to explorer renderer
+// ═══════════════════════════════════════════════════════════════
+function showView(which){
+  const shell    = document.querySelector('.shell');
+  const explorer = document.getElementById('explorer-shell');
+  if(which==='explorer'){
+    shell.style.display='none';
+    explorer.style.display='flex';
+    document.getElementById('view-ingest').classList.remove('active');
+    document.getElementById('view-explorer').classList.add('active');
+    // Only replace the preloaded sample corpus once the user has actually
+    // ingested something. Before that, leave the Nashville sample visible
+    // so the explorer isn't an empty void on first visit.
+    if (typeof state !== 'undefined' && state.docs && state.docs.length > 0) {
+      try { syncExplorerFromIngest(); } catch(err) { console.error('sync failed', err); }
+    }
+  } else {
+    shell.style.display='grid';
+    explorer.style.display='none';
+    document.getElementById('view-ingest').classList.add('active');
+    document.getElementById('view-explorer').classList.remove('active');
+  }
+}
+
+// ── Bridge: translate the ingest engine's state.docs + state.combined
+//    into the explorer's DOCS / ENT / SPANS / GNODES / GEDGES model,
+//    then re-render the explorer panels.
+function syncExplorerFromIngest(){
+  if(typeof state === 'undefined' || !state.docs || state.docs.length === 0){
+    // Clear explorer to empty state
+    DOCS = {}; ENT.length = 0; SPANS.length = 0;
+    GNODES.length = 0; GEDGES.length = 0;
+    actDoc = null; actSpan = null; actEnt = null;
+    rSrcs(); rOps(); rTypes(); rDocSelector();
+    document.getElementById('doc-text').innerHTML =
+      '<div class="empty">Process a document in the INGEST view, then flip back here.</div>';
+    document.getElementById('rail-list').innerHTML = '';
+    document.getElementById('rail-cnt').textContent = '—';
+    rCtxStrip(null); rGraph(); rLegend();
+    return;
+  }
+
+  // ── DOCS ────────────────────────────────────────────────────
+  const newDocs = {};
+  state.docs.forEach((d, i) => {
+    const id = 'd' + i;
+    newDocs[id] = {
+      id, title: d.title || ('Document ' + (i+1)),
+      type: 'TEXT',
+      date: new Date().toISOString().slice(0,10),
+      text: d.text,
+      _anchor: d.doc_anchor,
+    };
+  });
+  DOCS = newDocs;
+
+  // ── Entities (SIG/INS create anchors; DEF resolves display names) ──
+  const entries = state.combined ? state.combined.entries() : [];
+
+  // Map entity_anchor → entity record
+  const entMap = new Map();
+  let entSeq = 0;
+  const ensureEnt = (anchor) => {
+    if (!anchor) return null;
+    if (entMap.has(anchor)) return entMap.get(anchor);
+    const name = (typeof resolveDisplayName === 'function')
+      ? resolveDisplayName(anchor) : anchor.slice(0,16);
+    const rec = {
+      id: 'e' + (++entSeq),
+      _anchor: anchor,
+      name,
+      type: 'ENTITY',
+      ops: [],
+      conf: 0.90,
+      links: 0,
+      desc: '',
+      evs: [],
+    };
+    entMap.set(anchor, rec);
+    return rec;
+  };
+
+  // Seed entities from SIG/INS np entries
+  for (const e of entries) {
+    if (e.op === 'SIG' && e.operand && (e.operand.kind === 'NP' || e.operand.type === 'entity')) {
+      ensureEnt(e.anchor);
+    } else if (e.op === 'INS' && e.operand && e.operand.type === 'entity') {
+      ensureEnt(e.anchor);
+    }
+  }
+
+  // Also seed from any entry whose target looks like an entity anchor
+  for (const e of entries) {
+    if (e.target && typeof e.target === 'string' && e.target.startsWith('@e:')) {
+      ensureEnt(e.target);
+    }
+  }
+
+  // ── SPANS: every entry with a char span becomes an explorer span ──
+  const newSpans = [];
+  let spanSeq = 0;
+  // Build doc_anchor → doc id
+  const docByAnchor = {};
+  state.docs.forEach((d,i)=>{ docByAnchor[d.doc_anchor] = 'd'+i; });
+
+  for (const e of entries) {
+    const prov = e.provenance || {};
+    const da = prov.doc_anchor;
+    const src = docByAnchor[da];
+    if (!src) continue;
+    const start = prov.span_start, end = prov.span_end;
+    if (typeof start !== 'number' || typeof end !== 'number' || end <= start) continue;
+
+    // Try to attach to an entity
+    let eid = null;
+    if (e.target && typeof e.target === 'string' && e.target.startsWith('@e:') && entMap.has(e.target)) {
+      eid = entMap.get(e.target).id;
+    } else if (e.anchor && entMap.has(e.anchor)) {
+      eid = entMap.get(e.anchor).id;
+    }
+    if (!eid) continue; // spans only render when tied to an entity
+
+    const opLower = (e.op || '').toLowerCase();
+    const docText = DOCS[src]?.text || '';
+    const match = docText.slice(start, end);
+    if (!match) continue;
+
+    const note = (e.operand && (e.operand.note || e.operand.text || e.operand.detector || e.operand.param)) || e.op;
+    newSpans.push({
+      id: 'sp' + (++spanSeq),
+      eid, op: opLower, src, match,
+      note: typeof note === 'string' ? note.slice(0,140) : String(note).slice(0,140),
+    });
+
+    // Record op on the entity (for badges)
+    const ent = Array.from(entMap.values()).find(r => r.id === eid);
+    if (ent && !ent.ops.includes(opLower)) ent.ops.push(opLower);
+
+    // Record an event row (used by Inspect / Events tabs and provenance)
+    const doc = DOCS[src];
+    ent?.evs.push({
+      op: opLower,
+      site: match.length > 48 ? match.slice(0,48) + '…' : match,
+      res: typeof note === 'string' ? note.slice(0,96) : String(note).slice(0,96),
+      ref: `${doc.title} · [${start}:${end}]`,
+    });
+  }
+
+  SPANS.length = 0;
+  newSpans.forEach(sp => SPANS.push(sp));
+
+  // Compute links count from CON targets (approximate)
+  for (const e of entries) {
+    if (e.op === 'CON' && e.anchor && entMap.has(e.anchor)) {
+      entMap.get(e.anchor).links += 1;
+    }
+  }
+
+  // Flush entities into ENT
+  ENT.length = 0;
+  entMap.forEach(r => ENT.push(r));
+
+  // ── Graph: SIG→nodes, CON→edges, layout in a circle ──
+  GNODES.length = 0; GEDGES.length = 0;
+  const nodesList = ENT.slice(0, 30); // cap
+  const cx=135, cy=115, R=85;
+  nodesList.forEach((r,i)=>{
+    const ang = (i / Math.max(1,nodesList.length)) * Math.PI*2 - Math.PI/2;
+    const x = cx + Math.cos(ang)*R;
+    const y = cy + Math.sin(ang)*R;
+    const lbl = r.name.length>10 ? r.name.slice(0,9)+'…' : r.name;
+    const op = r.ops[0] || 'ins';
+    GNODES.push({id:r.id, x, y, r:10, op, lbl});
+  });
+  const entByAnchor = new Map(Array.from(entMap.entries()));
+  for (const e of entries) {
+    if (e.op !== 'CON') continue;
+    const a = entByAnchor.get(e.anchor)?.id;
+    const t = entByAnchor.get(e.target)?.id;
+    if (!a || !t || a === t) continue;
+    // Dedupe edges
+    if (GEDGES.find(x => (x.f===a && x.t===t) || (x.f===t && x.t===a))) continue;
+    GEDGES.push({f:a, t, op:'con', dash:''});
+  }
+
+  // ── Active selections ──
+  actDoc = Object.keys(DOCS)[0] || null;
+  actSpan = null; actEnt = null;
+
+  // ── Render ──
+  document.getElementById('hdr-sel').textContent = 'no selection';
+  rSrcs(); rOps(); rTypes();
+  rDocSelector(); rDocText();
+  rCtxStrip(null);
+  rGraph(); rLegend();
+  if (actTab === 'lib') rLib();
+  if (actTab === 'evs') rEvLog();
+}
+
+// Expose on window for the ingest script to call
+window.syncExplorerFromIngest = syncExplorerFromIngest;
+window.showExplorerView = () => showView('explorer');
+</script>
+
 </body>
 </html>
