@@ -29,12 +29,20 @@ import {
   hydrationSync,
   updateSync,
   type SyncCustomization,
+  type SyncProgress,
   type HydrationResult,
   type UpdateSyncResult,
   type RawImportBundle,
   type ProvenanceResult,
 } from './airtable-sync';
-import { useAirtableStore, DEFAULT_SYNC_SETTINGS, type AirtableSyncSettings, type SyncLogEntry } from './airtable-store';
+import {
+  useAirtableStore,
+  DEFAULT_SYNC_SETTINGS,
+  type AirtableSyncSettings,
+  type SyncLogEntry,
+  type CurrentSyncSnapshot,
+} from './airtable-store';
+import { saveContinuousEnabled, saveCurrentSync } from './airtable-persistence';
 import { airtableSyncEventTypes } from '../lib/matrix-domain';
 import type { GDriveSyncService } from '../google-drive/gdrive-sync';
 import { createImportProgressListener } from '../store/eo-store';
@@ -108,8 +116,16 @@ export class AirtableSyncService {
     // Load sync settings from room state (shared config)
     this.loadSyncSettingsFromRoom();
 
+    // Persist the enabled flag so a refresh can auto-resume. Fire-and-forget:
+    // if the write fails we just lose the auto-resume once, nothing more.
+    saveContinuousEnabled(this.store, true);
+
     // Listen for to-device sync signals from other clients
     this.matrixClient.on('toDeviceEvent' as any, this.handleToDeviceEvent);
+
+    // Show the user "next check in Ns" immediately so they know we're
+    // scheduled, even before the first tick fires.
+    useAirtableStore.getState().setNextTickAt(Date.now() + FIRST_SYNC_DELAY_MS);
 
     // Initial claim attempt after a short delay
     setTimeout(async () => {
@@ -125,7 +141,9 @@ export class AirtableSyncService {
   private restartTimer(): void {
     if (this.timer) clearInterval(this.timer);
     if (!this.running) return;
-    this.timer = setInterval(() => this.tick(), this.getSyncIntervalMs());
+    const intervalMs = this.getSyncIntervalMs();
+    this.timer = setInterval(() => this.tick(), intervalMs);
+    useAirtableStore.getState().setNextTickAt(Date.now() + intervalMs);
   }
 
   /** Stop the sync loop and release the primary syncer claim. */
@@ -142,6 +160,10 @@ export class AirtableSyncService {
     await this.releasePrimarySyncer();
     useAirtableStore.getState().setPrimarySyncer(false);
     useAirtableStore.getState().setContinuousSync(false);
+    useAirtableStore.getState().setNextTickAt(null);
+    // Clear the persisted flag so the next mount doesn't auto-resume against
+    // the user's explicit "off" action.
+    saveContinuousEnabled(this.store, false);
   }
 
   /** Update the customization options for future syncs. */
@@ -421,6 +443,7 @@ export class AirtableSyncService {
       } catch { /* best-effort */ }
     }
 
+    const tickStart = Date.now();
     try {
       const client = new AirtableClient(apiKey);
       const isHydrated = headBefore?.hydrated ?? false;
@@ -432,6 +455,45 @@ export class AirtableSyncService {
         preserveExisting: syncSettings.preserveExisting,
         recordLimit: syncSettings.recordLimit > 0 ? syncSettings.recordLimit : undefined,
       };
+
+      const plannedStrategy: 'hydration' | 'lastModified' | 'fullDiff' =
+        !isHydrated ? 'hydration'
+        : syncSettings.syncStrategy === 'fullDiff' ? 'fullDiff'
+        : 'lastModified';
+
+      // Initial snapshot — the UI flips from "idle — next in Ns" to "preparing"
+      // the moment the tick claims the lock, so the user sees something even
+      // before the first network round-trip.
+      const initialSnapshot: CurrentSyncSnapshot = {
+        startedAt: tickStart,
+        phase: 'preparing',
+        strategy: plannedStrategy,
+        preserveExisting: !!effectiveCustomization.preserveExisting,
+        recordsSoFar: 0,
+        perTable: [],
+      };
+      useAirtableStore.getState().setCurrentSync(initialSnapshot);
+      saveCurrentSync(this.store, initialSnapshot);
+
+      useAirtableStore.getState().addSyncLogEntry({
+        ts: Date.now(),
+        type: 'sync_start',
+        source: 'local',
+        syncer: this.agent,
+        device: this.deviceId,
+        detail: plannedStrategy === 'hydration'
+          ? 'Continuous tick — initial hydration'
+          : plannedStrategy === 'fullDiff'
+          ? 'Continuous tick — full field diff'
+          : 'Continuous tick — LAST_MODIFIED_TIME',
+        strategy: plannedStrategy,
+        preserveExisting: !!effectiveCustomization.preserveExisting,
+      });
+
+      // SyncProgress → currentSync bridge. Accumulates per-table counters so
+      // the UI can show a running tally and the completion banner can summarise
+      // what happened without recomputing from sync_results.
+      const onProgress = (p: SyncProgress) => this.applyProgress(p);
 
       let result: HydrationResult | UpdateSyncResult;
       let ranHydration = false;
@@ -446,6 +508,7 @@ export class AirtableSyncService {
           result = await hydrationSync(this.store, client, this.agent, {
             customization: effectiveCustomization,
             onEvent: progressListener.onEvent,
+            onProgress,
             onRawImport: (bundle) => this.persistBulkImportProvenance(bundle),
           });
           ranHydration = true;
@@ -457,6 +520,7 @@ export class AirtableSyncService {
             result = await hydrationSync(this.store, client, this.agent, {
               customization: { ...effectiveCustomization, preserveExisting: false },
               onEvent: progressListener.onEvent,
+              onProgress,
               onRawImport: (bundle) => this.persistBulkImportProvenance(bundle),
             });
             ranHydration = true;
@@ -464,6 +528,7 @@ export class AirtableSyncService {
             result = await updateSync(this.store, client, this.agent, {
               customization: effectiveCustomization,
               onEvent: progressListener.onEvent,
+              onProgress,
             });
           }
         }
@@ -486,9 +551,10 @@ export class AirtableSyncService {
 
       useAirtableStore.getState().setLastSyncResult(result);
 
-      await this.signalCompletion(result, !isHydrated);
+      await this.signalCompletion(result, !isHydrated, plannedStrategy);
     } catch (e: any) {
       console.error('[EO-DB] Airtable sync failed:', e);
+      const snap = useAirtableStore.getState().currentSync;
       useAirtableStore.getState().setError(e.message);
       useAirtableStore.getState().addSyncLogEntry({
         ts: Date.now(),
@@ -497,6 +563,13 @@ export class AirtableSyncService {
         syncer: this.agent,
         device: this.deviceId,
         detail: e.message,
+        strategy: snap?.strategy,
+        preserveExisting: snap?.preserveExisting,
+        baseId: snap?.baseId,
+        baseName: snap?.baseName,
+        endpoint: snap?.endpoint,
+        cursorUsed: snap?.cursorUsed,
+        durationMs: Date.now() - tickStart,
       });
 
       // Update head to reflect sync failure (not syncing anymore)
@@ -512,6 +585,15 @@ export class AirtableSyncService {
     } finally {
       this.syncing = false;
       useAirtableStore.getState().setSyncing(false);
+      // Clear the live snapshot — the run is either finished or errored; the
+      // persistent sync log captures what happened from here on.
+      useAirtableStore.getState().setCurrentSync(null);
+      saveCurrentSync(this.store, null);
+      // Schedule the next tick marker so the idle countdown reappears
+      // immediately instead of waiting for restartTimer's next setInterval.
+      if (this.running) {
+        useAirtableStore.getState().setNextTickAt(Date.now() + this.getSyncIntervalMs());
+      }
 
       // Broadcast lock released
       await this.broadcastToMembers(LOCK_TYPE, {
@@ -528,6 +610,74 @@ export class AirtableSyncService {
         syncer: this.agent,
         device: this.deviceId,
       });
+    }
+  }
+
+  /**
+   * Translate a SyncProgress event into a Zustand `currentSync` update and
+   * accumulate per-table counters. Persists to IndexedDB at phase boundaries
+   * so a mid-tick refresh can restore the snapshot.
+   */
+  private applyProgress(p: SyncProgress): void {
+    const state = useAirtableStore.getState();
+    const prev = state.currentSync;
+    if (!prev) return;
+
+    // Merge per-table roll-up — grow the array when we see a new table,
+    // patch the existing entry on each update. Keep tableId as the match key
+    // when available; fall back to table-name.
+    const nextPerTable = [...prev.perTable];
+    if (p.table) {
+      const key = p.tableId ?? p.table;
+      const idx = nextPerTable.findIndex((t) => (t.tableId ?? t.table) === key);
+      const base = idx >= 0 ? nextPerTable[idx] : {
+        table: p.table,
+        tableId: p.tableId,
+        ingested: 0,
+        overwritten: 0,
+        skipped: 0,
+      };
+      const patched = {
+        ...base,
+        table: p.table,
+        tableId: p.tableId ?? base.tableId,
+        ingested: p.ingested ?? base.ingested,
+        overwritten: p.overwritten ?? base.overwritten,
+        skipped: p.skipped ?? base.skipped,
+      };
+      if (idx >= 0) nextPerTable[idx] = patched;
+      else nextPerTable.push(patched);
+    }
+
+    const phase: CurrentSyncSnapshot['phase'] =
+      p.phase === 'discovering' ? 'discovering'
+      : p.phase === 'collecting' ? 'collecting'
+      : p.phase === 'fetching' ? 'fetching'
+      : p.phase === 'folding' ? 'folding'
+      : p.phase === 'syncing' ? 'syncing'
+      : p.phase === 'table_done' ? 'table_done'
+      : prev.phase;
+
+    const next: CurrentSyncSnapshot = {
+      ...prev,
+      phase,
+      strategy: p.strategy ?? prev.strategy,
+      preserveExisting: p.preserveExisting ?? prev.preserveExisting,
+      baseId: p.baseId ?? prev.baseId,
+      baseName: p.baseName ?? p.base ?? prev.baseName,
+      table: p.table ?? prev.table,
+      tableId: p.tableId ?? prev.tableId,
+      recordsSoFar: p.records_so_far ?? prev.recordsSoFar,
+      endpoint: p.endpoint ?? prev.endpoint,
+      cursorUsed: p.cursor ?? prev.cursorUsed,
+      perTable: nextPerTable,
+    };
+
+    useAirtableStore.getState().setCurrentSync(next);
+    // Only persist on phase boundaries / table completion — not on every
+    // pagination progress event — so we don't hammer the store.
+    if (phase === 'table_done' || phase !== prev.phase) {
+      saveCurrentSync(this.store, next);
     }
   }
 
@@ -581,17 +731,39 @@ export class AirtableSyncService {
   private async signalCompletion(
     result: HydrationResult | UpdateSyncResult,
     wasHydration: boolean,
+    strategy: 'hydration' | 'lastModified' | 'fullDiff',
   ): Promise<void> {
     const now = new Date().toISOString();
+    const snap = useAirtableStore.getState().currentSync;
 
     useAirtableStore.getState().setLastSyncAt(now);
+    // Roll up per-table counts directly from sync_results — authoritative,
+    // unlike the running perTable on the snapshot which may have been patched
+    // mid-stream.
+    const perTable = result.sync_results.map((r) => ({
+      table: r.table_name,
+      ingested: r.records_ingested,
+      overwritten: r.records_overwritten,
+      skipped: r.records_skipped_no_change + r.records_skipped_duplicate,
+    }));
+    const overwrittenStr = result.total_records_overwritten > 0
+      ? `, ${result.total_records_overwritten} overwritten`
+      : '';
     useAirtableStore.getState().addSyncLogEntry({
       ts: Date.now(),
       type: wasHydration ? 'hydration_complete' : 'sync_complete',
       source: 'local',
       syncer: this.agent,
       device: this.deviceId,
-      detail: `${result.total_records_ingested} ingested, ${result.total_records_skipped} unchanged`,
+      detail: `${result.total_records_ingested} ingested${overwrittenStr}, ${result.total_records_skipped} unchanged`,
+      strategy,
+      preserveExisting: snap?.preserveExisting,
+      perTable,
+      durationMs: result.duration_ms,
+      endpoint: snap?.endpoint,
+      cursorUsed: snap?.cursorUsed,
+      baseId: snap?.baseId,
+      baseName: snap?.baseName,
     });
 
     // Update head state event (deduplicated, not spam)

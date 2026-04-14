@@ -27,6 +27,7 @@ import { useIsMobile, useIsTablet, useIsNarrow } from '../hooks/useIsMobile';
 import { formatName } from './scope-picker-utils';
 import { ConnectionStatus, useConnectionState, type ConnectionState } from './ConnectionStatus';
 import { SyncToast, useSyncToast } from './SyncToast';
+import { AirtableSyncBadge } from './AirtableSyncBadge';
 import { ErrorBoundary } from './ErrorBoundary';
 import { SyncProgress } from './SyncProgress';
 // Lazily-loaded views — split into separate chunks so the initial bundle
@@ -2504,6 +2505,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             retryLabel={connectionError?.phase === 'auth' ? 'Re-login' : undefined}
           />
           {!isMobile && <SyncToast status={syncToastStatus} seq={syncToastSeq} />}
+          {!isMobile && <AirtableSyncBadge />}
           {selectedSpace && !isMobile && (
             <PermissionBadge role={currentRole} displayName={displayName} />
           )}

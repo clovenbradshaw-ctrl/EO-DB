@@ -50,6 +50,12 @@ export interface SyncResult {
   table_name: string;
   records_fetched: number;
   records_ingested: number;
+  /**
+   * Subset of `records_ingested` where the record already existed in EO-DB
+   * and at least one previously non-null field value was replaced. Lets the
+   * UI surface "12 new / 3 overwritten" instead of a flat "15 ingested".
+   */
+  records_overwritten: number;
   records_skipped_no_change: number;
   records_skipped_duplicate: number;
   cursor_before: string | null;
@@ -60,6 +66,8 @@ export interface HydrationResult {
   manifest: HydrationManifest;
   sync_results: SyncResult[];
   total_records_ingested: number;
+  /** Sum of `records_overwritten` across sync_results. */
+  total_records_overwritten: number;
   total_records_skipped: number;
   duration_ms: number;
 }
@@ -67,15 +75,45 @@ export interface HydrationResult {
 export interface UpdateSyncResult {
   sync_results: SyncResult[];
   total_records_ingested: number;
+  /** Sum of `records_overwritten` across sync_results. */
+  total_records_overwritten: number;
   total_records_skipped: number;
   duration_ms: number;
 }
 
+/**
+ * Runtime strategy label for a sync run — drives UI pills / toasts.
+ *   - 'hydration'    — full pull (collectAirtableBundle + processHydrationBundle)
+ *   - 'lastModified' — incremental via LAST_MODIFIED_TIME cursor
+ *   - 'fullDiff'     — full re-hydration used as a full field-diff sweep
+ */
+export type SyncStrategy = 'hydration' | 'lastModified' | 'fullDiff';
+
 export interface SyncProgress {
-  phase: 'discovering' | 'collecting' | 'syncing';
+  phase: 'discovering' | 'collecting' | 'syncing' | 'fetching' | 'folding' | 'table_done';
   base?: string;
+  /** Human-readable base name — mirrors `base` but surfaced explicitly for the UI. */
+  baseName?: string;
+  baseId?: string;
   table?: string;
+  tableId?: string;
   records_so_far?: number;
+  /**
+   * The actual Airtable API URL being queried for the current phase, e.g.
+   * `https://api.airtable.com/v0/appXYZ/tblABC?filterByFormula=...`.
+   * Only populated for phases that hit the network.
+   */
+  endpoint?: string;
+  /** ISO timestamp of the LAST_MODIFIED_TIME cursor used for this table. */
+  cursor?: string;
+  /** Which strategy drove this run — for UI labelling. */
+  strategy?: SyncStrategy;
+  /** Whether this run preserves existing EO-DB field values. */
+  preserveExisting?: boolean;
+  /** Per-table counters emitted with `table_done`. */
+  ingested?: number;
+  overwritten?: number;
+  skipped?: number;
 }
 
 /**
@@ -412,7 +450,7 @@ async function ingestRecord(
   onEvent?: (event: any) => void,
   displayField?: string,
   defaultResolution?: Resolution,
-): Promise<'ingested' | 'skipped_no_change' | 'skipped_duplicate'> {
+): Promise<'ingested' | 'overwritten' | 'skipped_no_change' | 'skipped_duplicate'> {
   const target = recordTarget(baseId, tableId, record.id);
 
   // 1. Extract only storable fields (skip computed/metadata, normalize values)
@@ -424,6 +462,21 @@ async function ingestRecord(
 
   // 3. Compute field-level diff — only fields that actually changed
   let diffFields = computeFieldDiff(storableFields, existingFields);
+
+  // 3a. Detect overwrite: record already existed AND at least one diff field
+  //     was replacing a previously non-null value. This is the count surfaced
+  //     in the "N overwritten" UI pill so users can tell destructive changes
+  //     apart from first-time ingests.
+  let isOverwrite = false;
+  if (existing && existingFields) {
+    for (const key of Object.keys(diffFields)) {
+      const prev = existingFields[key];
+      if (prev !== undefined && prev !== null) {
+        isOverwrite = true;
+        break;
+      }
+    }
+  }
 
   // 4. If preserveExisting, further filter to only fields where existing is null/undefined
   if (preserveExisting && existingFields) {
@@ -509,7 +562,7 @@ async function ingestRecord(
         }, onEvent);
       }
     }
-    return 'ingested';
+    return isOverwrite ? 'overwritten' : 'ingested';
   } catch (e: any) {
     if (e.message?.includes('already')) return 'skipped_duplicate';
     throw e;
@@ -552,6 +605,7 @@ async function syncTable(
   store: EoStore,
   client: AirtableClient,
   baseId: string,
+  baseName: string | undefined,
   tableId: string,
   tableName: string,
   agent: string,
@@ -562,9 +616,11 @@ async function syncTable(
   onProgress?: (progress: SyncProgress) => void,
   recordLimit?: number,
   defaultResolution?: Resolution,
+  strategy: SyncStrategy = 'lastModified',
 ): Promise<SyncResult> {
   let fetched = 0;
   let ingested = 0;
+  let overwritten = 0;
   let skippedNoChange = 0;
   let skippedDuplicate = 0;
   const now = new Date().toISOString();
@@ -589,6 +645,28 @@ async function syncTable(
 
   const useFieldIds = fieldMeta.size > 0;
 
+  // Build the human-facing endpoint URL so the UI can display exactly which
+  // Airtable API request is running right now. This is the same URL Airtable
+  // sees — we stringify it here instead of in the client so the progress
+  // stream doesn't need to know about the network layer.
+  const endpoint = buildAirtableEndpoint(baseId, tableId, { filterByFormula, returnFieldsByFieldId: useFieldIds });
+
+  // Emit a "fetching" progress event with the full request context so the
+  // status card can say: "GET <url> — checking changes since <cursor>".
+  onProgress?.({
+    phase: 'fetching',
+    table: tableName,
+    tableId,
+    base: baseName,
+    baseName,
+    baseId,
+    records_so_far: 0,
+    endpoint,
+    cursor: filterCursor,
+    strategy,
+    preserveExisting,
+  });
+
   let limitReached = false;
   for await (const page of client.paginateRecords(baseId, tableId, {
     filterByFormula,
@@ -600,15 +678,45 @@ async function syncTable(
       const result = await ingestRecord(store, baseId, tableId, record, agent, fieldMeta, exclusions, preserveExisting, onEvent, displayField, defaultResolution);
       switch (result) {
         case 'ingested': ingested++; break;
+        case 'overwritten': ingested++; overwritten++; break;
         case 'skipped_no_change': skippedNoChange++; break;
         case 'skipped_duplicate': skippedDuplicate++; break;
       }
     }
     if (limitReached) break;
-    onProgress?.({ phase: 'syncing', table: tableName, records_so_far: fetched });
+    onProgress?.({
+      phase: 'syncing',
+      table: tableName,
+      tableId,
+      base: baseName,
+      baseName,
+      baseId,
+      records_so_far: fetched,
+      endpoint,
+      cursor: filterCursor,
+      strategy,
+      preserveExisting,
+    });
   }
 
   await setCursor(store, baseId, tableId, now);
+
+  onProgress?.({
+    phase: 'table_done',
+    table: tableName,
+    tableId,
+    base: baseName,
+    baseName,
+    baseId,
+    records_so_far: fetched,
+    endpoint,
+    cursor: filterCursor,
+    strategy,
+    preserveExisting,
+    ingested,
+    overwritten,
+    skipped: skippedNoChange + skippedDuplicate,
+  });
 
   return {
     base_id: baseId,
@@ -616,11 +724,30 @@ async function syncTable(
     table_name: tableName,
     records_fetched: fetched,
     records_ingested: ingested,
+    records_overwritten: overwritten,
     records_skipped_no_change: skippedNoChange,
     records_skipped_duplicate: skippedDuplicate,
     cursor_before: cursorSince,
     cursor_after: now,
   };
+}
+
+/**
+ * Build the same URL the AirtableClient will eventually hit — exposed here
+ * so progress events can surface "which API are we actually calling" in the
+ * UI without having to sniff network requests.
+ */
+function buildAirtableEndpoint(
+  baseId: string,
+  tableId: string,
+  opts: { filterByFormula?: string; returnFieldsByFieldId?: boolean },
+): string {
+  const params = new URLSearchParams();
+  if (opts.filterByFormula) params.set('filterByFormula', opts.filterByFormula);
+  if (opts.returnFieldsByFieldId) params.set('returnFieldsByFieldId', 'true');
+  const qs = params.toString();
+  const base = `https://api.airtable.com/v0/${baseId}/${tableId}`;
+  return qs ? `${base}?${qs}` : base;
 }
 
 // ─── Hydration sync ────────────────────────────────────────────────────────
@@ -920,7 +1047,16 @@ export async function processHydrationBundle(
       await emitFieldConstraints(store, fieldTarget, field, agent, base.id, table.id, opts?.onEvent);
     }
 
-    opts?.onProgress?.({ phase: 'syncing', base: base.name, table: table.name });
+    opts?.onProgress?.({
+      phase: 'folding',
+      base: base.name,
+      baseName: base.name,
+      baseId: base.id,
+      table: table.name,
+      tableId: table.id,
+      strategy: 'hydration',
+      preserveExisting,
+    });
 
     const exclusions = fieldExclusions?.[table.id] ?? EMPTY_EXCLUSIONS;
     const now = new Date().toISOString();
@@ -933,6 +1069,7 @@ export async function processHydrationBundle(
     const displayField: string | undefined = tableState?.value?._displayField;
 
     let ingested = 0;
+    let overwritten = 0;
     let skippedNoChange = 0;
     let skippedDuplicate = 0;
     for (let i = 0; i < tableBundle.records.length; i++) {
@@ -944,17 +1081,41 @@ export async function processHydrationBundle(
       );
       switch (r) {
         case 'ingested': ingested++; break;
+        case 'overwritten': ingested++; overwritten++; break;
         case 'skipped_no_change': skippedNoChange++; break;
         case 'skipped_duplicate': skippedDuplicate++; break;
       }
       if ((i + 1) % 50 === 0 || i === tableBundle.records.length - 1) {
         opts?.onProgress?.({
-          phase: 'syncing', base: base.name, table: table.name, records_so_far: i + 1,
+          phase: 'syncing',
+          base: base.name,
+          baseName: base.name,
+          baseId: base.id,
+          table: table.name,
+          tableId: table.id,
+          records_so_far: i + 1,
+          strategy: 'hydration',
+          preserveExisting,
         });
       }
     }
 
     await setCursor(store, base.id, table.id, now);
+
+    opts?.onProgress?.({
+      phase: 'table_done',
+      base: base.name,
+      baseName: base.name,
+      baseId: base.id,
+      table: table.name,
+      tableId: table.id,
+      records_so_far: tableBundle.records.length,
+      strategy: 'hydration',
+      preserveExisting,
+      ingested,
+      overwritten,
+      skipped: skippedNoChange + skippedDuplicate,
+    });
 
     const result: SyncResult = {
       base_id: base.id,
@@ -962,6 +1123,7 @@ export async function processHydrationBundle(
       table_name: table.name,
       records_fetched: tableBundle.records.length,
       records_ingested: ingested,
+      records_overwritten: overwritten,
       records_skipped_no_change: skippedNoChange,
       records_skipped_duplicate: skippedDuplicate,
       cursor_before: null,
@@ -972,6 +1134,7 @@ export async function processHydrationBundle(
   }
 
   const totalIngested = syncResults.reduce((s, r) => s + r.records_ingested, 0);
+  const totalOverwritten = syncResults.reduce((s, r) => s + r.records_overwritten, 0);
   const totalSkipped = syncResults.reduce(
     (s, r) => s + r.records_skipped_no_change + r.records_skipped_duplicate, 0,
   );
@@ -980,6 +1143,7 @@ export async function processHydrationBundle(
     manifest: bundle.manifest,
     sync_results: syncResults,
     total_records_ingested: totalIngested,
+    total_records_overwritten: totalOverwritten,
     total_records_skipped: totalSkipped,
     duration_ms: Date.now() - start,
   };
@@ -1170,15 +1334,26 @@ export async function updateSync(
         await emitFieldConstraints(store, fieldTarget, field, agent, base.id, table.id, opts?.onEvent);
       }
 
-      opts?.onProgress?.({ phase: 'syncing', base: base.name, table: table.name });
+      opts?.onProgress?.({
+        phase: 'syncing',
+        base: base.name,
+        baseName: base.name,
+        baseId: base.id,
+        table: table.name,
+        tableId: table.id,
+        strategy: 'lastModified',
+        preserveExisting,
+        cursor,
+      });
 
       const exclusions = fieldExclusions?.[table.id] ?? EMPTY_EXCLUSIONS;
 
       const result = await syncTable(
-        store, client, base.id, table.id, table.name, agent, cursor,
+        store, client, base.id, base.name, table.id, table.name, agent, cursor,
         exclusions, preserveExisting,
         opts?.onEvent, opts?.onProgress, recordLimit,
         defaultResolution,
+        'lastModified',
       );
       syncResults.push(result);
       opts?.onTableComplete?.(result);
@@ -1186,6 +1361,7 @@ export async function updateSync(
   }
 
   const totalIngested = syncResults.reduce((s, r) => s + r.records_ingested, 0);
+  const totalOverwritten = syncResults.reduce((s, r) => s + r.records_overwritten, 0);
   const totalSkipped = syncResults.reduce(
     (s, r) => s + r.records_skipped_no_change + r.records_skipped_duplicate, 0,
   );
@@ -1193,6 +1369,7 @@ export async function updateSync(
   return {
     sync_results: syncResults,
     total_records_ingested: totalIngested,
+    total_records_overwritten: totalOverwritten,
     total_records_skipped: totalSkipped,
     duration_ms: Date.now() - start,
   };
