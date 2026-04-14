@@ -769,6 +769,9 @@ mark.span-def    { background: rgba(34,211,238,0.15); }
     <div class="header-right" id="header-chips">
       <!-- chips populated on process -->
     </div>
+    <span id="classifier-status" style="font-size:11px;color:var(--muted);margin-left:10px;">
+      Loading classifier…
+    </span>
   </header>
 
   <div class="body">
@@ -862,6 +865,232 @@ mark.span-def    { background: rgba(34,211,238,0.15); }
 
   </div>
 </div>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     EO EMBEDDING CLASSIFIER — in-browser, nearest-centroid lookup
+     Loaded as an ES module so it can `import` transformers.js.
+     Exposes its API on window.EOClassifier for the main (non-module)
+     script block below to call.
+     ═══════════════════════════════════════════════════════════════ -->
+<script type="module">
+import { pipeline } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2';
+
+const MODEL_ID    = 'Xenova/all-MiniLM-L6-v2';
+const ML_MODEL_ID = 'Xenova/paraphrase-multilingual-MiniLM-L12-v2';  // ~118MB lazy
+const DIM = 384;
+
+const CONF_THRESHOLD = {
+  latin: 0.08, cyrillic: 0.06, arabic: 0.04,
+  devanagari: 0.04, cjk: 0.04, default: 0.05,
+};
+
+let _embedder = null, _mlEmbedder = null;
+let _centroids = null, _alignMatrix = null, _ready = false;
+
+// ── OPFS-backed classification cache ────────────────────────────
+// Borrowed from the EO-DB fold architecture: treat embedding output as
+// durable state. A clause's (text, script) pair is keyed by FNV-1a hash;
+// a hit skips the embedding + centroid compare entirely. Index is flushed
+// to OPFS in barriers between batches so crashes lose at most one batch.
+const CACHE_DIR     = 'eo-embed-cache';
+const CACHE_VERSION = 'v1.0';   // bump when centroid set changes
+let _opfsDir    = null;
+let _cacheIndex = null;    // Map<hash, result>
+let _cacheDirty = 0;
+
+async function initCache() {
+  try {
+    if (!navigator.storage?.getDirectory) return;
+    const root = await navigator.storage.getDirectory();
+    _opfsDir    = await root.getDirectoryHandle(CACHE_DIR, { create: true });
+    _cacheIndex = new Map();
+    try {
+      const fh   = await _opfsDir.getFileHandle('index_' + CACHE_VERSION + '.json');
+      const blob = await fh.getFile();
+      const obj  = JSON.parse(await blob.text());
+      for (const k in obj) _cacheIndex.set(k, obj[k]);
+    } catch { /* first run */ }
+  } catch (e) { console.warn('OPFS unavailable — cache disabled:', e); }
+}
+
+async function cacheFlush() {
+  if (!_opfsDir || !_cacheIndex) return;
+  _cacheDirty = 0;
+  try {
+    const fh  = await _opfsDir.getFileHandle('index_' + CACHE_VERSION + '.json', { create: true });
+    const w   = await fh.createWritable();
+    const obj = Object.fromEntries(_cacheIndex);
+    await w.write(new Blob([JSON.stringify(obj)]));
+    await w.close();
+  } catch (e) { console.warn('OPFS flush failed:', e); }
+}
+
+function hashKey(script, text) {
+  const s = (script || '?') + '|' + CACHE_VERSION + '|' + text;
+  let h1 = 0x811c9dc5, h2 = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    h1 ^= c; h1 = Math.imul(h1, 0x01000193) >>> 0;
+    h2 ^= (c + i); h2 = Math.imul(h2, 0x01000193) >>> 0;
+  }
+  return h1.toString(16) + h2.toString(16);
+}
+
+async function initClassifier(centroidsUrl, alignmentUrl) {
+  _embedder  = await pipeline('feature-extraction', MODEL_ID, { quantized: true });
+  const cRes = await fetch(centroidsUrl);
+  if (!cRes.ok) throw new Error('centroids fetch failed: ' + cRes.status);
+  _centroids = await cRes.json();
+  if (alignmentUrl) {
+    try {
+      const d = await (await fetch(alignmentUrl)).json();
+      _alignMatrix = new Float32Array(DIM * DIM);
+      for (let i = 0; i < DIM; i++)
+        for (let j = 0; j < DIM; j++)
+          _alignMatrix[i * DIM + j] = d.R[i][j];
+    } catch (e) { console.warn('No alignment matrix'); }
+  }
+  await initCache();
+  _ready = true;
+}
+
+function isReady() { return _ready; }
+
+async function getEmbedder(script) {
+  if (!script || script === 'latin' || script === 'cyrillic') return _embedder;
+  if (!_mlEmbedder) {
+    const label = document.getElementById('parsing-label');
+    if (label) label.textContent = 'Loading multilingual model…';
+    _mlEmbedder = await pipeline('feature-extraction', ML_MODEL_ID, { quantized: true });
+  }
+  return _mlEmbedder;
+}
+
+async function embedText(text, script) {
+  const embedder = await getEmbedder(script);
+  const out = await embedder(text, { pooling: 'mean', normalize: true });
+  return Array.from(out.data);
+}
+
+function applyAlignment(v) {
+  if (!_alignMatrix) return v;
+  const r = new Float32Array(DIM);
+  for (let j = 0; j < DIM; j++) {
+    let s = 0;
+    for (let i = 0; i < DIM; i++) s += v[i] * _alignMatrix[i * DIM + j];
+    r[j] = s;
+  }
+  let norm = 0;
+  for (let i = 0; i < DIM; i++) norm += r[i] * r[i];
+  norm = Math.sqrt(norm);
+  for (let i = 0; i < DIM; i++) r[i] /= norm;
+  return Array.from(r);
+}
+
+function cosine(a, b) {
+  let dot = 0;
+  for (let i = 0; i < a.length; i++) dot += a[i] * b[i];
+  return dot;
+}
+
+async function classifyClause(text, script, mechanicalOp) {
+  if (!_ready) throw new Error('Classifier not initialized');
+  let v = await embedText(text, script);
+  // Procrustes alignment only applies to the small (non-multilingual) model
+  if (!script || script === 'latin' || script === 'cyrillic') {
+    v = applyAlignment(v);
+  }
+  const scores = _centroids.map(c => ({
+    ...c, score: cosine(v, c.vector)
+  })).sort((a, b) => b.score - a.score);
+  const gap = scores[0].score - scores[1].score;
+  const threshold = CONF_THRESHOLD[script] || CONF_THRESHOLD.default;
+  const flags = [];
+  if (script && script !== 'latin' && gap < 0.08) flags.push('low_confidence_nolatin');
+  if (gap < threshold) flags.push('boundary');
+  if (mechanicalOp && mechanicalOp !== scores[0].operator) flags.push('mechanical_conflict');
+  return {
+    cell_id: scores[0].cell_id, cell_key: scores[0].cell_key,
+    operator: scores[0].operator, site: scores[0].site,
+    resolution: scores[0].resolution, mode: scores[0].mode,
+    domain: scores[0].domain,
+    confidence_gap: parseFloat(gap.toFixed(4)),
+    similarity_profile: scores.map(s => ({ cell_id: s.cell_id, score: parseFloat(s.score.toFixed(4)) })),
+    mechanical_operator: mechanicalOp || null,
+    agreement: mechanicalOp ? mechanicalOp === scores[0].operator : null,
+    flags, script: script || 'unknown',
+  };
+}
+
+// Wave-fold classifier:
+//   Wave 0 — cache lookup (OPFS hit → zero embedding cost)
+//   Wave 1 — embedding + nearest-centroid for cache misses, in batches
+//            with barriers (flush cache, yield UI, release intermediate arrays)
+// Results are written into a pre-allocated array (SeqReservoir pattern)
+// so order is deterministic even under sharded iteration.
+async function classifyClauses(clauses, script, mechOps, onProgress) {
+  const total   = clauses.length;
+  const results = new Array(total);
+  const BATCH   = 32;
+
+  // Wave 0 — cache lookup
+  const toEmbed = [];
+  for (let i = 0; i < total; i++) {
+    const key    = hashKey(script, clauses[i].text);
+    const cached = _cacheIndex?.get(key);
+    if (cached) {
+      // Re-apply mechanical-operator agreement for the current call
+      const mech = mechOps?.[i] || null;
+      results[i] = {
+        ...cached,
+        mechanical_operator: mech,
+        agreement: mech ? mech === cached.operator : null,
+      };
+    } else {
+      toEmbed.push({ i, key });
+    }
+  }
+  if (onProgress) onProgress(total - toEmbed.length, total);
+
+  // Wave 1 — embed + classify in chunked batches
+  let done = total - toEmbed.length;
+  for (let b = 0; b < toEmbed.length; b += BATCH) {
+    const slice = toEmbed.slice(b, b + BATCH);
+    for (const { i, key } of slice) {
+      const r = await classifyClause(clauses[i].text, script, mechOps?.[i]);
+      results[i] = r;
+      // Cache a mech-independent copy
+      const cacheable = { ...r };
+      delete cacheable.mechanical_operator;
+      delete cacheable.agreement;
+      _cacheIndex?.set(key, cacheable);
+      _cacheDirty++;
+      done++;
+      if (onProgress) onProgress(done, total);
+    }
+    // Barrier: flush cache, yield to UI, release slice references
+    if (_cacheDirty >= BATCH) await cacheFlush();
+    await new Promise(r => setTimeout(r, 0));
+  }
+  await cacheFlush();
+  return results;
+}
+
+// Expose API on window for the non-module script block
+window.EOClassifier = { initClassifier, isReady, classifyClause, classifyClauses };
+
+// Auto-init on load. centroids.json + alignment_matrix.json are produced by
+// generate_centroids.py (Phase 1). If absent, the classifier stays unavailable
+// and the mechanical-only pipeline continues to work.
+initClassifier('centroids.json', 'alignment_matrix.json').then(() => {
+  const el = document.getElementById('classifier-status');
+  if (el) el.textContent = '○ Classifier ready';
+}).catch((e) => {
+  console.warn('Classifier unavailable:', e);
+  const el = document.getElementById('classifier-status');
+  if (el) el.textContent = '○ Classifier unavailable';
+});
+</script>
 
 <script>
 // ═══════════════════════════════════════════════════════
@@ -2062,7 +2291,192 @@ function stageREC_superposition(combinedLog) {
 // FULL INGEST
 // ═══════════════════════════════════════════════════════
 
-function ingest(text, title, source) {
+async function stageEmbeddingClassify(log, da) {
+  if (!window.EOClassifier || !window.EOClassifier.isReady()) return;
+  const clauseEntries = log.byOp('SEG').filter(e =>
+    e.operand?.type === 'clause' && e.provenance?.doc_anchor === da
+  );
+  if (!clauseEntries.length) return;
+
+  const clauses = clauseEntries.map(e => ({ text: e.operand.text }));
+  // Mechanical operator prediction per clause — not yet implemented; extend
+  // later with a _getMechanicalOp(clauseEntry) that reads surface cues.
+  const mechOps = clauseEntries.map(() => null);
+
+  const results = await window.EOClassifier.classifyClauses(
+    clauses, _currentScript, mechOps,
+    (done, total) => {
+      const el = document.getElementById('parsing-label');
+      if (el) el.textContent = `Classifying ${done}/${total} clauses…`;
+    }
+  );
+
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i], seg = clauseEntries[i];
+    log.push(makeEntry('EVA',
+      anchor('eva:emb:' + seg.anchor + ':' + r.cell_id),
+      seg.anchor,
+      {
+        eva_type: 'embedding_classification',
+        cell_id: r.cell_id, cell_key: r.cell_key,
+        operator: r.operator, site: r.site, resolution: r.resolution,
+        mode: r.mode, domain: r.domain,
+        confidence_gap: r.confidence_gap,
+        similarity_profile: r.similarity_profile,
+        mechanical_operator: r.mechanical_operator,
+        agreement: r.agreement, flags: r.flags,
+        notation: `${r.operator}(${r.site}, ${r.resolution})`,
+      },
+      {
+        source: 'mechanical:embedding_classify',
+        span_start: seg.provenance?.span_start,
+        span_end: seg.provenance?.span_end,
+        doc_anchor: da, script: _currentScript,
+        model_version: 'all-MiniLM-L6-v2',
+        centroid_version: 'v1.0',
+        confidence: Math.min(0.4 + r.confidence_gap * 4, 0.95),
+      }
+    ));
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+// DEF → EVA → REC loop for embedding evidence (Phase 3)
+// ═══════════════════════════════════════════════════════
+
+function stageDomainAdapter(combinedLog) {
+  const entries = combinedLog.entries();
+  const highConf = entries.filter(e =>
+    e.op === 'EVA' &&
+    e.operand?.eva_type === 'embedding_classification' &&
+    e.operand?.confidence_gap >= 0.12 &&
+    e.operand?.agreement !== false
+  );
+  if (!highConf.length) return;
+
+  const byCell = {};
+  for (const e of highConf) {
+    const cid = e.operand.cell_id;
+    if (!byCell[cid]) byCell[cid] = [];
+    byCell[cid].push(e);
+  }
+
+  for (const [cellId, evas] of Object.entries(byCell)) {
+    if (evas.length < 5) continue;
+    const topCells = evas.map(e =>
+      e.operand.similarity_profile.slice(0, 3).map(s => s.cell_id).join(',')
+    );
+    const sigFreq = {};
+    for (const s of topCells) sigFreq[s] = (sigFreq[s] || 0) + 1;
+    const dominantSig = Object.entries(sigFreq).sort((a, b) => b[1] - a[1])[0]?.[0];
+    const a = anchor('def:domain_adapter:' + cellId);
+    if (entries.some(e => e.anchor === a && e.operand?.dominant_signature === dominantSig)) continue;
+
+    combinedLog.push(makeEntry('DEF', a, anchor('cell:' + cellId), {
+      param: 'domain_centroid',
+      value: cellId,
+      n: evas.length,
+      mean_confidence_gap: parseFloat((evas.reduce((s, e) => s + e.operand.confidence_gap, 0) / evas.length).toFixed(4)),
+      dominant_signature: dominantSig,
+      agreement_rate: parseFloat((evas.filter(e => e.operand.agreement).length / evas.length).toFixed(3)),
+      note: 'domain adapter — not a centroid replacement',
+    }, { source: 'mechanical:domain_adapter', confidence: Math.min(0.5 + evas.length * 0.01, 0.85) }));
+  }
+}
+
+function stageEVA_embedding(combinedLog) {
+  const entries = combinedLog.entries();
+  const embEVAs = entries.filter(e =>
+    e.op === 'EVA' && e.operand?.eva_type === 'embedding_classification'
+  );
+  if (embEVAs.length < 20) return;
+
+  const cellStats = {};
+  for (const e of embEVAs) {
+    const cid = e.operand.cell_id;
+    if (!cellStats[cid]) cellStats[cid] = { total: 0, conflicts: 0, boundaries: 0, mech_conflicts: 0 };
+    const s = cellStats[cid];
+    s.total++;
+    if (e.operand.flags?.includes('boundary')) s.boundaries++;
+    if (e.operand.flags?.includes('mechanical_conflict')) s.mech_conflicts++;
+    if (e.operand.flags?.includes('boundary') && e.operand.flags?.includes('mechanical_conflict'))
+      s.conflicts++;
+  }
+
+  const cells = Object.entries(cellStats);
+  if (cells.length < 3) return;
+  const rates = cells.map(([, s]) => s.total > 0 ? s.conflicts / s.total : 0);
+  const mean = rates.reduce((a, b) => a + b, 0) / rates.length;
+  const sd   = Math.sqrt(rates.reduce((a, b) => a + (b - mean) ** 2, 0) / rates.length) || 0.001;
+
+  for (let i = 0; i < cells.length; i++) {
+    const [cellId, s] = cells[i];
+    const z = (rates[i] - mean) / sd;
+    if (Math.abs(z) < 0.5) continue;
+    const a = anchor('eva:emb_pressure:' + cellId);
+    if (entries.some(e => e.anchor === a)) continue;
+    combinedLog.push(makeEntry('EVA', a, anchor('cell:' + cellId), {
+      eva_type: 'embedding_pressure',
+      cell_id: cellId,
+      result: z > 1.5 ? 'conflicts' : z > 0.5 ? 'extends' : 'satisfies',
+      z_score: parseFloat(z.toFixed(3)),
+      total: s.total, conflict_count: s.conflicts,
+      boundary_count: s.boundaries, mech_conflict: s.mech_conflicts,
+      conflict_rate: parseFloat((s.total > 0 ? s.conflicts / s.total : 0).toFixed(3)),
+    }, { source: 'mechanical:eva_embedding_pressure', confidence: Math.min(0.6 + s.total * 0.005, 0.9) }));
+  }
+}
+
+function stageREC_embedding(combinedLog) {
+  const entries = combinedLog.entries();
+  const pressureEVAs = entries.filter(e =>
+    e.op === 'EVA' && e.operand?.eva_type === 'embedding_pressure' && e.operand?.z_score > 1.5
+  );
+  for (const pEVA of pressureEVAs) {
+    const cellId = pEVA.operand.cell_id;
+    const ra = anchor('rec:emb:' + cellId);
+    if (entries.some(e => e.anchor === ra)) continue;
+
+    const altCounts = {};
+    for (const e of entries) {
+      if (e.op !== 'EVA' || e.operand?.eva_type !== 'embedding_classification') continue;
+      if (!e.operand?.flags?.includes('boundary')) continue;
+      const second = e.operand.similarity_profile?.[1]?.cell_id;
+      if (second && second !== cellId) altCounts[second] = (altCounts[second] || 0) + 1;
+    }
+    const topAlt = Object.entries(altCounts).sort((a, b) => b[1] - a[1])[0];
+    const sampleClauses = entries
+      .filter(e => e.op === 'EVA' && e.operand?.eva_type === 'embedding_classification'
+        && e.operand?.cell_id === cellId && e.operand?.flags?.includes('boundary'))
+      .slice(0, 5).map(e => e.target);
+
+    combinedLog.push(makeEntry('REC', ra, anchor('cell:' + cellId), {
+      trigger: 'embedding_cell_pressure',
+      cell_id: cellId,
+      z_score: pEVA.operand.z_score,
+      conflict_count: pEVA.operand.conflict_count,
+      competing_cell: topAlt?.[0] || null,
+      competing_count: topAlt?.[1] || 0,
+      sample_clauses: sampleClauses,
+      resolution_options: [
+        'accept_boundary — add to boundary exemplar set',
+        'domain_mapping — surface form means this cell in this domain',
+        'flag_for_corpus — needs new exemplars in next centroid version',
+      ],
+      new_frame: null,
+      resolution: 'pending_human',
+      note: `Cell ${cellId} under embedding pressure z=${pEVA.operand.z_score.toFixed(2)} — competing with ${topAlt?.[0] || 'unknown'}`,
+    }, { source: 'mechanical:rec_embedding', confidence: Math.min(0.7 + pEVA.operand.conflict_count * 0.02, 0.92) }));
+  }
+}
+
+function stageEmbeddingLoop(combinedLog) {
+  stageDomainAdapter(combinedLog);
+  stageEVA_embedding(combinedLog);
+  stageREC_embedding(combinedLog);
+}
+
+async function ingest(text, title, source) {
   const log = new OperatorLog();
   text = cleanText(text);
   _currentScript = detectScript(text);  // set global script context for this ingest
@@ -2095,6 +2509,9 @@ function ingest(text, title, source) {
 
   // 9. DEF (frame) — structural hypothesis: CON neighborhood at this moment
   stageFrameDEF(log, entityAnchors, da);
+
+  // 9b. EVA (embedding) — per-clause nearest-centroid classification
+  await stageEmbeddingClassify(log, da);
 
   // 10. EVA (temporal) — data collection pass: date-anchored assertions
   stageEVA_temporal(log, text, da);
@@ -2129,8 +2546,7 @@ function runIngest() {
 
   document.getElementById('btn-process').disabled = true;
 
-  setTimeout(() => {
-    const { log, doc_anchor } = ingest(text, title, title);
+  ingest(text, title, title).then(({ log, doc_anchor }) => {
     state.docs.push({ title, text, log, doc_anchor });
     state.activeDoc = state.docs.length - 1;
 
@@ -2149,6 +2565,8 @@ function runIngest() {
     stageSIM_candidates(state.combined, state.docs.map(d => d.log));
     // REC: fires when irresolvable superposition detected in combined log
     stageREC_superposition(state.combined);
+    // Phase 3 — DEF → EVA → REC loop on embedding evidence
+    stageEmbeddingLoop(state.combined);
 
     renderAll();
     document.getElementById('btn-process').disabled = false;
@@ -2157,7 +2575,12 @@ function runIngest() {
     document.getElementById('doc-input').style.display = 'none';
     document.getElementById('doc-viewer').style.display = 'block';
     renderDocViewer();
-  }, 20);
+  }).catch((err) => {
+    console.error('ingest failed', err);
+    document.getElementById('btn-process').disabled = false;
+    const el = document.getElementById('parsing-label');
+    if (el) el.textContent = 'Error: ' + (err?.message || err);
+  });
 }
 
 // Resolve display name for an entity anchor by looking up its DEF entries
@@ -2290,6 +2713,16 @@ function entryMainText(e) {
       const r = e.operand.result;
       const delta = e.operand.neighbor_delta >= 0 ? `+${e.operand.neighbor_delta}` : `${e.operand.neighbor_delta}`;
       return `EVA [${r}]: ${delta} neighbors · lost=${e.operand.neighbors_lost?.length||0} gained=${e.operand.neighbors_gained?.length||0}`;
+    }
+    if (e.operand?.eva_type === 'embedding_classification') {
+      const notation = e.operand.notation || `${e.operand.operator}(?)`;
+      const gap = e.operand.confidence_gap?.toFixed(3) || '?';
+      const flags = e.operand.flags?.length ? ` ⚑${e.operand.flags.join(',')}` : '';
+      const agree = e.operand.agreement === false ? ' ≠mech' : '';
+      return `EVA [embed] ${notation} · gap=${gap}${agree}${flags}`;
+    }
+    if (e.operand?.eva_type === 'embedding_pressure') {
+      return `EVA [pressure] ${e.operand.cell_id} z=${e.operand.z_score?.toFixed(2)}σ · ${e.operand.conflict_count} conflicts`;
     }
     return `${e.operand?.entity_text} = ${e.operand?.value} @ ${e.operand?.at_time || '?'}`;
   }
