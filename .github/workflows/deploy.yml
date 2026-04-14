@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'github-matrix-dev/app/**'
+      - 'nl/**'
       - '.github/workflows/deploy.yml'
 
 permissions:
