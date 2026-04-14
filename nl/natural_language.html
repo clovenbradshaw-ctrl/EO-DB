@@ -1045,19 +1045,33 @@ async function bakeCentroids(onProgress) {
   const tasks = [];
   const perCellTop = {};
   let skipped = 0;
+  // Schema (per exemplars.json _legend):
+  //   clause   — sentence text (was called "text" in older corpora)
+  //   language — ISO 639-1 code (was "lang")
+  //   margin_composite — ranking key for 27cell (min margin across all faces)
+  //   margin_face      — fallback for per-face exemplar sets
+  const marginOf = (e) =>
+    (typeof e.margin_composite === 'number') ? e.margin_composite :
+    (typeof e.margin_face === 'number')      ? e.margin_face :
+    (typeof e.margin === 'number')           ? e.margin : 0;
+  const textOf = (e) =>
+    (typeof e.clause === 'string' && e.clause.trim()) ? e.clause :
+    (typeof e.text === 'string' && e.text.trim())     ? e.text : '';
+  const langOf = (e) => e.language || e.lang || 'en';
+
   for (const key of cellKeys) {
     const english = cells[key]
-      .filter(e => (e.lang || 'en') === 'en')
+      .filter(e => langOf(e) === 'en')
       .filter(e => {
-        const ok = typeof e.text === 'string' && e.text.trim().length > 0;
+        const ok = textOf(e).length > 0;
         if (!ok) skipped++;
         return ok;
       });
-    const ranked  = english.sort((a, b) => (b.margin || 0) - (a.margin || 0));
-    let top = ranked.filter(e => (e.margin || 0) >= MIN_MARGIN).slice(0, TOP_N);
+    const ranked  = english.sort((a, b) => marginOf(b) - marginOf(a));
+    let top = ranked.filter(e => marginOf(e) >= MIN_MARGIN).slice(0, TOP_N);
     if (!top.length) top = ranked.slice(0, Math.min(10, ranked.length));
     perCellTop[key] = top;
-    for (const ex of top) tasks.push({ key, text: ex.text });
+    for (const ex of top) tasks.push({ key, text: textOf(ex) });
   }
   if (skipped) console.warn(`bakeCentroids: skipped ${skipped} exemplars with missing/empty text`);
   if (!tasks.length) throw new Error('No usable exemplars (all entries missing text)');
@@ -1099,7 +1113,7 @@ async function bakeCentroids(onProgress) {
     const inner = key.slice(op.length + 1, -1);
     const parts = inner.split(',').map(s => s.trim());
     const cell_id = key.replace('(', '_').replace(')', '').replace(', ', '_').replace(' ', '_');
-    const margins = perCellTop[key].map(e => e.margin || 0);
+    const margins = perCellTop[key].map(marginOf);
 
     records.push({
       cell_id, cell_key: key, operator: op,

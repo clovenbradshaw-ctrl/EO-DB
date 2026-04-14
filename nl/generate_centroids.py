@@ -3,7 +3,9 @@ EO Embedding Classification System — Phase 1
 Centroid Generation (offline, Python)
 
 Inputs:
-  data/exemplars.json
+  exemplars.json (auto-discovered: $1 CLI arg, ./exemplars.json,
+  ./data/exemplars.json, alongside this script, or downloaded from
+  the canonical upstream URL).
 Outputs:
   centroids.json
   alignment_matrix.json
@@ -16,6 +18,9 @@ Dependencies:
 """
 
 import json
+import os
+import sys
+import urllib.request
 import numpy as np
 from scipy.linalg import orthogonal_procrustes
 from sentence_transformers import SentenceTransformer
@@ -27,21 +32,80 @@ MIN_MARGIN         = 0.03
 ALIGNMENT_N        = 500
 BATCH_SIZE         = 64
 
-with open('data/exemplars.json') as f:
-    data = json.load(f)
+EXEMPLARS_URL = (
+    'https://raw.githubusercontent.com/clovenbradshaw-ctrl/'
+    'eo-lexical-analysis-2.0/main/run_2026-03-19_144302/exemplars.json'
+)
+
+def load_exemplars():
+    """Load exemplars.json from CLI arg, common local paths, or download."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = []
+    if len(sys.argv) > 1:
+        candidates.append(sys.argv[1])
+    candidates += [
+        'exemplars.json',
+        'data/exemplars.json',
+        os.path.join(script_dir, 'exemplars.json'),
+        os.path.join(script_dir, 'data', 'exemplars.json'),
+    ]
+    for path in candidates:
+        if path and os.path.isfile(path):
+            print(f"Loading exemplars from {path}")
+            with open(path) as f:
+                return json.load(f)
+    print(f"No local exemplars.json found. Downloading from {EXEMPLARS_URL}")
+    cache_path = os.path.join(script_dir, 'exemplars.json')
+    with urllib.request.urlopen(EXEMPLARS_URL) as resp:
+        payload = resp.read()
+    with open(cache_path, 'wb') as f:
+        f.write(payload)
+    print(f"Cached to {cache_path}")
+    return json.loads(payload)
+
+# Schema (per exemplars.json _legend):
+#   clause           — sentence text (older corpora used "text")
+#   language         — ISO 639-1 code (older: "lang")
+#   margin_composite — ranking key for 27cell (min margin across all faces)
+#   margin_face      — fallback for per-face exemplar sets
+def margin_of(e):
+    for k in ('margin_composite', 'margin_face', 'margin'):
+        v = e.get(k)
+        if isinstance(v, (int, float)):
+            return v
+    return 0
+
+def text_of(e):
+    for k in ('clause', 'text'):
+        v = e.get(k)
+        if isinstance(v, str) and v.strip():
+            return v
+    return ''
+
+def lang_of(e):
+    return e.get('language') or e.get('lang') or 'en'
+
+data = load_exemplars()
 cells = data['27cell']
 
 # Select top-N consensus exemplars per cell
 selected = {}
 all_english = []
+skipped = 0
 for cell_key, exemplars in cells.items():
-    ranked = sorted(exemplars, key=lambda x: x.get('margin', 0), reverse=True)
-    top = [e for e in ranked if e.get('margin', 0) >= MIN_MARGIN][:TOP_N]
+    usable = [e for e in exemplars if text_of(e)]
+    skipped += len(exemplars) - len(usable)
+    ranked = sorted(usable, key=margin_of, reverse=True)
+    top = [e for e in ranked if margin_of(e) >= MIN_MARGIN][:TOP_N]
     if not top:
         top = ranked[:min(10, len(ranked))]
-    selected[cell_key] = [e['text'] for e in top]
-    all_english.extend([e['text'] for e in top if e.get('lang') == 'en'])
+    selected[cell_key] = [text_of(e) for e in top]
+    all_english.extend([text_of(e) for e in top if lang_of(e) == 'en'])
     print(f"  {cell_key}: {len(top)} exemplars")
+if skipped:
+    print(f"  (skipped {skipped} exemplars with missing/empty text)")
+if not any(selected.values()):
+    raise SystemExit('No usable exemplars (all entries missing text)')
 
 # Embed with multilingual model
 ml_model = SentenceTransformer(MULTILINGUAL_MODEL)
@@ -56,16 +120,14 @@ for cell_key, texts in selected.items():
     centroid /= np.linalg.norm(centroid)
     intra_variance = float(np.mean([1 - float(np.dot(e, centroid)) for e in embeddings]))
     centroids[cell_key] = centroid.tolist()
+    top_for_stats = sorted(cells[cell_key], key=margin_of, reverse=True)[:TOP_N]
     centroid_stats[cell_key] = {
         'exemplar_count': len(texts),
-        'mean_margin': float(np.mean([
-            e.get('margin', 0) for e in sorted(
-                cells[cell_key], key=lambda x: x.get('margin', 0), reverse=True
-            )[:TOP_N]
-        ])),
-        'intra_variance': intra_variance
+        'mean_margin': float(np.mean([margin_of(e) for e in top_for_stats])) if top_for_stats else 0.0,
+        'intra_variance': intra_variance,
     }
 
+# Operator keys match the exemplars.json _legend (Significance row is ALT/SUP/REC).
 OP_MAP = {
     'NUL': {'mode': 'Differentiating', 'domain': 'Existence'},
     'SIG': {'mode': 'Relating',        'domain': 'Existence'},
@@ -73,8 +135,8 @@ OP_MAP = {
     'SEG': {'mode': 'Differentiating', 'domain': 'Structure'},
     'CON': {'mode': 'Relating',        'domain': 'Structure'},
     'SYN': {'mode': 'Generating',      'domain': 'Structure'},
-    'EVA': {'mode': 'Differentiating', 'domain': 'Significance'},
-    'DEF': {'mode': 'Relating',        'domain': 'Significance'},
+    'ALT': {'mode': 'Differentiating', 'domain': 'Significance'},
+    'SUP': {'mode': 'Relating',        'domain': 'Significance'},
     'REC': {'mode': 'Generating',      'domain': 'Significance'},
 }
 
