@@ -16,18 +16,31 @@
 import { useEoStore } from '../store/eo-store';
 import type { EoEventInput, Operator } from '../db/types';
 import { classifyBatch, initClassifier, type Classification } from './eo-classifier';
+import {
+  extractTriples,
+  getSpoExtractorStatus,
+  initSpoExtractor,
+  type ExtractedTriple,
+} from './spo-extractor';
 import type { ExtractedDocument, RawClause } from './clause-extractor';
 
 const BATCH_SIZE = 32;
+const SPO_BATCH_SIZE = 8;
 const PROGRESS_KEY_PREFIX = 'eo-nl-progress:';
 
 export interface IngestProgress {
   doc_id: string;
   total: number;
   processed: number;
-  phase: 'queued' | 'embedding' | 'committing' | 'done' | 'error';
+  phase: 'queued' | 'embedding' | 'extracting_triples' | 'committing' | 'done' | 'error';
   message?: string;
   classificationsByIx: Record<number, Classification>;
+  /** Extracted triples grouped by clause_ix. Populated as SPO extraction progresses. */
+  triplesByIx: Record<number, ExtractedTriple[]>;
+  /** Per-triple 27-cell classification keyed by `${clause_ix}:${triple_ix}`. */
+  tripleClassifications: Record<string, Classification>;
+  /** True when SPO was attempted but the extractor failed to load or was disabled. */
+  tripleExtractionSkipped?: boolean;
 }
 
 type ProgressListener = (p: IngestProgress) => void;
@@ -84,7 +97,17 @@ function event(
 
 /** Convert a RawClause to a stable anchor target string. */
 function clauseTarget(doc_id: string, clause: RawClause): string {
-  return `nl_clause:${doc_id}:${clause.clause_ix}`;
+  return clauseTargetById(doc_id, clause.clause_ix);
+}
+
+/** Same as `clauseTarget` but indexed by clause_ix directly. */
+function clauseTargetById(doc_id: string, clause_ix: number): string {
+  return `nl_clause:${doc_id}:${clause_ix}`;
+}
+
+/** Stable anchor target for a single triple within a clause. */
+function tripleTarget(doc_id: string, clause_ix: number, triple_ix: number): string {
+  return `${clauseTargetById(doc_id, clause_ix)}:triple:${triple_ix}`;
 }
 
 /**
@@ -107,6 +130,8 @@ export async function ingestDocument(
     processed: resumeFrom,
     phase: 'queued',
     classificationsByIx: {},
+    triplesByIx: {},
+    tripleClassifications: {},
   };
   const notify = (patch: Partial<IngestProgress>) => {
     Object.assign(progress, patch);
@@ -193,9 +218,140 @@ export async function ingestDocument(
     notify({ processed });
   }
 
+  // ── SPO triple extraction ──────────────────────────────────────────────
+  // This runs after clause-level classification so the existing EVA stream
+  // is never delayed by the heavier REBEL model. Triples are additive — if
+  // the extractor is disabled or fails to boot we flag it and return.
+  notify({ phase: 'extracting_triples' });
+  try {
+    const spoStatus = await initSpoExtractor();
+    if (spoStatus.state === 'ready') {
+      await ingestTriples(doc, progress, agent, notify);
+    } else {
+      notify({ tripleExtractionSkipped: true });
+    }
+  } catch (err) {
+    // Extraction is best-effort; surface the message but don't fail the doc.
+    notify({
+      tripleExtractionSkipped: true,
+      message: `SPO skipped: ${(err as Error).message ?? String(err)}`,
+    });
+  }
+
   notify({ phase: 'done', processed: total });
   clearCheckpoint(doc.doc_id);
   return progress;
+}
+
+/**
+ * Run REBEL over every latin-script clause in batches, emitting one SEG event
+ * per extracted triple and one EVA event per per-triple predicate
+ * classification. Non-latin clauses were already filtered inside
+ * `extractTriples`, so no additional guard is needed here.
+ */
+async function ingestTriples(
+  doc: ExtractedDocument,
+  progress: IngestProgress,
+  agent: string,
+  notify: (patch: Partial<IngestProgress>) => void,
+): Promise<void> {
+  const store = useEoStore.getState();
+  for (let start = 0; start < doc.clauses.length; start += SPO_BATCH_SIZE) {
+    const slice = doc.clauses.slice(start, start + SPO_BATCH_SIZE);
+    let triples: ExtractedTriple[];
+    try {
+      triples = await extractTriples(slice);
+    } catch {
+      // Per-batch failure: skip the batch rather than abort the whole doc.
+      continue;
+    }
+    if (triples.length === 0) continue;
+
+    // Group by clause for progress reporting + bulk-dispatch SEG events.
+    const byClause: Record<number, ExtractedTriple[]> = {};
+    for (const t of triples) {
+      (byClause[t.clause_ix] ??= []).push(t);
+    }
+
+    for (const t of triples) {
+      const tripleId = tripleTarget(doc.doc_id, t.clause_ix, t.triple_ix);
+      await store.dispatch(
+        event('SEG' as Operator, tripleId, {
+          kind: 'nl_triple',
+          doc_id: doc.doc_id,
+          clause_ix: t.clause_ix,
+          triple_ix: t.triple_ix,
+          subject: t.subject,
+          predicate: t.predicate,
+          object: t.object,
+          subj_span: t.subj_span,
+          obj_span: t.obj_span,
+          confidence: t.confidence,
+          flags: t.flags,
+          model_version: 'rebel-large',
+        }, agent),
+      );
+    }
+
+    for (const [ixStr, list] of Object.entries(byClause)) {
+      const ix = Number(ixStr);
+      progress.triplesByIx[ix] = [...(progress.triplesByIx[ix] ?? []), ...list];
+    }
+
+    // Classify each triple's predicate via the existing 27-cell classifier.
+    // We run one call per batch with every predicate text at once; the script
+    // is always 'latin' since non-latin clauses were filtered upstream.
+    try {
+      const predicateTexts = triples.map((t) => t.predicate);
+      const predicateResults = await classifyBatch(predicateTexts, 'latin');
+      for (let i = 0; i < triples.length; i++) {
+        const t = triples[i];
+        const r = predicateResults[i];
+        if (!r) continue;
+        const key = `${t.clause_ix}:${t.triple_ix}`;
+        progress.tripleClassifications[key] = r;
+        const tripleId = tripleTarget(doc.doc_id, t.clause_ix, t.triple_ix);
+        await store.dispatch(
+          event('EVA' as Operator, tripleId, {
+            eva_type: 'embedding_classification',
+            scope: 'triple_predicate',
+            cell_id: r.cell_id,
+            cell_key: r.cell_key,
+            operator: r.operator,
+            site: r.site,
+            resolution: r.resolution,
+            mode: r.mode,
+            domain: r.domain,
+            confidence_gap: r.confidence_gap,
+            similarity_profile: r.similarity_profile,
+            flags: r.flags,
+            script: r.script,
+            model_version: 'all-MiniLM-L6-v2',
+            centroid_version: 'v1.0',
+            doc_id: doc.doc_id,
+            clause_ix: t.clause_ix,
+            triple_ix: t.triple_ix,
+            text_preview: t.predicate.slice(0, 160),
+          }, agent),
+        );
+      }
+    } catch {
+      // Predicate classification is best-effort — the triples themselves are
+      // already stored above.
+    }
+
+    notify({
+      triplesByIx: { ...progress.triplesByIx },
+      tripleClassifications: { ...progress.tripleClassifications },
+    });
+  }
+
+  // Record the final SPO status so consumers can distinguish "no triples
+  // found" from "extractor unavailable".
+  const finalStatus = getSpoExtractorStatus();
+  if (finalStatus.state !== 'ready') {
+    notify({ tripleExtractionSkipped: true });
+  }
 }
 
 /**

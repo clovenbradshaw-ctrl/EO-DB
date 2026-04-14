@@ -29,6 +29,12 @@ import {
   type ClassifierStatus,
   type Classification,
 } from '../nl/eo-classifier';
+import {
+  subscribeSpoExtractorStatus,
+  getSpoExtractorStatus,
+  type SpoExtractorStatus,
+  type ExtractedTriple,
+} from '../nl/spo-extractor';
 import { useNLPrefs } from '../lib/nl-prefs';
 
 interface NaturalLanguageViewProps {
@@ -41,6 +47,7 @@ export function NaturalLanguageView({ userId }: NaturalLanguageViewProps) {
   const [doc, setDoc] = useState<ExtractedDocument | null>(null);
   const [progress, setProgress] = useState<IngestProgress | null>(null);
   const [status, setStatus] = useState<ClassifierStatus>(getClassifierStatus);
+  const [spoStatus, setSpoStatus] = useState<SpoExtractorStatus>(getSpoExtractorStatus);
   const [selectedIx, setSelectedIx] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isIngesting, setIsIngesting] = useState(false);
@@ -48,6 +55,7 @@ export function NaturalLanguageView({ userId }: NaturalLanguageViewProps) {
 
   // Status subscription.
   useEffect(() => subscribeClassifierStatus(setStatus), []);
+  useEffect(() => subscribeSpoExtractorStatus(setSpoStatus), []);
 
   // Prewarm classifier the moment this view mounts so the model download
   // happens before the user picks a file.
@@ -56,6 +64,8 @@ export function NaturalLanguageView({ userId }: NaturalLanguageViewProps) {
   }, [prefs.enabled]);
 
   const classificationsByIx = progress?.classificationsByIx ?? {};
+  const triplesByIx = progress?.triplesByIx ?? {};
+  const tripleClassifications = progress?.tripleClassifications ?? {};
   const clauses: RawClause[] = doc?.clauses ?? [];
 
   const virtualizer = useVirtualizer({
@@ -102,6 +112,8 @@ export function NaturalLanguageView({ userId }: NaturalLanguageViewProps) {
   const selectedClause = selectedIx !== null ? clauses[selectedIx] : null;
   const selectedClassification =
     selectedIx !== null ? classificationsByIx[selectedIx] : undefined;
+  const selectedTriples: ExtractedTriple[] =
+    selectedIx !== null ? triplesByIx[selectedIx] ?? [] : [];
 
   const handleCorrect = useCallback(
     async (toCellId: string) => {
@@ -205,6 +217,7 @@ export function NaturalLanguageView({ userId }: NaturalLanguageViewProps) {
         </div>
 
         <StatusPanel status={status} theme={theme} />
+        <SpoStatusPanel status={spoStatus} theme={theme} />
 
         {doc && (
           <div
@@ -303,6 +316,7 @@ export function NaturalLanguageView({ userId }: NaturalLanguageViewProps) {
               const cls = classificationsByIx[c.clause_ix];
               const color = cls ? OP_COLORS[cls.operator] : null;
               const isSelected = selectedIx === c.clause_ix;
+              const tripleCount = (triplesByIx[c.clause_ix] ?? []).length;
               return (
                 <div
                   key={vi.key}
@@ -359,6 +373,7 @@ export function NaturalLanguageView({ userId }: NaturalLanguageViewProps) {
                   >
                     {cls ? `gap ${cls.confidence_gap.toFixed(2)}` : ''}
                     {cls?.flags.includes('boundary') ? ' ⚑' : ''}
+                    {tripleCount > 0 ? ` · ${tripleCount}△` : ''}
                   </div>
                 </div>
               );
@@ -440,9 +455,205 @@ export function NaturalLanguageView({ userId }: NaturalLanguageViewProps) {
                 onPick={(cell) => void handleCorrect(cell.cell_id)}
               />
             </div>
+
+            <TriplesPanel
+              triples={selectedTriples}
+              classifications={tripleClassifications}
+              spoStatus={spoStatus}
+              theme={theme}
+            />
           </>
         )}
       </aside>
+    </div>
+  );
+}
+
+function SpoStatusPanel({
+  status,
+  theme,
+}: {
+  status: SpoExtractorStatus;
+  theme: any;
+}) {
+  const color =
+    status.state === 'ready'
+      ? theme.success
+      : status.state === 'error'
+      ? theme.danger
+      : theme.textMuted;
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 4,
+        padding: 8,
+        borderRadius: 4,
+        border: `1px solid ${theme.border}`,
+        background: theme.bgMuted,
+      }}
+    >
+      <div
+        style={{
+          fontFamily: "'JetBrains Mono', monospace",
+          fontSize: 9,
+          letterSpacing: '0.08em',
+          textTransform: 'uppercase',
+          color: theme.textMuted,
+        }}
+      >
+        SPO Extractor
+      </div>
+      <div
+        style={{
+          fontFamily: "'JetBrains Mono', monospace",
+          fontSize: 11,
+          color,
+        }}
+      >
+        {status.state === 'ready'
+          ? `ready (${status.backend})`
+          : status.state === 'loading'
+          ? status.message ?? 'loading…'
+          : status.state === 'error'
+          ? status.message ?? 'error'
+          : status.state === 'disabled'
+          ? 'disabled'
+          : 'idle'}
+      </div>
+      {status.state === 'loading' && (
+        <div
+          style={{
+            height: 3,
+            background: theme.bgActive,
+            borderRadius: 2,
+            overflow: 'hidden',
+          }}
+        >
+          <div
+            style={{
+              width: `${Math.round(status.progress * 100)}%`,
+              height: '100%',
+              background: theme.accent,
+              transition: 'width 0.2s',
+            }}
+          />
+        </div>
+      )}
+      <div
+        style={{
+          fontFamily: "'JetBrains Mono', monospace",
+          fontSize: 9,
+          color: theme.textMuted,
+        }}
+      >
+        REBEL · English-only
+      </div>
+    </div>
+  );
+}
+
+function TriplesPanel({
+  triples,
+  classifications,
+  spoStatus,
+  theme,
+}: {
+  triples: ExtractedTriple[];
+  classifications: Record<string, Classification>;
+  spoStatus: SpoExtractorStatus;
+  theme: any;
+}) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <Label text="Triples (S → P → O)" theme={theme} />
+      {triples.length === 0 ? (
+        <div
+          style={{
+            fontFamily: "'JetBrains Mono', monospace",
+            fontSize: 10,
+            color: theme.textMuted,
+          }}
+        >
+          {spoStatus.state === 'ready'
+            ? 'No triples extracted for this clause.'
+            : spoStatus.state === 'loading'
+            ? 'Waiting for SPO model…'
+            : spoStatus.state === 'error'
+            ? `SPO unavailable: ${spoStatus.message ?? 'error'}`
+            : 'SPO extraction pending.'}
+        </div>
+      ) : (
+        triples.map((t) => {
+          const key = `${t.clause_ix}:${t.triple_ix}`;
+          const cls = classifications[key];
+          const predColor = cls ? OP_COLORS[cls.operator] : null;
+          return (
+            <div
+              key={key}
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 2,
+                padding: 6,
+                borderRadius: 4,
+                border: `1px solid ${theme.border}`,
+                background: theme.bgMuted,
+              }}
+            >
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  fontFamily: "'JetBrains Mono', monospace",
+                  fontSize: 10,
+                  flexWrap: 'wrap',
+                }}
+              >
+                <span style={{ color: theme.accent, fontWeight: 600 }}>
+                  {t.subject}
+                </span>
+                <span style={{ color: theme.textMuted }}>→</span>
+                <span
+                  style={{
+                    color: predColor ? predColor.text : theme.text,
+                    background: predColor ? predColor.bg : 'transparent',
+                    border: predColor
+                      ? `1px solid ${predColor.border}40`
+                      : `1px solid ${theme.border}`,
+                    borderRadius: 3,
+                    padding: '0 4px',
+                    fontWeight: 600,
+                  }}
+                >
+                  {t.predicate}
+                </span>
+                <span style={{ color: theme.textMuted }}>→</span>
+                <span style={{ color: theme.accent, fontWeight: 600 }}>
+                  {t.object}
+                </span>
+              </div>
+              <div
+                style={{
+                  fontFamily: "'JetBrains Mono', monospace",
+                  fontSize: 9,
+                  color: theme.textMuted,
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                }}
+              >
+                <span>
+                  {cls ? cls.cell_id : 'predicate unclassified'}
+                  {t.flags.length > 0 ? ` · ${t.flags.join(',')}` : ''}
+                </span>
+                <span>conf {t.confidence.toFixed(2)}</span>
+              </div>
+            </div>
+          );
+        })
+      )}
     </div>
   );
 }
