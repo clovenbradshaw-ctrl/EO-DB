@@ -31,6 +31,13 @@ export interface ExtractedDocument {
   source: 'text' | 'markdown' | 'pdf' | 'docx';
   /** Total characters. */
   char_count: number;
+  /**
+   * The raw extracted text. Kept so paragraph / sentence segmentation (which
+   * lives in segment.ts) doesn't have to re-read the file — especially
+   * important for PDF / DOCX where the original binary can't be re-decoded
+   * as plain text.
+   */
+  raw_text: string;
   clauses: RawClause[];
 }
 
@@ -198,6 +205,7 @@ export async function extractDocument(file: File): Promise<ExtractedDocument> {
     title: titleBase || 'Untitled',
     source,
     char_count: text.length,
+    raw_text: text,
     clauses,
   };
 }

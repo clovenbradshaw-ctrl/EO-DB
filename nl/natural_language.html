@@ -108,6 +108,82 @@ header {
 .chip-rec  { border-color: var(--rec);  color: var(--rec); }
 .chip-syn  { border-color: var(--con);  color: var(--con); }
 
+/* ── Operator triad 3×3 grid (replaces the flat filter bar) ─────── */
+.op-triad-grid {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  align-items: center;
+}
+.op-triad-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  grid-column: 1;
+}
+.op-triad-all {
+  grid-column: 2;
+  grid-row: 1 / span 3;
+  display: flex;
+  align-items: stretch;
+}
+.op-tile {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: var(--surface);
+  border: 1px solid var(--border2);
+  border-radius: 3px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: opacity 0.12s, background 0.12s, border-color 0.12s;
+  opacity: 0.55;
+  min-height: 26px;
+}
+.op-tile:hover { opacity: 0.85; }
+.op-tile.active { opacity: 1; background: rgba(255,255,255,0.03); }
+.op-tile-sym {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+.op-tile-name {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 10px;
+  color: var(--muted);
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.op-tile-count {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--bright);
+  min-width: 24px;
+  text-align: right;
+}
+.op-tile-all {
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  padding: 10px 6px;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+  border-color: var(--border2);
+  background: var(--surface);
+}
+.op-tile-all.active { opacity: 1; color: var(--bright); background: rgba(255,255,255,0.03); }
+
 .body {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -336,9 +412,16 @@ mark.span-def    { background: rgba(34,211,238,0.15); }
 .entry-main {
   font-size: 12px;
   color: var(--bright);
-  white-space: nowrap;
+  /* Allow up to three lines of wrapped content before ellipsis.
+     Previously: white-space:nowrap truncated everything past the first ~40
+     characters, making most log entries unreadable at normal widths. */
+  white-space: normal;
   overflow: hidden;
-  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  word-break: break-word;
+  line-height: 1.4;
   margin-bottom: 3px;
 }
 
@@ -766,9 +849,10 @@ mark.span-def    { background: rgba(34,211,238,0.15); }
   <header>
     <div class="logo">EO<span>//</span>INGEST</div>
     <div class="tagline">Operator Log · Mechanical Extraction</div>
-    <div class="header-right" id="header-chips">
-      <!-- chips populated on process -->
-    </div>
+    <!-- Header stat chips removed — the single source of truth for
+         operator counts + filtering is the 3x3 triad grid in the right
+         panel, just above the log list. -->
+    <div class="header-right" id="header-chips" style="display:none"></div>
     <span id="classifier-status" style="font-size:11px;color:var(--muted);margin-left:10px;">
       Loading classifier…
     </span>
@@ -851,18 +935,66 @@ mark.span-def    { background: rgba(34,211,238,0.15); }
         <span style="margin-left:auto;color:var(--bright)">EVA pressure · z-score</span>
       </div>
 
-      <div class="filter-bar" id="filter-bar">
-        <span class="filter-label">Filter</span>
-        <button class="filter-btn all active" data-filter="ALL" onclick="setFilter('ALL',this)">ALL</button>
-        <button class="filter-btn chip-ins" data-filter="INS"  onclick="setFilter('INS',this)">INS ●</button>
-        <button class="filter-btn chip-seg" data-filter="SEG"  onclick="setFilter('SEG',this)">SEG ｜</button>
-        <button class="filter-btn chip-sig" data-filter="SIG"  onclick="setFilter('SIG',this)">SIG ○</button>
-        <button class="filter-btn chip-con" data-filter="CON"  onclick="setFilter('CON',this)">CON ⤫</button>
-        <button class="filter-btn chip-syn" data-filter="SYN"  onclick="setFilter('SYN',this)">SYN △</button>
-        <button class="filter-btn chip-eva" data-filter="EVA"  onclick="setFilter('EVA',this)">EVA ∿</button>
-        <button class="filter-btn chip-nul" data-filter="NUL"  onclick="setFilter('NUL',this)">NUL ∅</button>
-        <button class="filter-btn chip-def" data-filter="DEF"  onclick="setFilter('DEF',this)">DEF ∥</button>
-        <button class="filter-btn chip-rec" data-filter="REC"  onclick="setFilter('REC',this)">REC ⊛</button>
+      <!-- Operator triad grid: 3 rows × 3 cols = 9 operators.
+           Row 1 Identity: NUL / SIG / INS
+           Row 2 Structure: SEG / CON / SYN
+           Row 3 Interpretation: DEF / EVA / REC
+           Each tile is a filter button; counts populated by renderStats(). -->
+      <div class="op-triad-grid" id="op-triad-grid">
+        <div class="op-triad-row">
+          <button class="op-tile chip-nul" data-filter="NUL" onclick="setFilter('NUL',this)">
+            <span class="op-tile-sym">NUL ∅</span>
+            <span class="op-tile-name">Null</span>
+            <span class="op-tile-count" data-count="NUL">0</span>
+          </button>
+          <button class="op-tile chip-sig" data-filter="SIG" onclick="setFilter('SIG',this)">
+            <span class="op-tile-sym">SIG ○</span>
+            <span class="op-tile-name">Signal</span>
+            <span class="op-tile-count" data-count="SIG">0</span>
+          </button>
+          <button class="op-tile chip-ins" data-filter="INS" onclick="setFilter('INS',this)">
+            <span class="op-tile-sym">INS ●</span>
+            <span class="op-tile-name">Instantiate</span>
+            <span class="op-tile-count" data-count="INS">0</span>
+          </button>
+        </div>
+        <div class="op-triad-row">
+          <button class="op-tile chip-seg" data-filter="SEG" onclick="setFilter('SEG',this)">
+            <span class="op-tile-sym">SEG ｜</span>
+            <span class="op-tile-name">Segment</span>
+            <span class="op-tile-count" data-count="SEG">0</span>
+          </button>
+          <button class="op-tile chip-con" data-filter="CON" onclick="setFilter('CON',this)">
+            <span class="op-tile-sym">CON ⤫</span>
+            <span class="op-tile-name">Connect</span>
+            <span class="op-tile-count" data-count="CON">0</span>
+          </button>
+          <button class="op-tile chip-syn" data-filter="SYN" onclick="setFilter('SYN',this)">
+            <span class="op-tile-sym">SYN △</span>
+            <span class="op-tile-name">Synthesize</span>
+            <span class="op-tile-count" data-count="SYN">0</span>
+          </button>
+        </div>
+        <div class="op-triad-row">
+          <button class="op-tile chip-def" data-filter="DEF" onclick="setFilter('DEF',this)">
+            <span class="op-tile-sym">DEF ∥</span>
+            <span class="op-tile-name">Define</span>
+            <span class="op-tile-count" data-count="DEF">0</span>
+          </button>
+          <button class="op-tile chip-eva" data-filter="EVA" onclick="setFilter('EVA',this)">
+            <span class="op-tile-sym">EVA ∿</span>
+            <span class="op-tile-name">Evaluate</span>
+            <span class="op-tile-count" data-count="EVA">0</span>
+          </button>
+          <button class="op-tile chip-rec" data-filter="REC" onclick="setFilter('REC',this)">
+            <span class="op-tile-sym">REC ⊛</span>
+            <span class="op-tile-name">Recurse</span>
+            <span class="op-tile-count" data-count="REC">0</span>
+          </button>
+        </div>
+        <div class="op-triad-all">
+          <button class="op-tile op-tile-all active" data-filter="ALL" onclick="setFilter('ALL',this)">ALL</button>
+        </div>
       </div>
 
       <div class="log-list" id="log-list">
@@ -3002,17 +3134,19 @@ function entryMainText(e) {
 function renderStats() {
   if (!state.combined) return;
   const ops = ['INS','SEG','SIG','CON','SYN','EVA','NUL','DEF','REC'];
-  const chips = document.getElementById('header-chips');
   const total = state.combined.entries().length;
-  chips.innerHTML = ops.map(op => {
+
+  // Update the triad-grid tile counts. All 9 are present in the DOM; we just
+  // write numbers into the `[data-count="OP"]` spans.
+  for (const op of ops) {
     const n = state.combined.byOp(op).length;
-    if (n === 0) return '';
-    return `<div class="stat-chip chip-${op.toLowerCase()} active">
-      <span class="op-glyph">${OP_GLYPH[op]}</span>
-      <span>${op}</span>
-      <span class="count">${n}</span>
-    </div>`;
-  }).join('');
+    const cell = document.querySelector(`.op-tile-count[data-count="${op}"]`);
+    if (cell) cell.textContent = n;
+    // Dim tiles for operators with zero events — still visible (Rule 5:
+    // every position in S is a valid perspective) but visually quieter.
+    const tile = document.querySelector(`.op-tile[data-filter="${op}"]`);
+    if (tile) tile.style.opacity = n === 0 ? '0.35' : '';
+  }
 
   document.getElementById('status-total').textContent = `${total} entries`;
 
@@ -3035,8 +3169,10 @@ function renderStats() {
 
 function setFilter(op, btn) {
   state.activeFilter = op;
-  document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
-  btn.classList.add('active');
+  // Accept either the legacy `.filter-btn` rail or the new `.op-tile` grid;
+  // we walk both selectors so any stray old buttons still deactivate cleanly.
+  document.querySelectorAll('.filter-btn, .op-tile').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
   applyFilter(op);
 }
 
@@ -3838,23 +3974,25 @@ function paintLogPressure(scores) {
 // ─────────────────────────────────────────────────────────
 
 function switchRightTab(tab) {
-  const logList   = document.getElementById('log-list');
-  const filterBar = document.getElementById('filter-bar');
-  const pressMap  = document.getElementById('pressure-map');
-  const legend    = document.getElementById('gradient-legend');
-  const tabLog    = document.getElementById('tab-log');
-  const tabPres   = document.getElementById('tab-pressure');
+  const logList    = document.getElementById('log-list');
+  // The flat filter-bar was replaced with the triad grid — keep the same
+  // show/hide behaviour so pressure-map view stays uncluttered.
+  const triadGrid  = document.getElementById('op-triad-grid');
+  const pressMap   = document.getElementById('pressure-map');
+  const legend     = document.getElementById('gradient-legend');
+  const tabLog     = document.getElementById('tab-log');
+  const tabPres    = document.getElementById('tab-pressure');
 
   if (tab === 'log') {
     logList.classList.remove('hidden');
-    filterBar.style.display = '';
+    if (triadGrid) triadGrid.style.display = '';
     pressMap.classList.remove('visible');
     legend.style.display = 'none';
     tabLog.classList.add('active');
     tabPres.classList.remove('active');
   } else {
     logList.classList.add('hidden');
-    filterBar.style.display = 'none';
+    if (triadGrid) triadGrid.style.display = 'none';
     pressMap.classList.add('visible');
     legend.style.display = 'flex';
     tabLog.classList.remove('active');

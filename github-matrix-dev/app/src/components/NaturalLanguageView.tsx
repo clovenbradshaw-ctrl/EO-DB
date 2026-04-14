@@ -36,14 +36,18 @@ import {
   type ExtractedTriple,
 } from '../nl/spo-extractor';
 import { useNLPrefs } from '../lib/nl-prefs';
+import { DocumentExplorer } from './DocumentExplorer';
 
 interface NaturalLanguageViewProps {
   userId: string;
 }
 
+type ViewMode = 'upload' | 'explore';
+
 export function NaturalLanguageView({ userId }: NaturalLanguageViewProps) {
   const { theme } = useTheme();
   const [prefs] = useNLPrefs();
+  const [viewMode, setViewMode] = useState<ViewMode>('upload');
   const [doc, setDoc] = useState<ExtractedDocument | null>(null);
   const [progress, setProgress] = useState<IngestProgress | null>(null);
   const [status, setStatus] = useState<ClassifierStatus>(getClassifierStatus);
@@ -152,17 +156,102 @@ export function NaturalLanguageView({ userId }: NaturalLanguageViewProps) {
       ? Math.round((progress.processed / progress.total) * 100)
       : 0;
 
+  const modeToggle = (
+    <div
+      style={{
+        display: 'flex',
+        gap: 4,
+        padding: '8px 12px',
+        borderBottom: `1px solid ${theme.border}`,
+        alignItems: 'center',
+      }}
+    >
+      <div
+        style={{
+          fontFamily: "'JetBrains Mono', monospace",
+          fontSize: 10,
+          letterSpacing: '0.08em',
+          textTransform: 'uppercase',
+          color: theme.textMuted,
+          marginRight: 8,
+        }}
+      >
+        NL
+      </div>
+      {(['upload', 'explore'] as ViewMode[]).map((m) => (
+        <button
+          key={m}
+          onClick={() => setViewMode(m)}
+          style={{
+            padding: '4px 12px',
+            fontSize: 11,
+            fontFamily: "'JetBrains Mono', monospace",
+            fontWeight: 600,
+            letterSpacing: '0.05em',
+            textTransform: 'uppercase',
+            background: viewMode === m ? theme.accent : theme.bgMuted,
+            color: viewMode === m ? theme.bg : theme.text,
+            border: `1px solid ${theme.border}`,
+            borderRadius: 3,
+            cursor: 'pointer',
+          }}
+        >
+          {m}
+        </button>
+      ))}
+      {doc && (
+        <div
+          style={{
+            marginLeft: 'auto',
+            fontFamily: "'JetBrains Mono', monospace",
+            fontSize: 10,
+            color: theme.textMuted,
+          }}
+        >
+          {doc.title} · {doc.clauses.length} clauses
+        </div>
+      )}
+    </div>
+  );
+
+  if (viewMode === 'explore') {
+    return (
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateRows: 'auto 1fr',
+          height: '100%',
+          overflow: 'hidden',
+          background: theme.bg,
+          color: theme.text,
+        }}
+      >
+        {modeToggle}
+        <DocumentExplorer doc={doc} />
+      </div>
+    );
+  }
+
   return (
     <div
       style={{
         display: 'grid',
-        gridTemplateColumns: 'minmax(260px, 320px) 1fr minmax(320px, 420px)',
+        gridTemplateRows: 'auto 1fr',
+        gridTemplateColumns: '100%',
         height: '100%',
         overflow: 'hidden',
         background: theme.bg,
         color: theme.text,
       }}
     >
+      {modeToggle}
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'minmax(260px, 320px) 1fr minmax(320px, 420px)',
+          overflow: 'hidden',
+        }}
+      >
       {/* ── Left: upload + status ─────────────────────────────────────── */}
       <aside
         style={{
@@ -465,6 +554,7 @@ export function NaturalLanguageView({ userId }: NaturalLanguageViewProps) {
           </>
         )}
       </aside>
+      </div>
     </div>
   );
 }
