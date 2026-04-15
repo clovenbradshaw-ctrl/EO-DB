@@ -502,6 +502,11 @@ function scheduleCheckpoint(): void {
 function checkAdaptiveCheckpoint(): void {
   if (bulkImportInProgress || checkpointInProgress) return;
   eventsSinceCheckpoint++;
+  // Occasionally republish the current fold cost to the main thread so the
+  // PressureMonitor can track fold-cost drift between init boundaries.
+  if (eventsSinceCheckpoint % 256 === 0) {
+    post({ id: -1, type: 'telemetry', avgMicrosPerEvent: avgProcessMicrosPerEvent });
+  }
   const estimatedReplayMs = (eventsSinceCheckpoint * avgProcessMicrosPerEvent) / 1000;
   if (estimatedReplayMs > TARGET_STARTUP_MS) {
     scheduleCheckpoint();
@@ -780,6 +785,7 @@ function buildFoldEntry(target: string): FoldEntry {
             if (reg.mode === 'fold') evaluateFormula(reg);
           }
         }
+        post({ id: -1, type: 'telemetry', avgMicrosPerEvent: avgProcessMicrosPerEvent });
         post({ id: -1, type: 'ready', headSeq: logHeadSeq, fastPath });
         break;
       }

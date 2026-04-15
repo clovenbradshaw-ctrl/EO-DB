@@ -27,6 +27,7 @@ import type { GDriveSyncService } from '../google-drive/gdrive-sync';
 import type { ResolvedPermissions } from '../permissions/types';
 import type { ManifestState as UserManifest } from '../google-drive/space-permissions';
 import { eventHash } from '../db/hash';
+import { pressureMonitor } from '../perf/pressure-monitor';
 
 // ─── Shard worker pool (Phase G/H wiring) ──────────────────────────────────
 //
@@ -294,6 +295,10 @@ export const useEoStore = create<EoDbState>((set, get) => ({
 
   async initLocal(dbName = 'local') {
     const workerClient = createFoldWorkerClient();
+    // Feed fold-cost telemetry to the PressureMonitor (Phase 1 observe-only).
+    workerClient.onTelemetry = ({ avgMicrosPerEvent }) => {
+      pressureMonitor.reportFoldMicros(avgMicrosPerEvent);
+    };
     const { headSeq } = await initFoldWorker(workerClient, dbName);
     await get().init(workerClient, headSeq);
   },

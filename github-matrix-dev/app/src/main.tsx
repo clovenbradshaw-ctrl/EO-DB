@@ -2,6 +2,11 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { App } from './App';
 import { tryRecoverFromChunkError } from './lib/chunk-reload';
+import { pressureMonitor } from './perf/pressure-monitor';
+
+// Phase 1 of cloud-tiered .eodb: start observing device pressure at boot.
+// This is read-only; nothing in the app changes behavior based on the score yet.
+pressureMonitor.start();
 
 // Vite fires `vite:preloadError` when a <link rel="modulepreload"> 404s —
 // this happens when the current tab was loaded from a previous deploy and
