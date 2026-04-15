@@ -20,7 +20,15 @@ export type SyncLogEventType =
   | 'sync_error'
   | 'sync_start'
   /** Raw pre-fold bundle was uploaded to Drive as provenance. */
-  | 'provenance_uploaded';
+  | 'provenance_uploaded'
+  /** A single webhook /payloads poll completed (one cycle of continuous sync). */
+  | 'webhook_poll'
+  /** Per-record field change observed by the fold. Carries before/after diffs. */
+  | 'change_detected'
+  /** Snapshot bytes were written to local disk via "Download from Airtable". */
+  | 'snapshot_downloaded'
+  /** Snapshot file was uploaded into the local DB via "Import snapshot". */
+  | 'snapshot_imported';
 
 export interface SyncLogEntry {
   /** Unix ms timestamp. */
@@ -59,6 +67,73 @@ export interface SyncLogEntry {
   }>;
   /** Wall-clock duration in ms for completion entries. */
   durationMs?: number;
+
+  // ── Telemetry-specific fields ──
+  /** HTTP status code of the last webhook poll (used for `webhook_poll` and `sync_error`). */
+  httpStatus?: number;
+  /** Number of records inspected by this cycle (separate from records changed). */
+  recordsScanned?: number;
+  /** Number of records actually changed by this cycle. */
+  recordsChanged?: number;
+  /** Per-record field diffs that triggered this `change_detected` entry. */
+  diffs?: Array<{ field: string; before: unknown; after: unknown }>;
+  /** Airtable record id this entry refers to (for `change_detected`). */
+  recordId?: string;
+  /** Human-readable table name this entry refers to (for `change_detected`). */
+  tableName?: string;
+}
+
+// ─── Webhook health (last poll snapshot) ───────────────────────────────────
+
+/**
+ * Lightweight "what happened on the last webhook /payloads call" — surfaced
+ * by the transparency UI so users can tell at a glance whether the
+ * incremental feed is alive or silently 401-ing.
+ *
+ * Updated by `AirtableSyncService` on every poll via the `onResponse` hook
+ * we register on `AirtableClient`. Cleared on `disconnect()`.
+ */
+export interface WebhookHealth {
+  /** Full URL of the last `/payloads` call (or other Airtable endpoint we last touched). */
+  url: string | null;
+  /** Unix ms when the response landed. */
+  lastPolledAt: number | null;
+  /** HTTP status code of the last response. */
+  lastStatus: number | null;
+  /** "200 OK" / "401 Unauthorized" — convenient string for the UI. */
+  lastStatusText: string | null;
+  /** Cursor passed (or returned) on the last poll. */
+  lastCursor: string | null;
+  /** Error message when the call threw before producing a response. */
+  lastError: string | null;
+}
+
+export const EMPTY_WEBHOOK_HEALTH: WebhookHealth = {
+  url: null,
+  lastPolledAt: null,
+  lastStatus: null,
+  lastStatusText: null,
+  lastCursor: null,
+  lastError: null,
+};
+
+// ─── Recent changes (per-record diffs) ──────────────────────────────────────
+
+/**
+ * Per-record diff captured by `ingestRecord` during update sync. Powers the
+ * "Recent changes" panel — exactly the artifact you'd inspect to confirm
+ * "I edited Status from Active → Inactive and the sync caught it."
+ */
+export interface RecentChange {
+  /** Unix ms when the diff was observed by the fold. */
+  ts: number;
+  baseId: string;
+  tableId: string;
+  tableName: string;
+  recordId: string;
+  /** Best-effort human label for the record (display field value, falls back to recordId). */
+  recordLabel?: string;
+  diffs: Array<{ field: string; before: unknown; after: unknown }>;
 }
 
 // ─── Live "what's happening right now" snapshot ────────────────────────────
@@ -151,6 +226,14 @@ export interface AirtableSyncState {
   /** Unix ms when the next continuous-sync tick is scheduled to fire (null if not scheduled). */
   nextTickAt: number | null;
 
+  // ── Transparency telemetry ──
+  /** Number of sync cycles (full + webhook polls) this browser session has run. Reset on disconnect. */
+  cyclesThisSession: number;
+  /** Snapshot of the most recent webhook /payloads response. */
+  webhookHealth: WebhookHealth;
+  /** Rolling buffer of per-record diffs (newest first), capped at 50. */
+  recentChanges: RecentChange[];
+
   // ── Sync settings (shared across room via Matrix state) ──
   /** Configurable sync parameters. */
   syncSettings: AirtableSyncSettings;
@@ -181,6 +264,14 @@ export interface AirtableSyncState {
   hydrateSyncLog: (entries: SyncLogEntry[]) => void;
   setCurrentSync: (snapshot: CurrentSyncSnapshot | null) => void;
   setNextTickAt: (ts: number | null) => void;
+  /** Increment the session cycle counter — called once per sync tick. */
+  incCycle: () => void;
+  /** Replace the webhook health snapshot. Pass partial fields to merge. */
+  setWebhookHealth: (h: Partial<WebhookHealth>) => void;
+  /** Append a per-record diff observation (newest first, capped at 50). */
+  addRecentChange: (change: RecentChange) => void;
+  /** Wipe the recent-changes buffer (UI "clear" affordance). */
+  clearRecentChanges: () => void;
 }
 
 export const useAirtableStore = create<AirtableSyncState>((set, get) => ({
@@ -199,6 +290,9 @@ export const useAirtableStore = create<AirtableSyncState>((set, get) => ({
   syncLog: [],
   currentSync: null,
   nextTickAt: null,
+  cyclesThisSession: 0,
+  webhookHealth: { ...EMPTY_WEBHOOK_HEALTH },
+  recentChanges: [],
 
   async connectFromWebhook(matrixAccessToken: string): Promise<void> {
     set({ connecting: true, error: null });
@@ -252,6 +346,9 @@ export const useAirtableStore = create<AirtableSyncState>((set, get) => ({
       manifest: null,
       currentSync: null,
       nextTickAt: null,
+      cyclesThisSession: 0,
+      webhookHealth: { ...EMPTY_WEBHOOK_HEALTH },
+      recentChanges: [],
     });
   },
 
@@ -280,4 +377,12 @@ export const useAirtableStore = create<AirtableSyncState>((set, get) => ({
   },
   setCurrentSync(snapshot) { set({ currentSync: snapshot }); },
   setNextTickAt(ts) { set({ nextTickAt: ts }); },
+  incCycle() { set((state) => ({ cyclesThisSession: state.cyclesThisSession + 1 })); },
+  setWebhookHealth(h) {
+    set((state) => ({ webhookHealth: { ...state.webhookHealth, ...h } }));
+  },
+  addRecentChange(change) {
+    set((state) => ({ recentChanges: [change, ...state.recentChanges].slice(0, 50) }));
+  },
+  clearRecentChanges() { set({ recentChanges: [] }); },
 }));

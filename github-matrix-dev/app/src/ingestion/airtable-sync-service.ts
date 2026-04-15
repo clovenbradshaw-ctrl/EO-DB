@@ -458,7 +458,30 @@ export class AirtableSyncService {
 
     const tickStart = Date.now();
     try {
-      const client = new AirtableClient(apiKey);
+      // Wire response observation into the store so the Webhook Health panel
+      // surfaces the last /payloads HTTP status + cursor in real time. We
+      // only mirror /payloads calls into webhookHealth — other endpoints
+      // (listBases, getBaseSchema) would just churn the panel.
+      const client = new AirtableClient(apiKey, undefined, {
+        onResponse: (info) => {
+          if (!info.url.includes('/webhooks/') || !info.url.includes('/payloads')) return;
+          const cursorMatch = info.url.match(/[?&]cursor=([^&]+)/);
+          useAirtableStore.getState().setWebhookHealth({
+            url: info.url,
+            lastPolledAt: Date.now(),
+            lastStatus: info.status,
+            lastStatusText: info.status != null
+              ? `${info.status} ${info.statusText ?? ''}`.trim()
+              : null,
+            lastCursor: cursorMatch ? decodeURIComponent(cursorMatch[1]) : null,
+            lastError: info.ok ? null : (info.error ?? 'request failed'),
+          });
+        },
+      });
+      // Every tick that gets past the lock counts as a cycle for the header
+      // strip's "N cycles this session" indicator. Errors below still count
+      // — a failed cycle is still a cycle the user wants to see.
+      useAirtableStore.getState().incCycle();
       const isHydrated = headBefore?.hydrated ?? false;
 
       // Merge sync settings into customization
@@ -569,6 +592,33 @@ export class AirtableSyncService {
               customization: effectiveCustomization,
               onEvent: progressListener.onEvent,
               onProgress,
+              // Surface per-record diffs to the "Recent changes" UI panel.
+              // ingestRecord only fires this for actual mutations (not
+              // skip-no-change), so the buffer reflects real edits.
+              onChange: (report) => {
+                useAirtableStore.getState().addRecentChange({
+                  ts: Date.now(),
+                  baseId: report.baseId,
+                  tableId: report.tableId,
+                  tableName: report.tableName ?? report.tableId,
+                  recordId: report.recordId,
+                  recordLabel: report.recordLabel,
+                  diffs: report.diffs,
+                });
+                useAirtableStore.getState().addSyncLogEntry({
+                  ts: Date.now(),
+                  type: 'change_detected',
+                  source: 'local',
+                  syncer: this.agent,
+                  device: this.deviceId,
+                  detail: `${report.diffs.length} field${report.diffs.length === 1 ? '' : 's'}: ${report.diffs.map((d) => d.field).join(', ')}`,
+                  baseId: report.baseId,
+                  tableName: report.tableName,
+                  recordId: report.recordId,
+                  diffs: report.diffs,
+                  recordsChanged: 1,
+                });
+              },
             });
           }
         }
