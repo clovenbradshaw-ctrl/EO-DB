@@ -1531,11 +1531,42 @@ export async function processHydrationBundle(
 }
 
 /**
+ * Payload handed to {@link hydrationSync} callers via `onSnapshotReady`.
+ * Contains everything needed to persist a one-shot hydration as an `.eodb`
+ * snapshot that future devices can replay instead of re-pulling the full
+ * base from Airtable.
+ *
+ * Events are the ordered stream that `processHydrationBundle()` folded into
+ * the store — replaying them on a fresh device reproduces the same state.
+ * Cursors reflect the per-table lastModified watermarks captured at the end
+ * of the run; seeding them on the replaying device means the first live
+ * `updateSync()` only pulls post-snapshot deltas.
+ */
+export interface HydrationSnapshotPayload {
+  /** Every event emitted by the fold, in order. */
+  events: any[];
+  /** `{ [baseId]: { [tableId]: { lastModified } } }` — safe to embed in the snapshot header. */
+  cursors: Record<string, Record<string, { lastModified: string }>>;
+  /** Bases touched by this hydration — used to derive per-base snapshot filenames. */
+  baseIds: string[];
+  /** Mirrors the top-level HydrationResult so callers can correlate snapshot metadata with sync stats. */
+  result: HydrationResult;
+}
+
+/**
  * One-shot hydration: collect everything, optionally hand the raw bundle
  * to `onRawImport` for provenance persistence, then process into operators.
  *
  * Throwing from onRawImport aborts the sync before ANY store mutations —
  * ideal for enforcing "don't process until Drive upload confirms".
+ *
+ * When `onSnapshotReady` is supplied, hydrationSync captures every emitted
+ * event and the final per-table cursors, then invokes the callback after
+ * the fold completes. The caller is expected to serialise the payload via
+ * `encodeAirtableSnapshot()` and persist the result (typically to Drive).
+ * The callback fires AFTER the store write, so a failing upload doesn't
+ * roll back the local hydration — snapshot publishing is an optimisation,
+ * not a correctness requirement.
  */
 export async function hydrationSync(
   store: EoStore,
@@ -1552,6 +1583,12 @@ export async function hydrationSync(
      * record in the event log. Throw to abort the hydration.
      */
     onRawImport?: (bundle: RawImportBundle) => Promise<ProvenanceResult | void>;
+    /**
+     * Fires AFTER the full hydration completes successfully. Receives the
+     * captured event stream + cursor map — the caller bakes these into an
+     * `.eodb` snapshot and publishes it (e.g. to Google Drive).
+     */
+    onSnapshotReady?: (payload: HydrationSnapshotPayload) => Promise<void> | void;
   },
 ): Promise<HydrationResult> {
   const bundle = await collectAirtableBundle(client, {
@@ -1565,13 +1602,55 @@ export async function hydrationSync(
     if (result) provenance = result;
   }
 
-  return processHydrationBundle(store, bundle, agent, {
+  // Tee onEvent so we can both forward to the caller AND collect the full
+  // stream for snapshot publishing. Zero allocation when onSnapshotReady
+  // is unset — we keep the original callback reference.
+  const collected: any[] = [];
+  const wantSnapshot = !!opts?.onSnapshotReady;
+  const teeEvent = wantSnapshot
+    ? (ev: any) => {
+        collected.push(ev);
+        opts?.onEvent?.(ev);
+      }
+    : opts?.onEvent;
+
+  const result = await processHydrationBundle(store, bundle, agent, {
     onProgress: opts?.onProgress,
-    onEvent: opts?.onEvent,
+    onEvent: teeEvent,
     onTableComplete: opts?.onTableComplete,
     customization: opts?.customization,
     provenance,
   });
+
+  if (wantSnapshot) {
+    // Build the cursor map by reading back the per-table cursors we just
+    // wrote during fold. Using the store (not the result) guarantees we
+    // capture the exact ISO string that the next updateSync() will compare
+    // against — no drift from recomputing `now` at publish time.
+    const cursors: Record<string, Record<string, { lastModified: string }>> = {};
+    const baseIds = new Set<string>();
+    for (const r of result.sync_results) {
+      baseIds.add(r.base_id);
+      const stored = await getCursor(store, r.base_id, r.table_id);
+      if (stored) {
+        (cursors[r.base_id] ??= {})[r.table_id] = { lastModified: stored };
+      }
+    }
+    try {
+      await opts!.onSnapshotReady!({
+        events: collected,
+        cursors,
+        baseIds: Array.from(baseIds),
+        result,
+      });
+    } catch (e) {
+      // Snapshot publish is best-effort. Log and continue — the hydration
+      // itself succeeded and the next run will retry.
+      console.warn('[EO-DB] onSnapshotReady failed (hydration unaffected):', e);
+    }
+  }
+
+  return result;
 }
 
 // ─── Update sync ───────────────────────────────────────────────────────────

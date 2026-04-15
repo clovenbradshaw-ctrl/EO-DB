@@ -15,6 +15,7 @@
 
 import type { EoStore } from '../db/encrypted-store';
 import type { CurrentSyncSnapshot, SyncLogEntry } from './airtable-store';
+import { airtableSnapshotRefKey } from './airtable-snapshot';
 
 const KEY_SYNC_LOG = 'meta:at_synclog';
 const KEY_CURRENT_SYNC = 'meta:at_current_sync';
@@ -107,6 +108,54 @@ export async function loadContinuousEnabled(store: EoStore): Promise<boolean> {
 export async function saveContinuousEnabled(store: EoStore, enabled: boolean): Promise<void> {
   try {
     await store.put(KEY_CONTINUOUS_ENABLED, enabled ? 'true' : 'false');
+  } catch {
+    /* best-effort */
+  }
+}
+
+// ─── Published snapshot refs ───────────────────────────────────────────────
+
+/**
+ * Reference to a baked Airtable hydration snapshot on Google Drive. The
+ * Drive file itself is the source of truth; this ref is a local hint so
+ * the same device (or a device with access to the same Drive folder) can
+ * skip a full re-hydration on bootstrap.
+ *
+ * `contentHash` is reserved for future integrity verification — today we
+ * rely on the `.eodb` trailer's FNV-1a checksum, but a SHA-256 over the
+ * whole file would let us detect silent Drive corruption before replay.
+ */
+export interface PublishedSnapshotRef {
+  baseId: string;
+  driveFileId: string;
+  fileName: string;
+  byteSize: number;
+  publishedAt: string;
+  eventCount: number;
+  contentHash?: string;
+}
+
+export async function loadPublishedSnapshotRef(
+  store: EoStore,
+  baseId: string,
+): Promise<PublishedSnapshotRef | null> {
+  try {
+    const raw = await store.get(airtableSnapshotRefKey(baseId));
+    if (!raw) return null;
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (!parsed || typeof parsed !== 'object') return null;
+    return parsed as PublishedSnapshotRef;
+  } catch {
+    return null;
+  }
+}
+
+export async function savePublishedSnapshotRef(
+  store: EoStore,
+  ref: PublishedSnapshotRef,
+): Promise<void> {
+  try {
+    await store.put(airtableSnapshotRefKey(ref.baseId), JSON.stringify(ref));
   } catch {
     /* best-effort */
   }
