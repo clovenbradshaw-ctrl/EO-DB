@@ -691,6 +691,54 @@ export class GDriveSyncService {
   }
 
   /**
+   * Upload a baked Airtable hydration snapshot (`.eodb`) to Drive under a
+   * deterministic per-base filename. Rebaking overwrites in place via
+   * `gdriveStoreNamed()`, so consumers can always GET the "current"
+   * snapshot for a base without an index lookup.
+   *
+   * The snapshot is encrypted with the viewer-tier key (same as
+   * `space-log.eodb`) so any space member with viewer access can decrypt
+   * and replay it — which is exactly what we want, since the snapshot's
+   * purpose is to substitute for a live Airtable hydration for peers.
+   */
+  async uploadAirtableSnapshot(
+    fileName: string,
+    snapshotBytes: Uint8Array,
+  ): Promise<{ fileName: string; driveFileId: string; byteSize: number }> {
+    if (this.destroyed) throw new Error('GDriveSyncService destroyed');
+    this.activateSpaceRoom();
+
+    const encrypted = await this.encryptBinary(snapshotBytes);
+    const result = await gdriveStoreNamed(this.accessToken, encrypted, this.dataType, fileName);
+    console.log(
+      `[EO-DB] uploadAirtableSnapshot: stored ${fileName} (${snapshotBytes.byteLength} B raw, drive id=${result.drive_file_id})`,
+    );
+    return {
+      fileName,
+      driveFileId: result.drive_file_id,
+      byteSize: snapshotBytes.byteLength,
+    };
+  }
+
+  /**
+   * Download a previously uploaded Airtable hydration snapshot by filename
+   * and return the decrypted raw bytes. Returns null if the file isn't
+   * present — caller should fall through to live hydration in that case.
+   */
+  async downloadAirtableSnapshot(fileName: string): Promise<Uint8Array | null> {
+    if (this.destroyed) return null;
+    this.activateSpaceRoom();
+    try {
+      const result = await gdriveRetrieveNamed(this.accessToken, this.dataType, fileName);
+      if (!result?.ok) return null;
+      return await this.decryptBinary(result.data);
+    } catch (e) {
+      console.warn(`[EO-DB] downloadAirtableSnapshot failed for ${fileName}:`, e);
+      return null;
+    }
+  }
+
+  /**
    * Download a previously uploaded provenance blob by filename and return the
    * decrypted raw bytes. Used by the UI's "download provenance" action so the
    * user can save the exact payload that produced a given import record.
