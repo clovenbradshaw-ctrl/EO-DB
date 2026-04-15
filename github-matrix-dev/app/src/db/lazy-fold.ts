@@ -114,7 +114,12 @@ export type FoldWorkerResponse =
   | { id: -1; type: 'ready'; headSeq: number; fastPath: boolean }
   | { id: -1; type: 'recOscillation'; target: string; cyclingStates: Record<string, unknown>[]; suggestedFix: RecMigrationRule[] }
   | { id: -1; type: 'eventEmitted'; event: EoEvent }
-  | { id: -1; type: 'progress'; current: number; total: number };
+  | { id: -1; type: 'progress'; current: number; total: number }
+  /**
+   * Push-telemetry for the PressureMonitor (see src/perf/pressure-monitor.ts).
+   * Emitted at init completion and intermittently from checkAdaptiveCheckpoint.
+   */
+  | { id: -1; type: 'telemetry'; avgMicrosPerEvent: number };
 
 // ─── FoldWorkerClient ─────────────────────────────────────────────────────────
 
@@ -132,6 +137,7 @@ export interface FoldWorkerClient {
   }) => void;
   onEventEmitted?: (ev: EoEvent) => void;
   onProgress?: (current: number, total: number) => void;
+  onTelemetry?: (t: { avgMicrosPerEvent: number }) => void;
 }
 
 // ─── createFoldWorkerClient ───────────────────────────────────────────────────
@@ -168,6 +174,9 @@ export function createFoldWorkerClient(): FoldWorkerClient {
           break;
         case 'progress':
           client.onProgress?.(msg.current, msg.total);
+          break;
+        case 'telemetry':
+          client.onTelemetry?.({ avgMicrosPerEvent: msg.avgMicrosPerEvent });
           break;
       }
       return;

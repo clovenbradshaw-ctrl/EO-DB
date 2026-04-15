@@ -28,6 +28,7 @@ import { ConnectionStatus, useConnectionState, type ConnectionState } from './Co
 import { SyncToast, useSyncToast } from './SyncToast';
 import { AirtableSyncBadge } from './AirtableSyncBadge';
 import { ErrorBoundary } from './ErrorBoundary';
+import { PressureBadge } from './PressureBadge';
 import { SyncProgress } from './SyncProgress';
 // Lazily-loaded views — split into separate chunks so the initial bundle
 // does not include code that users may never visit.
@@ -2240,6 +2241,8 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       background: roleTint ? roleTint.bg : themedBg.bg,
       transition: 'background 0.5s cubic-bezier(.4,0,.2,1)',
     }}>
+      {/* Dev-gated PressureMonitor badge (?pressure=1 or localStorage flag). */}
+      <PressureBadge />
       {/* Persona strip — always visible at the very top when a persona is
           active so the user has a persistent at-a-glance indicator of the
           persona they're currently in (works on mobile and desktop). */}
