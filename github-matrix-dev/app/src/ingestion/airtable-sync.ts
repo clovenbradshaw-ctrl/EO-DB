@@ -322,6 +322,28 @@ interface FieldMeta {
   options?: Record<string, any>;
 }
 
+/**
+ * Per-record diff observation reported by `ingestRecord` whenever a fold
+ * actually changes a record's stored fields. Surfaced to the UI's "Recent
+ * changes" panel so users can confirm "I edited Status from Active →
+ * Inactive and the sync caught it." Skip-no-change records do NOT emit a
+ * change report.
+ */
+export interface RecordChangeReport {
+  baseId: string;
+  tableId: string;
+  tableName?: string;
+  recordId: string;
+  /** Best-effort label (display field value), falls back to recordId. */
+  recordLabel?: string;
+  /** Field-level diffs. Field name comes from `FieldMeta` when available, else the raw id. */
+  diffs: Array<{ field: string; before: unknown; after: unknown }>;
+  /** Was this an INS (new record) vs an edit? Useful so the UI can group "added" vs "changed". */
+  kind: 'created' | 'updated';
+}
+
+export type RecordChangeListener = (report: RecordChangeReport) => void;
+
 function buildFieldMetaMap(
   fields: Array<{ id: string; name: string; type: string; options?: Record<string, any> }> | undefined,
 ): Map<string, FieldMeta> {
@@ -496,6 +518,8 @@ async function ingestRecord(
   onEvent?: (event: any) => void,
   displayField?: string,
   defaultResolution?: Resolution,
+  onChange?: RecordChangeListener,
+  tableName?: string,
 ): Promise<'ingested' | 'overwritten' | 'skipped_no_change' | 'skipped_duplicate'> {
   const target = recordTarget(baseId, tableId, record.id);
 
@@ -594,13 +618,15 @@ async function ingestRecord(
     }, onEvent);
 
     // 9. Set display name as a separate DEF — ontologically distinct from the data import.
+    let recordLabel: string | undefined;
     if (displayField) {
       const nameVal = diffFields[displayField] ?? record.fields[displayField];
       if (nameVal != null) {
+        recordLabel = String(nameVal);
         await processEvent(store, {
           op: 'DEF',
           target,
-          operand: { name: String(nameVal) },
+          operand: { name: recordLabel },
           agent: `${agent}:display`,
           ts: new Date().toISOString(),
           acquired_ts: new Date().toISOString(),
@@ -608,6 +634,35 @@ async function ingestRecord(
         }, onEvent);
       }
     }
+
+    // 10. Report the diff for the "Recent changes" UI panel. Resolves field
+    //     ids → human-readable names where the schema is available; falls back
+    //     to the raw id so we never drop information when fieldMeta is empty.
+    if (onChange) {
+      try {
+        const diffs: Array<{ field: string; before: unknown; after: unknown }> = [];
+        for (const [key, after] of Object.entries(diffFields)) {
+          const meta = fieldMeta.get(key);
+          diffs.push({
+            field: meta?.name ?? key,
+            before: existingFields ? existingFields[key] : undefined,
+            after,
+          });
+        }
+        if (diffs.length > 0) {
+          onChange({
+            baseId,
+            tableId,
+            tableName,
+            recordId: record.id,
+            recordLabel: recordLabel ?? record.id,
+            diffs,
+            kind: existing ? 'updated' : 'created',
+          });
+        }
+      } catch { /* observer must never break the fold */ }
+    }
+
     return isOverwrite ? 'overwritten' : 'ingested';
   } catch (e: any) {
     if (e.message?.includes('already')) return 'skipped_duplicate';
@@ -663,6 +718,7 @@ async function syncTable(
   recordLimit?: number,
   defaultResolution?: Resolution,
   strategy: SyncStrategy = 'lastModified',
+  onChange?: RecordChangeListener,
 ): Promise<SyncResult> {
   let fetched = 0;
   let ingested = 0;
@@ -721,7 +777,7 @@ async function syncTable(
     for (const record of page) {
       if (fetched >= limit) { limitReached = true; break; }
       fetched++;
-      const result = await ingestRecord(store, baseId, tableId, record, agent, fieldMeta, exclusions, preserveExisting, onEvent, displayField, defaultResolution);
+      const result = await ingestRecord(store, baseId, tableId, record, agent, fieldMeta, exclusions, preserveExisting, onEvent, displayField, defaultResolution, onChange, tableName);
       switch (result) {
         case 'ingested': ingested++; break;
         case 'overwritten': ingested++; overwritten++; break;
@@ -904,6 +960,7 @@ async function webhookIncrementalSyncBase(
   defaultResolution: Resolution | undefined,
   onEvent?: (event: any) => void,
   onProgress?: (progress: SyncProgress) => void,
+  onChange?: RecordChangeListener,
 ): Promise<SyncResult[]> {
   const state = await ensureWebhook(store, client, baseId);
   const tableById = new Map(tables.map(t => [t.id, t]));
@@ -983,6 +1040,7 @@ async function webhookIncrementalSyncBase(
           const result = await ingestRecord(
             store, baseId, tableId, rec, agent, fieldMeta, exclusions,
             preserveExisting, onEvent, displayField, defaultResolution,
+            onChange, table.name,
           );
           switch (result) {
             case 'ingested': counter.ingested++; break;
@@ -1011,6 +1069,7 @@ async function webhookIncrementalSyncBase(
           const result = await ingestRecord(
             store, baseId, tableId, rec, agent, fieldMeta, exclusions,
             preserveExisting, onEvent, displayField, defaultResolution,
+            onChange, table.name,
           );
           switch (result) {
             case 'ingested': counter.ingested++; break;
@@ -1664,6 +1723,12 @@ export async function updateSync(
     onEvent?: (event: any) => void;
     onTableComplete?: (result: SyncResult) => void;
     customization?: SyncCustomization;
+    /**
+     * Fires every time `ingestRecord` actually changes a record's stored
+     * fields (skip-no-change records do NOT fire). Surfaced to the UI's
+     * "Recent changes" panel.
+     */
+    onChange?: RecordChangeListener;
   },
 ): Promise<UpdateSyncResult> {
   const start = Date.now();
@@ -1840,7 +1905,7 @@ export async function updateSync(
         store, client, base.id, base.name, tables, agent,
         baseSelectedIds, preserveExisting, fieldExclusions,
         displayFields, defaultResolution,
-        opts?.onEvent, opts?.onProgress,
+        opts?.onEvent, opts?.onProgress, opts?.onChange,
       );
       for (const r of webhookResults) {
         syncResults.push(r);
@@ -1878,6 +1943,7 @@ export async function updateSync(
           opts?.onEvent, opts?.onProgress, recordLimit,
           defaultResolution,
           'lastModified',
+          opts?.onChange,
         );
         syncResults.push(result);
         opts?.onTableComplete?.(result);

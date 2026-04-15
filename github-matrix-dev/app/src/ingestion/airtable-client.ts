@@ -181,30 +181,92 @@ class TokenBucket {
 const AIRTABLE_API = 'https://api.airtable.com/v0';
 const AIRTABLE_META_API = 'https://api.airtable.com/v0/meta';
 
+/**
+ * Optional callback invoked for every HTTP request the client makes.
+ * Wired by `AirtableSyncService` to populate the Webhook Health panel —
+ * specifically the "200 OK / 401 Unauthorized" indicator the user sees
+ * for the most recent /payloads call.
+ *
+ * Fires for both success and failure paths. `status` is null when the
+ * fetch threw (network error, CORS) before producing a response.
+ */
+export interface AirtableResponseInfo {
+  url: string;
+  method: string;
+  status: number | null;
+  statusText: string | null;
+  ok: boolean;
+  /** Wall-clock duration in ms from request to response/error. */
+  durationMs: number;
+  /** Set when the call threw before a response landed. */
+  error?: string;
+  /**
+   * Set when the response body was non-JSON despite a 2xx status. The first
+   * 200 chars of the body are captured so the UI can show the user "we got
+   * HTML back" instead of the cryptic SyntaxError.
+   */
+  nonJsonBodyPreview?: string;
+}
+
+export type AirtableResponseHook = (info: AirtableResponseInfo) => void;
+
 export class AirtableClient {
   private bucket: TokenBucket;
+  private onResponse?: AirtableResponseHook;
 
   constructor(
     private readonly apiKey: string,
     ratePerSec: number = 4,
+    opts?: { onResponse?: AirtableResponseHook },
   ) {
     this.bucket = new TokenBucket(ratePerSec, ratePerSec);
+    this.onResponse = opts?.onResponse;
+  }
+
+  /**
+   * Replace the response observer after construction. Useful when the
+   * client is created before the sync service that wants to listen.
+   */
+  setResponseHook(hook: AirtableResponseHook | undefined): void {
+    this.onResponse = hook;
   }
 
   private async request<T>(url: string, init?: RequestInit, retries = 3): Promise<T> {
     await this.bucket.acquire();
 
     for (let attempt = 0; attempt <= retries; attempt++) {
-      const res = await fetch(url, {
-        ...init,
-        headers: {
-          'Authorization': `Bearer ${this.apiKey}`,
-          'Content-Type': 'application/json',
-          ...init?.headers,
-        },
-      });
+      const startedAt = Date.now();
+      const method = (init?.method ?? 'GET').toUpperCase();
+      let res: Response;
+      try {
+        res = await fetch(url, {
+          ...init,
+          headers: {
+            'Authorization': `Bearer ${this.apiKey}`,
+            'Content-Type': 'application/json',
+            ...init?.headers,
+          },
+        });
+      } catch (e) {
+        // Network-level failure — emit a synthetic info record so the UI
+        // can surface it before re-throwing.
+        const msg = (e as Error)?.message ?? String(e);
+        try {
+          this.onResponse?.({
+            url, method, status: null, statusText: null, ok: false,
+            durationMs: Date.now() - startedAt, error: msg,
+          });
+        } catch { /* observer must never break the request */ }
+        throw e;
+      }
 
       if (res.status === 429) {
+        try {
+          this.onResponse?.({
+            url, method, status: 429, statusText: res.statusText, ok: false,
+            durationMs: Date.now() - startedAt,
+          });
+        } catch { /* ignore */ }
         const backoff = Math.pow(2, attempt + 1) * 1000;
         await new Promise(resolve => setTimeout(resolve, backoff));
         continue;
@@ -212,6 +274,12 @@ export class AirtableClient {
 
       if (!res.ok) {
         const body = await res.text();
+        try {
+          this.onResponse?.({
+            url, method, status: res.status, statusText: res.statusText, ok: false,
+            durationMs: Date.now() - startedAt, error: body.slice(0, 200),
+          });
+        } catch { /* ignore */ }
         // Preserve the HTTP status so callers can branch on 404 (webhook
         // expired / cursor too stale) without parsing the error message.
         const err = new Error(`Airtable API ${res.status}: ${body}`) as Error & { status?: number };
@@ -219,7 +287,38 @@ export class AirtableClient {
         throw err;
       }
 
-      return await res.json() as T;
+      // Read body as text first so we can detect HTML-where-JSON-was-expected
+      // and surface a helpful error rather than the cryptic SyntaxError. This
+      // handles the common case where a captive portal / proxy / CDN returns
+      // an HTML error page with a 200 status.
+      const text = await res.text();
+      try {
+        const parsed = JSON.parse(text) as T;
+        try {
+          this.onResponse?.({
+            url, method, status: res.status, statusText: res.statusText, ok: true,
+            durationMs: Date.now() - startedAt,
+          });
+        } catch { /* ignore */ }
+        return parsed;
+      } catch (_jsonErr) {
+        const preview = text.slice(0, 200);
+        try {
+          this.onResponse?.({
+            url, method, status: res.status, statusText: res.statusText, ok: false,
+            durationMs: Date.now() - startedAt,
+            error: 'non-JSON response',
+            nonJsonBodyPreview: preview,
+          });
+        } catch { /* ignore */ }
+        const looksLikeHtml = /^\s*<(!doctype|html)/i.test(text);
+        const hint = looksLikeHtml
+          ? 'Airtable returned HTML instead of JSON — likely a network proxy, captive portal, or expired credentials redirect.'
+          : 'Airtable returned a non-JSON body.';
+        const err = new Error(`${hint} (${res.status} ${res.statusText}; body: ${preview})`) as Error & { status?: number };
+        err.status = res.status;
+        throw err;
+      }
     }
 
     throw new Error('Airtable API: max retries exceeded (429)');
