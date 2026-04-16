@@ -5,11 +5,13 @@ import {
   logSite,
   pieceSite,
   tailSite,
+  cacheSite,
   parseSwarmSite,
   parsePeerSite,
   parseLogSite,
   parsePieceSite,
   parseTailSite,
+  parseCacheSite,
   parseSyncSite,
   siteFamily,
   isSyncSite,
@@ -59,12 +61,20 @@ describe('sites — round-trip build/parse', () => {
     expect(parseTailSite(s)).toEqual({ family: 'tail', authorDeviceId: 'DEVICE123' });
   });
 
+  it('cache', () => {
+    const s = cacheSite('DEVICE123');
+    expect(s).toBe('cache:DEVICE123');
+    expect(parseCacheSite(s)).toEqual({ family: 'cache', deviceId: 'DEVICE123' });
+    expect(siteFamily(s)).toBe('cache');
+  });
+
   it('parseSyncSite dispatches', () => {
     expect(parseSyncSite(swarmSite('R'))?.family).toBe('swarm');
     expect(parseSyncSite(peerSite('@u', 'd'))?.family).toBe('peer');
     expect(parseSyncSite(logSite('d'))?.family).toBe('log');
     expect(parseSyncSite(pieceSite('d', 0))?.family).toBe('piece');
     expect(parseSyncSite(tailSite('d'))?.family).toBe('tail');
+    expect(parseSyncSite(cacheSite('d'))?.family).toBe('cache');
   });
 
   it('isSyncTarget and isSyncSite agree', () => {
@@ -97,6 +107,13 @@ describe('sites — malformed input rejected', () => {
     expect(parseLogSite('log:a|b')).toBeNull();
     expect(parseLogSite('log:')).toBeNull();
     expect(parseTailSite('tail:')).toBeNull();
+  });
+
+  it('cache rejects compound device ids and empty input', () => {
+    expect(parseCacheSite('cache:a/b')).toBeNull();
+    expect(parseCacheSite('cache:a|b')).toBeNull();
+    expect(parseCacheSite('cache:')).toBeNull();
+    expect(parseCacheSite('notcache:dev')).toBeNull();
   });
 
   it('swarm rejects empty room', () => {

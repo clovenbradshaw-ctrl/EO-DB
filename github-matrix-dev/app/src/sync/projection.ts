@@ -24,9 +24,11 @@ import type {
   PeerEvaPredicate,
   PeerPieceCoupling,
   DefResolvedFrom,
+  CacheDefOperand,
+  ArchiveScheme,
 } from './operators';
-import { isRecognizedSyncVariant, syncEventFamily } from './operators';
-import { parsePieceSite, parsePeerSite, pieceSite } from './sites';
+import { isRecognizedSyncVariant, syncEventFamily, DEFAULT_CACHE_DEF } from './operators';
+import { parsePieceSite, parsePeerSite, parseCacheSite, pieceSite } from './sites';
 import { getOriginDeviceId } from './agent';
 
 // ─── Types ───────────────────────────────────────────────────────────────
@@ -73,7 +75,21 @@ export type PieceStatus =
   | 'requested'
   | 'instantiated'
   | 'swarm_attested'
+  | 'archived'
   | 'unrecoverable';
+
+/**
+ * Set once REC(locally_archived) lands. Identifies where the archived bytes
+ * now live; the piece's hash/bounds are unchanged.
+ */
+export interface PieceArchive {
+  archive_uri: string;
+  scheme: ArchiveScheme;
+  content_hash: string;
+  archived_at: string;
+  size_bytes: number;
+  seq: number;
+}
 
 export interface PieceProjection {
   piece_site: PieceSiteStr;
@@ -96,6 +112,8 @@ export interface PieceProjection {
   swarmAttestedHash: string | null;
   /** Set once REC recognizes unrecoverability. */
   unrecoverable: boolean;
+  /** Set once REC(locally_archived) lands. Cleared on subsequent INS. */
+  archive: PieceArchive | null;
   /** Sequence number of the last event applied to this piece. */
   last_seq: number;
 }
@@ -159,12 +177,33 @@ export interface TailProjection {
   lastSyn: { contributors: PeerSite[]; head: number; seq: number } | null;
 }
 
+/**
+ * Per-device retention schema and latest measurement. Lives on
+ * `cache:<deviceId>` — each device has its own. The DEF is what the ⊢DEF
+ * slot of the archival loop holds; EVA is the last storage reading.
+ */
+export interface CacheProjection {
+  device_id: string;
+  cache_site: string;
+  first_seen_seq: number | null;
+  /** Merged retention schema (falls back to DEFAULT_CACHE_DEF field-wise). */
+  def: CacheDefOperand;
+  def_seq: number | null;
+  /** Latest usage_measurement EVA, if any. */
+  lastUsageMb: number | null;
+  lastQuotaMb: number | null;
+  lastResidentPieces: number | null;
+  lastArchivedPieces: number | null;
+  lastEvaSeq: number | null;
+}
+
 export interface SyncProjection {
   swarm: SwarmProjection;
   peers: Map<PeerSite, PeerProjection>;
   logs: Map<AuthorDeviceId, LogProjection>;
   pieces: Map<PieceSiteStr, PieceProjection>;
   tails: Map<AuthorDeviceId, TailProjection>;
+  caches: Map<string /*deviceId*/, CacheProjection>;
 }
 
 // ─── Constructors ────────────────────────────────────────────────────────
@@ -181,6 +220,22 @@ export function emptyProjection(): SyncProjection {
     logs: new Map(),
     pieces: new Map(),
     tails: new Map(),
+    caches: new Map(),
+  };
+}
+
+function emptyCache(device_id: string, cache_site: string): CacheProjection {
+  return {
+    device_id,
+    cache_site,
+    first_seen_seq: null,
+    def: { ...DEFAULT_CACHE_DEF },
+    def_seq: null,
+    lastUsageMb: null,
+    lastQuotaMb: null,
+    lastResidentPieces: null,
+    lastArchivedPieces: null,
+    lastEvaSeq: null,
   };
 }
 
@@ -198,6 +253,7 @@ function emptyPiece(piece_site: PieceSiteStr, author_device_id: AuthorDeviceId, 
     instantiatedHash: null,
     swarmAttestedHash: null,
     unrecoverable: false,
+    archive: null,
     last_seq: -1,
   };
 }
@@ -239,6 +295,9 @@ function emptyTail(author_device_id: AuthorDeviceId): TailProjection {
 
 export function pieceStatus(p: PieceProjection): PieceStatus {
   if (p.unrecoverable) return 'unrecoverable';
+  // Archive implies "bytes not held locally". INS (rehydrate) clears the
+  // archive flag, so `archive && !instantiatedHash` is the "faded" state.
+  if (p.archive && !p.instantiatedHash) return 'archived';
   if (p.swarmAttestedHash) return 'swarm_attested';
   if (p.instantiatedHash) return 'instantiated';
   if (p.candidates.size > 1) return 'contested';
@@ -260,7 +319,12 @@ function copyProjection(p: SyncProjection): SyncProjection {
     logs: new Map(p.logs),
     pieces: new Map(p.pieces),
     tails: new Map(p.tails),
+    caches: new Map(p.caches),
   };
+}
+
+function copyCache(c: CacheProjection): CacheProjection {
+  return { ...c, def: { ...c.def } };
 }
 
 function copyPiece(p: PieceProjection): PieceProjection {
@@ -328,6 +392,8 @@ export function applyEvent(proj: SyncProjection, event: EoEvent): SyncProjection
       return applyPieceEvent(proj, event);
     case 'tail':
       return applyTailEvent(proj, event);
+    case 'cache':
+      return applyCacheEvent(proj, event);
   }
 }
 
@@ -552,6 +618,10 @@ function applyPieceEvent(proj: SyncProjection, event: EoEvent): SyncProjection {
       const content_hash = operand?.content_hash as string | undefined;
       if (!content_hash) return proj;
       piece.instantiatedHash = content_hash;
+      // Fresh INS after archive = rehydrate. Clear the archive marker so
+      // status reports 'instantiated'. The URI is still recoverable from
+      // the log history if needed.
+      piece.archive = null;
       piece.last_seq = Math.max(piece.last_seq, event.seq);
       break;
     }
@@ -573,10 +643,25 @@ function applyPieceEvent(proj: SyncProjection, event: EoEvent): SyncProjection {
     }
     case 'REC': {
       const recognized = operand?.recognized as string | undefined;
-      if (recognized !== 'unrecoverable_pending_author') return proj;
-      piece.unrecoverable = true;
-      piece.last_seq = Math.max(piece.last_seq, event.seq);
-      break;
+      if (recognized === 'unrecoverable_pending_author') {
+        piece.unrecoverable = true;
+        piece.last_seq = Math.max(piece.last_seq, event.seq);
+        break;
+      }
+      if (recognized === 'locally_archived') {
+        const archive_uri = operand?.archive_uri as string | undefined;
+        const scheme = operand?.archive_scheme as ArchiveScheme | undefined;
+        const content_hash = operand?.content_hash as string | undefined;
+        const archived_at = operand?.archived_at as string | undefined;
+        const size_bytes = operand?.size_bytes as number | undefined;
+        if (!archive_uri || !isArchiveScheme(scheme) || !content_hash || !archived_at || typeof size_bytes !== 'number') return proj;
+        piece.archive = { archive_uri, scheme, content_hash, archived_at, size_bytes, seq: event.seq };
+        // Dropping bytes locally: clear the live residency marker.
+        piece.instantiatedHash = null;
+        piece.last_seq = Math.max(piece.last_seq, event.seq);
+        break;
+      }
+      return proj;
     }
   }
   next.pieces.set(event.target, piece);
@@ -614,6 +699,55 @@ function applyTailEvent(proj: SyncProjection, event: EoEvent): SyncProjection {
     }
   }
   next.tails.set(author_device_id, tail);
+  return next;
+}
+
+// ─── cache events ────────────────────────────────────────────────────────
+
+function applyCacheEvent(proj: SyncProjection, event: EoEvent): SyncProjection {
+  const parsed = parseCacheSite(event.target);
+  if (!parsed) return proj;
+  const next = copyProjection(proj);
+  const cache = copyCache(next.caches.get(parsed.deviceId) ?? emptyCache(parsed.deviceId, event.target));
+  const operand = event.operand as Record<string, unknown> | undefined;
+
+  switch (event.op) {
+    case 'INS': {
+      if (cache.first_seen_seq !== null) return proj;
+      cache.first_seen_seq = event.seq;
+      break;
+    }
+    case 'DEF': {
+      // Partial DEFs compose field-wise with the existing def so a toggle can
+      // flip `enabled` without restating the watermarks.
+      const next_def: CacheDefOperand = { ...cache.def };
+      if (typeof operand?.enabled === 'boolean') next_def.enabled = operand.enabled;
+      if (typeof operand?.high_watermark_mb === 'number') next_def.high_watermark_mb = operand.high_watermark_mb;
+      if (typeof operand?.low_watermark_mb === 'number') next_def.low_watermark_mb = operand.low_watermark_mb;
+      if (typeof operand?.min_attestation === 'number') next_def.min_attestation = operand.min_attestation;
+      if (typeof operand?.hot_window_ms === 'number') next_def.hot_window_ms = operand.hot_window_ms;
+      // Defend against nonsensical watermarks: reject if low >= high.
+      if (next_def.low_watermark_mb >= next_def.high_watermark_mb) return proj;
+      if (next_def.high_watermark_mb <= 0) return proj;
+      if (next_def.min_attestation < 0) return proj;
+      cache.def = next_def;
+      cache.def_seq = event.seq;
+      break;
+    }
+    case 'EVA': {
+      const predicate = operand?.predicate as string | undefined;
+      if (predicate !== 'usage_measurement') return proj;
+      const usage_mb = operand?.usage_mb;
+      if (typeof usage_mb !== 'number') return proj;
+      cache.lastUsageMb = usage_mb;
+      cache.lastQuotaMb = typeof operand?.quota_mb === 'number' ? operand.quota_mb as number : null;
+      cache.lastResidentPieces = typeof operand?.resident_pieces === 'number' ? operand.resident_pieces as number : null;
+      cache.lastArchivedPieces = typeof operand?.archived_pieces === 'number' ? operand.archived_pieces as number : null;
+      cache.lastEvaSeq = event.seq;
+      break;
+    }
+  }
+  next.caches.set(parsed.deviceId, cache);
   return next;
 }
 
@@ -666,4 +800,8 @@ function isPeerPieceCoupling(v: unknown): v is PeerPieceCoupling {
 
 function isDefResolvedFrom(v: unknown): v is DefResolvedFrom {
   return v === 'author_seg' || v === 'swarm_attestation' || v === 'single_verified_delivery';
+}
+
+function isArchiveScheme(v: unknown): v is ArchiveScheme {
+  return v === 'drive' || v === 'https' || v === 'matrix_mxc';
 }

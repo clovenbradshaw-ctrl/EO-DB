@@ -21,6 +21,18 @@ import { pieceStatus } from './projection';
 import { parsePeerSite } from './sites';
 import { stableDerivedId } from './derived';
 
+/**
+ * URI-backed advertisers (Filen/Drive/https archive URIs) use a reserved
+ * prefix (see archiver.ts `formatUriAdvertiser`). They are valid sources,
+ * but rely on a URI-aware transport that is wired separately from the
+ * peer-to-peer scheduler. Until that transport lands, the scheduler skips
+ * URI advertisers and leaves them for explicit rehydrate paths.
+ */
+const URI_ADVERTISER_PREFIX = 'uri:';
+function isUriAdvertiser(s: string): boolean {
+  return s.startsWith(URI_ADVERTISER_PREFIX);
+}
+
 export type PeerSite = string;
 export type PieceSiteStr = string;
 
@@ -163,7 +175,10 @@ export function schedule(input: SchedulerInput): SchedulerIntent[] {
 function swarmAvailability(piece: PieceProjection): number {
   const advertisers = new Set<PeerSite>();
   for (const c of piece.candidates.values()) {
-    for (const p of c.advertised_by) advertisers.add(p);
+    for (const p of c.advertised_by) {
+      if (isUriAdvertiser(p)) continue;
+      advertisers.add(p);
+    }
   }
   for (const d of piece.deliveries.values()) {
     if (d.verified) advertisers.add(d.peer);
@@ -243,7 +258,10 @@ function pickEligiblePeers(
   // Candidate set: peers that advertised the piece (includes past verified deliveries).
   const advertisers = new Set<PeerSite>();
   for (const c of piece.candidates.values()) {
-    for (const p of c.advertised_by) advertisers.add(p);
+    for (const p of c.advertised_by) {
+      if (isUriAdvertiser(p)) continue;
+      advertisers.add(p);
+    }
   }
   for (const d of piece.deliveries.values()) {
     if (d.verified) advertisers.add(d.peer);

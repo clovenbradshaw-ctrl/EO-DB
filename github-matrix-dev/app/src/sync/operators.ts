@@ -20,6 +20,7 @@ import {
   parseSwarmSite,
   parseLogSite,
   parseTailSite,
+  parseCacheSite,
   isSyncTarget,
 } from './sites';
 
@@ -150,10 +151,35 @@ export interface PieceSynOperand {
   threshold: number;
 }
 
-export interface PieceRecOperand {
+export type PieceRecognized =
+  | 'unrecoverable_pending_author'
+  | 'locally_archived';
+
+export interface PieceRecUnrecoverableOperand {
   recognized: 'unrecoverable_pending_author';
   awaiting: string; // author_device_id
 }
+
+/**
+ * Emitted when this device has uploaded the piece's bytes to a durable URI
+ * backend (Filen/Drive/https) and dropped the local copy. The piece's
+ * identity (hash, bounds) is unchanged — only this device's coupling to the
+ * bytes moves. Rehydrate pulls from the URI (or swarm) and re-instantiates.
+ */
+export interface PieceRecArchivedOperand {
+  recognized: 'locally_archived';
+  archive_uri: string;          // where the bytes now live
+  archive_scheme: ArchiveScheme;
+  content_hash: string;         // the piece hash at archive time (integrity anchor)
+  archived_at: string;          // ISO ts
+  size_bytes: number;           // recorded so the cache projection can sum without re-stating
+}
+
+export type PieceRecOperand =
+  | PieceRecUnrecoverableOperand
+  | PieceRecArchivedOperand;
+
+export type ArchiveScheme = 'drive' | 'https' | 'matrix_mxc';
 
 // ─── tail:<authorDeviceId> operands ──────────────────────────────────────
 
@@ -171,6 +197,67 @@ export interface TailSynOperand {
   kind: 'multi_sourced_unanimous';
   contributors: PeerId[];
   head: number;
+}
+
+// ─── cache:<deviceId> operands ───────────────────────────────────────────
+//
+// The cache site carries this device's retention policy and local residency
+// summary. It is the ⊢DEF slot of the DEF→EVA→REC archival loop:
+//
+//   DEF — define the retention schema (enabled, watermarks, thresholds).
+//   EVA — each archival tick evaluates pieces against the schema.
+//   REC — when evaluation selects a piece, emit REC on piece:* recognized
+//         "locally_archived" (see PieceRecArchivedOperand above). The cache's
+//         own definition can also be rewritten via a fresh DEF on this site.
+//
+// Per-device: each device maintains its own cache site. Policy DEFs
+// propagate via the same log as anything else, so devices can see each
+// other's policies for diagnostic purposes even though each device only
+// enforces its own.
+
+export interface CacheInsOperand {
+  /** When this device first stood up a cache projection. */
+  first_seen_at: string;
+}
+
+/**
+ * Retention schema. Every field has a default so partial DEFs (e.g. UI
+ * toggles `enabled` only) compose with the existing schema.
+ *
+ * Watermark semantics (hysteresis = DEF resistance):
+ *   - OPFS usage above `high_watermark_mb` triggers archiving
+ *   - archiving continues until usage drops below `low_watermark_mb`
+ *   - gap between the two should be ~20% to avoid thrashing
+ */
+export interface CacheDefOperand {
+  enabled: boolean;
+  high_watermark_mb: number;
+  low_watermark_mb: number;
+  /** Minimum number of independent SYN contributors before a piece may be
+   *  archived. Setting this to 0 allows archiving of any piece; the default
+   *  (3) matches DEFAULT_SYN_THRESHOLD. */
+  min_attestation: number;
+  /** Pieces accessed inside this window stay resident regardless of status. */
+  hot_window_ms: number;
+}
+
+export const DEFAULT_CACHE_DEF: CacheDefOperand = {
+  enabled: false,
+  high_watermark_mb: 500,
+  low_watermark_mb: 400,
+  min_attestation: 3,
+  hot_window_ms: 86_400_000, // 24h
+};
+
+/** Latest observed local storage state — written as EVA, not DEF. */
+export interface CacheEvaOperand {
+  predicate: 'usage_measurement';
+  usage_mb: number;
+  quota_mb: number | null;
+  /** Number of pieces currently `instantiated` locally (bytes held). */
+  resident_pieces: number;
+  /** Number of pieces currently `archived` locally (URI only). */
+  archived_pieces: number;
 }
 
 // ─── Variants (discriminated on (op, site-family)) ───────────────────────
@@ -199,7 +286,11 @@ export type SyncEventVariant =
   // tail
   | { op: 'INS'; family: 'tail'; operand: TailInsOperand }
   | { op: 'REC'; family: 'tail'; operand: TailRecOperand }
-  | { op: 'SYN'; family: 'tail'; operand: TailSynOperand };
+  | { op: 'SYN'; family: 'tail'; operand: TailSynOperand }
+  // cache
+  | { op: 'INS'; family: 'cache'; operand: CacheInsOperand }
+  | { op: 'DEF'; family: 'cache'; operand: CacheDefOperand }
+  | { op: 'EVA'; family: 'cache'; operand: CacheEvaOperand };
 
 export type SyncOp = SyncEventVariant['op'];
 
@@ -217,6 +308,7 @@ export function syncEventFamily(event: EoEvent): SyncSiteFamily | null {
   if (parseLogSite(event.target)) return 'log';
   if (parsePieceSite(event.target)) return 'piece';
   if (parseTailSite(event.target)) return 'tail';
+  if (parseCacheSite(event.target)) return 'cache';
   return null;
 }
 
@@ -237,5 +329,7 @@ export function isRecognizedSyncVariant(op: string, family: SyncSiteFamily): boo
       return op === 'INS' || op === 'DEF' || op === 'SYN' || op === 'REC';
     case 'tail':
       return op === 'INS' || op === 'REC' || op === 'SYN';
+    case 'cache':
+      return op === 'INS' || op === 'DEF' || op === 'EVA';
   }
 }
