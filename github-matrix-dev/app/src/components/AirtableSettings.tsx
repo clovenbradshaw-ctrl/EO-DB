@@ -890,31 +890,73 @@ export function AirtableSettingsSection({
         progressListener.finalize();
       }
 
+      // Bake the replayed state into the local KV snapshot and push the whole
+      // log to Google Drive. Without this, the in-memory fold lives only in
+      // the MemoryStore + (async, fire-and-forget) OPFS appends — a refresh
+      // can land on the stale pre-import snapshot, and no second device ever
+      // sees the imported records. Mirrors the "Take Snapshot" button: same
+      // kv-snapshot bake, same init-cache refresh, same fullPushToGDrive.
+      setSyncStatus((prev) => ({
+        ...prev,
+        snapshotImport: {
+          state: 'syncing',
+          message: `Saving ${replay.eventsReplayed} events to Drive…`,
+        },
+      }));
+      let driveSeq: number | null = null;
+      let driveError: string | null = null;
+      try {
+        const result = await useEoStore.getState().manualSnapshot();
+        driveSeq = result.seq;
+      } catch (e: any) {
+        driveError = e?.message || String(e);
+        console.warn('[EO-DB] snapshot import: Drive push failed:', e);
+      }
+
       const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
       const skippedSuffix = replay.insSkippedExisting > 0
         ? `, ${replay.insSkippedExisting} existing target(s) skipped`
         : '';
+      const driveSuffix = driveError
+        ? `, Drive push FAILED: ${driveError}`
+        : driveSeq !== null
+          ? `, pushed to Drive @ seq ${driveSeq}`
+          : '';
       useAirtableStore.getState().addSyncLogEntry({
         ts: Date.now(),
         type: 'snapshot_imported',
         source: 'local',
         syncer: session.userId,
-        detail: `${file.name}: replayed ${replay.eventsReplayed} events${skippedSuffix}, seeded ${replay.tablesSeeded} table cursor(s), ${seconds}s`,
+        detail: `${file.name}: replayed ${replay.eventsReplayed} events${skippedSuffix}${driveSuffix}, seeded ${replay.tablesSeeded} table cursor(s), ${seconds}s`,
         durationMs: Date.now() - startedAt,
         recordsScanned: replay.eventsReplayed,
       });
       // Refresh the synced index so the table picker reflects what just landed.
       getSyncedTableIds(store).then(setSyncedTableIds);
-      setSyncStatus((prev) => ({
-        ...prev,
-        snapshotImport: {
-          state: 'done',
-          message: `Imported ${replay.eventsReplayed} events from ${file.name}`,
-          detail: replay.insSkippedExisting > 0
-            ? `${replay.tablesSeeded} table cursor(s) seeded; ${replay.insSkippedExisting} target(s) already existed locally (new content folded in).`
-            : `${replay.tablesSeeded} table cursor(s) seeded — Update Sync will pull post-snapshot deltas.`,
-        },
-      }));
+      if (driveError) {
+        setSyncStatus((prev) => ({
+          ...prev,
+          snapshotImport: {
+            state: 'error',
+            message: `Imported locally but Drive push failed: ${driveError}`,
+            detail: `${replay.eventsReplayed} events replayed into the local store — retry by taking a manual snapshot once Drive is reachable.`,
+          },
+        }));
+      } else {
+        const driveDetail = driveSeq !== null
+          ? ` Pushed to Drive @ seq ${driveSeq}.`
+          : '';
+        setSyncStatus((prev) => ({
+          ...prev,
+          snapshotImport: {
+            state: 'done',
+            message: `Imported ${replay.eventsReplayed} events from ${file.name}`,
+            detail: (replay.insSkippedExisting > 0
+              ? `${replay.tablesSeeded} table cursor(s) seeded; ${replay.insSkippedExisting} target(s) already existed locally (new content folded in).`
+              : `${replay.tablesSeeded} table cursor(s) seeded — Update Sync will pull post-snapshot deltas.`) + driveDetail,
+          },
+        }));
+      }
     } catch (e: any) {
       useAirtableStore.getState().addSyncLogEntry({
         ts: Date.now(),
