@@ -8,6 +8,11 @@ import { createFoldWorkerClient, initFoldWorker, type FoldWorkerClient } from '.
 import { SyncManager } from '../matrix/sync-manager';
 import { PeerSync } from '../matrix/peer-sync';
 import { WebRTCPeer } from '../matrix/webrtc-peer';
+import {
+  startNetworkSyncSystem,
+  isOperatorSyncEnabled,
+  type NetworkSyncSystem,
+} from '../sync/network-sync-system';
 import { Presence, type PresenceUser } from '../matrix/presence';
 import { usePresencePrefs } from '../lib/presence-prefs';
 import { OnlineUsers } from './OnlineUsers';
@@ -1790,21 +1795,50 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
 
       let peerSync: PeerSync | null = null;
       let webrtcPeer: WebRTCPeer | null = null;
+      let operatorSync: NetworkSyncSystem | null = null;
+
+      const useOperatorSync = isOperatorSyncEnabled(
+        (import.meta as unknown as { env?: Record<string, string | undefined> }).env?.VITE_NETWORK_SYNC_WORKER,
+      );
 
       if (MATRIX_ENABLED && spaceRoomId && matrixClientRef.current) {
         try {
           webrtcPeer = new WebRTCPeer(matrixClientRef.current, spaceRoomId, useEoStore.getState().store!, onFoldEvent);
           webrtcPeer.start();
-          peerSync = new PeerSync(matrixClientRef.current, spaceRoomId, useEoStore.getState().store!, onFoldEvent);
-          peerSync.setWebRTCPeer(webrtcPeer);
-          await peerSync.start();
-          if (isStale()) { peerSync.stop(); webrtcPeer.stop(); return; }
-          useEoStore.getState().setSyncManager(peerSync as any);
-          cleanupFns.push(() => { peerSync!.stop(); webrtcPeer!.stop(); });
+          if (useOperatorSync) {
+            operatorSync = await startNetworkSyncSystem({
+              matrix: matrixClientRef.current,
+              roomId: spaceRoomId,
+              store: useEoStore.getState().store!,
+              webrtcPeer,
+              userId: session.userId,
+              deviceId: matrixClientRef.current.getDeviceId() ?? '',
+              onFoldEvent,
+              createWorker: () =>
+                new Worker(new URL('../workers/network-sync.worker.ts', import.meta.url), {
+                  type: 'module',
+                  name: 'eo-network-sync',
+                }),
+            });
+            if (isStale()) { await operatorSync.stop(); webrtcPeer.stop(); return; }
+            cleanupFns.push(() => {
+              void operatorSync!.stop();
+              webrtcPeer!.stop();
+            });
+            console.log('[EO-DB] Operator-native sync active for', spaceRoomId);
+          } else {
+            peerSync = new PeerSync(matrixClientRef.current, spaceRoomId, useEoStore.getState().store!, onFoldEvent);
+            peerSync.setWebRTCPeer(webrtcPeer);
+            await peerSync.start();
+            if (isStale()) { peerSync.stop(); webrtcPeer.stop(); return; }
+            useEoStore.getState().setSyncManager(peerSync as any);
+            cleanupFns.push(() => { peerSync!.stop(); webrtcPeer!.stop(); });
+          }
         } catch (e) {
-          console.warn('[EO-DB] PeerSync init failed for', selectedSpace, e);
+          console.warn('[EO-DB] Sync init failed for', selectedSpace, e);
           peerSync = null;
           webrtcPeer = null;
+          operatorSync = null;
         }
       }
 
