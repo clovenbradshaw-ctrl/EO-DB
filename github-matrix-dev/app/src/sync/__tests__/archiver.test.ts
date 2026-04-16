@@ -173,8 +173,8 @@ describe('piece archive — REC(locally_archived)', () => {
       target: pieceSite('A', 0),
       operand: {
         recognized: 'locally_archived',
-        archive_uri: 'https://filen.io/p/abcd',
-        archive_scheme: 'filen',
+        archive_uri: 'https://drive.google.com/p/abcd',
+        archive_scheme: 'drive',
         content_hash: 'h1',
         archived_at: '2026-01-02T00:00:00Z',
         size_bytes: 4096,
@@ -182,8 +182,8 @@ describe('piece archive — REC(locally_archived)', () => {
     }));
     const piece = p.pieces.get(pieceSite('A', 0))!;
     expect(piece.archive).not.toBeNull();
-    expect(piece.archive!.scheme).toBe('filen');
-    expect(piece.archive!.archive_uri).toBe('https://filen.io/p/abcd');
+    expect(piece.archive!.scheme).toBe('drive');
+    expect(piece.archive!.archive_uri).toBe('https://drive.google.com/p/abcd');
     expect(piece.instantiatedHash).toBeNull();
     expect(pieceStatus(piece)).toBe('archived');
   });
@@ -197,8 +197,8 @@ describe('piece archive — REC(locally_archived)', () => {
       target: pieceSite('A', 0),
       operand: {
         recognized: 'locally_archived',
-        archive_uri: 'https://filen.io/p/abcd',
-        archive_scheme: 'filen',
+        archive_uri: 'https://drive.google.com/p/abcd',
+        archive_scheme: 'drive',
         content_hash: 'h1',
         archived_at: 't',
         size_bytes: 4096,
@@ -224,7 +224,7 @@ describe('piece archive — REC(locally_archived)', () => {
       operand: {
         recognized: 'locally_archived',
         // missing archive_uri
-        archive_scheme: 'filen',
+        archive_scheme: 'drive',
         content_hash: 'h1',
         archived_at: 't',
         size_bytes: 1,
@@ -375,8 +375,8 @@ describe('selectForArchival', () => {
       target: pieceSite('A', 0),
       operand: {
         recognized: 'locally_archived',
-        archive_uri: 'https://filen.io/abc',
-        archive_scheme: 'filen',
+        archive_uri: 'https://drive.google.com/abc',
+        archive_scheme: 'drive',
         content_hash: 'h0',
         archived_at: 't',
         size_bytes: 4096,
@@ -402,7 +402,7 @@ describe('selectForArchival', () => {
 // ─── archiver tick — pipeline ────────────────────────────────────────────
 
 class FakeBackend implements ArchiveBackend {
-  scheme = 'filen' as const;
+  scheme = 'drive' as const;
   uploaded = new Map<string, Uint8Array>();
   failNext = false;
   async uploadPiece({ piece_site, content_hash, bytes }: { piece_site: string; content_hash: string; bytes: Uint8Array }) {
@@ -410,7 +410,7 @@ class FakeBackend implements ArchiveBackend {
       this.failNext = false;
       throw new Error('simulated upload failure');
     }
-    const uri = `https://filen.io/${content_hash}`;
+    const uri = `https://drive.google.com/${content_hash}`;
     this.uploaded.set(piece_site, bytes);
     return { archive_uri: uri, size_bytes: bytes.length };
   }
@@ -528,8 +528,8 @@ describe('buildArchiveEvents', () => {
       piece_index: 0,
       content_hash: 'h0',
       size_bytes: 4096,
-      archive_uri: 'https://filen.io/abc',
-      scheme: 'filen',
+      archive_uri: 'https://drive.google.com/abc',
+      scheme: 'drive',
       archived_at: '2026-02-02T00:00:00Z',
       knobs,
     });
@@ -537,7 +537,7 @@ describe('buildArchiveEvents', () => {
     expect(sig).toBeDefined();
     expect(sig!.target).toBe(swarmSite(knobs.roomId));
     expect((sig!.operand as { advertised_by: string }).advertised_by)
-      .toBe(formatUriAdvertiser('filen', 'https://filen.io/abc'));
+      .toBe(formatUriAdvertiser('drive', 'https://drive.google.com/abc'));
   });
 
   it('stable client_event_id — re-running with same inputs dedupes', () => {

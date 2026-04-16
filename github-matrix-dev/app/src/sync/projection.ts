@@ -803,5 +803,5 @@ function isDefResolvedFrom(v: unknown): v is DefResolvedFrom {
 }
 
 function isArchiveScheme(v: unknown): v is ArchiveScheme {
-  return v === 'filen' || v === 'drive' || v === 'https' || v === 'matrix_mxc';
+  return v === 'drive' || v === 'https' || v === 'matrix_mxc';
 }

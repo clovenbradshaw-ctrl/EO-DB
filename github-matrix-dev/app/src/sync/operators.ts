@@ -179,7 +179,7 @@ export type PieceRecOperand =
   | PieceRecUnrecoverableOperand
   | PieceRecArchivedOperand;
 
-export type ArchiveScheme = 'filen' | 'drive' | 'https' | 'matrix_mxc';
+export type ArchiveScheme = 'drive' | 'https' | 'matrix_mxc';
 
 // ─── tail:<authorDeviceId> operands ──────────────────────────────────────
 
