@@ -11,6 +11,7 @@ import { OP_COLORS, TRIAD_LABELS } from './LogView';
 import { ArchivedSpacesSection } from './ArchivedSpaces';
 import { AirtableSettingsSection } from './AirtableSettings';
 import { GCalendarSettingsSection } from './GCalendarSettings';
+import { MemoryFadingSettingsSection } from './MemoryFadingSettings';
 import { useGDriveStore } from '../google-drive/gdrive-store';
 import { clearTokens, startOAuthFlow, getAccessToken } from '../google-drive/gdrive-oauth';
 import { usePresencePrefs } from '../lib/presence-prefs';
@@ -224,6 +225,11 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
           <Field label="Events" value={String(eventCount ?? '—')} theme={theme} />
           <Field label="Current Seq" value={String(lastSeq)} theme={theme} />
           <Field label="Architecture" value="OPFS + in-memory (browser-native)" theme={theme} />
+        </Section>
+
+        {/* Memory Fading — archive cold pieces to URI backup */}
+        <Section title="Memory Fading (URI Archive)" theme={theme}>
+          <MemoryFadingSettingsSection session={session} />
         </Section>
 
         {/* Connection & Sync Status */}

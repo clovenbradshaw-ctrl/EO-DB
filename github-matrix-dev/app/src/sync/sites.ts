@@ -1,7 +1,7 @@
 /**
  * Sync-layer site builders and parsers.
  *
- * Sites are addresses. Events occur at sites. These five families cover the
+ * Sites are addresses. Events occur at sites. These six families cover the
  * sync layer:
  *
  *   swarm:<roomId>                              — one per joined room
@@ -9,6 +9,7 @@
  *   log:<authorDeviceId>                        — one per author seen
  *   piece:<authorDeviceId>/v<version>/<index>   — many per author
  *   tail:<authorDeviceId>                       — one per author
+ *   cache:<deviceId>                            — one per device; retention policy
  *
  * Site strings are stored in `EoEvent.target` — the repo's existing address
  * field. `isSyncTarget` is the check the fold worker calls on the wire;
@@ -21,6 +22,7 @@ export const PEER_PREFIX = 'peer:';
 export const LOG_PREFIX = 'log:';
 export const PIECE_PREFIX = 'piece:';
 export const TAIL_PREFIX = 'tail:';
+export const CACHE_PREFIX = 'cache:';
 
 export const PIECE_SCHEMA_VERSION = 1;
 
@@ -62,6 +64,11 @@ export function tailSite(authorDeviceId: string): string {
   return TAIL_PREFIX + authorDeviceId;
 }
 
+export function cacheSite(deviceId: string): string {
+  assertNoDelimiters('deviceId', deviceId, ['|', '/']);
+  return CACHE_PREFIX + deviceId;
+}
+
 // ─── Parsers ─────────────────────────────────────────────────────────────
 
 export interface ParsedSwarmSite {
@@ -92,12 +99,18 @@ export interface ParsedTailSite {
   authorDeviceId: string;
 }
 
+export interface ParsedCacheSite {
+  family: 'cache';
+  deviceId: string;
+}
+
 export type ParsedSyncSite =
   | ParsedSwarmSite
   | ParsedPeerSite
   | ParsedLogSite
   | ParsedPieceSite
-  | ParsedTailSite;
+  | ParsedTailSite
+  | ParsedCacheSite;
 
 export type SyncSiteFamily = ParsedSyncSite['family'];
 
@@ -148,13 +161,21 @@ export function parseTailSite(s: string): ParsedTailSite | null {
   return { family: 'tail', authorDeviceId };
 }
 
+export function parseCacheSite(s: string): ParsedCacheSite | null {
+  if (!s.startsWith(CACHE_PREFIX)) return null;
+  const deviceId = s.slice(CACHE_PREFIX.length);
+  if (!deviceId || deviceId.includes('/') || deviceId.includes('|')) return null;
+  return { family: 'cache', deviceId };
+}
+
 export function parseSyncSite(s: string): ParsedSyncSite | null {
   return (
     parseSwarmSite(s) ||
     parsePeerSite(s) ||
     parseLogSite(s) ||
     parsePieceSite(s) ||
-    parseTailSite(s)
+    parseTailSite(s) ||
+    parseCacheSite(s)
   );
 }
 
