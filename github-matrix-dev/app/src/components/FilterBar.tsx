@@ -3,6 +3,7 @@ import type { ColumnDef, FilterRule, FilterOperator } from './filter-types';
 import { operatorsForType, OPERATOR_LABELS } from './filter-types';
 import { useTheme, type Theme } from '../theme';
 import { QueryFilterInput } from './QueryFilterInput';
+import { FieldPicker } from './FieldPicker';
 import { usePanelPosition } from '../hooks/usePanelPosition';
 
 type FilterMode = 'visual' | 'query';
@@ -37,11 +38,9 @@ export function FilterBar({
   });
 
   function addFilter() {
-    const field = columns[0]?.key || '';
-    const ops = columns[0] ? operatorsForType(columns[0].type) : ['equals' as FilterOperator];
     onFiltersChange([
       ...filters,
-      { id: crypto.randomUUID(), field, operator: ops[0], value: '' },
+      { id: crypto.randomUUID(), field: '', operator: 'contains', value: '' },
     ]);
   }
 
@@ -135,7 +134,8 @@ export function FilterBar({
             )}
 
             {mode === 'visual' && filters.map((filter, idx) => {
-              const col = columns.find(c => c.key === filter.field);
+              const col = filter.field ? columns.find(c => c.key === filter.field) : undefined;
+              const hasField = !!filter.field && !!col;
               const ops = col ? operatorsForType(col.type) : operatorsForType('text');
               const needsValue = !['is_empty', 'is_not_empty'].includes(filter.operator);
               const isSelect = col?.type === 'select';
@@ -155,53 +155,53 @@ export function FilterBar({
                   )}
 
                   {/* Field picker */}
-                  <select
+                  <FieldPicker
+                    columns={columns}
                     value={filter.field}
-                    onChange={(e) => updateFilter(filter.id, { field: e.target.value })}
-                    style={s.select}
-                    aria-label="Filter field"
-                  >
-                    {columns.map((c) => (
-                      <option key={c.key} value={c.key}>{c.label}</option>
-                    ))}
-                  </select>
+                    onChange={(key) => updateFilter(filter.id, { field: key })}
+                  />
 
-                  {/* Operator picker */}
-                  <select
-                    value={filter.operator}
-                    onChange={(e) => updateFilter(filter.id, { operator: e.target.value as FilterOperator })}
-                    style={s.select}
-                    aria-label="Filter operator"
-                  >
-                    {ops.map((op) => (
-                      <option key={op} value={op}>{OPERATOR_LABELS[op]}</option>
-                    ))}
-                  </select>
-
-                  {/* Value input */}
-                  {needsValue && (
-                    isSelect && col?.selectOptions ? (
+                  {/* Operator + value — only after a field is chosen */}
+                  {hasField && (
+                    <>
                       <select
-                        value={filter.value}
-                        onChange={(e) => updateFilter(filter.id, { value: e.target.value })}
+                        value={filter.operator}
+                        onChange={(e) => updateFilter(filter.id, { operator: e.target.value as FilterOperator })}
                         style={s.select}
+                        aria-label="Filter operator"
                       >
-                        <option value="">--</option>
-                        {col.selectOptions.map((opt) => (
-                          <option key={opt} value={opt}>{opt}</option>
+                        {ops.map((op) => (
+                          <option key={op} value={op}>{OPERATOR_LABELS[op]}</option>
                         ))}
                       </select>
-                    ) : (
-                      <input
-                        type={col?.type === 'number' ? 'number' : 'text'}
-                        value={filter.value}
-                        onChange={(e) => updateFilter(filter.id, { value: e.target.value })}
-                        placeholder="value"
-                        aria-label="Filter value"
-                        style={s.input}
-                      />
-                    )
+
+                      {needsValue && (
+                        isSelect && col?.selectOptions ? (
+                          <select
+                            value={filter.value}
+                            onChange={(e) => updateFilter(filter.id, { value: e.target.value })}
+                            style={s.select}
+                          >
+                            <option value="">--</option>
+                            {col.selectOptions.map((opt) => (
+                              <option key={opt} value={opt}>{opt}</option>
+                            ))}
+                          </select>
+                        ) : (
+                          <input
+                            type={col?.type === 'number' ? 'number' : 'text'}
+                            value={filter.value}
+                            onChange={(e) => updateFilter(filter.id, { value: e.target.value })}
+                            placeholder="value"
+                            aria-label="Filter value"
+                            style={s.input}
+                          />
+                        )
+                      )}
+                    </>
                   )}
+
+                  {!hasField && <div style={{ flex: 1 }} />}
 
                   {/* Remove */}
                   <button
