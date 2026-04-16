@@ -90,22 +90,30 @@ export function LinkFieldPicker({ fieldKey, linkedTable, currentIds, onClose, on
   return (
     <div style={{
       position: 'absolute',
-      top: '100%',
+      top: 'calc(100% + 4px)',
       left: 0,
       zIndex: 200,
       background: t.bgCard,
       border: `1px solid ${t.border}`,
-      borderRadius: 8,
-      boxShadow: `0 8px 30px ${t.shadow}`,
-      minWidth: 260,
-      maxWidth: 360,
-      maxHeight: 360,
+      borderRadius: 10,
+      boxShadow: '0 12px 32px rgba(0,0,0,0.12), 0 2px 8px rgba(0,0,0,0.06)',
+      minWidth: 320,
+      maxWidth: 420,
+      maxHeight: 380,
       display: 'flex',
       flexDirection: 'column',
+      overflow: 'hidden',
     }}>
       {/* Search bar */}
-      <div style={{ padding: '8px 10px', borderBottom: `1px solid ${t.borderLight}`, display: 'flex', alignItems: 'center', gap: 6 }}>
-        <MagnifyingGlass size={13} color={t.textMuted} />
+      <div style={{
+        padding: '10px 12px',
+        background: t.bgHover,
+        borderBottom: `1px solid ${t.borderLight}`,
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+      }}>
+        <MagnifyingGlass size={14} color={t.textMuted} weight="bold" />
         <input
           autoFocus
           value={search}
@@ -116,22 +124,40 @@ export function LinkFieldPicker({ fieldKey, linkedTable, currentIds, onClose, on
             background: 'transparent',
             border: 'none',
             outline: 'none',
-            fontSize: 12,
+            fontSize: 13,
             color: t.text,
             fontFamily: 'inherit',
           }}
         />
         <button
           onClick={onClose}
-          style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, color: t.textMuted, lineHeight: 1 }}
+          aria-label="Close"
+          style={{
+            background: 'none',
+            border: 'none',
+            cursor: 'pointer',
+            padding: 2,
+            color: t.textMuted,
+            lineHeight: 0,
+            borderRadius: 4,
+            display: 'inline-flex',
+          }}
+          onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = t.bgMuted; }}
+          onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
         >
-          <X size={13} />
+          <X size={13} weight="bold" />
         </button>
       </div>
 
       {/* Currently linked chips */}
       {currentIds.length > 0 && (
-        <div style={{ padding: '6px 10px', borderBottom: `1px solid ${t.borderLight}`, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+        <div style={{
+          padding: '8px 12px',
+          borderBottom: `1px solid ${t.borderLight}`,
+          display: 'flex',
+          flexWrap: 'wrap',
+          gap: 4,
+        }}>
           {currentIds.map(id => {
             const rec = records.find(r => r.target.split('.').pop() === id);
             const name = rec ? getRecordDisplayName(rec) : id;
@@ -139,23 +165,48 @@ export function LinkFieldPicker({ fieldKey, linkedTable, currentIds, onClose, on
               <span
                 key={id}
                 onClick={() => toggle(id)}
+                title={`Remove ${name}`}
+                onMouseEnter={e => {
+                  const el = e.currentTarget as HTMLElement;
+                  el.style.background = t.purple;
+                  el.style.color = '#fff';
+                  el.style.borderColor = t.purple;
+                  const x = el.querySelector('[data-chip-x]') as HTMLElement | null;
+                  if (x) x.style.opacity = '1';
+                }}
+                onMouseLeave={e => {
+                  const el = e.currentTarget as HTMLElement;
+                  el.style.background = t.purpleBg;
+                  el.style.color = t.purple;
+                  el.style.borderColor = t.purpleBorder;
+                  const x = el.querySelector('[data-chip-x]') as HTMLElement | null;
+                  if (x) x.style.opacity = '0.55';
+                }}
                 style={{
                   display: 'inline-flex',
                   alignItems: 'center',
-                  gap: 4,
-                  padding: '2px 6px',
-                  borderRadius: 4,
+                  gap: 5,
+                  padding: '2px 9px',
+                  borderRadius: 999,
                   fontSize: 11,
-                  background: `${t.purple}20`,
-                  border: `1px solid ${t.purple}50`,
+                  fontWeight: 500,
+                  lineHeight: 1.4,
+                  background: t.purpleBg,
+                  border: `1px solid ${t.purpleBorder}`,
                   color: t.purple,
                   cursor: 'pointer',
-                  fontFamily: "'JetBrains Mono', monospace",
+                  maxWidth: 260,
+                  transition: 'background 0.12s, color 0.12s, border-color 0.12s',
                 }}
               >
-                {id}
-                {name !== id && <span style={{ color: t.text, fontWeight: 400, fontFamily: 'inherit' }}>{' · '}{name}</span>}
-                <X size={10} />
+                <span style={{
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}>{name !== id ? name : id}</span>
+                <span data-chip-x style={{ opacity: 0.55, display: 'inline-flex', lineHeight: 0, flexShrink: 0, transition: 'opacity 0.12s' }}>
+                  <X size={10} weight="bold" />
+                </span>
               </span>
             );
           })}
@@ -163,11 +214,11 @@ export function LinkFieldPicker({ fieldKey, linkedTable, currentIds, onClose, on
       )}
 
       {/* Record list */}
-      <div style={{ overflowY: 'auto', flex: 1 }}>
+      <div style={{ overflowY: 'auto', flex: 1, padding: '4px 0' }}>
         {loading ? (
-          <div style={{ padding: '10px 12px', fontSize: 12, color: t.textMuted }}>Loading…</div>
+          <div style={{ padding: '12px 14px', fontSize: 12, color: t.textMuted }}>Loading…</div>
         ) : filtered.length === 0 ? (
-          <div style={{ padding: '10px 12px', fontSize: 12, color: t.textMuted }}>No records found</div>
+          <div style={{ padding: '12px 14px', fontSize: 12, color: t.textMuted }}>No records found</div>
         ) : (
           filtered.map(rec => {
             const id = rec.target.split('.').pop() ?? rec.target;
@@ -178,30 +229,38 @@ export function LinkFieldPicker({ fieldKey, linkedTable, currentIds, onClose, on
                 key={rec.target}
                 onClick={() => toggle(id)}
                 style={{
-                  padding: '7px 12px',
+                  padding: '8px 12px',
                   fontSize: 12,
                   cursor: 'pointer',
                   display: 'flex',
                   alignItems: 'center',
-                  gap: 8,
-                  background: isLinked ? `${t.purple}10` : 'transparent',
+                  gap: 10,
+                  background: isLinked ? `${t.purple}14` : 'transparent',
+                  boxShadow: isLinked ? `inset 3px 0 0 ${t.purple}` : 'none',
                   color: t.text,
+                  transition: 'background 0.1s',
                 }}
                 onMouseEnter={e => { if (!isLinked) (e.currentTarget as HTMLElement).style.background = t.bgHover ?? t.bgMuted; }}
-                onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = isLinked ? `${t.purple}10` : 'transparent'; }}
+                onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = isLinked ? `${t.purple}14` : 'transparent'; }}
               >
                 {/* Checkbox indicator */}
                 <span style={{
-                  width: 13,
-                  height: 13,
+                  width: 14,
+                  height: 14,
                   borderRadius: 3,
                   border: `1.5px solid ${isLinked ? t.purple : t.border}`,
                   background: isLinked ? t.purple : 'transparent',
                   flexShrink: 0,
-                  display: 'inline-block',
-                }} />
-                <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: t.textSecondary, flexShrink: 0 }}>{id}</span>
-                <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{name}</span>
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  color: '#fff',
+                  fontSize: 9,
+                  lineHeight: 1,
+                  fontWeight: 700,
+                }}>{isLinked ? '✓' : ''}</span>
+                <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: isLinked ? 500 : 400 }}>{name}</span>
+                <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: t.textMuted, flexShrink: 0 }}>{id}</span>
               </div>
             );
           })
