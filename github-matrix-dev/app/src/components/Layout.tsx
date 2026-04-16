@@ -98,7 +98,9 @@ import { SpaceBrowser } from './SpaceBrowser';
 import { Horizon } from './Horizon';
 import { type TimeScrubberFilter, type DateColumnOption, DEFAULT_FILTER, detectDateColumns, computeDateRange, buildAdaptiveFormatter } from './time-scrubber-utils';
 import { hasFieldsSubObject, buildFieldNameMap } from './filter-types';
-import { useHashRoute, type View } from '../lib/router';
+import { useHashRoute, type View, type AppRoute } from '../lib/router';
+import { TabBar } from './TabBar';
+import { useTabsStore, routeFromTab, defaultTitleFor, defaultIconFor } from '../store/tabs-store';
 import { type AccessRole, type UserTypeDefinition, type SpaceConfig, type TerminologyKey, powerLevelToRole, legacyAccessToRole, resolveTerminology } from '../permissions/types';
 import { DEFAULT_LAW_FIRM_PERSONAS } from '../permissions/default-personas';
 import { UserTypeSwitcher } from './UserTypeSwitcher';
@@ -508,6 +510,54 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   const activeView = route.view;
   const selectedScope = route.scope;
   const selectedRecord = route.record;
+
+  // ─── Browser-style tabs ────────────────────────────────────────────────
+  // The tabs store owns the list of open tabs; the active tab's route stays
+  // mirrored with the URL hash. `openRouteAsTab` creates a new tab (or
+  // focuses an existing one with matching identity) and navigates to it.
+  // TabBar subscribes to the store directly, so Layout only subscribes to
+  // the active-tab id (needed by the route-sync effect below).
+  const activeTabId = useTabsStore((s) => s.activeTabId);
+  const hydrateTabs = useTabsStore((s) => s.hydrate);
+  const openTabAction = useTabsStore((s) => s.openTab);
+  const updateActiveTabRoute = useTabsStore((s) => s.updateActiveTab);
+
+  // Seed the tabs store from the URL on first mount.
+  useEffect(() => {
+    if (useTabsStore.getState().tabs.length === 0) {
+      const initial = {
+        id: crypto.randomUUID ? crypto.randomUUID() : `tab_${Date.now().toString(36)}`,
+        view: route.view,
+        space: route.space,
+        scope: route.scope,
+        record: route.record,
+        builderViewId: route.builderViewId,
+        customPageId: route.customPageId,
+        query: route.query,
+        title: defaultTitleFor(route),
+        icon: defaultIconFor(route),
+      };
+      hydrateTabs([initial], initial.id);
+    }
+    // Run once on mount — subsequent route sync is handled below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Keep the active tab's route in sync with the URL (covers back/forward
+  // navigation and navigate() calls alike).
+  useEffect(() => {
+    if (!activeTabId) return;
+    updateActiveTabRoute(route);
+  }, [route, activeTabId, updateActiveTabRoute]);
+
+  /** Open a new tab for the given route partial, focus it, and update the URL. */
+  const openRouteAsTab = useCallback(
+    (partial: Partial<AppRoute> & { title?: string; icon?: string }, opts?: { reuseByView?: boolean }) => {
+      openTabAction(partial, { reuseByView: opts?.reuseByView });
+      navigate(partial);
+    },
+    [openTabAction, navigate],
+  );
   const [selectedSpace, setSelectedSpace] = useState<string | null>(() => {
     // Prefer space from URL hash (enables direct links)
     if (route.space) {
@@ -2507,10 +2557,15 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             />
           )}
 
-          {/* Members button — hidden on mobile */}
+          {/* Members button — hidden on mobile. Opens (or focuses) a
+              dedicated "Share / Members" tab instead of replacing the
+              current view. */}
           {selectedSpace && !isMobile && (
             <button
-              onClick={() => navigate({ view: 'members' })}
+              onClick={() => openRouteAsTab(
+                { view: 'members', space: selectedSpace },
+                { reuseByView: true },
+              )}
               style={{
                 ...s.headerButton,
                 ...(activeView === 'members' ? { background: theme.accent, color: '#fff' } : {}),
@@ -2597,6 +2652,19 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           </div>
         )}
       </header>
+
+      {/* Chrome-style tab strip — sits below the header, above every view */}
+      <TabBar
+        onActivate={(tab) => {
+          navigate(routeFromTab(tab));
+        }}
+        onNewTab={() => {
+          openRouteAsTab(
+            { view: 'records', space: selectedSpace, scope: null, record: null },
+            { reuseByView: false },
+          );
+        }}
+      />
 
       {/* Role banner — appears when an active user type (role) is selected */}
       {activeTypeDef && roleAccentColor && (
@@ -2746,7 +2814,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             {(['compose', 'import'] as View[]).map((view) => isNavViewVisible(view) && (
               <button
                 key={view}
-                onClick={() => { navigate({ view }); }}
+                onClick={() => openRouteAsTab({ view, space: selectedSpace }, { reuseByView: true })}
                 style={navItemStyle(view)}
               >
                 <span style={s.navIcon}>{NAV_ICONS[view]}</span>
@@ -2755,7 +2823,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             ))}
             {isNavViewVisible('api') && (
               <button
-                onClick={() => { navigate({ view: 'api' }); }}
+                onClick={() => openRouteAsTab({ view: 'api', space: selectedSpace }, { reuseByView: true })}
                 style={navItemStyle('api')}
               >
                 <span style={s.navIcon}>{NAV_ICONS.api}</span>
@@ -2765,7 +2833,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             <div style={s.navGroupLabel}>Collaborate</div>
             {isNavViewVisible('people') && (
               <button
-                onClick={() => navigate({ view: 'people' })}
+                onClick={() => openRouteAsTab({ view: 'people', space: selectedSpace }, { reuseByView: true })}
                 style={navItemStyle('people')}
               >
                 <span style={s.navIcon}>{NAV_ICONS.people}</span>
@@ -2774,7 +2842,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             )}
             {isNavViewVisible('messages') && (
               <button
-                onClick={() => navigate({ view: 'messages' })}
+                onClick={() => openRouteAsTab({ view: 'messages', space: selectedSpace }, { reuseByView: true })}
                 style={navItemStyle('messages')}
               >
                 <span style={s.navIcon}>{NAV_ICONS.messages}</span>
@@ -2783,7 +2851,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             )}
             {isNavViewVisible('members') && (
               <button
-                onClick={() => navigate({ view: 'members' })}
+                onClick={() => openRouteAsTab({ view: 'members', space: selectedSpace }, { reuseByView: true })}
                 style={navItemStyle('members')}
               >
                 <span style={s.navIcon}>{NAV_ICONS.members}</span>
@@ -2793,7 +2861,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             <div style={s.navGroupLabel}>System</div>
             {isNavViewVisible('log') && (
               <button
-                onClick={() => { navigate({ view: 'log' }); }}
+                onClick={() => openRouteAsTab({ view: 'log', space: selectedSpace }, { reuseByView: true })}
                 style={navItemStyle('log')}
               >
                 <span style={s.navIcon}>{NAV_ICONS.log}</span>
@@ -2802,7 +2870,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             )}
             {currentPermissions?.can_build_slices !== false && isNavViewVisible('builder') && (
               <button
-                onClick={() => { navigate({ view: 'builder', builderViewId: null, customPageId: null }); }}
+                onClick={() => openRouteAsTab({ view: 'builder', space: selectedSpace, builderViewId: null, customPageId: null }, { reuseByView: true })}
                 style={navItemStyle('builder')}
               >
                 <span style={s.navIcon}>{NAV_ICONS.builder}</span>
@@ -2811,7 +2879,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             )}
             {currentPermissions?.can_set_governance !== false && isNavViewVisible('settings') && (
               <button
-                onClick={() => { navigate({ view: 'settings' }); }}
+                onClick={() => openRouteAsTab({ view: 'settings', space: selectedSpace }, { reuseByView: true })}
                 style={navItemStyle('settings')}
               >
                 <span style={s.navIcon}>{NAV_ICONS.settings}</span>
@@ -2819,7 +2887,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               </button>
             )}
             <button
-              onClick={() => { navigate({ view: 'branch' }); }}
+              onClick={() => openRouteAsTab({ view: 'branch', space: selectedSpace }, { reuseByView: true })}
               style={navItemStyle('branch')}
             >
               <span style={s.navIcon}>{NAV_ICONS.branch}</span>
@@ -2836,7 +2904,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             </a>
             <div style={s.navGroupLabel}>Testing</div>
             <button
-              onClick={() => { navigate({ view: 'multiuser' }); }}
+              onClick={() => openRouteAsTab({ view: 'multiuser', space: selectedSpace }, { reuseByView: true })}
               style={navItemStyle('multiuser')}
             >
               <span style={s.navIcon}>{NAV_ICONS.multiuser}</span>
@@ -3063,14 +3131,32 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               )
             ) : activeView === 'members' ? (
               selectedSpace ? (
-                <div style={{ padding: '20px 28px', maxWidth: 560 }}>
-                  <SpaceMembers
-                    spaceTarget={selectedSpace}
-                    currentUserId={session.userId}
-                    onClose={() => navigate({ view: 'records' })}
-                    matrixClient={matrixClientRef.current}
-                    mainRoomId={spaceRoomId}
-                  />
+                <div style={{
+                  flex: 1, minHeight: 0, minWidth: 0, overflow: 'auto',
+                  padding: isMobile ? '12px' : '24px 32px',
+                }}>
+                  <div style={{ maxWidth: 720, margin: '0 auto' }}>
+                    <SpaceMembers
+                      spaceTarget={selectedSpace}
+                      currentUserId={session.userId}
+                      onClose={() => {
+                        // Close the Members tab if one is open; otherwise
+                        // fall back to navigating away to the records view.
+                        const st = useTabsStore.getState();
+                        const memberTab = st.tabs.find((t) => t.view === 'members');
+                        if (memberTab && st.tabs.length > 1) {
+                          st.closeTab(memberTab.id);
+                          const nextId = useTabsStore.getState().activeTabId;
+                          const next = useTabsStore.getState().tabs.find((t) => t.id === nextId);
+                          if (next) navigate(routeFromTab(next));
+                        } else {
+                          navigate({ view: 'records' });
+                        }
+                      }}
+                      matrixClient={matrixClientRef.current}
+                      mainRoomId={spaceRoomId}
+                    />
+                  </div>
                 </div>
               ) : (
                 <div style={s.empty}>
