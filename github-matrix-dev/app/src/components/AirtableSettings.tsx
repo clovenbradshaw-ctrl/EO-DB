@@ -797,6 +797,18 @@ export function AirtableSettingsSection({
             const bytes = await encodeAirtableSnapshot(events, cursors, {
               collectionId: `airtable-hydration-${baseId}`,
               name: `Airtable hydration snapshot for ${baseId}`,
+              // Surface encoding progress so the button doesn't look frozen
+              // while msgpack packs large event arrays. Throttled implicitly
+              // by the chunk size in encodeAirtableSnapshot.
+              onProgress: (encoded, total) => {
+                setSyncStatus((prev) => ({
+                  ...prev,
+                  snapshotDownload: {
+                    state: 'syncing',
+                    message: `Encoding ${baseId} snapshot… ${encoded}/${total} events`,
+                  },
+                }));
+              },
             });
             downloadedBytes += bytes.byteLength;
             triggerBrowserDownload(fileName, bytes);

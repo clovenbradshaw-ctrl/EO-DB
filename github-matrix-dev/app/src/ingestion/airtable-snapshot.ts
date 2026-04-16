@@ -68,7 +68,26 @@ export interface EncodeOptions {
   name: string;
   /** ISO timestamp marking when the snapshot was captured. */
   capturedAt?: string;
+  /**
+   * Reports `(encoded, total)` after each LOG_SEGMENT is written. Lets the
+   * UI render encoding progress and is the hook that keeps the main thread
+   * visibly responsive while large snapshots (12k+ records) are being
+   * packed and framed.
+   */
+  onProgress?: (encoded: number, total: number) => void;
+  /**
+   * Events per LOG_SEGMENT frame. Large single-frame packs block the main
+   * thread for seconds (msgpack `pack()` runs synchronously), which freezes
+   * the UI on bases with many thousand records. Splitting into multiple
+   * frames lets us yield to the event loop between packs; the decoder
+   * already walks frames in a loop so this is fully backward-compatible.
+   */
+  chunkSize?: number;
 }
+
+/** Default events-per-frame. ~1000 keeps per-chunk `pack()` under ~100ms
+ *  for typical Airtable records while keeping frame overhead negligible. */
+const DEFAULT_LOG_SEGMENT_CHUNK = 1000;
 
 // ─── Encode ─────────────────────────────────────────────────────────────────
 
@@ -96,12 +115,23 @@ export async function encodeAirtableSnapshot(
     airtable_cursor: cursors,
   };
 
+  const chunkSize = Math.max(1, opts.chunkSize ?? DEFAULT_LOG_SEGMENT_CHUNK);
   const sink = new BufferSink();
   const writer = new EodbWriter(sink.stream().getWriter());
   try {
     await writer.writeHeader(header);
-    if (events.length > 0) {
-      await writer.writeLogSegment(events);
+    opts.onProgress?.(0, events.length);
+    for (let i = 0; i < events.length; i += chunkSize) {
+      const batch = events.slice(i, i + chunkSize);
+      await writer.writeLogSegment(batch);
+      const encoded = Math.min(i + chunkSize, events.length);
+      opts.onProgress?.(encoded, events.length);
+      // Yield to the event loop between batches so the UI can repaint
+      // and process input while we pack the next chunk. Without this,
+      // encoding 12k+ events freezes the page for several seconds.
+      if (encoded < events.length) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      }
     }
     await writer.finalize();
   } catch (e) {
