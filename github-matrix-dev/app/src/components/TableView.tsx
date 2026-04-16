@@ -26,6 +26,7 @@ import { ColumnManagerPanel } from './ColumnManagerPanel';
 import { AddColumnDialog } from './AddColumnDialog';
 import { SchemaFieldPanel, type FieldValueStats } from './SchemaFieldPanel';
 import { WatchedFieldsPicker } from './WatchedFieldsPicker';
+import { LinkFieldPicker } from './LinkFieldPicker';
 import {
   DndContext,
   DragOverlay,
@@ -595,6 +596,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   // Full-field editor side panel — opened by double-clicking a column header.
   const [fieldPanelKey, setFieldPanelKey] = useState<string | null>(null);
   const [editingCell, setEditingCell] = useState<{ target: string; fieldKey: string; value: string } | null>(null);
+  const [editingLinkCell, setEditingLinkCell] = useState<{ target: string; fieldKey: string; linkedTable: string } | null>(null);
   const editDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const prevRecordsKeyRef = useRef<string>('');
   const prevSchemaKeyRef = useRef<string>('');
@@ -1428,7 +1430,37 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
 
   const canEdit = sliceReadOnly ? false : (permissions ? (permissions.can_edit_any_record || permissions.can_edit_own_records) : true);
 
-  function handleCellDoubleClick(rec: EoState, colKey: string) {
+  function extractLinkIds(value: unknown): string[] {
+    if (value == null) return [];
+    if (typeof value === 'string') {
+      if (value.startsWith('[') && value.endsWith(']')) {
+        try {
+          const p = JSON.parse(value);
+          if (Array.isArray(p)) return p.filter((v): v is string => typeof v === 'string');
+        } catch { /* fall through */ }
+      }
+      return value ? [value] : [];
+    }
+    if (Array.isArray(value)) return value.filter((v): v is string => typeof v === 'string');
+    if (typeof value === 'object') {
+      const linked = (value as { linked?: unknown }).linked;
+      if (Array.isArray(linked)) return linked.filter((v): v is string => typeof v === 'string');
+    }
+    return [];
+  }
+
+  function resolveLinkedTable(fieldKey: string, currentIds: string[]): string | undefined {
+    const override = columnTypeOverrides.get(fieldKey);
+    if (override?.linkedTable) return override.linkedTable as string;
+    if (override?.linkedTableId) return override.linkedTableId as string;
+    for (const id of currentIds) {
+      const resolved = idResolver?.resolve(id);
+      if (resolved) return resolved.target.split('.').slice(0, -1).join('.');
+    }
+    return undefined;
+  }
+
+  function handleCellDoubleClick(rec: EoState, colKey: string, colType?: string) {
     if (!canEdit) return;
     if (colKey === '_record' || colKey === '_last_updated') return;
     if (permissions?.locked_fields?.includes(colKey)) return;
@@ -1436,10 +1468,50 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     if (permissions?.type_hidden_fields?.includes(colKey)) return;
 
     const raw = getFieldValue(rec, colKey, useFieldsSub);
+
+    // Link fields get the Airtable-style picker, never a raw JSON text input.
+    if (colType === 'link' || colType === 'linkedRecord' || colType === 'relationship') {
+      const currentIds = extractLinkIds(raw);
+      const linkedTable = resolveLinkedTable(colKey, currentIds);
+      if (!linkedTable) return;
+      setEditingLinkCell({ target: rec.target, fieldKey: colKey, linkedTable });
+      return;
+    }
+
     const strVal = raw != null && typeof raw === 'object'
       ? JSON.stringify(raw, null, 2)
       : String(raw ?? '');
     setEditingCell({ target: rec.target, fieldKey: colKey, value: strVal });
+  }
+
+  async function handleLinkCellSave(target: string, fieldKey: string, ids: string[]) {
+    const rec = records.find((r) => r.target === target);
+    const prior = rec ? getFieldValue(rec, fieldKey, useFieldsSub) : undefined;
+    const isFirstFill =
+      prior === undefined ||
+      prior === null ||
+      prior === '' ||
+      (Array.isArray(prior) && prior.length === 0);
+    try {
+      if (isFirstFill) {
+        await dispatch(
+          buildMakingDefEvent(target, fieldKey, ids, `user:${session.userId}`, useFieldsSub),
+        );
+      } else {
+        const operand = useFieldsSub
+          ? { fields: { [fieldKey]: ids } }
+          : { [fieldKey]: ids };
+        await dispatch({
+          op: 'DEF',
+          target,
+          operand,
+          agent: `user:${session.userId}`,
+          ts: new Date().toISOString(),
+          acquired_ts: new Date().toISOString(),
+        });
+      }
+      syncEditToAirtable({ target, fieldKey, value: ids, getStateByPrefix }).catch(console.warn);
+    } catch { /* ignore */ }
   }
 
   async function handleCellSave(target: string, fieldKey: string, rawValue: string) {
@@ -2311,6 +2383,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                       const isLocked = permissions?.locked_fields?.includes(col.key);
                       const tdStyle = s.td;
                       const isEditingThis = editingCell?.target === rec.target && editingCell?.fieldKey === col.key;
+                      const isEditingLinkHere = editingLinkCell?.target === rec.target && editingLinkCell?.fieldKey === col.key;
                       const isEditableCol = col.key !== '_record' && col.key !== '_last_updated' && !isRedacted && !isLocked && canEdit;
                       return (
                         <td
@@ -2454,12 +2527,13 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                                   cursor: 'text',
                                   transition: 'border-bottom-color 0.12s',
                                   boxSizing: 'border-box' as const,
+                                  position: 'relative' as const,
                                 }}
                                 title="Double-click to edit · right-click for options"
                                 onClick={(e) => e.stopPropagation()}
                                 onDoubleClick={(e) => {
                                   e.stopPropagation();
-                                  handleCellDoubleClick(rec, col.key);
+                                  handleCellDoubleClick(rec, col.key, col.type);
                                 }}
                                 onMouseEnter={(e) => {
                                   (e.currentTarget as HTMLElement).style.borderBottomColor = theme.borderLight;
@@ -2467,7 +2541,24 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                                 onMouseLeave={(e) => {
                                   (e.currentTarget as HTMLElement).style.borderBottomColor = 'transparent';
                                 }}
-                              >{renderCell(getFieldValue(rec, col.key, useFieldsSub), col.key, onSelectRecord, theme, idResolver, col.type)}</span>
+                              >
+                                {renderCell(getFieldValue(rec, col.key, useFieldsSub), col.key, onSelectRecord, theme, idResolver, col.type)}
+                                {isEditingLinkHere && editingLinkCell && (
+                                  <>
+                                    <div
+                                      style={{ position: 'fixed' as const, inset: 0, zIndex: 199 }}
+                                      onClick={(e) => { e.stopPropagation(); setEditingLinkCell(null); }}
+                                    />
+                                    <LinkFieldPicker
+                                      fieldKey={col.key}
+                                      linkedTable={editingLinkCell.linkedTable}
+                                      currentIds={extractLinkIds(getFieldValue(rec, col.key, useFieldsSub))}
+                                      onClose={() => setEditingLinkCell(null)}
+                                      onChange={(ids) => handleLinkCellSave(rec.target, col.key, ids)}
+                                    />
+                                  </>
+                                )}
+                              </span>
                             : renderCell(getFieldValue(rec, col.key, useFieldsSub), col.key, onSelectRecord, theme, idResolver, col.type)
                           }
                         </td>
