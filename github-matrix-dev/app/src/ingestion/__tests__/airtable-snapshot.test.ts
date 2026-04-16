@@ -193,4 +193,44 @@ describe('airtable-snapshot', () => {
     const seeded = await store.get('meta:at_cursor:appABC:tblClients');
     expect(seeded).toBe('2026-04-11T10:00:00.000Z');
   });
+
+  it('tolerates duplicate INS when the target is already instantiated', async () => {
+    // Real-world trigger for "Target already instantiated": a prior
+    // hydration / cross-device sync / partial import has already folded
+    // some of the snapshot's targets under *different* client_event_ids,
+    // so idempotency does not fire, but the target's state row exists.
+    // Replaying the snapshot INS on that target used to abort the whole
+    // import — now it must be skipped and DEF events on the same target
+    // must still land so new content is folded in.
+    const store = createTestStore();
+
+    // Pre-seed state for the INS target the snapshot will try to instantiate.
+    // This simulates a store that already knows the record from another path.
+    await store.put('state:at.rec.appABC:tblClients:rec01', {
+      target: 'at.rec.appABC:tblClients:rec01',
+      value: { id: 'rec01', fields: { Name: 'Alice (pre-existing)' } },
+      level: 1,
+      last_seq: 0,
+      last_op: 'INS',
+      last_agent: '@other:example.com',
+      last_ts: '2026-04-10T00:00:00.000Z',
+      last_acquired_ts: '2026-04-10T00:00:00.000Z',
+    });
+
+    const bytes = await encodeAirtableSnapshot(makeEvents(), makeCursors(), {
+      collectionId: 'airtable-hydration-appABC',
+      name: 'Re-import',
+    });
+    const decoded = await decodeAirtableSnapshot(bytes);
+
+    // Replay must succeed instead of throwing. The duplicate INS is skipped
+    // and counted; surrounding DEF events still fold through processEvent.
+    const result = await replayAirtableSnapshot(store, decoded);
+    expect(result.eventsReplayed).toBe(decoded.events.length);
+    // At least the explicit INS (event 2) is skipped; helix-promoted
+    // synthetic INS from subsequent DEFs on the same target may also be
+    // counted here, so assert >= 1 rather than an exact count.
+    expect(result.insSkippedExisting).toBeGreaterThanOrEqual(1);
+    expect(result.tablesSeeded).toBe(1);
+  });
 });
