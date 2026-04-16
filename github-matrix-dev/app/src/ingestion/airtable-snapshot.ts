@@ -197,6 +197,14 @@ export interface ReplayResult {
   tablesSeeded: number;
   /** Last seq observed in the snapshot — useful for diagnostics. */
   lastSeq: number;
+  /**
+   * INS events skipped because the target was already instantiated locally
+   * (e.g. from a prior snapshot import or cross-device sync). Subsequent
+   * DEF/CON/SEG events on the same target still fold normally, so new
+   * content in the snapshot still lands — matching the live ingest path
+   * in airtable-sync.ts which also treats duplicate INS as a no-op.
+   */
+  insSkippedExisting: number;
 }
 
 /**
@@ -210,6 +218,15 @@ export interface ReplayResult {
  * discarded — `processEvent` assigns fresh monotonic seqs from
  * `store.nextSeq()` to avoid colliding with the replaying device's
  * own seq space.
+ *
+ * Duplicate-INS tolerance. When replaying a snapshot into a store that
+ * already knows some of its targets (re-import, partial previous run,
+ * peer sync), `processEvent` throws "Target already instantiated" on the
+ * INS. We treat that as a no-op and continue — the entity is already born,
+ * and the DEF/CON/SEG events that follow still apply and deliver any new
+ * content the snapshot carries. This mirrors `ingestRecordEvent()` in
+ * airtable-sync.ts, which catches the same error around its record-level
+ * INS so a re-ingest still fields in new changes.
  */
 export async function replayAirtableSnapshot(
   store: EoStore,
@@ -217,13 +234,31 @@ export async function replayAirtableSnapshot(
   onEvent?: (event: EoEvent) => void,
 ): Promise<ReplayResult> {
   let lastSeq = 0;
+  let insSkippedExisting = 0;
   for (const event of snapshot.events) {
     // Strip the embedded seq — processEvent assigns its own.
     const { seq: _seq, ...rest } = event;
     void _seq;
     const input = rest as EoEventInput;
-    const assignedSeq = await processEvent(store, input, onEvent);
-    if (assignedSeq > lastSeq) lastSeq = assignedSeq;
+    try {
+      const assignedSeq = await processEvent(store, input, onEvent);
+      if (assignedSeq > lastSeq) lastSeq = assignedSeq;
+    } catch (e: any) {
+      // Duplicate-INS tolerance. Two paths can raise this error on replay:
+      //   (a) An explicit INS in the snapshot whose target already has
+      //       local state (prior import, peer sync, partial hydration).
+      //   (b) A DEF/SEG/CON whose helix-promotion path emits a synthetic
+      //       INS on the same already-instantiated target.
+      // In both cases the target is already born locally; skipping the
+      // throw lets the rest of the snapshot fold so new DEF/CON content
+      // still lands. Any other error is a real problem — rethrow.
+      if (typeof e?.message === 'string'
+          && e.message.includes('Target already instantiated')) {
+        insSkippedExisting++;
+        continue;
+      }
+      throw e;
+    }
   }
 
   // Seed cursors so the first post-bootstrap updateSync only pulls deltas.
@@ -250,5 +285,6 @@ export async function replayAirtableSnapshot(
     eventsReplayed: snapshot.events.length,
     tablesSeeded,
     lastSeq,
+    insSkippedExisting,
   };
 }

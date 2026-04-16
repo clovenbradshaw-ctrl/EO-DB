@@ -879,12 +879,15 @@ export function AirtableSettingsSection({
       }
 
       const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
+      const skippedSuffix = replay.insSkippedExisting > 0
+        ? `, ${replay.insSkippedExisting} existing target(s) skipped`
+        : '';
       useAirtableStore.getState().addSyncLogEntry({
         ts: Date.now(),
         type: 'snapshot_imported',
         source: 'local',
         syncer: session.userId,
-        detail: `${file.name}: replayed ${replay.eventsReplayed} events, seeded ${replay.tablesSeeded} table cursor(s), ${seconds}s`,
+        detail: `${file.name}: replayed ${replay.eventsReplayed} events${skippedSuffix}, seeded ${replay.tablesSeeded} table cursor(s), ${seconds}s`,
         durationMs: Date.now() - startedAt,
         recordsScanned: replay.eventsReplayed,
       });
@@ -895,7 +898,9 @@ export function AirtableSettingsSection({
         snapshotImport: {
           state: 'done',
           message: `Imported ${replay.eventsReplayed} events from ${file.name}`,
-          detail: `${replay.tablesSeeded} table cursor(s) seeded — Update Sync will pull post-snapshot deltas.`,
+          detail: replay.insSkippedExisting > 0
+            ? `${replay.tablesSeeded} table cursor(s) seeded; ${replay.insSkippedExisting} target(s) already existed locally (new content folded in).`
+            : `${replay.tablesSeeded} table cursor(s) seeded — Update Sync will pull post-snapshot deltas.`,
         },
       }));
     } catch (e: any) {
