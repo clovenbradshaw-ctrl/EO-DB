@@ -606,13 +606,13 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   const [fieldSchemas, setFieldSchemas] = useState<Map<string, FieldSchema>>(new Map());
   const [columnTypeOverrides, setColumnTypeOverrides] = useState<Map<string, any>>(new Map());
   const [columnTypeSelector, setColumnTypeSelector] = useState<{ x: number; y: number; key: string } | null>(null);
-  const [linkedRecordPicker, setLinkedRecordPicker] = useState<{ x: number; y: number; key: string; tables: { scope: string; name: string }[]; mode: 'linkedRecord' | 'link' | 'relationship' } | null>(null);
+  const [linkedRecordPicker, setLinkedRecordPicker] = useState<{ x: number; y: number; key: string; tables: { scope: string; name: string }[]; mode: 'linkedRecord' | 'link' | 'relationship'; selected: string[] } | null>(null);
   const [resolutionComposer, setResolutionComposer] = useState<{ x: number; y: number; key: string } | null>(null);
   const [constraintComposer, setConstraintComposer] = useState<{ x: number; y: number; key: string } | null>(null);
   // Full-field editor side panel — opened by double-clicking a column header.
   const [fieldPanelKey, setFieldPanelKey] = useState<string | null>(null);
   const [editingCell, setEditingCell] = useState<{ target: string; fieldKey: string; value: string } | null>(null);
-  const [editingLinkCell, setEditingLinkCell] = useState<{ target: string; fieldKey: string; linkedTable: string } | null>(null);
+  const [editingLinkCell, setEditingLinkCell] = useState<{ target: string; fieldKey: string; linkedTables: string[] } | null>(null);
   const editDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const prevRecordsKeyRef = useRef<string>('');
   const prevSchemaKeyRef = useRef<string>('');
@@ -1262,15 +1262,22 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     setRenameCol(null);
   }
 
-  async function handleSetColumnType(fieldKey: string, type: string, linkedTable?: string, keepOpen = false) {
-    const operand: Record<string, string> = { type };
+  async function handleSetColumnType(fieldKey: string, type: string, linkedTable?: string | string[], keepOpen = false) {
+    const operand: Record<string, unknown> = { type };
     if (linkedTable) {
-      // 'link' and 'relationship' store the EO scope path under 'linkedTable'
-      // 'linkedRecord' (legacy Airtable) stores under 'linkedTableId'
-      if (type === 'link' || type === 'relationship') {
-        operand.linkedTable = linkedTable;
-      } else {
-        operand.linkedTableId = linkedTable;
+      const arr = Array.isArray(linkedTable) ? linkedTable : [linkedTable];
+      const unique = [...new Set(arr.filter(s => typeof s === 'string' && s.length > 0))];
+      if (unique.length > 0) {
+        // 'link' and 'relationship' store EO scope paths under 'linkedTable' /
+        // 'linkedTables'. 'linkedRecord' (legacy Airtable) stores under
+        // 'linkedTableId'. Multiple source tables are stored as 'linkedTables'.
+        if (type === 'link' || type === 'relationship') {
+          operand.linkedTable = unique[0];
+          if (unique.length > 1) operand.linkedTables = unique;
+        } else {
+          operand.linkedTableId = unique[0];
+          if (unique.length > 1) operand.linkedTables = unique;
+        }
       }
     }
     try {
@@ -1465,15 +1472,23 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     return [];
   }
 
-  function resolveLinkedTable(fieldKey: string, currentIds: string[]): string | undefined {
+  function resolveLinkedTables(fieldKey: string, currentIds: string[]): string[] {
     const override = columnTypeOverrides.get(fieldKey);
-    if (override?.linkedTable) return override.linkedTable as string;
-    if (override?.linkedTableId) return override.linkedTableId as string;
-    for (const id of currentIds) {
-      const resolved = idResolver?.resolve(id);
-      if (resolved) return resolved.target.split('.').slice(0, -1).join('.');
+    const out = new Set<string>();
+    const linkedTables = override?.linkedTables;
+    if (Array.isArray(linkedTables)) {
+      for (const t of linkedTables) if (typeof t === 'string' && t) out.add(t);
     }
-    return undefined;
+    if (typeof override?.linkedTable === 'string' && override.linkedTable) out.add(override.linkedTable);
+    if (typeof override?.linkedTableId === 'string' && override.linkedTableId) out.add(override.linkedTableId);
+    // Fall back: infer from existing linked IDs via the resolver.
+    if (out.size === 0) {
+      for (const id of currentIds) {
+        const resolved = idResolver?.resolve(id);
+        if (resolved) out.add(resolved.target.split('.').slice(0, -1).join('.'));
+      }
+    }
+    return [...out];
   }
 
   function handleCellDoubleClick(rec: EoState, colKey: string, colType?: string) {
@@ -1488,9 +1503,9 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     // Link fields get the Airtable-style picker, never a raw JSON text input.
     if (colType === 'link' || colType === 'linkedRecord' || colType === 'relationship') {
       const currentIds = extractLinkIds(raw);
-      const linkedTable = resolveLinkedTable(colKey, currentIds);
-      if (!linkedTable) return;
-      setEditingLinkCell({ target: rec.target, fieldKey: colKey, linkedTable });
+      const linkedTables = resolveLinkedTables(colKey, currentIds);
+      if (linkedTables.length === 0) return;
+      setEditingLinkCell({ target: rec.target, fieldKey: colKey, linkedTables });
       return;
     }
 
@@ -2399,7 +2414,6 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                       const isLocked = permissions?.locked_fields?.includes(col.key);
                       const tdStyle = s.td;
                       const isEditingThis = editingCell?.target === rec.target && editingCell?.fieldKey === col.key;
-                      const isEditingLinkHere = editingLinkCell?.target === rec.target && editingLinkCell?.fieldKey === col.key;
                       const isEditableCol = col.key !== '_record' && col.key !== '_last_updated' && !isRedacted && !isLocked && canEdit;
                       return (
                         <td
@@ -2559,21 +2573,6 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                                 }}
                               >
                                 {renderCell(getFieldValue(rec, col.key, useFieldsSub), col.key, onSelectRecord, theme, idResolver, col.type)}
-                                {isEditingLinkHere && editingLinkCell && (
-                                  <>
-                                    <div
-                                      style={{ position: 'fixed' as const, inset: 0, zIndex: 199 }}
-                                      onClick={(e) => { e.stopPropagation(); setEditingLinkCell(null); }}
-                                    />
-                                    <LinkFieldPicker
-                                      fieldKey={col.key}
-                                      linkedTable={editingLinkCell.linkedTable}
-                                      currentIds={extractLinkIds(getFieldValue(rec, col.key, useFieldsSub))}
-                                      onClose={() => setEditingLinkCell(null)}
-                                      onChange={(ids) => handleLinkCellSave(rec.target, col.key, ids)}
-                                    />
-                                  </>
-                                )}
                               </span>
                             : renderCell(getFieldValue(rec, col.key, useFieldsSub), col.key, onSelectRecord, theme, idResolver, col.type)
                           }
@@ -2648,6 +2647,19 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
       )}
 
       {/* Type selector popover */}
+      {editingLinkCell && (() => {
+        const rec = records.find(r => r.target === editingLinkCell.target);
+        const currentIds = rec ? extractLinkIds(getFieldValue(rec, editingLinkCell.fieldKey, useFieldsSub)) : [];
+        return (
+          <LinkFieldPicker
+            fieldKey={editingLinkCell.fieldKey}
+            linkedTables={editingLinkCell.linkedTables}
+            currentIds={currentIds}
+            onClose={() => setEditingLinkCell(null)}
+            onChange={(ids) => handleLinkCellSave(editingLinkCell.target, editingLinkCell.fieldKey, ids)}
+          />
+        );
+      })()}
       {typeSelector && (
         <>
           <div
@@ -2722,7 +2734,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                     })
                     .map(tableScope => ({ scope: tableScope, name: formatScopeName(tableScope) }));
                   setColumnTypeSelector(null);
-                  setLinkedRecordPicker({ x: columnTypeSelector.x, y: columnTypeSelector.y, key: columnTypeSelector.key, tables, mode: type as 'linkedRecord' | 'link' | 'relationship' });
+                  setLinkedRecordPicker({ x: columnTypeSelector.x, y: columnTypeSelector.y, key: columnTypeSelector.key, tables, mode: type as 'linkedRecord' | 'link' | 'relationship', selected: [] });
                 } else if (type === 'select' || type === 'multiSelect') {
                   const key = columnTypeSelector.key;
                   const hasEnumConstraint = !!fieldSchemas.get(key)?.constraints.find(c => c.name === 'enum');
@@ -2760,23 +2772,98 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
             maxWidth: 320,
             padding: '8px 0',
           }}>
-            <div style={{ padding: '6px 12px 8px', fontSize: 11, fontWeight: 600, color: theme.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-              Link to table
+            <div style={{ padding: '6px 12px 4px', fontSize: 11, fontWeight: 600, color: theme.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+              Link to table{linkedRecordPicker.tables.length > 1 ? 's' : ''}
+            </div>
+            <div style={{ padding: '0 12px 6px', fontSize: 10, color: theme.textMuted }}>
+              Select one or more source tables
             </div>
             {linkedRecordPicker.tables.length === 0 ? (
               <div style={{ padding: '6px 12px', fontSize: 13, color: theme.textMuted }}>No other tables found</div>
             ) : (
-              linkedRecordPicker.tables.map(t => (
-                <div
-                  key={t.scope}
-                  style={{ padding: '7px 12px', fontSize: 13, cursor: 'pointer', color: theme.text }}
-                  onMouseEnter={e => (e.currentTarget.style.background = theme.bgHover ?? theme.bgMuted)}
-                  onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                  onClick={() => handleSetColumnType(linkedRecordPicker.key, linkedRecordPicker.mode, t.scope)}
-                >
-                  {t.name}
+              <>
+                {linkedRecordPicker.tables.map(tbl => {
+                  const isSelected = linkedRecordPicker.selected.includes(tbl.scope);
+                  return (
+                    <div
+                      key={tbl.scope}
+                      style={{
+                        padding: '7px 12px',
+                        fontSize: 13,
+                        cursor: 'pointer',
+                        color: theme.text,
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 8,
+                        background: isSelected ? `${theme.purple}14` : 'transparent',
+                      }}
+                      onMouseEnter={e => { if (!isSelected) (e.currentTarget as HTMLElement).style.background = theme.bgHover ?? theme.bgMuted; }}
+                      onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = isSelected ? `${theme.purple}14` : 'transparent'; }}
+                      onClick={() => setLinkedRecordPicker(prev => {
+                        if (!prev) return prev;
+                        const next = prev.selected.includes(tbl.scope)
+                          ? prev.selected.filter(s => s !== tbl.scope)
+                          : [...prev.selected, tbl.scope];
+                        return { ...prev, selected: next };
+                      })}
+                    >
+                      <span style={{
+                        width: 14,
+                        height: 14,
+                        borderRadius: 3,
+                        border: `1.5px solid ${isSelected ? theme.purple : theme.border}`,
+                        background: isSelected ? theme.purple : 'transparent',
+                        flexShrink: 0,
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        color: '#fff',
+                        fontSize: 9,
+                        lineHeight: 1,
+                        fontWeight: 700,
+                      }}>{isSelected ? '✓' : ''}</span>
+                      <span>{tbl.name}</span>
+                    </div>
+                  );
+                })}
+                <div style={{
+                  padding: '8px 12px',
+                  borderTop: `1px solid ${theme.borderLight}`,
+                  display: 'flex',
+                  justifyContent: 'flex-end',
+                  gap: 6,
+                  marginTop: 4,
+                }}>
+                  <button
+                    onClick={() => setLinkedRecordPicker(null)}
+                    style={{
+                      background: 'transparent',
+                      border: `1px solid ${theme.border}`,
+                      borderRadius: 6,
+                      padding: '4px 10px',
+                      fontSize: 12,
+                      color: theme.textMuted,
+                      cursor: 'pointer',
+                      fontFamily: 'inherit',
+                    }}
+                  >Cancel</button>
+                  <button
+                    disabled={linkedRecordPicker.selected.length === 0}
+                    onClick={() => handleSetColumnType(linkedRecordPicker.key, linkedRecordPicker.mode, linkedRecordPicker.selected)}
+                    style={{
+                      background: linkedRecordPicker.selected.length === 0 ? theme.bgMuted : theme.purple,
+                      border: `1px solid ${linkedRecordPicker.selected.length === 0 ? theme.border : theme.purple}`,
+                      borderRadius: 6,
+                      padding: '4px 10px',
+                      fontSize: 12,
+                      color: linkedRecordPicker.selected.length === 0 ? theme.textMuted : '#fff',
+                      cursor: linkedRecordPicker.selected.length === 0 ? 'not-allowed' : 'pointer',
+                      fontFamily: 'inherit',
+                      fontWeight: 500,
+                    }}
+                  >Link</button>
                 </div>
-              ))
+              </>
             )}
           </div>
         </>
