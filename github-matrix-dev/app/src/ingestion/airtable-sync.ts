@@ -1190,6 +1190,49 @@ async function refreshKnownWebhooks(
   }
 }
 
+export interface WebhookRegistrationResult {
+  baseId: string;
+  webhookId?: string;
+  cursor?: number;
+  /** Error status code / message when registration failed for this base. */
+  error?: string;
+}
+
+/**
+ * Register (or re-use) the Airtable webhook for each base so post-hydration
+ * edits are queued as payloads immediately — not on the user's next Update
+ * Sync click. Without this, any change made in Airtable between the full
+ * pull and the first Update Sync is invisible: Airtable only queues payloads
+ * that happen AFTER the webhook exists.
+ *
+ * Best-effort: a failure on one base (e.g. token lacks `webhooks:manage`)
+ * does not stop the others, and never throws. Callers surface the returned
+ * error strings in the UI and fall back to the LAST_MODIFIED_TIME path.
+ */
+export async function registerWebhooksForBases(
+  store: EoStore,
+  client: AirtableClient,
+  baseIds: string[],
+): Promise<WebhookRegistrationResult[]> {
+  const results: WebhookRegistrationResult[] = [];
+  const seen = new Set<string>();
+  for (const baseId of baseIds) {
+    if (seen.has(baseId)) continue;
+    seen.add(baseId);
+    try {
+      const state = await ensureWebhook(store, client, baseId);
+      results.push({ baseId, webhookId: state.webhookId, cursor: state.cursor });
+    } catch (e: unknown) {
+      const err = e as { status?: number; message?: string };
+      results.push({
+        baseId,
+        error: `${err.status ?? '?'}: ${err.message ?? String(e)}`,
+      });
+    }
+  }
+  return results;
+}
+
 // ─── Hydration sync ────────────────────────────────────────────────────────
 //
 // Bulk imports (hydrations) run in three phases so we always have a
@@ -1680,6 +1723,29 @@ export async function hydrationSync(
     customization: opts?.customization,
     provenance,
   });
+
+  // Register the Airtable webhook for every hydrated base now, not on the
+  // first updateSync. Without this, any edit the user makes in Airtable
+  // between hydration and their first Update Sync click is silently dropped:
+  // Airtable only queues payloads generated after the webhook exists.
+  //
+  // Best-effort — a token without `webhooks:manage` scope will fall back to
+  // the LAST_MODIFIED_TIME path on the next updateSync, exactly as before.
+  const hydratedBaseIds = Array.from(
+    new Set(result.sync_results.map(r => r.base_id)),
+  );
+  if (hydratedBaseIds.length) {
+    const webhookResults = await registerWebhooksForBases(store, client, hydratedBaseIds);
+    for (const r of webhookResults) {
+      if (r.error) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[airtable-sync] could not register webhook for base ${r.baseId} at hydration: ${r.error}. ` +
+          `Update sync will fall back to LAST_MODIFIED_TIME until this is resolved.`,
+        );
+      }
+    }
+  }
 
   if (wantSnapshot) {
     // Build the cursor map by reading back the per-table cursors we just
