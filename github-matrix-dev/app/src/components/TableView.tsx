@@ -371,7 +371,7 @@ function renderCell(value: any, key: string, onNavigate: (t: string) => void, t:
     if (ids.length === 0) return <AbsentCell t={t} />;
 
     return (
-      <span style={{ display: 'inline-flex', flexWrap: 'wrap', gap: 4, alignItems: 'center' }}>
+      <span style={{ display: 'inline-flex', flexWrap: 'wrap', gap: 4, alignItems: 'center', maxWidth: '100%' }}>
         {ids.map((id) => {
           const shortId = id.includes('.') ? (id.split('.').pop() || id) : id;
           const resolved = id.includes('.')
@@ -383,22 +383,38 @@ function renderCell(value: any, key: string, onNavigate: (t: string) => void, t:
             <span
               key={id}
               onClick={(e) => { e.stopPropagation(); onNavigate(navTarget); }}
+              onMouseEnter={(e) => {
+                const el = e.currentTarget as HTMLElement;
+                el.style.background = t.purple;
+                el.style.color = '#fff';
+                el.style.borderColor = t.purple;
+              }}
+              onMouseLeave={(e) => {
+                const el = e.currentTarget as HTMLElement;
+                el.style.background = t.purpleBg;
+                el.style.color = t.purple;
+                el.style.borderColor = t.purpleBorder;
+              }}
               style={{
                 display: 'inline-flex',
                 alignItems: 'center',
                 gap: 3,
-                padding: '1px 7px',
-                borderRadius: 4,
+                padding: '2px 9px',
+                borderRadius: 999,
                 fontSize: 11,
-                background: `${t.purpleBg}`,
+                fontWeight: 500,
+                lineHeight: 1.4,
+                background: t.purpleBg,
                 border: `1px solid ${t.purpleBorder}`,
                 color: t.purple,
                 cursor: 'pointer',
                 whiteSpace: 'nowrap',
-                maxWidth: 180,
+                maxWidth: 240,
                 overflow: 'hidden',
                 textOverflow: 'ellipsis',
+                transition: 'background 0.12s, color 0.12s, border-color 0.12s',
               }}
+              title={displayName ? `${displayName} (${shortId})` : shortId}
             >
               {displayName || shortId}
             </span>
@@ -2390,7 +2406,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                           key={col.key}
                           style={{
                             ...tdStyle,
-                            padding: `${rowHeight === 'compact' ? 4 : rowHeight === 'tall' ? 18 : 10}px 8px ${rowHeight === 'compact' ? 4 : rowHeight === 'tall' ? 18 : 10}px 20px`,
+                            padding: `${rowHeight === 'compact' ? 4 : rowHeight === 'tall' ? 18 : 10}px 10px`,
                             ...(cellOverflow === 'clip'
                               ? { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', wordBreak: 'normal' as const }
                               : { whiteSpace: 'normal', wordBreak: 'break-word' as const }),
