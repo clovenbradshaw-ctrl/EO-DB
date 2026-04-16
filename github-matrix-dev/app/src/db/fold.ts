@@ -26,6 +26,7 @@ import { syncDefToGpu, dispatchEvalGpu } from './gpu-dispatch';
 import { partitionTargets } from './fold-pool';
 import type { EoEvent, EoEventInput, EoState, EvaRegistration, RecResult, ExternalOperator, DerivedEntity, LoggableOperator, Resolution } from './types';
 import { nulStateToResolution } from './types';
+import { isSyncTarget } from '../sync/sites';
 
 export { sortByHelixLevel } from './fold-core';
 export type { HelixWave } from './fold-core';
@@ -1030,7 +1031,11 @@ export async function processEventCoreWithSeq(
   nulHorizon: NulHorizon,
   onEvent?: (event: EoEvent) => void,
 ): Promise<number> {
-  if (event.op === 'REC') {
+  if (event.op === 'REC' && !isSyncTarget(event.target)) {
+    // App-layer RECs are emitted internally by detectAndEmitREC. Sync-layer
+    // RECs (peer/piece site restructuring, §3) are emitted by the sync
+    // worker — a system actor — and must be accepted here so they enter
+    // the log on the same path as application events (sync.md §Phase 5).
     throw new Error('REC is system-generated and cannot be submitted externally');
   }
   const validationErrors = validateEvent(event);
@@ -1109,7 +1114,11 @@ async function processEventCore(
   onEvent?: (event: EoEvent) => void,
   _promotionDepth = 0,
 ): Promise<number> {
-  if (event.op === 'REC') {
+  if (event.op === 'REC' && !isSyncTarget(event.target)) {
+    // App-layer RECs are emitted internally by detectAndEmitREC. Sync-layer
+    // RECs (peer/piece site restructuring, §3) are emitted by the sync
+    // worker — a system actor — and must be accepted here so they enter
+    // the log on the same path as application events (sync.md §Phase 5).
     throw new Error('REC is system-generated and cannot be submitted externally');
   }
   const validationErrors = validateEvent(event);
@@ -1188,7 +1197,11 @@ async function processEventInner(
   // 0. Validate event structure before any state mutation.
   //    This catches malformed events from Matrix/peer sync before we
   //    assign a seq or touch the log.
-  if (event.op === 'REC') {
+  if (event.op === 'REC' && !isSyncTarget(event.target)) {
+    // App-layer RECs are emitted internally by detectAndEmitREC. Sync-layer
+    // RECs (peer/piece site restructuring, §3) are emitted by the sync
+    // worker — a system actor — and must be accepted here so they enter
+    // the log on the same path as application events (sync.md §Phase 5).
     throw new Error('REC is system-generated and cannot be submitted externally');
   }
   const validationErrors = validateEvent(event);
