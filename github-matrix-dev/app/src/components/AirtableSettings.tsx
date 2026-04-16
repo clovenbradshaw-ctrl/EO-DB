@@ -22,6 +22,7 @@ import {
   discoverSchema,
   getSyncedTableIds,
   hydrationSync,
+  registerWebhooksForBases,
   updateSync,
   type HydrationManifest,
   type SyncCustomization,
@@ -890,16 +891,53 @@ export function AirtableSettingsSection({
         progressListener.finalize();
       }
 
+      // Register the Airtable webhook(s) for the imported bases NOW, so
+      // edits the user makes in Airtable between this import and their
+      // first Update Sync are captured. Without this, Airtable only starts
+      // queueing payloads on the first Update Sync click, and anything
+      // edited before that click is silently lost.
+      const importedBaseIds = Object.keys(snapshot.cursors ?? {});
+      let webhooksRegistered = 0;
+      let webhookErrors: string[] = [];
+      if (importedBaseIds.length && apiKey) {
+        const webhookClient = new AirtableClient(apiKey, undefined, {
+          onResponse: (info) => {
+            if (info.ok) return;
+            useAirtableStore.getState().setWebhookHealth({
+              url: info.url,
+              lastPolledAt: Date.now(),
+              lastStatus: info.status,
+              lastStatusText: info.status != null
+                ? `${info.status} ${info.statusText ?? ''}`.trim()
+                : null,
+              lastError: info.error ?? 'request failed',
+            });
+          },
+        });
+        const webhookResults = await registerWebhooksForBases(
+          store, webhookClient, importedBaseIds,
+        );
+        for (const r of webhookResults) {
+          if (r.error) webhookErrors.push(`${r.baseId}: ${r.error}`);
+          else webhooksRegistered++;
+        }
+      }
+
       const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
       const skippedSuffix = replay.insSkippedExisting > 0
         ? `, ${replay.insSkippedExisting} existing target(s) skipped`
         : '';
+      const webhookSuffix = webhooksRegistered > 0
+        ? `, ${webhooksRegistered} webhook(s) registered`
+        : webhookErrors.length > 0
+          ? `, webhook registration failed: ${webhookErrors.join('; ')}`
+          : '';
       useAirtableStore.getState().addSyncLogEntry({
         ts: Date.now(),
         type: 'snapshot_imported',
         source: 'local',
         syncer: session.userId,
-        detail: `${file.name}: replayed ${replay.eventsReplayed} events${skippedSuffix}, seeded ${replay.tablesSeeded} table cursor(s), ${seconds}s`,
+        detail: `${file.name}: replayed ${replay.eventsReplayed} events${skippedSuffix}, seeded ${replay.tablesSeeded} table cursor(s)${webhookSuffix}, ${seconds}s`,
         durationMs: Date.now() - startedAt,
         recordsScanned: replay.eventsReplayed,
       });
