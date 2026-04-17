@@ -618,6 +618,13 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   const prevSchemaKeyRef = useRef<string>('');
   const prevScopeNameRef = useRef<string | null>(null);
   const fetchGenRef = useRef(0);
+  // Counts consecutive sync re-fetches that returned zero records while the
+  // previous snapshot was non-empty. The store can transiently report an empty
+  // scope during SYN merges and in-flight fold operations (see comment at
+  // `hasCheckedEmptyScopeRef` below); applying those as-is causes the grid to
+  // flicker between "loaded" and "No records in this scope" on every sync.
+  // Require two consecutive empties before accepting an empty set as truth.
+  const emptySyncCountRef = useRef(0);
   const { theme } = useTheme();
   const s = makeStyles(theme);
 
@@ -789,6 +796,19 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
       getStateByPrefix(scope + '.').then((states) => {
         if (gen !== fetchGenRef.current) return;
         const direct = filterDirect(states);
+        // Guard against transient empty results: the store can momentarily
+        // return zero matches during SYN merges, fold operations, or other
+        // in-flight mutations. If the previous snapshot had records, skip the
+        // first such empty and wait for the next sync to confirm it. This
+        // prevents the grid from flickering to "No records in this scope"
+        // on every lastSeq bump.
+        if (direct.length === 0 && prevRecordsMapRef.current.size > 0 && emptySyncCountRef.current < 1) {
+          emptySyncCountRef.current += 1;
+          setIsUpdating(false);
+          setRecordsLoaded(true);
+          return;
+        }
+        emptySyncCountRef.current = 0;
         const key = direct.map(r => r.target + ':' + r.last_seq).join('|');
         if (key !== prevRecordsKeyRef.current) {
           // Compute the diff against the previously-observed record set so the
@@ -905,6 +925,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     // Clear update indicator state so switching tables doesn't carry over a
     // stale "updated" badge from the previous scope.
     prevRecordsMapRef.current = new Map();
+    emptySyncCountRef.current = 0;
     setIsUpdating(false);
     setLastUpdate(null);
     setShowUpdateDetail(false);
