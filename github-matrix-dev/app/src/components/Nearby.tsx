@@ -1,4 +1,4 @@
-import { useMemo, useState, useEffect } from 'react';
+import { useMemo, useState, useEffect, useRef, useCallback } from 'react';
 import type { SimilarRecord, SimilarityReason } from '../db/types';
 import { useTheme, type Theme } from '../theme';
 import { useDisplayNames } from '../hooks/useDisplayNames';
@@ -145,18 +145,83 @@ function SimilarCard({
 
 export function Nearby({ entries, onNavigate }: NearbyProps) {
   const { theme } = useTheme();
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+
+  useEffect(() => {
+    const onChange = () => {
+      setIsFullscreen(document.fullscreenElement === containerRef.current);
+    };
+    document.addEventListener('fullscreenchange', onChange);
+    return () => document.removeEventListener('fullscreenchange', onChange);
+  }, []);
+
+  const toggleFullscreen = useCallback(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    if (document.fullscreenElement === el) {
+      void document.exitFullscreen();
+    } else {
+      void el.requestFullscreen?.();
+    }
+  }, []);
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-      {entries.map((entry, i) => (
-        <SimilarCard
-          key={entry.target}
-          entry={entry}
-          onNavigate={onNavigate}
-          theme={theme}
-          delay={i * 60}
-        />
-      ))}
+    <div
+      ref={containerRef}
+      style={{
+        position: 'relative',
+        ...(isFullscreen ? {
+          background: theme.bg,
+          padding: '48px 40px 40px',
+          overflow: 'auto',
+        } : {}),
+      }}
+    >
+      <button
+        onClick={toggleFullscreen}
+        title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+        style={{
+          position: 'absolute',
+          top: isFullscreen ? 12 : -2,
+          right: isFullscreen ? 12 : -2,
+          zIndex: 2,
+          width: 24,
+          height: 24,
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          background: isFullscreen ? theme.accentBg : theme.bgCard,
+          border: `0.5px solid ${isFullscreen ? theme.accentBorder : theme.borderLight}`,
+          borderRadius: 6,
+          fontSize: 12,
+          color: isFullscreen ? theme.accent : theme.textMuted,
+          cursor: 'pointer',
+          padding: 0,
+          lineHeight: 1,
+        }}
+      >
+        ⤢
+      </button>
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: isFullscreen
+            ? 'repeat(auto-fill, minmax(280px, 1fr))'
+            : '1fr 1fr',
+          gap: isFullscreen ? 12 : 8,
+        }}
+      >
+        {entries.map((entry, i) => (
+          <SimilarCard
+            key={entry.target}
+            entry={entry}
+            onNavigate={onNavigate}
+            theme={theme}
+            delay={i * 60}
+          />
+        ))}
+      </div>
     </div>
   );
 }

@@ -64,6 +64,7 @@ if (typeof document !== 'undefined' && !document.getElementById(HORIZON_STYLE_ID
       transition: max-height 0.35s ease;
     }
     .eo-horizon-panel.open { max-height: 400px; }
+    :fullscreen .eo-horizon-panel.open { max-height: 100vh; }
   `;
   document.head.appendChild(el);
 }
@@ -103,8 +104,10 @@ export function Horizon({ records, dateColumns, filter, onFilterChange }: Horizo
   const [expanded, setExpanded] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [playSpeed, setPlaySpeed] = useState(1);
+  const [isFullscreen, setIsFullscreen] = useState(false);
 
   // ---- Refs ----
+  const containerRef = useRef<HTMLDivElement>(null);
   const trackRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<DragState | null>(null);
   const rafRef = useRef<number | null>(null);
@@ -178,6 +181,27 @@ export function Horizon({ records, dateColumns, filter, onFilterChange }: Horizo
 
   // Stop playback when scrubber resets to live
   useEffect(() => { if (isLive) stopPlay(); }, [isLive, stopPlay]);
+
+  // ---- Fullscreen ----
+  useEffect(() => {
+    const onChange = () => {
+      const active = document.fullscreenElement === containerRef.current;
+      setIsFullscreen(active);
+      if (active) setExpanded(true);
+    };
+    document.addEventListener('fullscreenchange', onChange);
+    return () => document.removeEventListener('fullscreenchange', onChange);
+  }, []);
+
+  const toggleFullscreen = useCallback(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    if (document.fullscreenElement === el) {
+      void document.exitFullscreen();
+    } else {
+      void el.requestFullscreen?.();
+    }
+  }, []);
 
   // ---- Pointer handlers ----
   const onPointerDown = useCallback(
@@ -260,7 +284,22 @@ export function Horizon({ records, dateColumns, filter, onFilterChange }: Horizo
   const s = makeStyles(theme);
 
   return (
-    <div style={s.container}>
+    <div
+      ref={containerRef}
+      style={{
+        ...s.container,
+        ...(isFullscreen ? {
+          background: theme.bg,
+          padding: '24px 32px',
+          overflow: 'auto',
+          justifyContent: 'center',
+        } : {}),
+      }}
+      onDoubleClick={(e) => {
+        if ((e.target as HTMLElement).closest('button, select, input, [data-horizon-track]')) return;
+        toggleFullscreen();
+      }}
+    >
 
       {/* ── Top row — always visible ── */}
       <div style={s.topRow}>
@@ -301,20 +340,36 @@ export function Horizon({ records, dateColumns, filter, onFilterChange }: Horizo
           />
         </div>
 
-        {/* Right cell — expand toggle */}
-        <button
-          onClick={() => setExpanded((v) => !v)}
-          style={{
-            ...s.histBtn,
-            ...(expanded ? {
-              borderColor: theme.purpleBorder,
-              color: theme.purple,
-              background: theme.purpleBg,
-            } : {}),
-          }}
-        >
-          {expanded ? '↑ Close' : '⏮ History'}
-        </button>
+        {/* Right cell — expand + fullscreen toggles */}
+        <div style={{ display: 'inline-flex', gap: 6, flexShrink: 0 }}>
+          <button
+            onClick={() => setExpanded((v) => !v)}
+            style={{
+              ...s.histBtn,
+              ...(expanded ? {
+                borderColor: theme.purpleBorder,
+                color: theme.purple,
+                background: theme.purpleBg,
+              } : {}),
+            }}
+          >
+            {expanded ? '↑ Close' : '⏮ History'}
+          </button>
+          <button
+            onClick={toggleFullscreen}
+            title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+            style={{
+              ...s.histBtn,
+              ...(isFullscreen ? {
+                borderColor: theme.accentBorder,
+                color: theme.accent,
+                background: theme.accentBg,
+              } : {}),
+            }}
+          >
+            {isFullscreen ? '⤢ Exit' : '⤢'}
+          </button>
+        </div>
 
       </div>
 
@@ -325,6 +380,7 @@ export function Horizon({ records, dateColumns, filter, onFilterChange }: Horizo
           {/* Track */}
           <div
             ref={trackRef}
+            data-horizon-track
             style={{ ...s.trackOuter, cursor: range ? 'pointer' : 'default' }}
             onPointerDown={onPointerDown}
             onPointerMove={onPointerMove}
