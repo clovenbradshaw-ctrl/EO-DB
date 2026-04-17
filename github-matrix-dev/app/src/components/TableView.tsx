@@ -613,6 +613,11 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   const [fieldPanelKey, setFieldPanelKey] = useState<string | null>(null);
   const [editingCell, setEditingCell] = useState<{ target: string; fieldKey: string; value: string } | null>(null);
   const [editingLinkCell, setEditingLinkCell] = useState<{ target: string; fieldKey: string; linkedTables: string[] } | null>(null);
+  // Tracks the most recent editable cell a user clicked. A second click on the
+  // same cell (while its record is active in the side drawer) enters inline
+  // edit mode; this implements the "click once opens drawer, click again edits"
+  // interaction.
+  const [lastClickedCell, setLastClickedCell] = useState<{ target: string; fieldKey: string } | null>(null);
   const editDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const prevRecordsKeyRef = useRef<string>('');
   const prevSchemaKeyRef = useRef<string>('');
@@ -2580,11 +2585,23 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                                   boxSizing: 'border-box' as const,
                                   position: 'relative' as const,
                                 }}
-                                title="Double-click to edit · right-click for options"
-                                onClick={(e) => e.stopPropagation()}
+                                title="Click to view · click again to edit · right-click for options"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  const isActiveRecord = rec.target === activeRecord;
+                                  const isSameCell = lastClickedCell?.target === rec.target && lastClickedCell?.fieldKey === col.key;
+                                  if (isActiveRecord && isSameCell) {
+                                    handleCellDoubleClick(rec, col.key, col.type);
+                                    setLastClickedCell(null);
+                                  } else {
+                                    onSelectRecord(rec.target);
+                                    setLastClickedCell({ target: rec.target, fieldKey: col.key });
+                                  }
+                                }}
                                 onDoubleClick={(e) => {
                                   e.stopPropagation();
                                   handleCellDoubleClick(rec, col.key, col.type);
+                                  setLastClickedCell(null);
                                 }}
                                 onMouseEnter={(e) => {
                                   (e.currentTarget as HTMLElement).style.borderBottomColor = theme.borderLight;
