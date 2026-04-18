@@ -1,20 +1,19 @@
 /**
  * SchemaFieldPanel — Right-side panel for editing a schema field.
  *
- * Three-layer progressive disclosure:
- *   Layer 1 (always visible) — Airtable-level basics: name, key, type,
- *     required toggle, simple validation (type-aware).
- *   Layer 2 (▸ More options, collapsed)  — Uncommon but grounded:
- *     uniqueness, cardinality, immutability, reference. Plus an
- *     "Edit in constraint grid →" escape hatch that embeds the full
- *     ConstraintComposer for expert users.
- *   Layer 3 (▸ Advanced, collapsed) — Power-user machinery: conflict
- *     resolution policies. Most fields never need this, so it's kept
- *     out of the default view entirely.
+ * Sections (top-to-bottom, constraints and resolution are peers):
+ *   Field rules (always visible) — Airtable-level basics: name, key,
+ *     type, required toggle, simple validation (type-aware).
+ *   Constraints (▸ collapsed) — uniqueness, cardinality, immutability,
+ *     reference. Plus an "Edit in constraint grid →" escape hatch that
+ *     embeds the full ConstraintComposer for expert users.
+ *   Resolution (▸ collapsed) — conflict resolution policy for
+ *     reconciling values from multiple sources. Peer of Constraints,
+ *     not nested under it.
  *
- * Existing fields with Layer 2 or Layer 3 configuration auto-expand
- * those sections on panel open so users editing prior work aren't
- * confused about missing settings.
+ * Existing fields with constraint or resolution configuration
+ * auto-expand those sections on panel open so users editing prior work
+ * aren't confused about missing settings.
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -58,11 +57,10 @@ interface SchemaFieldPanelProps {
    * When set, force-opens the named disclosure section and scrolls it into
    * view. The `token` is a pulse value that changes on every focus request
    * so the effect re-fires even if the section was already the target.
-   * Used by the Schema view to open Layer 3 (Advanced) directly when the
-   * user clicks a Resolution column cell — otherwise the composer is buried
-   * two collapses deep from the panel header.
+   * Used by the Schema view to open the Resolution section directly when
+   * the user clicks a Resolution column cell.
    */
-  focusRequest?: { section: 'advanced'; token: number } | null;
+  focusRequest?: { section: 'resolution'; token: number } | null;
   onClose: () => void;
   onSaveLabel: (newLabel: string) => void;
   onAddConstraint: (name: string, value: any) => void;
@@ -107,9 +105,9 @@ function typeFamilyOf(type: string | undefined): TypeFamily {
   return 'other';
 }
 
-// Constraint names that Layer 2 surfaces. If any of these are already set
-// on panel open, Layer 2 auto-expands.
-const LAYER_2_CONSTRAINT_NAMES = new Set(['uniqueness', 'cardinality', 'immutability', 'reference']);
+// Constraint names surfaced in the Constraints section. If any of these are
+// already set on panel open, the section auto-expands.
+const CONSTRAINTS_SECTION_NAMES = new Set(['uniqueness', 'cardinality', 'immutability', 'reference']);
 
 export function SchemaFieldPanel({
   fieldKey,
@@ -215,7 +213,7 @@ export function SchemaFieldPanel({
   const isUnique = !!uniquenessConstraint;
   const isImmutable = !!immutabilityConstraint;
 
-  const hasLayer2 = constraints.some(c => LAYER_2_CONSTRAINT_NAMES.has(c.name));
+  const hasExtraConstraints = constraints.some(c => CONSTRAINTS_SECTION_NAMES.has(c.name));
 
   // normalizeResolvePolicy handles both the canonical titlecase-keyed shape
   // and the two legacy shapes (lowercase stances + pre-composer {strategy})
@@ -226,21 +224,21 @@ export function SchemaFieldPanel({
   // ── Disclosure state ──
   // Auto-expand sections that already have config so users editing existing
   // fields can see their current settings without hunting for them.
-  const [moreOpen, setMoreOpen] = useState(hasLayer2);
-  const [advancedOpen, setAdvancedOpen] = useState(hasResolution);
+  const [constraintsOpen, setConstraintsOpen] = useState(hasExtraConstraints);
+  const [resolutionOpen, setResolutionOpen] = useState(hasResolution);
   const [showFullGrid, setShowFullGrid] = useState(false);
 
   // ── External focus requests ──
   // Schema view sends a pulse when the user clicks the Resolution column cell
-  // so we can open Layer 3 directly and scroll the composer into view.
-  const advancedSectionRef = useRef<HTMLDivElement | null>(null);
+  // so we can open the Resolution section and scroll the composer into view.
+  const resolutionSectionRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     if (!focusRequest) return;
-    if (focusRequest.section === 'advanced') {
-      setAdvancedOpen(true);
+    if (focusRequest.section === 'resolution') {
+      setResolutionOpen(true);
       // Scroll after the next paint so the section has rendered its content.
       const id = window.setTimeout(() => {
-        advancedSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        resolutionSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
       }, 0);
       return () => window.clearTimeout(id);
     }
@@ -271,7 +269,7 @@ export function SchemaFieldPanel({
   const [rangeMax, setRangeMax] = useState<string>(initialRangeMax);
   const [regex, setRegex] = useState<string>(initialRegex);
 
-  // ── Layer 2 local draft state ──
+  // ── Constraints section local draft state ──
   const initialCardMin = useMemo(
     () => (cardinalityConstraint?.value?.min != null ? String(cardinalityConstraint.value.min) : ''),
     [cardinalityConstraint],
@@ -374,7 +372,7 @@ export function SchemaFieldPanel({
     regex, setRegex, applyRegex,
   });
 
-  const layer2Summary = useMemo(() => {
+  const constraintsSummary = useMemo(() => {
     const parts: string[] = [];
     if (isUnique) parts.push('unique');
     if (cardinalityConstraint) parts.push('limited');
@@ -637,7 +635,7 @@ export function SchemaFieldPanel({
           </div>
         )}
 
-        {/* ═══ Layer 1 — Field rules (always visible) ═══ */}
+        {/* ═══ Field rules (always visible) ═══ */}
         <div style={{ padding: '14px 16px 4px' }}>
 
           {/* Required toggle */}
@@ -662,10 +660,10 @@ export function SchemaFieldPanel({
           )}
         </div>
 
-        {/* ═══ Layer 2 — More options (collapsed) ═══ */}
+        {/* ═══ Constraints (collapsed) ═══ */}
         <div style={{ borderTop: `1px solid ${theme.border}` }}>
           <button
-            onClick={() => setMoreOpen(v => !v)}
+            onClick={() => setConstraintsOpen(v => !v)}
             style={{
               width: '100%',
               display: 'flex',
@@ -679,23 +677,23 @@ export function SchemaFieldPanel({
             }}
           >
             <span style={{ fontSize: 11, color: theme.textMuted }}>
-              {moreOpen ? '▾' : '▸'}
+              {constraintsOpen ? '▾' : '▸'}
             </span>
             <span style={{ fontSize: 12, fontWeight: 600, color: theme.textHeading }}>
-              More options
+              Constraints
             </span>
-            {layer2Summary && !moreOpen && (
+            {constraintsSummary && !constraintsOpen && (
               <span style={{
                 fontSize: 10,
                 fontFamily: "'JetBrains Mono', monospace",
                 color: theme.textMuted,
               }}>
-                {layer2Summary}
+                {constraintsSummary}
               </span>
             )}
           </button>
 
-          {moreOpen && (
+          {constraintsOpen && (
             <div style={{ padding: '0 16px 12px' }}>
               {/* Unique values */}
               <div style={s.row}>
@@ -797,10 +795,10 @@ export function SchemaFieldPanel({
           )}
         </div>
 
-        {/* ═══ Layer 3 — Advanced (collapsed) ═══ */}
-        <div ref={advancedSectionRef} style={{ borderTop: `1px solid ${theme.border}` }}>
+        {/* ═══ Resolution (collapsed) ═══ */}
+        <div ref={resolutionSectionRef} style={{ borderTop: `1px solid ${theme.border}` }}>
           <button
-            onClick={() => setAdvancedOpen(v => !v)}
+            onClick={() => setResolutionOpen(v => !v)}
             style={{
               width: '100%',
               display: 'flex',
@@ -814,17 +812,12 @@ export function SchemaFieldPanel({
             }}
           >
             <span style={{ fontSize: 11, color: theme.textMuted }}>
-              {advancedOpen ? '▾' : '▸'}
+              {resolutionOpen ? '▾' : '▸'}
             </span>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 12, fontWeight: 600, color: theme.textHeading }}>
-                Advanced
-              </div>
-              <div style={{ fontSize: 10, color: theme.textMuted, marginTop: 1 }}>
-                conflict resolution — most fields never need this
-              </div>
-            </div>
-            {hasResolution && !advancedOpen && (
+            <span style={{ fontSize: 12, fontWeight: 600, color: theme.textHeading }}>
+              Resolution
+            </span>
+            {hasResolution && !resolutionOpen && (
               <span style={{
                 fontSize: 10,
                 fontFamily: "'JetBrains Mono', monospace",
@@ -835,7 +828,7 @@ export function SchemaFieldPanel({
             )}
           </button>
 
-          {advancedOpen && (
+          {resolutionOpen && (
             <div style={{ padding: '0 16px 16px' }}>
               <div style={{
                 fontSize: 11,
@@ -857,7 +850,7 @@ export function SchemaFieldPanel({
                   currentPolicy={currentPolicy}
                   onApply={onSetResolution}
                   onClear={onClearResolution}
-                  onClose={() => setAdvancedOpen(false)}
+                  onClose={() => setResolutionOpen(false)}
                 />
               </div>
             </div>

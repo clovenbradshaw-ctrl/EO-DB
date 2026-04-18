@@ -200,10 +200,11 @@ export function SchemaView({ scope }: SchemaViewProps) {
   const [loading, setLoading] = useState(true);
   const [expandedField, setExpandedField] = useState<string | null>(null);
   const [selectedFieldKey, setSelectedFieldKey] = useState<string | null>(null);
-  // Pulse token sent to the panel to force-open Layer 3 when the user clicks
-  // the Resolution column cell. A monotonically increasing counter lets the
-  // panel's effect re-fire even when the same section is requested twice.
-  const [focusRequest, setFocusRequest] = useState<{ section: 'advanced'; token: number } | null>(null);
+  // Pulse token sent to the panel to force-open the Resolution section when
+  // the user clicks the Resolution column cell. A monotonically increasing
+  // counter lets the panel's effect re-fire even when the same section is
+  // requested twice.
+  const [focusRequest, setFocusRequest] = useState<{ section: 'resolution'; token: number } | null>(null);
   const [editingLabel, setEditingLabel] = useState<{ fieldKey: string; value: string } | null>(null);
   const [sortKey, setSortKey] = useState<SortKey>('fieldKey');
   const [sortDir, setSortDir] = useState<SortDir>('asc');
@@ -750,7 +751,7 @@ export function SchemaView({ scope }: SchemaViewProps) {
                         onClick={(e) => {
                           e.stopPropagation();
                           setSelectedFieldKey(fs.fieldKey);
-                          setFocusRequest({ section: 'advanced', token: Date.now() });
+                          setFocusRequest({ section: 'resolution', token: Date.now() });
                         }}
                         onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = theme.bgHover; }}
                         onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
