@@ -149,7 +149,35 @@ function AppMain() {
   }
 
   if (loading) {
-    return <div style={{ padding: 40, textAlign: 'center', color: theme.textSecondary }}>Loading...</div>;
+    return (
+      <div
+        role="status"
+        aria-live="polite"
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          minHeight: '100vh',
+          gap: 12,
+          color: theme.textSecondary,
+          fontFamily: "'JetBrains Mono', monospace",
+        }}
+      >
+        <span
+          style={{
+            width: 24,
+            height: 24,
+            border: `2px solid ${theme.border}`,
+            borderTopColor: theme.accent,
+            borderRadius: '50%',
+            animation: 'spin 0.8s linear infinite',
+            display: 'inline-block',
+          }}
+        />
+        <div style={{ fontSize: 13 }}>Loading data…</div>
+      </div>
+    );
   }
 
   if (!session) {
