@@ -2594,6 +2594,41 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             errorMessage={connectionMessage}
             retryLabel={connectionError?.phase === 'auth' ? 'Re-login' : undefined}
           />
+          {showStoreLoading && (
+            <div
+              role="status"
+              aria-live="polite"
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 6,
+                background: theme.bgMuted,
+                color: theme.textSecondary,
+                border: `1px solid ${theme.border}`,
+                borderRadius: 20,
+                padding: '4px 10px',
+                fontSize: 11,
+                fontWeight: 500,
+                fontFamily: "'JetBrains Mono', monospace",
+                whiteSpace: 'nowrap' as const,
+                flexShrink: 0,
+              }}
+              title="Local data is still loading"
+            >
+              <span
+                style={{
+                  width: 10,
+                  height: 10,
+                  border: `1.5px solid ${theme.border}`,
+                  borderTopColor: theme.accent,
+                  borderRadius: '50%',
+                  animation: 'spin 0.8s linear infinite',
+                  display: 'inline-block',
+                }}
+              />
+              Loading data{lastSeq > 0 ? ` (${lastSeq})` : ''}…
+            </div>
+          )}
           {!isMobile && <SyncToast status={syncToastStatus} seq={syncToastSeq} />}
           {!isMobile && <AirtableSyncBadge />}
           {selectedSpace && !isMobile && (
