@@ -236,15 +236,18 @@ export const useEoStore = create<EoDbState>((set, get) => ({
       workerHeadSeq !== undefined &&
       workerHeadSeq === snapshotSeq;
 
+    let replayedEvents: EoEvent[] = [];
+    let replayFailed = false;
     if (!nothingNew) {
       // Replay only events that arrived after the snapshot was written.
       try {
-        const events = await scanLog(workerClient, snapshotSeq);
-        if (events.length > 0) {
-          await replayFromLog(memStore, events);
+        replayedEvents = await scanLog(workerClient, snapshotSeq);
+        if (replayedEvents.length > 0) {
+          await replayFromLog(memStore, replayedEvents);
         }
       } catch (e) {
         console.warn('[EO-DB] OPFS log replay failed:', e);
+        replayFailed = true;
       }
     }
 
@@ -266,7 +269,21 @@ export const useEoStore = create<EoDbState>((set, get) => ({
       // persisted alongside it — use it directly and skip the O(n) scan of
       // the memory store's log: entries.
       hydrated = cachedTail;
+    } else if (!replayFailed && (snapshotHit || replayedEvents.length > 0)) {
+      // We already have every event needed: cachedTail covers everything up to
+      // snapshotSeq, replayedEvents covers the rest. Concatenating is
+      // equivalent to readLogSince(memStore, lastSeq - LIMIT) but skips an
+      // O(n) scan of the memory store's log: entries — the dominant cost on
+      // the refresh path for spaces with large event histories.
+      const combined = cachedTail.length > 0
+        ? [...cachedTail, ...replayedEvents]
+        : replayedEvents;
+      hydrated = combined.length > RECENT_EVENT_LIMIT
+        ? combined.slice(-RECENT_EVENT_LIMIT)
+        : combined;
     } else {
+      // Fallback: snapshot miss with replay failure, or truly brand-new store.
+      // Scan the memStore for whatever's there.
       try {
         const fromSeq = Math.max(0, lastSeq - RECENT_EVENT_LIMIT);
         hydrated = await readLogSince(memStore, fromSeq);
