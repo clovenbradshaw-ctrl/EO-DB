@@ -54,6 +54,15 @@ interface SchemaFieldPanelProps {
    */
   scope?: string;
   valueStats?: FieldValueStats | null;
+  /**
+   * When set, force-opens the named disclosure section and scrolls it into
+   * view. The `token` is a pulse value that changes on every focus request
+   * so the effect re-fires even if the section was already the target.
+   * Used by the Schema view to open Layer 3 (Advanced) directly when the
+   * user clicks a Resolution column cell — otherwise the composer is buried
+   * two collapses deep from the panel header.
+   */
+  focusRequest?: { section: 'advanced'; token: number } | null;
   onClose: () => void;
   onSaveLabel: (newLabel: string) => void;
   onAddConstraint: (name: string, value: any) => void;
@@ -107,6 +116,7 @@ export function SchemaFieldPanel({
   fieldSchema,
   scope,
   valueStats,
+  focusRequest,
   onClose,
   onSaveLabel,
   onAddConstraint,
@@ -219,6 +229,22 @@ export function SchemaFieldPanel({
   const [moreOpen, setMoreOpen] = useState(hasLayer2);
   const [advancedOpen, setAdvancedOpen] = useState(hasResolution);
   const [showFullGrid, setShowFullGrid] = useState(false);
+
+  // ── External focus requests ──
+  // Schema view sends a pulse when the user clicks the Resolution column cell
+  // so we can open Layer 3 directly and scroll the composer into view.
+  const advancedSectionRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!focusRequest) return;
+    if (focusRequest.section === 'advanced') {
+      setAdvancedOpen(true);
+      // Scroll after the next paint so the section has rendered its content.
+      const id = window.setTimeout(() => {
+        advancedSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 0);
+      return () => window.clearTimeout(id);
+    }
+  }, [focusRequest]);
 
   // ── Layer 1 validation — local draft state ──
   // We apply on blur / explicit action rather than per-keystroke, so users
@@ -772,7 +798,7 @@ export function SchemaFieldPanel({
         </div>
 
         {/* ═══ Layer 3 — Advanced (collapsed) ═══ */}
-        <div style={{ borderTop: `1px solid ${theme.border}` }}>
+        <div ref={advancedSectionRef} style={{ borderTop: `1px solid ${theme.border}` }}>
           <button
             onClick={() => setAdvancedOpen(v => !v)}
             style={{
