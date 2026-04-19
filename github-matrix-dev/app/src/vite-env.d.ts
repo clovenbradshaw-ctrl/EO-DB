@@ -9,6 +9,12 @@ interface ImportMetaEnv {
    * reference the compiled assets but must only talk to a single server.
    */
   readonly VITE_MATRIX_HOMESERVER?: string;
+  /**
+   * Optional pre-fill for the homeserver input on unlocked builds. Lets a
+   * deploy show its own server as the default placeholder without baking
+   * the value into the source. Ignored when VITE_MATRIX_HOMESERVER is set.
+   */
+  readonly VITE_DEFAULT_HOMESERVER?: string;
 }
 
 interface ImportMeta {

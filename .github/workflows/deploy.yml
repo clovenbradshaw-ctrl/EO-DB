@@ -41,6 +41,9 @@ jobs:
         run: npm run build
         env:
           VITE_GOOGLE_CLIENT_ID: ${{ vars.VITE_GOOGLE_CLIENT_ID }}
+          # Pre-fills the homeserver input so the firm's deploy keeps its
+          # existing UX. Source no longer hardcodes a firm-specific value.
+          VITE_DEFAULT_HOMESERVER: app.aminoimmigration.com
 
       - name: Copy standalone /nl/ assets into build output
         # Ships the self-contained HTML plus any baked centroids/alignment

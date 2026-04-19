@@ -12,7 +12,9 @@ interface LoginProps {
 
 export function Login({ onLogin, onLocalMode }: LoginProps) {
   const lockedHomeserver = getLockedHomeserver();
-  const [homeserver, setHomeserver] = useState(lockedHomeserver ?? 'app.aminoimmigration.com');
+  const [homeserver, setHomeserver] = useState(
+    lockedHomeserver ?? import.meta.env.VITE_DEFAULT_HOMESERVER ?? '',
+  );
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
