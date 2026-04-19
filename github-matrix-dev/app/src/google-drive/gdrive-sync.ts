@@ -120,6 +120,16 @@ export class GDriveSyncService {
    */
   private opsBuffer: EoEvent[] = [];
 
+  /**
+   * Flush serialization. At most one flushBuffer executes at a time; at most
+   * one additional flush is queued behind it to pick up ops that arrive during
+   * the running flush. Rapid-fire saveOp calls coalesce into the queued flush,
+   * so N concurrent updates produce at most two Drive writes instead of N
+   * races (which could lose events via out-of-order PUTs).
+   */
+  private runningFlush: Promise<void> | null = null;
+  private nextFlush: Promise<void> | null = null;
+
   // GUID-derived Drive filenames — set in start() before first use.
   // All three tiers (viewer / restricted / admin) are initialised here.
   private logFile: string = LEGACY_LOG_FILE;
@@ -420,7 +430,7 @@ export class GDriveSyncService {
     if (this.destroyed) return;
 
     this.opsBuffer.push(event);
-    await this.flushBuffer();
+    await this.scheduleFlush();
     if (this.opsBuffer.length >= OPS_PER_BAKE && !this.baking) {
       this.raiseBakeHand().catch(console.warn);
     }
@@ -434,10 +444,36 @@ export class GDriveSyncService {
     if (this.destroyed || events.length === 0) return;
 
     for (const e of events) this.opsBuffer.push(e);
-    await this.flushBuffer();
+    await this.scheduleFlush();
     if (this.opsBuffer.length >= OPS_PER_BAKE && !this.baking) {
       this.raiseBakeHand().catch(console.warn);
     }
+  }
+
+  /**
+   * Queue a flushBuffer call, serializing against the currently-running one
+   * and coalescing rapid-fire callers onto a single queued flush. The returned
+   * promise resolves once the event (already pushed to opsBuffer by the
+   * caller) has been written to Drive.
+   */
+  private scheduleFlush(): Promise<void> {
+    if (this.destroyed) return Promise.resolve();
+    if (this.nextFlush) return this.nextFlush;
+
+    const runAfter = this.runningFlush ?? Promise.resolve();
+    const p: Promise<void> = runAfter.catch(() => {}).then(async () => {
+      // Transition from queued → running: open the queue slot so ops pushed
+      // after this point schedule a fresh flush that will see them.
+      this.nextFlush = null;
+      this.runningFlush = p;
+      try {
+        await this.flushBuffer();
+      } finally {
+        if (this.runningFlush === p) this.runningFlush = null;
+      }
+    });
+    this.nextFlush = p;
+    return p;
   }
 
   /**
