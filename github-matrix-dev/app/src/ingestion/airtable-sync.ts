@@ -226,6 +226,17 @@ export interface SyncCustomization {
   defaultResolution?: Resolution;
 }
 
+// ─── Polling pacing ───────────────────────────────────────────────────────
+//
+// Sequential single-flight polling enforces a 10-second wall-clock gap
+// between consecutive table polls within an updateSync cycle. Combined with
+// the per-base AirtableClient TokenBucket (4 req/sec) and the leader-election
+// lease (only one device polls at a time), this caps the steady-state load
+// well under Airtable's 5 req/sec limit even on installations with many
+// tables.
+
+const INTER_TABLE_POLL_GAP_MS = 10_000;
+
 // ─── Cursor management (IndexedDB meta store) ─────────────────────────────
 
 function cursorKey(baseId: string, tableId: string): string {
@@ -2104,8 +2115,15 @@ export async function updateSync(
     }
 
     if (!webhookOk) {
-      for (const table of tables) {
-        if (baseTables && !baseTables.includes(table.id)) continue;
+      // Build the eligible-table list up front so the inter-table sleep only
+      // runs between tables we'll actually poll (skipped tables don't burn
+      // 10s of wall clock).
+      const tablesToSync = tables.filter((t) => {
+        if (baseTables && !baseTables.includes(t.id)) return false;
+        return hydratedTableIds.has(t.id);
+      });
+      for (let i = 0; i < tablesToSync.length; i++) {
+        const table = tablesToSync[i];
         const cursor = await getCursor(store, base.id, table.id);
         if (!cursor) continue;
         const exclusions = fieldExclusions?.[table.id] ?? EMPTY_EXCLUSIONS;
@@ -2130,6 +2148,14 @@ export async function updateSync(
         );
         syncResults.push(result);
         opts?.onTableComplete?.(result);
+
+        // Strict sequential polling: 10s gap between tables (not after the
+        // last one) so a leader doing the rounds across a base doesn't burst
+        // through the rate limiter and so a non-trivial number of tables
+        // doesn't monopolize the bucket.
+        if (i < tablesToSync.length - 1) {
+          await new Promise((resolve) => setTimeout(resolve, INTER_TABLE_POLL_GAP_MS));
+        }
       }
     }
   }

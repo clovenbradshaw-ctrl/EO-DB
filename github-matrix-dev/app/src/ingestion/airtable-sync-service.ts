@@ -66,7 +66,12 @@ import { createImportProgressListener } from '../store/eo-store';
 const MIN_SYNC_INTERVAL_SEC = 15;
 const MAX_SYNC_INTERVAL_SEC = 600;
 const STALE_THRESHOLD_MS = 2 * 60_000;   // 2 minutes — claim is stale after this
-const FIRST_SYNC_DELAY_MS = 3_000;       // 3 seconds — let connections settle
+// Fire the first sync tick on the next macrotask after start() — the leader
+// election + initial poll should happen on app-load, not after a polite delay.
+// Kept as a queued setTimeout(..., 0) (rather than a direct call) so we don't
+// inline the network round-trip in start() and so the existing nextTickAt UI
+// indicator still gets a non-null timestamp before the tick begins.
+const FIRST_SYNC_DELAY_MS = 0;
 
 const EO_AIRTABLE_HEAD = 'eo.airtable.head';
 const EO_AIRTABLE_CONFIG = 'eo.airtable.config';
