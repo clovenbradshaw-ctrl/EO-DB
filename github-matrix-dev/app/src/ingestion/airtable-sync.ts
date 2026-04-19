@@ -251,6 +251,32 @@ async function setCursor(store: EoStore, baseId: string, tableId: string, cursor
   await store.put(cursorKey(baseId, tableId), cursor);
 }
 
+/**
+ * Seed local IndexedDB cursors from a `${baseId}/${tableId} -> ISO` map
+ * sourced from Matrix room state. Takes the max of (room, local) per key so
+ * a leader handoff can never regress a cursor — if local just advanced past
+ * the room state value (because we wrote local first and the state event
+ * hasn't propagated), local wins; if room state is fresher (a different
+ * device was the previous leader), room wins.
+ */
+export async function seedCursorsFromMap(
+  store: EoStore,
+  cursors: Map<string, string>,
+): Promise<void> {
+  for (const [stateKey, remoteCursor] of cursors) {
+    const slash = stateKey.indexOf('/');
+    if (slash < 0) continue;
+    const baseId = stateKey.slice(0, slash);
+    const tableId = stateKey.slice(slash + 1);
+    if (!baseId || !tableId) continue;
+    const local = await getCursor(store, baseId, tableId);
+    const winner = !local || remoteCursor > local ? remoteCursor : local;
+    if (winner !== local) {
+      await setCursor(store, baseId, tableId, winner);
+    }
+  }
+}
+
 // ─── NUL preservation index ───────────────────────────────────────────────
 //
 // A user can explicitly clear a cell, which logs a NUL event with
@@ -1923,6 +1949,13 @@ export async function updateSync(
      * "Recent changes" panel.
      */
     onChange?: RecordChangeListener;
+    /**
+     * Fires after each successful per-table poll with the new cursor value
+     * (the same value `setCursor` just wrote to IndexedDB). Used by the
+     * service to mirror cursors into Matrix room state so a leader handoff
+     * to a different device picks up where the previous leader left off.
+     */
+    onCursorAdvance?: (baseId: string, tableId: string, cursor: string) => Promise<void>;
   },
 ): Promise<UpdateSyncResult> {
   const start = Date.now();
@@ -2148,6 +2181,28 @@ export async function updateSync(
         );
         syncResults.push(result);
         opts?.onTableComplete?.(result);
+
+        // Mirror the freshly-advanced cursor to Matrix room state so a
+        // leader handoff doesn't restart from a stale position. Read-back
+        // (vs reusing `cursor` above — which is the PRE-poll value) lets us
+        // emit whatever syncTable actually wrote, including any internal
+        // bumping of the value beyond `now`.
+        if (opts?.onCursorAdvance) {
+          const advanced = await getCursor(store, base.id, table.id);
+          if (advanced) {
+            try {
+              await opts.onCursorAdvance(base.id, table.id, advanced);
+            } catch (e) {
+              // Best-effort: a state-event write failure shouldn't abort the
+              // whole sync cycle. The next leader will re-derive from
+              // IndexedDB until the next successful mirror.
+              console.warn(
+                `[airtable-sync] cursor mirror failed for ${base.id}/${table.id}:`,
+                e,
+              );
+            }
+          }
+        }
 
         // Strict sequential polling: 10s gap between tables (not after the
         // last one) so a leader doing the rounds across a base doesn't burst

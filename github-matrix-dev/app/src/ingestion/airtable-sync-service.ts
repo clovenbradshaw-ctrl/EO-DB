@@ -27,6 +27,7 @@ import type { EoStore } from '../db/encrypted-store';
 import { AirtableClient } from './airtable-client';
 import {
   hydrationSync,
+  seedCursorsFromMap,
   updateSync,
   type SyncCustomization,
   type SyncProgress,
@@ -75,6 +76,10 @@ const FIRST_SYNC_DELAY_MS = 0;
 
 const EO_AIRTABLE_HEAD = 'eo.airtable.head';
 const EO_AIRTABLE_CONFIG = 'eo.airtable.config';
+// Per-table cursor mirror. Each (baseId, tableId) pair gets its own state
+// event with state_key = "${baseId}/${tableId}", so writes are independent
+// and a leader handoff can read the entire set in one room-state scan.
+const EO_AIRTABLE_CURSOR = 'eo.airtable.cursor';
 
 const SIGNAL_TYPE = airtableSyncEventTypes().signal;
 const LOCK_TYPE = airtableSyncEventTypes().lock;
@@ -314,6 +319,45 @@ export class AirtableSyncService {
     }
   }
 
+  // ─── Per-table cursor mirror (Matrix room state) ─────────────────────────
+  //
+  // IndexedDB cursors don't survive a leader handoff to a different device.
+  // We mirror each per-table cursor to a `eo.airtable.cursor` state event
+  // (state_key = `${baseId}/${tableId}`) so the next leader can pick up
+  // where the previous one left off. seedCursorsFromMap() takes the max of
+  // (room, local) so a regression is impossible.
+
+  private readAllCursorsFromRoom(): Map<string, string> {
+    const out = new Map<string, string>();
+    try {
+      const room = this.matrixClient.getRoom(this.roomId);
+      if (!room) return out;
+      const events = room.currentState.getStateEvents(EO_AIRTABLE_CURSOR);
+      const list = Array.isArray(events) ? events : (events ? [events] : []);
+      for (const ev of list) {
+        const stateKey = (ev as any).getStateKey?.() ?? '';
+        const content = (ev as any).getContent?.() ?? ev;
+        const cursor = content?.lastModifiedSeen;
+        if (typeof stateKey === 'string' && stateKey && typeof cursor === 'string' && cursor) {
+          out.set(stateKey, cursor);
+        }
+      }
+    } catch {
+      // Fall through with whatever we collected — best-effort read.
+    }
+    return out;
+  }
+
+  private async writeCursorToRoom(baseId: string, tableId: string, cursor: string): Promise<void> {
+    const stateKey = `${baseId}/${tableId}`;
+    await this.matrixClient.sendStateEvent(this.roomId, EO_AIRTABLE_CURSOR as any, {
+      lastModifiedSeen: cursor,
+      updatedBy: this.agent,
+      device: this.deviceId,
+      updatedAt: new Date().toISOString(),
+    }, stateKey);
+  }
+
   // ─── Primary syncer election ──────────────────────────────────────────────
 
   private readHead(): AirtableHeadContent | null {
@@ -431,6 +475,16 @@ export class AirtableSyncService {
     // Try to claim / verify primary syncer
     const isPrimary = await this.claimPrimarySyncer();
     if (!isPrimary) return;
+
+    // Seed local cursors from room state BEFORE marking syncing — picks up
+    // any advances written by a previous leader on a different device. The
+    // max-merge in seedCursorsFromMap guarantees a stale state event can't
+    // regress a cursor we already advanced locally.
+    try {
+      await seedCursorsFromMap(this.store, this.readAllCursorsFromRoom());
+    } catch (e) {
+      console.warn('[EO-DB] cursor seed from room state failed:', e);
+    }
 
     this.syncing = true;
     useAirtableStore.getState().setSyncing(true);
@@ -589,6 +643,8 @@ export class AirtableSyncService {
               customization: effectiveCustomization,
               onEvent: progressListener.onEvent,
               onProgress,
+              onCursorAdvance: (baseId, tableId, cursor) =>
+                this.writeCursorToRoom(baseId, tableId, cursor),
               // Surface per-record diffs to the "Recent changes" UI panel.
               // ingestRecord only fires this for actual mutations (not
               // skip-no-change), so the buffer reflects real edits.
