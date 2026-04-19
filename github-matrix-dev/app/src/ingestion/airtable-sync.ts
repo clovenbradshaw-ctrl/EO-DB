@@ -15,8 +15,9 @@
 import type { EoStore } from '../db/encrypted-store';
 import { processEvent } from '../db/fold';
 import { getState } from '../db/state';
+import { readLogForPrefix } from '../db/log';
 import { markDeleted } from '../db/tombstone';
-import type { Resolution } from '../db/types';
+import type { EoEvent, Resolution } from '../db/types';
 import {
   AirtableClient,
   type AirtableBase,
@@ -225,6 +226,17 @@ export interface SyncCustomization {
   defaultResolution?: Resolution;
 }
 
+// ─── Polling pacing ───────────────────────────────────────────────────────
+//
+// Sequential single-flight polling enforces a 10-second wall-clock gap
+// between consecutive table polls within an updateSync cycle. Combined with
+// the per-base AirtableClient TokenBucket (4 req/sec) and the leader-election
+// lease (only one device polls at a time), this caps the steady-state load
+// well under Airtable's 5 req/sec limit even on installations with many
+// tables.
+
+const INTER_TABLE_POLL_GAP_MS = 10_000;
+
 // ─── Cursor management (IndexedDB meta store) ─────────────────────────────
 
 function cursorKey(baseId: string, tableId: string): string {
@@ -237,6 +249,68 @@ async function getCursor(store: EoStore, baseId: string, tableId: string): Promi
 
 async function setCursor(store: EoStore, baseId: string, tableId: string, cursor: string): Promise<void> {
   await store.put(cursorKey(baseId, tableId), cursor);
+}
+
+/**
+ * Seed local IndexedDB cursors from a `${baseId}/${tableId} -> ISO` map
+ * sourced from Matrix room state. Takes the max of (room, local) per key so
+ * a leader handoff can never regress a cursor — if local just advanced past
+ * the room state value (because we wrote local first and the state event
+ * hasn't propagated), local wins; if room state is fresher (a different
+ * device was the previous leader), room wins.
+ */
+export async function seedCursorsFromMap(
+  store: EoStore,
+  cursors: Map<string, string>,
+): Promise<void> {
+  for (const [stateKey, remoteCursor] of cursors) {
+    const slash = stateKey.indexOf('/');
+    if (slash < 0) continue;
+    const baseId = stateKey.slice(0, slash);
+    const tableId = stateKey.slice(slash + 1);
+    if (!baseId || !tableId) continue;
+    const local = await getCursor(store, baseId, tableId);
+    const winner = !local || remoteCursor > local ? remoteCursor : local;
+    if (winner !== local) {
+      await setCursor(store, baseId, tableId, winner);
+    }
+  }
+}
+
+// ─── NUL preservation index ───────────────────────────────────────────────
+//
+// A user can explicitly clear a cell, which logs a NUL event with
+// `operand.fieldKey` (see components/cell-events.ts). Without filtering,
+// the next Airtable poll would re-import the previously-cleared value and
+// silently undo the user's NUL transformation.
+//
+// `buildNulledFieldsForTable` scans the log once per table sync to build a
+// `recordTarget -> Set<fieldKey>` index of every field a user has cleared.
+// `ingestRecord` then drops those keys from the diff before emitting DEF
+// when the existing local value is still null (i.e. the clearing DEF that
+// accompanies the NUL is still the most recent state — the user hasn't
+// re-set the value locally).
+
+async function buildNulledFieldsForTable(
+  store: EoStore,
+  baseId: string,
+  tableId: string,
+): Promise<Map<string, Set<string>>> {
+  const prefix = `${tableTarget(baseId, tableId)}.`;
+  const events = await readLogForPrefix(store, prefix);
+  const map = new Map<string, Set<string>>();
+  for (const event of events as EoEvent[]) {
+    if (event.op !== 'NUL') continue;
+    const fieldKey = (event.operand as { fieldKey?: unknown } | undefined)?.fieldKey;
+    if (typeof fieldKey !== 'string' || !fieldKey) continue;
+    let set = map.get(event.target);
+    if (!set) {
+      set = new Set<string>();
+      map.set(event.target, set);
+    }
+    set.add(fieldKey);
+  }
+  return map;
 }
 
 // ─── Webhook state (IndexedDB meta store) ─────────────────────────────────
@@ -520,6 +594,7 @@ async function ingestRecord(
   defaultResolution?: Resolution,
   onChange?: RecordChangeListener,
   tableName?: string,
+  nulledFields?: Map<string, Set<string>>,
 ): Promise<'ingested' | 'overwritten' | 'skipped_no_change' | 'skipped_duplicate'> {
   const target = recordTarget(baseId, tableId, record.id);
 
@@ -532,6 +607,22 @@ async function ingestRecord(
 
   // 3. Compute field-level diff — only fields that actually changed
   let diffFields = computeFieldDiff(storableFields, existingFields);
+
+  // 3a. NUL preservation — drop any field the user has explicitly cleared
+  //     where the local state still reflects the cleared value. If the user
+  //     has since re-set the field locally, `existingFields[key]` will be
+  //     non-null and the diff is allowed to proceed normally.
+  const nulled = nulledFields?.get(target);
+  if (nulled && nulled.size > 0) {
+    const filtered: Record<string, any> = {};
+    for (const [key, val] of Object.entries(diffFields)) {
+      if (nulled.has(key) && (existingFields == null || existingFields[key] == null)) {
+        continue;
+      }
+      filtered[key] = val;
+    }
+    diffFields = filtered;
+  }
 
   // 3a. Detect overwrite: record already existed AND at least one diff field
   //     was replacing a previously non-null value. This is the count surfaced
@@ -734,6 +825,13 @@ async function syncTable(
   const tableState = await getState(store, tableTarget(baseId, tableId));
   const displayField: string | undefined = tableState?.value?._displayField;
 
+  // Build the per-table NUL preservation index once. Skipped for hydration —
+  // an empty/fresh store has no NULs to preserve, and avoiding the log scan
+  // keeps initial pulls fast.
+  const nulledFields = strategy === 'hydration'
+    ? undefined
+    : await buildNulledFieldsForTable(store, baseId, tableId);
+
   // Subtract a 60-second overlap window from the cursor to catch records
   // modified during clock skew or at the tail of the previous sync.
   // Use IS_AFTER+DATETIME_PARSE — the correct Airtable datetime comparison
@@ -777,7 +875,7 @@ async function syncTable(
     for (const record of page) {
       if (fetched >= limit) { limitReached = true; break; }
       fetched++;
-      const result = await ingestRecord(store, baseId, tableId, record, agent, fieldMeta, exclusions, preserveExisting, onEvent, displayField, defaultResolution, onChange, tableName);
+      const result = await ingestRecord(store, baseId, tableId, record, agent, fieldMeta, exclusions, preserveExisting, onEvent, displayField, defaultResolution, onChange, tableName, nulledFields);
       switch (result) {
         case 'ingested': ingested++; break;
         case 'overwritten': ingested++; overwritten++; break;
@@ -1851,6 +1949,13 @@ export async function updateSync(
      * "Recent changes" panel.
      */
     onChange?: RecordChangeListener;
+    /**
+     * Fires after each successful per-table poll with the new cursor value
+     * (the same value `setCursor` just wrote to IndexedDB). Used by the
+     * service to mirror cursors into Matrix room state so a leader handoff
+     * to a different device picks up where the previous leader left off.
+     */
+    onCursorAdvance?: (baseId: string, tableId: string, cursor: string) => Promise<void>;
   },
 ): Promise<UpdateSyncResult> {
   const start = Date.now();
@@ -1864,11 +1969,6 @@ export async function updateSync(
 
   opts?.onProgress?.({ phase: 'discovering' });
   const bases = await client.listBases();
-
-  // Reset the 7-day expiration clock on every webhook we know about before
-  // we poll. Cheap, idempotent, and avoids silent subscription loss on
-  // installations that only ever run incremental syncs.
-  await refreshKnownWebhooks(store, client, bases.map(b => b.id));
 
   for (const base of bases) {
     // If table selection exists but this base has no selected tables, skip
@@ -2017,34 +2117,22 @@ export async function updateSync(
       const c = await getCursor(store, base.id, table.id);
       if (c) hydratedTableIds.add(table.id);
     }
-    const baseSelectedIds: Set<string> | null = hydratedTableIds.size
-      ? hydratedTableIds
-      : null;
     if (!hydratedTableIds.size) continue;
-    let webhookOk = false;
-    try {
-      const webhookResults = await webhookIncrementalSyncBase(
-        store, client, base.id, base.name, tables, agent,
-        baseSelectedIds, preserveExisting, fieldExclusions,
-        displayFields, defaultResolution,
-        opts?.onEvent, opts?.onProgress, opts?.onChange,
-      );
-      for (const r of webhookResults) {
-        syncResults.push(r);
-        opts?.onTableComplete?.(r);
-      }
-      webhookOk = true;
-    } catch (e: unknown) {
-      const err = e as { status?: number; message?: string };
-      // eslint-disable-next-line no-console
-      console.warn(
-        `[airtable-sync] webhook path failed for base ${base.id} (${err.status ?? '?'}): ${err.message ?? e}. Falling back to LAST_MODIFIED_TIME filter.`,
-      );
-    }
-
-    if (!webhookOk) {
-      for (const table of tables) {
-        if (baseTables && !baseTables.includes(table.id)) continue;
+    {
+      // Polling-only sync. The webhook subscription path was removed in
+      // favour of a strict per-table LAST_MODIFIED_TIME filter — see
+      // commit message for the rationale (one-leader, sequential, 10s gap,
+      // diff-before-emit with NUL preservation).
+      //
+      // Build the eligible-table list up front so the inter-table sleep only
+      // runs between tables we'll actually poll (skipped tables don't burn
+      // 10s of wall clock).
+      const tablesToSync = tables.filter((t) => {
+        if (baseTables && !baseTables.includes(t.id)) return false;
+        return hydratedTableIds.has(t.id);
+      });
+      for (let i = 0; i < tablesToSync.length; i++) {
+        const table = tablesToSync[i];
         const cursor = await getCursor(store, base.id, table.id);
         if (!cursor) continue;
         const exclusions = fieldExclusions?.[table.id] ?? EMPTY_EXCLUSIONS;
@@ -2069,6 +2157,36 @@ export async function updateSync(
         );
         syncResults.push(result);
         opts?.onTableComplete?.(result);
+
+        // Mirror the freshly-advanced cursor to Matrix room state so a
+        // leader handoff doesn't restart from a stale position. Read-back
+        // (vs reusing `cursor` above — which is the PRE-poll value) lets us
+        // emit whatever syncTable actually wrote, including any internal
+        // bumping of the value beyond `now`.
+        if (opts?.onCursorAdvance) {
+          const advanced = await getCursor(store, base.id, table.id);
+          if (advanced) {
+            try {
+              await opts.onCursorAdvance(base.id, table.id, advanced);
+            } catch (e) {
+              // Best-effort: a state-event write failure shouldn't abort the
+              // whole sync cycle. The next leader will re-derive from
+              // IndexedDB until the next successful mirror.
+              console.warn(
+                `[airtable-sync] cursor mirror failed for ${base.id}/${table.id}:`,
+                e,
+              );
+            }
+          }
+        }
+
+        // Strict sequential polling: 10s gap between tables (not after the
+        // last one) so a leader doing the rounds across a base doesn't burst
+        // through the rate limiter and so a non-trivial number of tables
+        // doesn't monopolize the bucket.
+        if (i < tablesToSync.length - 1) {
+          await new Promise((resolve) => setTimeout(resolve, INTER_TABLE_POLL_GAP_MS));
+        }
       }
     }
   }
