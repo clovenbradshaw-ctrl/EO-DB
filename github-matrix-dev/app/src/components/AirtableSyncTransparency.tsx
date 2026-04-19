@@ -223,6 +223,15 @@ function WebhookHealthPanel({ theme, nowMs }: { theme: Theme; nowMs: number }) {
     ? { fg: theme.successText, bg: theme.successBg, border: theme.successBorder }
     : { fg: theme.dangerText, bg: theme.dangerBg, border: theme.dangerBorder };
 
+  // 404 / 403-INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND both mean the webhook
+  // ID is dead upstream. The sync loop wipes local state on these errors,
+  // so the next tick will auto-register a fresh one — surface that to the
+  // user instead of leaving the raw Airtable error sitting in the panel.
+  const isWebhookGone =
+    health.lastStatus === 404 ||
+    (health.lastStatus === 403 &&
+      (health.lastError ?? '').includes('INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND'));
+
   return (
     <div style={{
       border: `1px solid ${theme.borderLight}`,
@@ -267,7 +276,20 @@ function WebhookHealthPanel({ theme, nowMs }: { theme: Theme; nowMs: number }) {
           fontSize: 11,
           color: theme.dangerText,
           borderTop: `1px solid ${theme.borderLight}`,
-        }}>error: {health.lastError}</div>
+        }}>
+          {isWebhookGone ? (
+            <>
+              <div style={{ fontWeight: 600, marginBottom: 2 }}>
+                webhook expired or was deleted upstream
+              </div>
+              <div style={{ color: theme.textMuted }}>
+                next sync tick will auto-register a fresh webhook (Airtable GCs them after 7 days of inactivity)
+              </div>
+            </>
+          ) : (
+            <>error: {health.lastError}</>
+          )}
+        </div>
       )}
     </div>
   );
