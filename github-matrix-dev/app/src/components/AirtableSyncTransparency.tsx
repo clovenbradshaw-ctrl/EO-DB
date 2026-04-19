@@ -269,6 +269,18 @@ function WebhookHealthPanel({ theme, nowMs }: { theme: Theme; nowMs: number }) {
           borderTop: `1px solid ${theme.borderLight}`,
         }}>error: {health.lastError}</div>
       )}
+      {health.hint && !ok && (
+        <div style={{
+          padding: '8px 12px',
+          fontSize: 11,
+          color: theme.text,
+          background: theme.bgMuted,
+          borderTop: `1px solid ${theme.borderLight}`,
+          borderBottomLeftRadius: 8,
+          borderBottomRightRadius: 8,
+          lineHeight: 1.45,
+        }}>{health.hint}</div>
+      )}
     </div>
   );
 }

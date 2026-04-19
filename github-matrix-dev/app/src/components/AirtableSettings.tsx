@@ -39,7 +39,7 @@ import { createMemoryStore } from '../db/memory-store';
 import { AirtableSyncTransparency } from './AirtableSyncTransparency';
 import type { Resolution } from '../db/types';
 import type { GDriveSyncService } from '../google-drive/gdrive-sync';
-import { useAirtableStore, DEFAULT_SYNC_SETTINGS, type SyncLogEntry, type CurrentSyncSnapshot } from '../ingestion/airtable-store';
+import { useAirtableStore, webhookHealthPatch, DEFAULT_SYNC_SETTINGS, type SyncLogEntry, type CurrentSyncSnapshot } from '../ingestion/airtable-store';
 import { AirtableSyncService } from '../ingestion/airtable-sync-service';
 import {
   loadSyncLog,
@@ -534,32 +534,15 @@ export function AirtableSettingsSection({
     try {
       // Mirror the response observer the continuous-sync service installs,
       // so the manual "Run test sync" / "Run Update Sync" path also feeds
-      // the Webhook Health panel.
+      // the Webhook Health panel. Mirror all webhook-endpoint calls (not
+      // just /payloads) so setup failures like 403 INVALID_PERMISSIONS
+      // appear immediately; mirror non-webhook failures only.
       const client = new AirtableClient(apiKey, undefined, {
         onResponse: (info) => {
-          if (info.url.includes('/webhooks/') && info.url.includes('/payloads')) {
-            const cursorMatch = info.url.match(/[?&]cursor=([^&]+)/);
-            useAirtableStore.getState().setWebhookHealth({
-              url: info.url,
-              lastPolledAt: Date.now(),
-              lastStatus: info.status,
-              lastStatusText: info.status != null
-                ? `${info.status} ${info.statusText ?? ''}`.trim()
-                : null,
-              lastCursor: cursorMatch ? decodeURIComponent(cursorMatch[1]) : null,
-              lastError: info.ok ? null : (info.error ?? 'request failed'),
-            });
+          if (info.url.includes('/webhooks')) {
+            useAirtableStore.getState().setWebhookHealth(webhookHealthPatch(info));
           } else if (!info.ok) {
-            // Even non-/payloads failures should be visible — surface them.
-            useAirtableStore.getState().setWebhookHealth({
-              url: info.url,
-              lastPolledAt: Date.now(),
-              lastStatus: info.status,
-              lastStatusText: info.status != null
-                ? `${info.status} ${info.statusText ?? ''}`.trim()
-                : null,
-              lastError: info.error ?? 'request failed',
-            });
+            useAirtableStore.getState().setWebhookHealth(webhookHealthPatch(info));
           }
         },
       });
@@ -818,15 +801,7 @@ export function AirtableSettingsSection({
           // Mirror failures into the panel even for non-/payloads URLs so
           // the user sees "401 on listBases" instead of a silent spinner.
           if (info.ok) return;
-          useAirtableStore.getState().setWebhookHealth({
-            url: info.url,
-            lastPolledAt: Date.now(),
-            lastStatus: info.status,
-            lastStatusText: info.status != null
-              ? `${info.status} ${info.statusText ?? ''}`.trim()
-              : null,
-            lastError: info.error ?? 'request failed',
-          });
+          useAirtableStore.getState().setWebhookHealth(webhookHealthPatch(info));
         },
       });
 
@@ -974,15 +949,7 @@ export function AirtableSettingsSection({
         const webhookClient = new AirtableClient(apiKey, undefined, {
           onResponse: (info) => {
             if (info.ok) return;
-            useAirtableStore.getState().setWebhookHealth({
-              url: info.url,
-              lastPolledAt: Date.now(),
-              lastStatus: info.status,
-              lastStatusText: info.status != null
-                ? `${info.status} ${info.statusText ?? ''}`.trim()
-                : null,
-              lastError: info.error ?? 'request failed',
-            });
+            useAirtableStore.getState().setWebhookHealth(webhookHealthPatch(info));
           },
         });
         const webhookResults = await registerWebhooksForBases(
