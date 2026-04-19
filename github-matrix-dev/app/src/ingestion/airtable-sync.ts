@@ -15,8 +15,9 @@
 import type { EoStore } from '../db/encrypted-store';
 import { processEvent } from '../db/fold';
 import { getState } from '../db/state';
+import { readLogForPrefix } from '../db/log';
 import { markDeleted } from '../db/tombstone';
-import type { Resolution } from '../db/types';
+import type { EoEvent, Resolution } from '../db/types';
 import {
   AirtableClient,
   type AirtableBase,
@@ -237,6 +238,42 @@ async function getCursor(store: EoStore, baseId: string, tableId: string): Promi
 
 async function setCursor(store: EoStore, baseId: string, tableId: string, cursor: string): Promise<void> {
   await store.put(cursorKey(baseId, tableId), cursor);
+}
+
+// ─── NUL preservation index ───────────────────────────────────────────────
+//
+// A user can explicitly clear a cell, which logs a NUL event with
+// `operand.fieldKey` (see components/cell-events.ts). Without filtering,
+// the next Airtable poll would re-import the previously-cleared value and
+// silently undo the user's NUL transformation.
+//
+// `buildNulledFieldsForTable` scans the log once per table sync to build a
+// `recordTarget -> Set<fieldKey>` index of every field a user has cleared.
+// `ingestRecord` then drops those keys from the diff before emitting DEF
+// when the existing local value is still null (i.e. the clearing DEF that
+// accompanies the NUL is still the most recent state — the user hasn't
+// re-set the value locally).
+
+async function buildNulledFieldsForTable(
+  store: EoStore,
+  baseId: string,
+  tableId: string,
+): Promise<Map<string, Set<string>>> {
+  const prefix = `${tableTarget(baseId, tableId)}.`;
+  const events = await readLogForPrefix(store, prefix);
+  const map = new Map<string, Set<string>>();
+  for (const event of events as EoEvent[]) {
+    if (event.op !== 'NUL') continue;
+    const fieldKey = (event.operand as { fieldKey?: unknown } | undefined)?.fieldKey;
+    if (typeof fieldKey !== 'string' || !fieldKey) continue;
+    let set = map.get(event.target);
+    if (!set) {
+      set = new Set<string>();
+      map.set(event.target, set);
+    }
+    set.add(fieldKey);
+  }
+  return map;
 }
 
 // ─── Webhook state (IndexedDB meta store) ─────────────────────────────────
@@ -520,6 +557,7 @@ async function ingestRecord(
   defaultResolution?: Resolution,
   onChange?: RecordChangeListener,
   tableName?: string,
+  nulledFields?: Map<string, Set<string>>,
 ): Promise<'ingested' | 'overwritten' | 'skipped_no_change' | 'skipped_duplicate'> {
   const target = recordTarget(baseId, tableId, record.id);
 
@@ -532,6 +570,22 @@ async function ingestRecord(
 
   // 3. Compute field-level diff — only fields that actually changed
   let diffFields = computeFieldDiff(storableFields, existingFields);
+
+  // 3a. NUL preservation — drop any field the user has explicitly cleared
+  //     where the local state still reflects the cleared value. If the user
+  //     has since re-set the field locally, `existingFields[key]` will be
+  //     non-null and the diff is allowed to proceed normally.
+  const nulled = nulledFields?.get(target);
+  if (nulled && nulled.size > 0) {
+    const filtered: Record<string, any> = {};
+    for (const [key, val] of Object.entries(diffFields)) {
+      if (nulled.has(key) && (existingFields == null || existingFields[key] == null)) {
+        continue;
+      }
+      filtered[key] = val;
+    }
+    diffFields = filtered;
+  }
 
   // 3a. Detect overwrite: record already existed AND at least one diff field
   //     was replacing a previously non-null value. This is the count surfaced
@@ -734,6 +788,13 @@ async function syncTable(
   const tableState = await getState(store, tableTarget(baseId, tableId));
   const displayField: string | undefined = tableState?.value?._displayField;
 
+  // Build the per-table NUL preservation index once. Skipped for hydration —
+  // an empty/fresh store has no NULs to preserve, and avoiding the log scan
+  // keeps initial pulls fast.
+  const nulledFields = strategy === 'hydration'
+    ? undefined
+    : await buildNulledFieldsForTable(store, baseId, tableId);
+
   // Subtract a 60-second overlap window from the cursor to catch records
   // modified during clock skew or at the tail of the previous sync.
   // Use IS_AFTER+DATETIME_PARSE — the correct Airtable datetime comparison
@@ -777,7 +838,7 @@ async function syncTable(
     for (const record of page) {
       if (fetched >= limit) { limitReached = true; break; }
       fetched++;
-      const result = await ingestRecord(store, baseId, tableId, record, agent, fieldMeta, exclusions, preserveExisting, onEvent, displayField, defaultResolution, onChange, tableName);
+      const result = await ingestRecord(store, baseId, tableId, record, agent, fieldMeta, exclusions, preserveExisting, onEvent, displayField, defaultResolution, onChange, tableName, nulledFields);
       switch (result) {
         case 'ingested': ingested++; break;
         case 'overwritten': ingested++; overwritten++; break;
