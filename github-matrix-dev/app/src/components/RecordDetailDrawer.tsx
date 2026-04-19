@@ -23,6 +23,9 @@ interface RecordDetailDrawerProps {
   tableRecordTargets?: string[];
   /** Current user ID (needed to attribute a pinned-record slice to its creator) */
   userId?: string;
+  /** Hide the panel while keeping the record selected. The parent is
+   *  responsible for rendering a way to un-collapse (e.g., a rail button). */
+  onCollapse?: () => void;
 }
 
 /** Extract initials from a display name (e.g. "Priya Chandrasekaran" -> "PC") */
@@ -66,7 +69,7 @@ const TYPE_COLORS: Record<string, string> = {
   note: '#7c5cbf',
 };
 
-export function RecordDetailDrawer({ target, onClose, onNavigate, profileFields, isMobile, layoutType, tableRecordTargets, userId }: RecordDetailDrawerProps) {
+export function RecordDetailDrawer({ target, onClose, onNavigate, profileFields, isMobile, layoutType, tableRecordTargets, userId, onCollapse }: RecordDetailDrawerProps) {
   const { theme } = useTheme();
   const s = makeStyles(theme);
   const horizon = useEoStore((s) => s.horizon);
@@ -446,6 +449,16 @@ export function RecordDetailDrawer({ target, onClose, onNavigate, profileFields,
               aria-label={expanded ? 'Collapse' : 'Expand'}
             >
               {expanded ? '\u229F' : '\u229E'}
+            </button>
+          )}
+          {!isMobile && !isFullModal && !expanded && onCollapse && (
+            <button
+              onClick={onCollapse}
+              style={s.expandBtn}
+              title="Collapse panel (keeps record selected)"
+              aria-label="Collapse panel"
+            >
+              {'\u00BB'}
             </button>
           )}
           {!isMobile && <button onClick={onClose} style={s.closeBtn}>&times;</button>}

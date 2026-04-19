@@ -2157,30 +2157,6 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
           </div>
           )}
 
-          {/* Field ID toggle — hidden on mobile */}
-          {!isMobile && (
-          <button
-            onClick={() => sliceStore.setShowFieldIds(scope, !showFieldIds)}
-            title={showFieldIds ? 'Showing raw field IDs — click for display names' : 'Showing display names — click for raw field IDs'}
-            aria-label="Toggle field ID display"
-            aria-pressed={showFieldIds}
-            style={{
-              ...s.toggleBtn,
-              padding: '0 8px',
-              minWidth: 28,
-              fontWeight: showFieldIds ? 600 : 400,
-              background: showFieldIds ? theme.accentBg : 'transparent',
-              color: showFieldIds ? theme.accent : theme.textMuted,
-              border: `1px solid ${showFieldIds ? theme.accentBorder : theme.border}`,
-              borderRadius: 4,
-              fontFamily: "'JetBrains Mono', monospace",
-              fontSize: 10,
-            }}
-          >
-            ID
-          </button>
-          )}
-
           {/* Column manager (Fields) */}
           <div style={{ position: 'relative' as const }}>
             <button
