@@ -1,5 +1,5 @@
 import { useState, useEffect, type FormEvent } from 'react';
-import { login, normalizeHomeserver, toMatrixUserId, type MatrixSession } from '../matrix/client';
+import { login, normalizeHomeserver, toMatrixUserId, getLockedHomeserver, type MatrixSession } from '../matrix/client';
 import { saveOfflineCredentials, verifyOfflineCredentials, listOfflineAccounts } from '../lib/offline-auth';
 import { startOAuthFlow } from '../google-drive/gdrive-oauth';
 import { useGDriveStore } from '../google-drive/gdrive-store';
@@ -11,7 +11,8 @@ interface LoginProps {
 }
 
 export function Login({ onLogin, onLocalMode }: LoginProps) {
-  const [homeserver, setHomeserver] = useState('app.aminoimmigration.com');
+  const lockedHomeserver = getLockedHomeserver();
+  const [homeserver, setHomeserver] = useState(lockedHomeserver ?? 'app.aminoimmigration.com');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
@@ -161,15 +162,21 @@ export function Login({ onLogin, onLocalMode }: LoginProps) {
           <div style={s.offlineBadge}>Offline Mode</div>
         )}
         <form onSubmit={handleSubmit} style={s.form}>
-          <input
-            type="text"
-            placeholder="Homeserver (e.g. matrix.org)"
-            aria-label="Homeserver"
-            value={homeserver}
-            onChange={(e) => setHomeserver(e.target.value)}
-            disabled={loading}
-            style={{ ...s.input, fontSize: 13, color: theme.loginTextDim }}
-          />
+          {lockedHomeserver ? (
+            <div style={s.lockedServer} aria-label="Homeserver (locked)">
+              {lockedHomeserver.replace(/^https?:\/\//i, '')}
+            </div>
+          ) : (
+            <input
+              type="text"
+              placeholder="Homeserver (e.g. matrix.org)"
+              aria-label="Homeserver"
+              value={homeserver}
+              onChange={(e) => setHomeserver(e.target.value)}
+              disabled={loading}
+              style={{ ...s.input, fontSize: 13, color: theme.loginTextDim }}
+            />
+          )}
           <input
             type="text"
             placeholder="Matrix username"
@@ -319,6 +326,15 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       color: '#d97706',
       marginBottom: 16,
       border: '1px solid #f59e0b44',
+    },
+    lockedServer: {
+      padding: '10px 16px',
+      fontSize: 12,
+      border: `1px solid ${t.loginBorder}`,
+      borderRadius: 8,
+      background: t.loginInput,
+      color: t.loginTextDim,
+      letterSpacing: '0.02em',
     },
   };
 }
