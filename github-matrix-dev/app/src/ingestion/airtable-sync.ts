@@ -1970,11 +1970,6 @@ export async function updateSync(
   opts?.onProgress?.({ phase: 'discovering' });
   const bases = await client.listBases();
 
-  // Reset the 7-day expiration clock on every webhook we know about before
-  // we poll. Cheap, idempotent, and avoids silent subscription loss on
-  // installations that only ever run incremental syncs.
-  await refreshKnownWebhooks(store, client, bases.map(b => b.id));
-
   for (const base of bases) {
     // If table selection exists but this base has no selected tables, skip
     const baseTables = selectedTables?.[base.id];
@@ -2122,32 +2117,13 @@ export async function updateSync(
       const c = await getCursor(store, base.id, table.id);
       if (c) hydratedTableIds.add(table.id);
     }
-    const baseSelectedIds: Set<string> | null = hydratedTableIds.size
-      ? hydratedTableIds
-      : null;
     if (!hydratedTableIds.size) continue;
-    let webhookOk = false;
-    try {
-      const webhookResults = await webhookIncrementalSyncBase(
-        store, client, base.id, base.name, tables, agent,
-        baseSelectedIds, preserveExisting, fieldExclusions,
-        displayFields, defaultResolution,
-        opts?.onEvent, opts?.onProgress, opts?.onChange,
-      );
-      for (const r of webhookResults) {
-        syncResults.push(r);
-        opts?.onTableComplete?.(r);
-      }
-      webhookOk = true;
-    } catch (e: unknown) {
-      const err = e as { status?: number; message?: string };
-      // eslint-disable-next-line no-console
-      console.warn(
-        `[airtable-sync] webhook path failed for base ${base.id} (${err.status ?? '?'}): ${err.message ?? e}. Falling back to LAST_MODIFIED_TIME filter.`,
-      );
-    }
-
-    if (!webhookOk) {
+    {
+      // Polling-only sync. The webhook subscription path was removed in
+      // favour of a strict per-table LAST_MODIFIED_TIME filter — see
+      // commit message for the rationale (one-leader, sequential, 10s gap,
+      // diff-before-emit with NUL preservation).
+      //
       // Build the eligible-table list up front so the inter-table sleep only
       // runs between tables we'll actually poll (skipped tables don't burn
       // 10s of wall clock).
