@@ -873,6 +873,39 @@ function buildAirtableEndpoint(
 // we wipe the state and trigger a full re-hydration (caller's responsibility).
 
 /**
+ * Session-scoped memo of bases we've already failed to register a webhook
+ * for with a permanent error (403 / missing scope). Keyed by baseId → Error
+ * so subsequent ticks can short-circuit to the LAST_MODIFIED_TIME fallback
+ * without hammering the same endpoint every poll — Airtable returns the
+ * same 403 every time and it wastes rate budget + churns the Health panel.
+ *
+ * Scoped to the module so it survives a full page reload only if the tab
+ * is kept open — i.e. the user fixing their token and reconnecting (which
+ * calls `resetWebhookPermissionCache`) re-enables the webhook path without
+ * needing a hard refresh.
+ */
+const webhookPermissionFailures = new Map<string, { status: number; message: string; errorType?: string }>();
+
+/**
+ * Clear the session-scoped 403 cache. Called when credentials change so a
+ * user that updates their PAT scopes doesn't have to reload the tab.
+ */
+export function resetWebhookPermissionCache(): void {
+  webhookPermissionFailures.clear();
+}
+
+/**
+ * 403 with `INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND` almost always means the
+ * token is missing `webhook:manage`, or this base isn't on the token's
+ * allowlist. Either way the error is permanent for the life of the token —
+ * retrying on every tick just wastes an API call.
+ */
+function isPermanentWebhookPermissionError(err: unknown): boolean {
+  const e = err as { status?: number; airtableErrorType?: string };
+  return e?.status === 403 && e.airtableErrorType === 'INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND';
+}
+
+/**
  * Register a webhook for this base that watches tableData changes across
  * all tables. Returns the starting cursor the next poll should use.
  */
@@ -881,6 +914,16 @@ async function ensureWebhook(
   client: AirtableClient,
   baseId: string,
 ): Promise<WebhookState> {
+  const priorFailure = webhookPermissionFailures.get(baseId);
+  if (priorFailure) {
+    const err = new Error(
+      `Airtable API ${priorFailure.status}: ${priorFailure.message}`,
+    ) as Error & { status?: number; airtableErrorType?: string; cached?: true };
+    err.status = priorFailure.status;
+    err.airtableErrorType = priorFailure.errorType;
+    err.cached = true;
+    throw err;
+  }
   const existing = await getWebhookState(store, baseId);
   if (existing) {
     // Verify the webhook still exists upstream; Airtable GCs webhooks after
@@ -897,22 +940,35 @@ async function ensureWebhook(
     await clearWebhookState(store, baseId);
   }
 
-  const created = await client.createWebhook(baseId, {
-    options: {
-      filters: {
-        // tableData covers record-level changes (create, update, delete).
-        // tableFields/tableMetadata are deliberately omitted — schema
-        // changes are handled by the separate discover + schema-DEF path
-        // in updateSync(), so we don't need them duplicated in payloads.
-        dataTypes: ['tableData'],
+  let created;
+  try {
+    created = await client.createWebhook(baseId, {
+      options: {
+        filters: {
+          // tableData covers record-level changes (create, update, delete).
+          // tableFields/tableMetadata are deliberately omitted — schema
+          // changes are handled by the separate discover + schema-DEF path
+          // in updateSync(), so we don't need them duplicated in payloads.
+          dataTypes: ['tableData'],
+        },
+        includes: {
+          // We refetch the full record for edits anyway, so don't pay the
+          // payload-size cost of including previous values we'll never read.
+          includePreviousCellValues: false,
+        },
       },
-      includes: {
-        // We refetch the full record for edits anyway, so don't pay the
-        // payload-size cost of including previous values we'll never read.
-        includePreviousCellValues: false,
-      },
-    },
-  });
+    });
+  } catch (e: unknown) {
+    if (isPermanentWebhookPermissionError(e)) {
+      const err = e as { status: number; message?: string; airtableErrorType?: string };
+      webhookPermissionFailures.set(baseId, {
+        status: err.status,
+        message: err.message ?? 'INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND',
+        errorType: err.airtableErrorType,
+      });
+    }
+    throw e;
+  }
   const state: WebhookState = {
     webhookId: created.id,
     // Airtable may or may not return a cursor on create. When absent the

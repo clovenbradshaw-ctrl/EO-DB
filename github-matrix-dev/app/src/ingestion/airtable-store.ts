@@ -8,6 +8,8 @@
 
 import { create } from 'zustand';
 import { AirtableClient } from './airtable-client';
+import type { AirtableResponseInfo } from './airtable-client';
+import { resetWebhookPermissionCache } from './airtable-sync';
 import type { HydrationManifest, HydrationResult, UpdateSyncResult, SyncStrategy } from './airtable-sync';
 
 // ─── Sync activity log ──────────────────────────────────────────────────────
@@ -106,6 +108,18 @@ export interface WebhookHealth {
   lastCursor: string | null;
   /** Error message when the call threw before producing a response. */
   lastError: string | null;
+  /**
+   * Machine-readable Airtable error type (e.g. `INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND`)
+   * parsed from the response body. The panel uses this to decide whether to
+   * show a scope hint rather than relying on brittle message matching.
+   */
+  lastErrorType: string | null;
+  /**
+   * Short, user-facing explanation for the most common webhook failures
+   * (missing `webhook:manage` scope, base not in token's base list, etc.).
+   * Null when no hint applies.
+   */
+  hint: string | null;
 }
 
 export const EMPTY_WEBHOOK_HEALTH: WebhookHealth = {
@@ -115,7 +129,54 @@ export const EMPTY_WEBHOOK_HEALTH: WebhookHealth = {
   lastStatusText: null,
   lastCursor: null,
   lastError: null,
+  lastErrorType: null,
+  hint: null,
 };
+
+/**
+ * Build a `setWebhookHealth` patch from an `AirtableResponseInfo`. Centralised
+ * so every observer (continuous sync, manual sync, snapshot download, import)
+ * produces the same shape — notably: clears stale `hint`/`lastErrorType` on
+ * success instead of leaving them set from a prior failure.
+ */
+export function webhookHealthPatch(info: AirtableResponseInfo): Partial<WebhookHealth> {
+  const isWebhookUrl = info.url.includes('/webhooks');
+  const isPayloads = isWebhookUrl && info.url.includes('/payloads');
+  const cursorMatch = isPayloads ? info.url.match(/[?&]cursor=([^&]+)/) : null;
+
+  const statusText = info.status != null
+    ? `${info.status} ${info.statusText ?? ''}`.trim()
+    : null;
+
+  const patch: Partial<WebhookHealth> = {
+    url: info.url,
+    lastPolledAt: Date.now(),
+    lastStatus: info.status,
+    lastStatusText: statusText,
+    lastError: info.ok ? null : (info.error ?? 'request failed'),
+    lastErrorType: info.ok ? null : (info.errorType ?? null),
+    hint: info.ok ? null : buildWebhookHint(info),
+  };
+  if (isPayloads) {
+    patch.lastCursor = cursorMatch ? decodeURIComponent(cursorMatch[1]) : null;
+  }
+  return patch;
+}
+
+function buildWebhookHint(info: AirtableResponseInfo): string | null {
+  if (info.ok) return null;
+  const onWebhookEndpoint = info.url.includes('/webhooks');
+  if (info.status === 403 && info.errorType === 'INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND' && onWebhookEndpoint) {
+    return 'Your Airtable personal access token is missing the webhook:manage scope, or this base is not in the token\u2019s list of bases. Regenerate the token at https://airtable.com/create/tokens with webhook:manage enabled and this base selected. Sync will fall back to LAST_MODIFIED_TIME polling until resolved.';
+  }
+  if (info.status === 401) {
+    return 'Airtable rejected the token (401). It may have been revoked or expired. Reconnect from Settings to refresh credentials.';
+  }
+  if (info.status === 404 && info.url.includes('/webhooks/') && info.url.includes('/payloads')) {
+    return 'The Airtable webhook expired (404). Airtable drops webhooks after 7 days of inactivity; the next sync will re-register automatically.';
+  }
+  return null;
+}
 
 // ─── Recent changes (per-record diffs) ──────────────────────────────────────
 
@@ -312,6 +373,10 @@ export const useAirtableStore = create<AirtableSyncState>((set, get) => ({
       // Verify the key is valid by making a lightweight API call
       const client = new AirtableClient(key);
       await client.listBases();
+      // A fresh key may have new scopes — drop any cached webhook 403s so
+      // the next sync tick retries webhook registration instead of short-
+      // circuiting straight to the LAST_MODIFIED_TIME fallback.
+      resetWebhookPermissionCache();
       set({ apiKey: key, connected: true, connecting: false });
     } catch (e: any) {
       set({ connecting: false, error: e.message });
@@ -324,6 +389,7 @@ export const useAirtableStore = create<AirtableSyncState>((set, get) => ({
     try {
       const client = new AirtableClient(apiKey);
       await client.listBases();
+      resetWebhookPermissionCache();
       set({ apiKey, connected: true, connecting: false, error: null });
     } catch (e: any) {
       set({ connecting: false, error: `Invalid Airtable API key: ${e.message}` });
@@ -332,6 +398,7 @@ export const useAirtableStore = create<AirtableSyncState>((set, get) => ({
   },
 
   disconnect() {
+    resetWebhookPermissionCache();
     set({
       apiKey: null,
       connected: false,

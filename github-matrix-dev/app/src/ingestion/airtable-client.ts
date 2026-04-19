@@ -201,11 +201,38 @@ export interface AirtableResponseInfo {
   /** Set when the call threw before a response landed. */
   error?: string;
   /**
+   * Machine-readable Airtable error type parsed from the `{error: {type}}`
+   * body, e.g. `INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND`. Lets the UI branch
+   * on known failure modes (scope hints) without string-matching.
+   */
+  errorType?: string;
+  /**
    * Set when the response body was non-JSON despite a 2xx status. The first
    * 200 chars of the body are captured so the UI can show the user "we got
    * HTML back" instead of the cryptic SyntaxError.
    */
   nonJsonBodyPreview?: string;
+}
+
+/**
+ * Extract `{error: {type, message}}` from an Airtable error body. Falls back
+ * to the first 200 chars of the raw text when the body isn't the documented
+ * shape — callers then get a readable string instead of a JSON dump.
+ */
+function parseAirtableError(body: string): { message: string; type?: string } {
+  try {
+    const parsed = JSON.parse(body);
+    const err = parsed?.error;
+    if (typeof err === 'string') return { message: err };
+    if (err && typeof err === 'object') {
+      const message = typeof err.message === 'string' && err.message
+        ? err.message
+        : body.slice(0, 200);
+      const type = typeof err.type === 'string' ? err.type : undefined;
+      return { message, type };
+    }
+  } catch { /* non-JSON body */ }
+  return { message: body.slice(0, 200) };
 }
 
 export type AirtableResponseHook = (info: AirtableResponseInfo) => void;
@@ -274,16 +301,23 @@ export class AirtableClient {
 
       if (!res.ok) {
         const body = await res.text();
+        const parsed = parseAirtableError(body);
         try {
           this.onResponse?.({
             url, method, status: res.status, statusText: res.statusText, ok: false,
-            durationMs: Date.now() - startedAt, error: body.slice(0, 200),
+            durationMs: Date.now() - startedAt,
+            error: parsed.message,
+            errorType: parsed.type,
           });
         } catch { /* ignore */ }
         // Preserve the HTTP status so callers can branch on 404 (webhook
         // expired / cursor too stale) without parsing the error message.
-        const err = new Error(`Airtable API ${res.status}: ${body}`) as Error & { status?: number };
+        const err = new Error(`Airtable API ${res.status}: ${parsed.message}`) as Error & {
+          status?: number;
+          airtableErrorType?: string;
+        };
         err.status = res.status;
+        if (parsed.type) err.airtableErrorType = parsed.type;
         throw err;
       }
 

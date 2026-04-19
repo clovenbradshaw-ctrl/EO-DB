@@ -38,6 +38,7 @@ import {
 } from './airtable-sync';
 import {
   useAirtableStore,
+  webhookHealthPatch,
   DEFAULT_SYNC_SETTINGS,
   type AirtableSyncSettings,
   type SyncLogEntry,
@@ -459,23 +460,14 @@ export class AirtableSyncService {
     const tickStart = Date.now();
     try {
       // Wire response observation into the store so the Webhook Health panel
-      // surfaces the last /payloads HTTP status + cursor in real time. We
-      // only mirror /payloads calls into webhookHealth — other endpoints
-      // (listBases, getBaseSchema) would just churn the panel.
+      // surfaces the last webhook call's HTTP status + cursor in real time.
+      // We mirror every /webhooks endpoint (list, create, refresh, /payloads)
+      // so setup failures like 403 INVALID_PERMISSIONS surface immediately,
+      // not only when /payloads finally runs.
       const client = new AirtableClient(apiKey, undefined, {
         onResponse: (info) => {
-          if (!info.url.includes('/webhooks/') || !info.url.includes('/payloads')) return;
-          const cursorMatch = info.url.match(/[?&]cursor=([^&]+)/);
-          useAirtableStore.getState().setWebhookHealth({
-            url: info.url,
-            lastPolledAt: Date.now(),
-            lastStatus: info.status,
-            lastStatusText: info.status != null
-              ? `${info.status} ${info.statusText ?? ''}`.trim()
-              : null,
-            lastCursor: cursorMatch ? decodeURIComponent(cursorMatch[1]) : null,
-            lastError: info.ok ? null : (info.error ?? 'request failed'),
-          });
+          if (!info.url.includes('/webhooks')) return;
+          useAirtableStore.getState().setWebhookHealth(webhookHealthPatch(info));
         },
       });
       // Every tick that gets past the lock counts as a cycle for the header
