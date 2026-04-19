@@ -27,6 +27,19 @@ import {
 const VALID_ACCESS_LEVELS: AccessLevel[] = ['read', 'write', 'read_write'];
 const VALID_SERVER_MODES: ServerAccessMode[] = ['accept_all', 'whitelist', 'blacklist'];
 
+const ADMIN_PREFIX_RE = /^[A-Za-z0-9:/_\-.]{1,256}$/;
+
+function parseAdminPrefix(raw: string): string | null {
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(raw);
+  } catch {
+    return null;
+  }
+  if (!ADMIN_PREFIX_RE.test(decoded)) return null;
+  return decoded;
+}
+
 function validateAccessLevel(value: any): value is AccessLevel {
   return VALID_ACCESS_LEVELS.includes(value);
 }
@@ -66,9 +79,13 @@ export function registerAdminRoutes(app: FastifyInstance, db: EoDb): void {
     if (!prefix) {
       return reply.code(400).send({ error: 'Missing prefix parameter' });
     }
+    const decoded = parseAdminPrefix(prefix);
+    if (!decoded) {
+      return reply.code(400).send({ error: 'Invalid prefix parameter' });
+    }
     const agent = request.matrixUser?.user_id || 'unknown';
     try {
-      const result = await softDeleteByPrefix(db, decodeURIComponent(prefix), agent);
+      const result = await softDeleteByPrefix(db, decoded, agent);
       return reply.send(result);
     } catch (e: any) {
       return reply.code(404).send({ error: e.message });
@@ -81,8 +98,12 @@ export function registerAdminRoutes(app: FastifyInstance, db: EoDb): void {
     if (!prefix) {
       return reply.code(400).send({ error: 'Missing prefix parameter' });
     }
+    const decoded = parseAdminPrefix(prefix);
+    if (!decoded) {
+      return reply.code(400).send({ error: 'Invalid prefix parameter' });
+    }
     try {
-      const result = await restoreByPrefix(db, decodeURIComponent(prefix));
+      const result = await restoreByPrefix(db, decoded);
       return reply.send(result);
     } catch (e: any) {
       return reply.code(400).send({ error: e.message });

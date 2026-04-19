@@ -17,6 +17,7 @@ import { formatName } from './scope-picker-utils';
 import { useIdResolver, isEntityId, isEntityIdArray, type IdResolver } from '../hooks/useIdResolver';
 import { groupSchemaStates, extractColumnTypeOverrides, schemaTypeTarget, schemaConstraintTarget, schemaResolveTarget, type FieldSchema } from '../db/schema-rules';
 import { isDeleted } from '../db/tombstone';
+import { safeUrl } from '../lib/safe-url';
 import { ColumnTypeSelector, COLUMN_TYPE_ICON_MAP } from './ColumnTypeSelector';
 import { ResolutionPolicyComposer, summarizePolicy, normalizeResolvePolicy, type ResolvePolicy } from './ResolutionPolicyComposer';
 import { buildNulClearingEvent, buildMakingDefEvent } from './cell-events';
@@ -319,15 +320,21 @@ function renderCell(value: any, key: string, onNavigate: (t: string) => void, t:
     return <span style={{ fontVariantNumeric: 'tabular-nums' }}>{parts.join(' ')}</span>;
   }
   if (colType === 'url' && typeof value === 'string') {
+    const href = safeUrl(value, ['http:', 'https:']);
     let display: string;
     try { display = new URL(value).hostname; } catch { display = value.slice(0, 40); }
-    return <a href={value} target="_blank" rel="noopener noreferrer" style={{ color: t.accent }} onClick={(e) => e.stopPropagation()}>{display}</a>;
+    if (!href) return <span style={{ color: t.textMuted }}>{display}</span>;
+    return <a href={href} target="_blank" rel="noopener noreferrer" style={{ color: t.accent }} onClick={(e) => e.stopPropagation()}>{display}</a>;
   }
   if (colType === 'email' && typeof value === 'string') {
-    return <a href={`mailto:${value}`} style={{ color: t.accent }} onClick={(e) => e.stopPropagation()}>{value}</a>;
+    const href = safeUrl(`mailto:${value}`, ['mailto:']);
+    if (!href) return <span>{value}</span>;
+    return <a href={href} style={{ color: t.accent }} onClick={(e) => e.stopPropagation()}>{value}</a>;
   }
   if (colType === 'phone' && typeof value === 'string') {
-    return <a href={`tel:${value}`} style={{ color: t.accent }} onClick={(e) => e.stopPropagation()}>{value}</a>;
+    const href = safeUrl(`tel:${value}`, ['tel:']);
+    if (!href) return <span>{value}</span>;
+    return <a href={href} style={{ color: t.accent }} onClick={(e) => e.stopPropagation()}>{value}</a>;
   }
   if (colType === 'autoNumber' && (typeof value === 'number' || typeof value === 'string')) {
     return <span style={{ fontVariantNumeric: 'tabular-nums', color: t.textMuted }}>#{value}</span>;

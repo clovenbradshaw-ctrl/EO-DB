@@ -1,4 +1,5 @@
 import type { FastifyRequest, FastifyReply } from 'fastify';
+import { timingSafeEqual } from 'node:crypto';
 import type { EoDb } from '../db/level.js';
 import { checkAccess, accessSatisfies, type AccessCheckResult } from './matrix-auth-config.js';
 import { getHomeserver, getWebhookUser, configureMatrixDomain } from '../config/matrix-domain.js';
@@ -130,7 +131,12 @@ function evictExpiredTokens(): void {
 }
 
 export function verifyWebhookSecret(secret: string): MatrixUser {
-  if (!webhookSecret || secret !== webhookSecret) {
+  if (!webhookSecret) {
+    throw new Error('Webhook secret not configured');
+  }
+  const a = Buffer.from(secret);
+  const b = Buffer.from(webhookSecret);
+  if (a.length !== b.length || !timingSafeEqual(a, b)) {
     throw new Error('Invalid webhook secret');
   }
   const webhookUser = getWebhookUser();

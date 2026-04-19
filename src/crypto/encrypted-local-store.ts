@@ -12,7 +12,7 @@
 
 import { createCipheriv, createDecipheriv, randomBytes, pbkdf2Sync, createHash } from 'node:crypto';
 import { readFile, writeFile, mkdir, readdir, stat } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { dirname, join, isAbsolute, resolve, relative } from 'node:path';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -238,8 +238,16 @@ export async function decryptDatabase(
     files: Array<{ path: string; data: string }>;
   };
 
+  const dbRoot = resolve(dbDir);
   for (const file of manifest.files) {
-    const fullPath = join(dbDir, file.path);
+    if (typeof file.path !== 'string' || file.path.length === 0 || isAbsolute(file.path)) {
+      throw new Error('Invalid manifest entry');
+    }
+    const fullPath = resolve(dbRoot, file.path);
+    const rel = relative(dbRoot, fullPath);
+    if (rel.startsWith('..') || isAbsolute(rel)) {
+      throw new Error('Invalid manifest entry');
+    }
     await mkdir(dirname(fullPath), { recursive: true });
     await writeFile(fullPath, Buffer.from(file.data, 'base64'));
   }

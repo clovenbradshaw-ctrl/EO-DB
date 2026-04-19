@@ -201,12 +201,12 @@
     if (!email || !pass) { log('Fill in Filen email and password', 'log-err'); return; }
 
     try {
-      // Encode credentials (base64 for basic obfuscation in account data —
-      // in production you'd encrypt with the account's cross-signing keys)
+      const encryptedPassword = await encryptCredential(pass, _getMatrixSecret());
       const payload = {
         email: email,
-        password: btoa(pass),
+        password: encryptedPassword,
         saved_at: new Date().toISOString(),
+        version: 2,
       };
 
       await matrixClient.setAccountData(FILEN_ACCOUNT_DATA_TYPE, payload);
@@ -223,10 +223,18 @@
       const data = await matrixClient.getAccountData(FILEN_ACCOUNT_DATA_TYPE);
       if (data) {
         const content = data.getContent ? data.getContent() : data;
+        let decoded = '';
+        if (content.password) {
+          if (content.password.startsWith(CRED_PREFIX)) {
+            decoded = await decryptCredential(content.password, _getMatrixSecret());
+          } else {
+            log('Legacy base64 credential detected — please re-enter the password and save to upgrade the stored ciphertext.', 'log-warn');
+          }
+        }
         document.getElementById('fi-email').value = content.email || '';
-        document.getElementById('fi-pass').value = content.password ? atob(content.password) : '';
+        document.getElementById('fi-pass').value = decoded;
         filenEmail = content.email;
-        filenPassword = content.password ? atob(content.password) : '';
+        filenPassword = decoded;
         log(`Loaded Filen credentials from Matrix (saved ${content.saved_at || 'unknown'})`, 'log-ok');
       } else {
         log('No Filen credentials found in Matrix account data', 'log-warn');
@@ -263,15 +271,83 @@
     return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
   }
 
-  async function deriveKeyFromPassword(password, salt, iterations = 200000) {
+  async function deriveKeyFromPassword(password, salt, iterations = 600000) {
     const enc = new TextEncoder();
     const keyMaterial = await crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveBits']);
+    const saltBytes = typeof salt === 'string' ? enc.encode(salt) : salt;
     const bits = await crypto.subtle.deriveBits(
-      { name: 'PBKDF2', salt: enc.encode(salt), iterations, hash: 'SHA-512' },
+      { name: 'PBKDF2', salt: saltBytes, iterations, hash: 'SHA-512' },
       keyMaterial,
       512
     );
     return Array.from(new Uint8Array(bits)).map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  // ── AES-GCM credential encryption keyed off the Matrix access token ─────
+  const CRED_PBKDF2_ITERATIONS = 600000;
+  const CRED_PREFIX = 'v2:';
+
+  function _b64encode(bytes) {
+    let s = '';
+    for (const b of bytes) s += String.fromCharCode(b);
+    return btoa(s);
+  }
+  function _b64decode(str) {
+    const bin = atob(str);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+
+  async function _deriveAesKey(secret, salt) {
+    const enc = new TextEncoder();
+    const keyMaterial = await crypto.subtle.importKey(
+      'raw', enc.encode(secret), 'PBKDF2', false, ['deriveKey']
+    );
+    return crypto.subtle.deriveKey(
+      { name: 'PBKDF2', salt, iterations: CRED_PBKDF2_ITERATIONS, hash: 'SHA-512' },
+      keyMaterial,
+      { name: 'AES-GCM', length: 256 },
+      false,
+      ['encrypt', 'decrypt']
+    );
+  }
+
+  async function encryptCredential(plaintext, secret) {
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const key = await _deriveAesKey(secret, salt);
+    const ct = new Uint8Array(await crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv },
+      key,
+      new TextEncoder().encode(plaintext)
+    ));
+    const blob = new Uint8Array(salt.length + iv.length + ct.length);
+    blob.set(salt, 0);
+    blob.set(iv, salt.length);
+    blob.set(ct, salt.length + iv.length);
+    return CRED_PREFIX + _b64encode(blob);
+  }
+
+  async function decryptCredential(encoded, secret) {
+    if (!encoded || !encoded.startsWith(CRED_PREFIX)) {
+      throw new Error('Credential is not in encrypted format');
+    }
+    const blob = _b64decode(encoded.slice(CRED_PREFIX.length));
+    if (blob.length < 16 + 12 + 16) throw new Error('Encrypted credential too short');
+    const salt = blob.slice(0, 16);
+    const iv = blob.slice(16, 28);
+    const ct = blob.slice(28);
+    const key = await _deriveAesKey(secret, salt);
+    const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ct);
+    return new TextDecoder().decode(plain);
+  }
+
+  function _getMatrixSecret() {
+    if (!matrixClient) throw new Error('Matrix client not ready');
+    const token = matrixClient.getAccessToken && matrixClient.getAccessToken();
+    if (!token) throw new Error('Matrix access token unavailable');
+    return token;
   }
 
   window.filenLogin = async function filenLogin() {

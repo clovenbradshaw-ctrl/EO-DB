@@ -32,6 +32,38 @@ export interface ConnectedUser {
 const connectedUsers = new Map</*socket id*/ string, ConnectedUser>();
 let socketCounter = 0;
 
+/**
+ * Extract the Matrix access token from a WebSocket upgrade request. Prefers
+ * the Sec-WebSocket-Protocol header (`bearer.<token>`) so tokens don't leak
+ * into HTTP access logs via query strings; falls back to `?access_token=` for
+ * legacy clients.
+ */
+function extractWebSocketToken(request: { headers: Record<string, unknown>; query: unknown }): string | null {
+  const protoHeader = request.headers['sec-websocket-protocol'];
+  const protos = typeof protoHeader === 'string'
+    ? protoHeader.split(',').map((s) => s.trim())
+    : Array.isArray(protoHeader)
+      ? (protoHeader as string[]).flatMap((s) => s.split(',').map((x) => x.trim()))
+      : [];
+  for (const p of protos) {
+    if (p.startsWith('bearer.')) {
+      const token = p.slice('bearer.'.length);
+      if (token) return token;
+    }
+  }
+  const q = (request.query as { access_token?: string }) ?? {};
+  return q.access_token ?? null;
+}
+
+function queryTokenUsed(request: { headers: Record<string, unknown>; query: unknown }): boolean {
+  const protoHeader = request.headers['sec-websocket-protocol'];
+  const hasHeader = typeof protoHeader === 'string'
+    ? protoHeader.split(',').some((s) => s.trim().startsWith('bearer.'))
+    : false;
+  if (hasHeader) return false;
+  return !!(request.query as { access_token?: string })?.access_token;
+}
+
 /** Cached connected-users snapshot — invalidated on join/leave. */
 let cachedConnectedUsers: Array<{ user_id: string; connected_at: string; rooms: string[] }> | null = null;
 
@@ -90,10 +122,15 @@ export function registerSyncRoute(
     instance.get('/sync', { websocket: true }, (connection, request) => {
       const socket = connection.socket;
 
-      const token = (request.query as { access_token?: string }).access_token;
+      const token = extractWebSocketToken(request);
       if (!token) {
         socket.close(4401, 'Missing access_token');
         return;
+      }
+      if (queryTokenUsed(request)) {
+        request.log.warn(
+          'WebSocket auth via query parameter is deprecated; use Sec-WebSocket-Protocol: bearer.<token>',
+        );
       }
 
       const socketId = `ws_${++socketCounter}`;
