@@ -595,6 +595,19 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   const allStatesFetchGenRef = useRef(0);
   const [timeScrubberFilter, setTimeScrubberFilter] = useState<TimeScrubberFilter>(DEFAULT_FILTER);
   const [tableRecordTargets, setTableRecordTargets] = useState<string[]>([]);
+
+  // Details panel collapse — hides the right-side record drawer without
+  // clearing the selected record. Persists across reloads. When collapsed,
+  // clicking a table row still selects the record (so navigation, highlight,
+  // and keyboard shortcuts work) but the drawer stays hidden until the user
+  // clicks the expand rail on the right edge.
+  const [detailsPanelCollapsed, setDetailsPanelCollapsedState] = useState<boolean>(() => {
+    try { return localStorage.getItem('eo:detailsPanelCollapsed') === '1'; } catch { return false; }
+  });
+  const setDetailsPanelCollapsed = useCallback((v: boolean) => {
+    setDetailsPanelCollapsedState(v);
+    try { localStorage.setItem('eo:detailsPanelCollapsed', v ? '1' : '0'); } catch {}
+  }, []);
   const [scopedRecords, setScopedRecords] = useState<EoState[]>([]);
   const prevScopedRecordsKeyRef = useRef<string>('');
   const scopedRecordsFetchGenRef = useRef(0);
@@ -3215,17 +3228,57 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           </ErrorBoundary>}
         </main>
 
-        {selectedRecord && activeView === 'records' && (
+        {selectedRecord && activeView === 'records' && !(detailsPanelCollapsed && !isMobile) && (
           <RecordPageOrDrawer
             recordTarget={selectedRecord}
             allStates={allStates}
             onClose={() => { navigate({ record: null }); }}
             onNavigate={(t) => { navigate({ record: t }); }}
+            onCollapse={!isMobile ? () => setDetailsPanelCollapsed(true) : undefined}
             profileFields={selectedScope ? sliceStore.getConfig(selectedScope).profileFields : undefined}
             isMobile={isMobile}
             tableRecordTargets={tableRecordTargets}
             userId={session.userId}
           />
+        )}
+
+        {activeView === 'records' && detailsPanelCollapsed && !isMobile && (
+          <aside
+            style={{
+              width: 28,
+              flexShrink: 0,
+              borderLeft: `1px solid ${theme.border}`,
+              background: theme.bgCard,
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              paddingTop: 12,
+            }}
+            aria-label="Details panel (collapsed)"
+          >
+            <button
+              onClick={() => setDetailsPanelCollapsed(false)}
+              title="Expand details panel"
+              aria-label="Expand details panel"
+              style={{
+                background: 'none',
+                border: `1px solid ${theme.border}`,
+                borderRadius: 4,
+                width: 22,
+                height: 48,
+                color: theme.textSecondary,
+                cursor: 'pointer',
+                fontSize: 14,
+                lineHeight: 1,
+                padding: 0,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+              }}
+            >
+              {'\u2039'}
+            </button>
+          </aside>
         )}
       </div>
 
@@ -3282,11 +3335,12 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
  * record page view for the record's collection. If yes, render RecordPageView
  * in a drawer. If no, fall back to the default RecordDetailDrawer.
  */
-function RecordPageOrDrawer({ recordTarget, allStates, onClose, onNavigate, profileFields, isMobile, tableRecordTargets, userId }: {
+function RecordPageOrDrawer({ recordTarget, allStates, onClose, onNavigate, onCollapse, profileFields, isMobile, tableRecordTargets, userId }: {
   recordTarget: string;
   allStates: EoState[];
   onClose: () => void;
   onNavigate: (target: string) => void;
+  onCollapse?: () => void;
   profileFields?: string[];
   isMobile?: boolean;
   tableRecordTargets?: string[];
@@ -3387,8 +3441,36 @@ function RecordPageOrDrawer({ recordTarget, allStates, onClose, onNavigate, prof
         width: isMobile ? '100vw' : 720, maxWidth: isMobile ? '100vw' : '55vw', height: '100%',
         flexShrink: 0, borderLeft: isMobile ? 'none' : '1px solid var(--border, #e0e0e0)',
         background: 'var(--bg, #fff)', display: 'flex', flexDirection: 'column',
+        position: 'relative' as const,
         ...(isMobile ? { position: 'fixed' as const, inset: 0, zIndex: 1000 } : {}),
       }}>
+        {onCollapse && !isMobile && (
+          <button
+            onClick={onCollapse}
+            title="Collapse panel (keeps record selected)"
+            aria-label="Collapse panel"
+            style={{
+              position: 'absolute',
+              top: 8,
+              right: 8,
+              zIndex: 2,
+              background: 'var(--bg-card, #fff)',
+              border: '1px solid var(--border, #e0e0e0)',
+              borderRadius: 4,
+              width: 24,
+              height: 24,
+              padding: 0,
+              fontSize: 14,
+              lineHeight: 1,
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+          >
+            {'\u00BB'}
+          </button>
+        )}
         <Suspense fallback={null}>
           <RecordPageView
             recordTarget={recordTarget}
@@ -3406,6 +3488,7 @@ function RecordPageOrDrawer({ recordTarget, allStates, onClose, onNavigate, prof
       target={recordTarget}
       onClose={onClose}
       onNavigate={onNavigate}
+      onCollapse={onCollapse}
       profileFields={profileFields}
       isMobile={isMobile}
       layoutType={layoutType}
