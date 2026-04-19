@@ -1985,7 +1985,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
       {/* Toolbar */}
       <div style={{
         ...s.toolbar,
-        ...(isMobile ? { flexWrap: 'wrap' as const, gap: 8, padding: '8px 12px' } : {}),
+        ...(isMobile ? { padding: '8px 12px' } : {}),
       }}>
         <div style={s.toolbarLeft}>
           <div style={s.scopeName}>{scopeName || formatScopeName(scope)}</div>
@@ -2036,16 +2036,13 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
           {(permissions?.can_add_records !== false) && (
             <button onClick={handleAddRecord} style={{
               ...s.addRecordBtn,
-              ...(isMobile ? { padding: '6px 10px', fontSize: 11 } : {}),
+              ...(isMobile ? { padding: '0 10px', fontSize: 11 } : {}),
             }}>
               + New
             </button>
           )}
         </div>
-        <div style={{
-          ...s.toolbarRight,
-          ...(isMobile ? { flexWrap: 'wrap' as const, gap: 6 } : {}),
-        }}>
+        <div style={s.toolbarRight}>
           <FilterBar
             columns={entityColumns}
             filters={advancedFilters}
@@ -2066,7 +2063,9 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
             placeholder="Search…"
             style={{
               ...s.filterInput,
-              ...(isMobile ? { width: 100, flex: '1 1 100px', minWidth: 80 } : {}),
+              ...(isMobile
+                ? { width: 'auto', flex: '1 1 100px', minWidth: 80 }
+                : { width: 'auto', flex: '0 1 180px', minWidth: 120 }),
             }}
           />
 
@@ -3648,20 +3647,32 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'space-between',
-      padding: '12px 20px',
+      flexWrap: 'wrap' as const,
+      columnGap: 12,
+      rowGap: 8,
+      padding: '10px 20px',
       borderBottom: `0.5px solid ${t.border}`,
       background: t.bgCard,
       flexShrink: 0,
+      minWidth: 0,
     },
     toolbarLeft: {
       display: 'flex',
       alignItems: 'center',
-      gap: 8,
+      flexWrap: 'wrap' as const,
+      columnGap: 8,
+      rowGap: 8,
+      minWidth: 0,
     },
     toolbarRight: {
       display: 'flex',
       alignItems: 'center',
-      gap: 8,
+      flexWrap: 'wrap' as const,
+      justifyContent: 'flex-end' as const,
+      columnGap: 8,
+      rowGap: 8,
+      minWidth: 0,
+      flex: '1 1 auto',
     },
     scopeName: {
       fontSize: 14,
@@ -3691,10 +3702,11 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       letterSpacing: '0.02em',
     },
     addRecordBtn: {
-      display: 'flex',
+      display: 'inline-flex',
       alignItems: 'center',
       gap: 4,
-      padding: '5px 12px',
+      height: 28,
+      padding: '0 12px',
       fontSize: 12,
       fontWeight: 600,
       border: `1px solid ${t.accent}`,
@@ -3703,6 +3715,7 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       color: '#fff',
       cursor: 'pointer',
       whiteSpace: 'nowrap' as const,
+      boxSizing: 'border-box' as const,
     },
     toggleBtn: {
       height: 28,

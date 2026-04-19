@@ -266,10 +266,11 @@ export function FilterBar({
 function makeStyles(t: Theme): Record<string, React.CSSProperties> {
   return {
     filterBtn: {
-      display: 'flex',
+      display: 'inline-flex',
       alignItems: 'center',
       gap: 6,
-      padding: '6px 12px',
+      height: 28,
+      padding: '0 12px',
       fontSize: 12,
       fontWeight: 500,
       border: `1px solid ${t.border}`,
@@ -277,6 +278,8 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       background: t.bgCard,
       color: t.text,
       cursor: 'pointer',
+      whiteSpace: 'nowrap' as const,
+      boxSizing: 'border-box' as const,
     },
     filterBtnActive: {
       borderColor: t.accent,
