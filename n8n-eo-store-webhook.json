@@ -7,7 +7,7 @@
         "path": "eo-store",
         "responseMode": "responseNode",
         "options": {
-          "allowedOrigins": "*",
+          "allowedOrigins": "https://app.aminoimmigration.com",
           "rawBody": true
         }
       },

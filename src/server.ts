@@ -33,9 +33,27 @@ const WEBHOOK_USER = process.env.EO_WEBHOOK_USER || '';
 const EVENT_PREFIX = process.env.EO_EVENT_PREFIX || '';
 const DATA_ROOM_ALIAS = process.env.EO_DATA_ROOM_ALIAS || '';
 const LOG_LEVEL = process.env.EO_LOG_LEVEL || 'info';
+const CORS_ORIGINS = (process.env.EO_CORS_ORIGINS || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
 
 async function start(): Promise<void> {
   const app = Fastify({ logger: { level: LOG_LEVEL } });
+
+  // Fail fast on misconfiguration that would silently disable auth.
+  if (HOMESERVER && WEBHOOK_SECRET.length < 32) {
+    throw new Error(
+      'EO_WEBHOOK_SECRET must be set to a value of at least 32 characters when EO_MATRIX_HOMESERVER is configured.',
+    );
+  }
+  if (HOMESERVER && !WEBHOOK_USER) {
+    throw new Error('EO_WEBHOOK_USER must be set when EO_MATRIX_HOMESERVER is configured.');
+  }
+  if (!process.env.EO_INGESTION_SECRET || process.env.EO_INGESTION_SECRET.length < 32) {
+    throw new Error('EO_INGESTION_SECRET must be set to a value of at least 32 characters.');
+  }
+
   const db: EoDb = createDb(DATA_DIR);
   await db.open();
   const feed = new Feed();
@@ -51,8 +69,13 @@ async function start(): Promise<void> {
   setAuthConfig({ homeserver: HOMESERVER, webhookSecret: WEBHOOK_SECRET, webhookUser: WEBHOOK_USER });
   setAuthDb(db);
 
-  // CORS
-  await app.register(cors, { origin: true });
+  // CORS — explicit allowlist. If EO_CORS_ORIGINS is unset, only same-origin
+  // requests succeed (no browser sends an Origin header for same-origin GETs).
+  const corsOrigin: string[] | boolean = CORS_ORIGINS.length > 0 ? CORS_ORIGINS : false;
+  await app.register(cors, {
+    origin: corsOrigin,
+    credentials: CORS_ORIGINS.length > 0,
+  });
 
   // Start connection health monitor
   let connectionMonitor: MatrixConnectionMonitor | undefined;

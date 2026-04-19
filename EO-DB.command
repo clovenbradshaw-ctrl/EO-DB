@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Double-click this file to launch EO///DB and open the admin UI.
 
-set -e
+set -euo pipefail
 
 REPO_URL="https://github.com/clovenbradshaw-ctrl/eo-db.git"
 REPO_DIR="$HOME/eo-db"
@@ -15,7 +15,7 @@ else
   cd "$REPO_DIR"
   git fetch origin main
   git checkout main
-  git reset --hard origin/main
+  git reset --hard "origin/main"
 fi
 
 cd "$REPO_DIR"

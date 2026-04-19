@@ -1,9 +1,10 @@
 /**
  * Google Drive OAuth2 PKCE — browser-native authentication.
  *
- * No client secret is used. All tokens are stored in localStorage.
- * The popup approach is preferred; the redirect flow is the fallback
- * when popups are blocked.
+ * No client secret is used. Tokens live in a module-scoped in-memory cache
+ * (so they are never exposed to XSS via localStorage). For same-tab reloads
+ * the access_token and expires_at are mirrored to sessionStorage; the
+ * refresh_token is only held in memory and is discarded on tab close.
  *
  * Usage:
  *   1. Call initGoogleOAuth() once at app startup.
@@ -26,13 +27,51 @@ const SCOPES = [
   'https://www.googleapis.com/auth/calendar.events',
 ].join(' ');
 
-// localStorage / sessionStorage keys
-const LS_ACCESS_TOKEN = 'eo-gdrive-access-token';
-const LS_REFRESH_TOKEN = 'eo-gdrive-refresh-token';
-const LS_EXPIRES_AT = 'eo-gdrive-expires-at';
+// Session keys. The access token and its expiry are mirrored to sessionStorage
+// so a page reload in the same tab can resume without re-auth; the refresh
+// token stays in memory only.
+const SS_ACCESS_TOKEN = 'eo-gdrive-access-token';
+const SS_EXPIRES_AT = 'eo-gdrive-expires-at';
 const SS_CODE_VERIFIER = 'eo-gdrive-code-verifier';
 const SS_PENDING_ROUTE = 'eo-gdrive-pending-route';
 const SS_POPUP_RESOLVE = 'eo-gdrive-popup-pending';
+
+interface CachedTokens {
+  accessToken: string;
+  refreshToken: string | null;
+  expiresAt: number;
+}
+
+let _tokens: CachedTokens | null = null;
+
+function readSessionTokens(): CachedTokens | null {
+  try {
+    const access = sessionStorage.getItem(SS_ACCESS_TOKEN);
+    const expires = Number(sessionStorage.getItem(SS_EXPIRES_AT) ?? '0');
+    if (access && expires > 0) {
+      return { accessToken: access, refreshToken: null, expiresAt: expires };
+    }
+  } catch {
+    /* private-mode sessionStorage can throw — fall through */
+  }
+  return null;
+}
+
+function getCachedTokens(): CachedTokens | null {
+  if (_tokens) return _tokens;
+  _tokens = readSessionTokens();
+  return _tokens;
+}
+
+function writeTokens(tokens: CachedTokens): void {
+  _tokens = tokens;
+  try {
+    sessionStorage.setItem(SS_ACCESS_TOKEN, tokens.accessToken);
+    sessionStorage.setItem(SS_EXPIRES_AT, String(tokens.expiresAt));
+  } catch {
+    /* storage unavailable — in-memory cache still works for this tab */
+  }
+}
 
 // BroadcastChannel used to signal OAuth completion from the popup back to the
 // opener. Needed because COOP on Google's OAuth pages severs the browsing
@@ -136,7 +175,8 @@ async function exchangeCode(code: string, verifier: string): Promise<void> {
 }
 
 async function refreshTokens(): Promise<void> {
-  const refreshToken = localStorage.getItem(LS_REFRESH_TOKEN);
+  const cached = getCachedTokens();
+  const refreshToken = cached?.refreshToken;
   if (!refreshToken) throw new Error('No refresh token — user must re-authenticate');
   const res = await fetch(GOOGLE_TOKEN_ENDPOINT, {
     method: 'POST',
@@ -152,17 +192,16 @@ async function refreshTokens(): Promise<void> {
     clearTokens();
     throw new Error(`Token refresh failed: ${json.error ?? 'no access_token'}`);
   }
-  // refresh_token may not be returned; keep the existing one
-  storeTokens({ ...json, refresh_token: json.refresh_token ?? refreshToken ?? undefined });
+  storeTokens({ ...json, refresh_token: json.refresh_token ?? refreshToken });
 }
 
 function storeTokens(tokens: TokenResponse): void {
-  localStorage.setItem(LS_ACCESS_TOKEN, tokens.access_token);
-  if (tokens.refresh_token) {
-    localStorage.setItem(LS_REFRESH_TOKEN, tokens.refresh_token);
-  }
   const expiresAt = Date.now() + (tokens.expires_in ?? 3600) * 1000;
-  localStorage.setItem(LS_EXPIRES_AT, String(expiresAt));
+  writeTokens({
+    accessToken: tokens.access_token,
+    refreshToken: tokens.refresh_token ?? _tokens?.refreshToken ?? null,
+    expiresAt,
+  });
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -171,9 +210,9 @@ function storeTokens(tokens: TokenResponse): void {
 
 /** Returns true when there's a stored token that is not expired. */
 export function isConnected(): boolean {
-  const token = localStorage.getItem(LS_ACCESS_TOKEN);
-  const expiresAt = Number(localStorage.getItem(LS_EXPIRES_AT) ?? '0');
-  return !!token && Date.now() < expiresAt - 60_000;
+  const cached = getCachedTokens();
+  if (!cached) return false;
+  return Date.now() < cached.expiresAt - 60_000;
 }
 
 /**
@@ -181,20 +220,23 @@ export function isConnected(): boolean {
  * Throws if no tokens are stored (user must call startOAuthFlow first).
  */
 export async function getAccessToken(): Promise<string> {
-  const token = localStorage.getItem(LS_ACCESS_TOKEN);
-  const expiresAt = Number(localStorage.getItem(LS_EXPIRES_AT) ?? '0');
-  if (!token) throw new Error('Not authenticated with Google Drive');
-  if (Date.now() >= expiresAt - 60_000) {
+  const cached = getCachedTokens();
+  if (!cached) throw new Error('Not authenticated with Google Drive');
+  if (Date.now() >= cached.expiresAt - 60_000) {
     await refreshTokens();
   }
-  return localStorage.getItem(LS_ACCESS_TOKEN)!;
+  return (_tokens ?? cached).accessToken;
 }
 
 /** Clear all stored tokens (sign out of Google Drive). */
 export function clearTokens(): void {
-  localStorage.removeItem(LS_ACCESS_TOKEN);
-  localStorage.removeItem(LS_REFRESH_TOKEN);
-  localStorage.removeItem(LS_EXPIRES_AT);
+  _tokens = null;
+  try {
+    sessionStorage.removeItem(SS_ACCESS_TOKEN);
+    sessionStorage.removeItem(SS_EXPIRES_AT);
+  } catch {
+    /* ignore */
+  }
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -227,18 +269,29 @@ export async function handleOAuthCallback(): Promise<boolean> {
     await exchangeCode(code, verifier);
     localStorage.removeItem(SS_CODE_VERIFIER);
 
-    // Broadcast completion over BroadcastChannel. This is the primary
-    // popup→opener signal because COOP from accounts.google.com severs the
-    // browsing-context group, which nulls out window.opener and makes
-    // cross-window postMessage unreliable. BroadcastChannel bypasses COOP
-    // — any same-origin context listening on the channel receives the
-    // message regardless of BC-group membership.
+    // Broadcast completion (and the freshly-issued tokens) over
+    // BroadcastChannel. This is the primary popup→opener signal because COOP
+    // from accounts.google.com severs the browsing-context group, which nulls
+    // out window.opener and makes cross-window postMessage unreliable.
+    // BroadcastChannel is same-origin only, so transmitting the tokens on it
+    // is equivalent to letting another same-origin tab read them; we no
+    // longer persist them to localStorage.
+    const cached = getCachedTokens();
     try {
       const channel = new BroadcastChannel(OAUTH_BROADCAST_CHANNEL);
-      channel.postMessage({ type: 'eo-gdrive-oauth-success' });
+      channel.postMessage({
+        type: 'eo-gdrive-oauth-success',
+        tokens: cached
+          ? {
+              access_token: cached.accessToken,
+              refresh_token: cached.refreshToken ?? undefined,
+              expires_at: cached.expiresAt,
+            }
+          : null,
+      });
       channel.close();
     } catch {
-      /* BroadcastChannel unsupported — parent falls back to storage-event + polling */
+      /* BroadcastChannel unsupported — opener falls back to postMessage */
     }
 
     // Use state param to reliably detect popup vs redirect flow.
@@ -253,7 +306,16 @@ export async function handleOAuthCallback(): Promise<boolean> {
       if (window.opener && !window.opener.closed) {
         try {
           window.opener.postMessage(
-            { type: 'eo-gdrive-oauth-success' },
+            {
+              type: 'eo-gdrive-oauth-success',
+              tokens: cached
+                ? {
+                    access_token: cached.accessToken,
+                    refresh_token: cached.refreshToken ?? undefined,
+                    expires_at: cached.expiresAt,
+                  }
+                : null,
+            },
             window.location.origin,
           );
         } catch {
@@ -323,26 +385,31 @@ export async function startOAuthFlow(): Promise<void> {
         channel = new BroadcastChannel(OAUTH_BROADCAST_CHANNEL);
         channel.onmessage = (ev: MessageEvent) => {
           if (ev.data?.type === 'eo-gdrive-oauth-success') {
+            adoptTokensFromMessage(ev.data);
             completeSuccess();
           }
         };
       } catch {
-        /* BroadcastChannel unsupported — fall back to storage + polling */
-      }
-
-      // ── storage event: fires in OTHER windows when popup writes tokens ─
-      function onStorage(ev: StorageEvent) {
-        if (ev.key === LS_ACCESS_TOKEN && isConnected()) {
-          completeSuccess();
-        }
+        /* BroadcastChannel unsupported — fall back to postMessage only */
       }
 
       // ── Legacy postMessage path (COOP-vulnerable, kept as fallback) ──
       function onMessage(event: MessageEvent) {
         if (event.origin !== window.location.origin) return;
         if (event.data?.type === 'eo-gdrive-oauth-success') {
+          adoptTokensFromMessage(event.data);
           completeSuccess();
         }
+      }
+
+      function adoptTokensFromMessage(data: unknown): void {
+        const payload = (data as { tokens?: { access_token?: string; refresh_token?: string; expires_at?: number } }).tokens;
+        if (!payload?.access_token || !payload.expires_at) return;
+        writeTokens({
+          accessToken: payload.access_token,
+          refreshToken: payload.refresh_token ?? null,
+          expiresAt: payload.expires_at,
+        });
       }
 
       function completeSuccess() {
@@ -373,13 +440,11 @@ export async function startOAuthFlow(): Promise<void> {
         clearTimeout(timeout);
         clearInterval(pollInterval);
         window.removeEventListener('message', onMessage);
-        window.removeEventListener('storage', onStorage);
         try { channel?.close(); } catch { /* ignore */ }
         sessionStorage.removeItem(SS_POPUP_RESOLVE);
       }
 
       window.addEventListener('message', onMessage);
-      window.addEventListener('storage', onStorage);
     });
     return;
   }
