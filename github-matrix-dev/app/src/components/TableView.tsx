@@ -637,6 +637,10 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   // flicker between "loaded" and "No records in this scope" on every sync.
   // Require two consecutive empties before accepting an empty set as truth.
   const emptySyncCountRef = useRef(0);
+  // Mirrors `recordsLoaded` for reads inside the paginated initial-load
+  // promise chain; state closures go stale across awaits, and we need to
+  // know whether the UI has already been unblocked before flipping again.
+  const recordsLoadedRef = useRef(false);
   const { theme } = useTheme();
   const s = makeStyles(theme);
 
@@ -780,7 +784,18 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
         const direct = filterDirect(rows);
         prevRecordsKeyRef.current = 'loading'; // mark as started
         setRecords(direct);
-        setRecordsLoaded(true);
+        // IDB keys sort lexicographically; `_schema.*` / `_slices.*` sort
+        // before regular record ids. A table with a rich schema can fill the
+        // entire first page with non-record rows that filterDirect() rejects.
+        // `direct.length === 0` is NOT authoritative until `nextCursor` is
+        // null — flipping recordsLoaded too early paints a transient "No
+        // records in this scope" until the streaming batches hydrate.
+        if (direct.length > 0 || nextCursor === null) {
+          setRecordsLoaded(true);
+        }
+        if (import.meta.env.DEV && rows.length > 0 && direct.length === 0 && nextCursor !== null) {
+          console.debug('[TableView] initial page yielded 0 visible records of', rows.length, 'for', scope);
+        }
 
         // Phase 2: stream remaining records in background batches
         let cursor = nextCursor;
@@ -792,8 +807,15 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
           const moreDirect = filterDirect(more);
           accumulated = [...accumulated, ...moreDirect];
           setRecords(accumulated);
+          // Unblock the UI the moment the first non-empty batch arrives.
+          if (!recordsLoadedRef.current && accumulated.length > 0) {
+            setRecordsLoaded(true);
+          }
           cursor = next;
         }
+        // Streaming finished — authoritative empty is safe to surface now.
+        if (!recordsLoadedRef.current) setRecordsLoaded(true);
+        emptySyncCountRef.current = 0;
         // Final fingerprint for future sync-triggered re-fetches
         prevRecordsKeyRef.current = accumulated.map(r => r.target + ':' + r.last_seq).join('|');
         // Seed the target→last_seq map so the first sync re-fetch after initial
@@ -938,10 +960,15 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     // stale "updated" badge from the previous scope.
     prevRecordsMapRef.current = new Map();
     emptySyncCountRef.current = 0;
+    recordsLoadedRef.current = false;
     setIsUpdating(false);
     setLastUpdate(null);
     setShowUpdateDetail(false);
   }, [scope]);
+
+  // Keep the recordsLoaded ref in sync with state so the async paginator
+  // inside the initial-load effect can read it without a stale closure.
+  useEffect(() => { recordsLoadedRef.current = recordsLoaded; }, [recordsLoaded]);
 
   // Debounce filterText so that keystroke latency is bounded by a short
   // timer rather than the cost of re-filtering the full record set.
