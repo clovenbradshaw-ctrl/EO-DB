@@ -579,6 +579,12 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
 
   const [records, setRecords] = useState<EoState[]>([]);
   const [recordsLoaded, setRecordsLoaded] = useState(false);
+  // True after the sync stream has gone quiet for a short grace period. Used to
+  // suppress the "No records in this scope" message while events are still
+  // streaming in from Matrix on a cold load — otherwise the grid paints the
+  // empty state prematurely before the fold has produced the records that are
+  // already on their way. Resets on scope change and on every lastSeq tick.
+  const [emptyStateSettled, setEmptyStateSettled] = useState(false);
   // --- Update indicator state ---
   // isUpdating: true briefly while a sync-triggered re-fetch is in flight.
   // lastUpdate: summary of the most recent non-empty diff (added/modified/removed
@@ -930,6 +936,10 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     // Don't navigate away while seq is 0 — the store is still receiving sync
     // and an empty result is transient, not authoritative.
     if (lastSeq === 0) return;
+    // Also defer the check while the sync stream is still active, otherwise
+    // a cold load that hasn't yet ingested this scope's records would bounce
+    // the user to the parent before the records arrive.
+    if (!emptyStateSettled) return;
     hasCheckedEmptyScopeRef.current = true;
     if (records.length === 0 && onEmptyScope) {
       // Don't navigate away if the scope itself has state — it's a leaf record
@@ -942,7 +952,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
         }
       });
     }
-  }, [records, recordsLoaded, lastSeq, scope, onEmptyScope, getState]);
+  }, [records, recordsLoaded, lastSeq, scope, onEmptyScope, getState, emptyStateSettled]);
 
   // Reset filter and loaded state when scope changes.
   // NOTE: records are NOT cleared here — the stale-fetch guard (fetchGenRef)
@@ -969,6 +979,22 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   // Keep the recordsLoaded ref in sync with state so the async paginator
   // inside the initial-load effect can read it without a stale closure.
   useEffect(() => { recordsLoadedRef.current = recordsLoaded; }, [recordsLoaded]);
+
+  // Delay the "No records in this scope" message until the event stream has
+  // been quiet for EMPTY_STATE_SETTLE_MS. Each scope change AND each lastSeq
+  // tick resets the timer, so:
+  //   - On cold load, while Matrix sync is still ingesting events (lastSeq
+  //     ticks frequently), the empty message stays hidden — we render a
+  //     neutral "Loading records…" instead of misleadingly claiming the scope
+  //     is empty.
+  //   - Once the stream settles and records is genuinely empty, the message
+  //     surfaces as expected.
+  const EMPTY_STATE_SETTLE_MS = 1500;
+  useEffect(() => {
+    setEmptyStateSettled(false);
+    const id = setTimeout(() => setEmptyStateSettled(true), EMPTY_STATE_SETTLE_MS);
+    return () => clearTimeout(id);
+  }, [scope, lastSeq]);
 
   // Debounce filterText so that keystroke latency is bounded by a short
   // timer rather than the cost of re-filtering the full record set.
@@ -2394,7 +2420,9 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
               {filtered.length === 0 && recordsLoaded && (
                 <tr>
                   <td colSpan={orderedColumns.length + 1} style={s.emptyRow}>
-                    {records.length === 0 ? 'No records in this scope' : 'No records match the current filter'}
+                    {records.length === 0
+                      ? (emptyStateSettled ? 'No records in this scope' : 'Loading records…')
+                      : 'No records match the current filter'}
                   </td>
                 </tr>
               )}
