@@ -12,9 +12,17 @@
  *   Cultivating present alongside anything  →  parallel_background
  */
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useRef, useEffect } from 'react';
 import { useTheme, type Theme } from '../theme';
 import type { Resolution } from '../db/types';
+
+// Identity color for the resolution composer — distinguishes it visually from
+// the Constraint composer, which uses a green identity bar.
+const RESOLUTION_IDENTITY_COLOR = '#6B21A8';
+
+// Width (px) below which the grid switches to compact mode — description and
+// example text move out of each cell and into a single detail strip.
+const COMPACT_WIDTH_THRESHOLD = 560;
 
 // ─── Types ──────────────────────────────────────────────────────────────
 
@@ -298,8 +306,23 @@ export function ResolutionPolicyComposer({
   fieldKey,
 }: ResolutionPolicyComposerProps) {
   const { theme } = useTheme();
-  const s = makeStyles(theme, embedded);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [compact, setCompact] = useState(false);
+  const s = makeStyles(theme, embedded, compact);
   const gpuAvailable = useMemo(hasWebGPU, []);
+  const [hoverCell, setHoverCell] = useState<Resolution | null>(null);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const obs = new ResizeObserver(entries => {
+      for (const entry of entries) {
+        setCompact(entry.contentRect.width < COMPACT_WIDTH_THRESHOLD);
+      }
+    });
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, []);
 
   // Local editing state — initialize from currentPolicy. If the caller
   // forgot to normalize a legacy policy on the way in, normalize here so
@@ -360,8 +383,18 @@ export function ResolutionPolicyComposer({
   const isDissectingSelected = selected.has('Dissecting');
   const isMakingSelected = selected.has('Making');
 
+  // Cell whose details the strip should show — prefer a hovered cell (fresh
+  // intent) over any currently selected one, since selections already show as
+  // highlighted tiles.
+  const focusedKey: Resolution | null =
+    hoverCell ?? (selected.size > 0 ? Array.from(selected.keys())[selected.size - 1] : null);
+  const focusedDef = focusedKey ? STANCES.find(st => st.key === focusedKey) : null;
+
   return (
-    <div style={embedded ? { padding: '0 16px 8px' } : s.container}>
+    <div ref={containerRef} style={embedded ? { padding: '0 16px 8px' } : s.container}>
+      {/* Identity bar — distinguishes this composer from the Constraint one */}
+      <div style={s.identityBar} />
+
       {/* Header — hidden when embedded (panel provides its own header) */}
       {!embedded && (
         <div style={s.header}>
@@ -373,6 +406,39 @@ export function ResolutionPolicyComposer({
       <div style={s.subtitle}>
         Select one or more stances to compose a resolution policy{fieldKey ? ` for ${fieldKey}` : ''}.
       </div>
+
+      {/* Detail strip — replaces in-cell description/example in compact mode. */}
+      {compact && (
+        <div
+          style={{
+            ...s.detailStrip,
+            borderLeftColor: focusedDef?.outputColor ?? theme.borderLight,
+            opacity: focusedDef ? 1 : 0.6,
+          }}
+        >
+          {focusedDef ? (
+            <>
+              <div style={s.detailStripHead}>
+                <span style={s.detailStripCell}>{focusedDef.cell}</span>
+                <span style={{ ...s.detailStripName, color: focusedDef.outputColor }}>
+                  {focusedDef.name}
+                </span>
+                <span style={{
+                  ...s.detailStripOutput,
+                  background: `${focusedDef.outputColor}18`,
+                  color: focusedDef.outputColor,
+                }}>
+                  {focusedDef.output}
+                </span>
+              </div>
+              <div style={s.detailStripDesc}>{focusedDef.description}</div>
+              <div style={s.detailStripExample}>{focusedDef.example}</div>
+            </>
+          ) : (
+            <div style={s.detailStripDesc}>Hover or tap a cell to see what it does.</div>
+          )}
+        </div>
+      )}
 
       {/* Column headers */}
       <div style={s.gridContainer}>
@@ -391,7 +457,9 @@ export function ResolutionPolicyComposer({
           <div key={row} style={s.gridRow}>
             <div style={s.rowLabel}>
               <span style={s.rowLabelText}>{ROW_LABELS[row].label}</span>
-              <span style={s.rowLabelSub}>{ROW_LABELS[row].subtitle}</span>
+              {!compact && (
+                <span style={s.rowLabelSub}>{ROW_LABELS[row].subtitle}</span>
+              )}
             </div>
             {COLS.map(col => {
               const stance = STANCES.find(st => st.row === row && st.col === col)!;
@@ -406,9 +474,11 @@ export function ResolutionPolicyComposer({
                   }}
                   onClick={() => toggleStance(stance.key)}
                   onMouseEnter={e => {
+                    setHoverCell(stance.key);
                     if (!isSelected) (e.currentTarget as HTMLElement).style.background = theme.bgHover;
                   }}
                   onMouseLeave={e => {
+                    setHoverCell(null);
                     if (!isSelected) (e.currentTarget as HTMLElement).style.background = theme.bgCard;
                   }}
                 >
@@ -416,8 +486,12 @@ export function ResolutionPolicyComposer({
                   <div style={{ ...s.cellName, color: isSelected ? stance.outputColor : theme.textHeading }}>
                     {stance.name}
                   </div>
-                  <div style={s.cellDesc}>{stance.description}</div>
-                  <div style={s.cellExample}>{stance.example}</div>
+                  {!compact && (
+                    <>
+                      <div style={s.cellDesc}>{stance.description}</div>
+                      <div style={s.cellExample}>{stance.example}</div>
+                    </>
+                  )}
                   <div style={s.cellOutputRow}>
                     <span style={{
                       ...s.outputTag,
@@ -531,12 +605,12 @@ export function ResolutionPolicyComposer({
 
 // ─── Styles ─────────────────────────────────────────────────────────────
 
-function makeStyles(t: Theme, embedded?: boolean): Record<string, React.CSSProperties> {
-  const labelW = embedded ? 72 : 90;
+function makeStyles(t: Theme, embedded?: boolean, compact?: boolean): Record<string, React.CSSProperties> {
+  const labelW = compact ? 0 : embedded ? 72 : 90;
   return {
     container: {
       padding: 16,
-      minWidth: 640,
+      minWidth: compact ? 280 : 640,
       maxWidth: 780,
       maxHeight: '80vh',
       overflowY: 'auto',
@@ -544,6 +618,55 @@ function makeStyles(t: Theme, embedded?: boolean): Record<string, React.CSSPrope
       borderRadius: 12,
       border: `1px solid ${t.border}`,
       boxShadow: '0 8px 32px rgba(0,0,0,0.18)',
+    },
+    identityBar: {
+      height: 3,
+      background: RESOLUTION_IDENTITY_COLOR,
+      borderRadius: 2,
+      marginBottom: 10,
+    },
+    detailStrip: {
+      padding: '8px 10px',
+      marginBottom: 10,
+      background: t.bgMuted,
+      borderRadius: 6,
+      borderLeft: '3px solid',
+      display: 'flex',
+      flexDirection: 'column' as const,
+      gap: 3,
+      transition: 'border-left-color 0.15s, opacity 0.15s',
+    },
+    detailStripHead: {
+      display: 'flex',
+      alignItems: 'baseline',
+      gap: 8,
+      flexWrap: 'wrap' as const,
+    },
+    detailStripCell: {
+      fontSize: 9,
+      color: t.textMuted,
+      fontFamily: "'JetBrains Mono', monospace",
+    },
+    detailStripName: {
+      fontSize: 13,
+      fontWeight: 600,
+    },
+    detailStripOutput: {
+      fontSize: 10,
+      fontWeight: 500,
+      padding: '1px 7px',
+      borderRadius: 10,
+      fontFamily: "'JetBrains Mono', monospace",
+    },
+    detailStripDesc: {
+      fontSize: 11,
+      color: t.textSecondary,
+      lineHeight: 1.35,
+    },
+    detailStripExample: {
+      fontSize: 10,
+      color: t.textMuted,
+      fontFamily: "'JetBrains Mono', monospace",
     },
     header: {
       display: 'flex',
@@ -579,11 +702,11 @@ function makeStyles(t: Theme, embedded?: boolean): Record<string, React.CSSPrope
     },
     colHeaders: {
       display: 'grid',
-      gridTemplateColumns: `${labelW}px 1fr 1fr 1fr`,
+      gridTemplateColumns: compact ? '1fr 1fr 1fr' : `${labelW}px 1fr 1fr 1fr`,
       gap: 6,
       marginBottom: 2,
     },
-    rowLabelSpacer: { width: labelW },
+    rowLabelSpacer: { width: labelW, display: compact ? 'none' : 'block' },
     colHeader: {
       display: 'flex',
       flexDirection: 'column',
@@ -602,11 +725,11 @@ function makeStyles(t: Theme, embedded?: boolean): Record<string, React.CSSPrope
     },
     gridRow: {
       display: 'grid',
-      gridTemplateColumns: `${labelW}px 1fr 1fr 1fr`,
+      gridTemplateColumns: compact ? '1fr 1fr 1fr' : `${labelW}px 1fr 1fr 1fr`,
       gap: 6,
     },
     rowLabel: {
-      display: 'flex',
+      display: compact ? 'none' : 'flex',
       flexDirection: 'column',
       justifyContent: 'center',
       alignItems: 'flex-end',
@@ -626,15 +749,15 @@ function makeStyles(t: Theme, embedded?: boolean): Record<string, React.CSSPrope
     cell: {
       display: 'flex',
       flexDirection: 'column',
-      gap: 4,
-      padding: '10px 12px',
+      gap: compact ? 2 : 4,
+      padding: compact ? '6px 8px' : '10px 12px',
       border: '1px solid',
       borderRadius: 8,
       cursor: 'pointer',
       textAlign: 'left' as const,
       fontFamily: 'inherit',
       transition: 'background 0.1s, border-color 0.15s',
-      minHeight: 100,
+      minHeight: compact ? 60 : 100,
     },
     cellLabel: {
       fontSize: 9,

@@ -13,8 +13,16 @@
  * Phase 2 (deferred): Groundedness, Rule, Invariant (need expression editors)
  */
 
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { useTheme, type Theme } from '../theme';
+
+// Identity color for the constraint composer — distinguishes it visually from
+// the Resolution composer, which uses a different accent.
+const CONSTRAINT_IDENTITY_COLOR = '#166534';
+
+// Width (px) below which the grid switches to compact mode — description text
+// moves out of each cell and into a single detail strip.
+const COMPACT_WIDTH_THRESHOLD = 560;
 
 // ─── Constraint Cell Definitions ────────────────────────────────────────
 
@@ -142,11 +150,25 @@ export function ConstraintComposer({
   embedded,
 }: ConstraintComposerProps) {
   const { theme } = useTheme();
-  const s = makeStyles(theme, embedded);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [compact, setCompact] = useState(false);
+  const s = makeStyles(theme, embedded, compact);
 
   const [activeCell, setActiveCell] = useState<string | null>(null);
   const [hoverCell, setHoverCell] = useState<string | null>(null);
   const existingSet = new Set(existingConstraints.map(c => c.name));
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const obs = new ResizeObserver(entries => {
+      for (const entry of entries) {
+        setCompact(entry.contentRect.width < COMPACT_WIDTH_THRESHOLD);
+      }
+    });
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, []);
 
   // ─── Config state for each cell ──
   const [presenceRule, setPresenceRule] = useState<string>(
@@ -450,8 +472,17 @@ export function ConstraintComposer({
   // GPU check
   const gpuAvailable = typeof navigator !== 'undefined' && !!navigator.gpu;
 
+  // Cell whose details should be surfaced — prefer active (clicked) over hover
+  // so the detail strip stays stable while the user moves toward the config
+  // panel.
+  const focusedKey = activeCell ?? hoverCell;
+  const focusedDef = focusedKey ? CONSTRAINT_CELLS.find(c => c.key === focusedKey) : null;
+
   return (
-    <div style={embedded ? { padding: '0 16px 8px' } : s.container}>
+    <div ref={containerRef} style={embedded ? { padding: '0 16px 8px' } : s.container}>
+      {/* Identity bar — distinguishes this composer from the Resolution one */}
+      <div style={s.identityBar} />
+
       {/* Header — hidden when embedded (panel provides its own header) */}
       {!embedded && (
         <div style={s.header}>
@@ -464,6 +495,32 @@ export function ConstraintComposer({
       {embedded && (
         <div style={{ fontSize: 11, color: theme.textSecondary, marginBottom: 8 }}>
           Click a cell to add or configure a constraint.
+        </div>
+      )}
+
+      {/* Detail strip — replaces in-cell description in compact mode. Persistent
+          empty state keeps layout stable so the grid doesn't jump. */}
+      {compact && (
+        <div
+          style={{
+            ...s.detailStrip,
+            borderLeftColor: focusedDef?.color ?? theme.borderLight,
+            opacity: focusedDef ? 1 : 0.6,
+          }}
+        >
+          {focusedDef ? (
+            <>
+              <div style={s.detailStripHead}>
+                <span style={s.detailStripCell}>{focusedDef.cell}</span>
+                <span style={{ ...s.detailStripName, color: focusedDef.color }}>
+                  {focusedDef.name}
+                </span>
+              </div>
+              <div style={s.detailStripDesc}>{focusedDef.description}</div>
+            </>
+          ) : (
+            <div style={s.detailStripDesc}>Hover or tap a cell to see what it does.</div>
+          )}
         </div>
       )}
 
@@ -484,7 +541,9 @@ export function ConstraintComposer({
           <div key={row} style={s.gridRow}>
             <div style={s.rowLabel}>
               <span style={s.rowLabelText}>{ROW_LABELS[row].label}</span>
-              <span style={s.rowLabelSub}>{ROW_LABELS[row].subtitle}</span>
+              {!compact && (
+                <span style={s.rowLabelSub}>{ROW_LABELS[row].subtitle}</span>
+              )}
             </div>
             {COLS.map(col => {
               const cellDef = CONSTRAINT_CELLS.find(c => c.row === row && c.col === col)!;
@@ -532,7 +591,7 @@ export function ConstraintComposer({
                   <div style={{ ...s.cellName, color: isConfigured || isActive ? cellDef.color : theme.textHeading }}>
                     {cellDef.name}
                   </div>
-                  <div style={s.cellDesc}>{cellDef.description}</div>
+                  {!compact && <div style={s.cellDesc}>{cellDef.description}</div>}
                   <div style={s.cellOutputRow}>
                     {isConfigured && (
                       <span style={{ ...s.configuredTag, background: `${cellDef.color}18`, color: cellDef.color }}>
@@ -626,12 +685,12 @@ export function ConstraintComposer({
 
 // ─── Styles ─────────────────────────────────────────────────────────────
 
-function makeStyles(t: Theme, embedded?: boolean): Record<string, React.CSSProperties> {
-  const labelW = embedded ? 72 : 90;
+function makeStyles(t: Theme, embedded?: boolean, compact?: boolean): Record<string, React.CSSProperties> {
+  const labelW = compact ? 0 : embedded ? 72 : 90;
   return {
     container: {
       padding: 16,
-      minWidth: 640,
+      minWidth: compact ? 280 : 640,
       maxWidth: 780,
       maxHeight: '80vh',
       overflowY: 'auto',
@@ -639,6 +698,43 @@ function makeStyles(t: Theme, embedded?: boolean): Record<string, React.CSSPrope
       borderRadius: 12,
       border: `1px solid ${t.border}`,
       boxShadow: '0 8px 32px rgba(0,0,0,0.18)',
+    },
+    identityBar: {
+      height: 3,
+      background: CONSTRAINT_IDENTITY_COLOR,
+      borderRadius: 2,
+      marginBottom: 10,
+    },
+    detailStrip: {
+      padding: '8px 10px',
+      marginBottom: 10,
+      background: t.bgMuted,
+      borderRadius: 6,
+      borderLeft: '3px solid',
+      display: 'flex',
+      flexDirection: 'column' as const,
+      gap: 3,
+      transition: 'border-left-color 0.15s, opacity 0.15s',
+    },
+    detailStripHead: {
+      display: 'flex',
+      alignItems: 'baseline',
+      gap: 8,
+      flexWrap: 'wrap' as const,
+    },
+    detailStripCell: {
+      fontSize: 9,
+      color: t.textMuted,
+      fontFamily: "'JetBrains Mono', monospace",
+    },
+    detailStripName: {
+      fontSize: 13,
+      fontWeight: 600,
+    },
+    detailStripDesc: {
+      fontSize: 11,
+      color: t.textSecondary,
+      lineHeight: 1.35,
     },
     header: {
       display: 'flex',
@@ -679,11 +775,11 @@ function makeStyles(t: Theme, embedded?: boolean): Record<string, React.CSSPrope
     },
     colHeaders: {
       display: 'grid',
-      gridTemplateColumns: `${labelW}px 1fr 1fr 1fr`,
+      gridTemplateColumns: compact ? '1fr 1fr 1fr' : `${labelW}px 1fr 1fr 1fr`,
       gap: 6,
       marginBottom: 2,
     },
-    rowLabelSpacer: { width: labelW },
+    rowLabelSpacer: { width: labelW, display: compact ? 'none' : 'block' },
     colHeader: {
       display: 'flex',
       flexDirection: 'column',
@@ -702,11 +798,11 @@ function makeStyles(t: Theme, embedded?: boolean): Record<string, React.CSSPrope
     },
     gridRow: {
       display: 'grid',
-      gridTemplateColumns: `${labelW}px 1fr 1fr 1fr`,
+      gridTemplateColumns: compact ? '1fr 1fr 1fr' : `${labelW}px 1fr 1fr 1fr`,
       gap: 6,
     },
     rowLabel: {
-      display: 'flex',
+      display: compact ? 'none' : 'flex',
       flexDirection: 'column',
       justifyContent: 'center',
       alignItems: 'flex-end',
@@ -726,14 +822,14 @@ function makeStyles(t: Theme, embedded?: boolean): Record<string, React.CSSPrope
     cell: {
       display: 'flex',
       flexDirection: 'column',
-      gap: 4,
-      padding: '10px 12px',
+      gap: compact ? 2 : 4,
+      padding: compact ? '6px 8px' : '10px 12px',
       border: '1px solid',
       borderRadius: 8,
       textAlign: 'left' as const,
       fontFamily: 'inherit',
       transition: 'background 0.1s, border-color 0.15s',
-      minHeight: 90,
+      minHeight: compact ? 54 : 90,
     },
     cellLabel: {
       fontSize: 9,
