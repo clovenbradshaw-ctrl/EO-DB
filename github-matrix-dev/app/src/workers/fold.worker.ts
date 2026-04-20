@@ -803,6 +803,11 @@ function buildFoldEntry(target: string): FoldEntry {
             `[EO-DB] fold checkpoint stale (checkpoint seq=${position.seq}, log head=${logHeadSeq}) — reporting log head as ready headSeq`,
           );
           nextSeq = Math.max(nextSeq, logHeadSeq);
+          // Advance the bare counter so the scanLog fast-path stops short-
+          // circuiting `req.since >= position.seq` and actually returns the log
+          // entries past the stale checkpoint. Structural fields on position
+          // are still stale; the main thread rebuilds them via replayFromLog.
+          position.seq = logHeadSeq;
         }
 
         const elapsed = performance.now() - t0;
@@ -928,6 +933,7 @@ function buildFoldEntry(target: string): FoldEntry {
         updateIndex(index, event, byteOffset);
         applyEvent(position, event);
         if (event.op === 'EVA') registerEvaFormula(event);
+        checkAdaptiveCheckpoint();
         post({ id: req.id, type: 'result', value: null });
         break;
       }
