@@ -23,6 +23,25 @@ export function normalizeHomeserver(input: string): string {
 }
 
 /**
+ * If the build was produced with `VITE_MATRIX_HOMESERVER` set, return the
+ * normalized base URL. External repos that reference these assets pass their
+ * own value at build time; when present the app is locked to that instance
+ * and the login form hides the homeserver field.
+ */
+export function getLockedHomeserver(): string | null {
+  const raw = import.meta.env.VITE_MATRIX_HOMESERVER;
+  if (!raw || !raw.trim()) return null;
+  return normalizeHomeserver(raw);
+}
+
+/**
+ * True when the current build was pinned to a single Matrix homeserver.
+ */
+export function isHomeserverLocked(): boolean {
+  return getLockedHomeserver() !== null;
+}
+
+/**
  * Convert a username input to a fully qualified Matrix user ID.
  * e.g. "alice" + "matrix.org" → "@alice:matrix.org"
  */
@@ -38,7 +57,11 @@ export function toMatrixUserId(username: string, homeserver: string): string {
  * Returns a session object stored in localStorage for persistence.
  */
 export async function login(homeserver: string, username: string, password: string): Promise<MatrixSession> {
-  const baseUrl = normalizeHomeserver(homeserver);
+  const locked = getLockedHomeserver();
+  const baseUrl = locked ?? normalizeHomeserver(homeserver);
+  if (locked && normalizeHomeserver(homeserver) !== locked) {
+    throw new Error(`This build is locked to ${locked}`);
+  }
   const client = sdk.createClient({ baseUrl });
 
   // Reuse the persisted deviceId if present (only survives within a session;
@@ -78,6 +101,14 @@ export function restoreSession(): MatrixSession | null {
     const parsed = JSON.parse(raw);
     if (!parsed.homeserver) {
       // Old session without homeserver — force re-login
+      localStorage.removeItem(SESSION_KEY);
+      return null;
+    }
+    const locked = getLockedHomeserver();
+    if (locked && normalizeHomeserver(parsed.homeserver) !== locked) {
+      // Session belongs to a different instance than the one this build is
+      // pinned to — discard so the user re-authenticates against the locked
+      // homeserver.
       localStorage.removeItem(SESSION_KEY);
       return null;
     }

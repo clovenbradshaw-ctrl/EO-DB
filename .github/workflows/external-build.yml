@@ -1,0 +1,104 @@
+name: External Build (matrix-instance-locked)
+
+# Reusable workflow another repository can invoke to produce a build of
+# github-matrix-dev/app pinned to a specific Matrix homeserver.
+#
+# Caller repo example (.github/workflows/build-eodb.yml):
+#
+#   jobs:
+#     build:
+#       uses: clovenbradshaw-ctrl/eo-db/.github/workflows/external-build.yml@main
+#       with:
+#         homeserver: matrix.example.org
+#         google_client_id: ${{ vars.VITE_GOOGLE_CLIENT_ID }}
+#         artifact_name: eo-db-build
+#
+# The caller then downloads the `eo-db-build` artifact and ships it however
+# they like (GitHub Pages, static host, CDN). Because VITE_MATRIX_HOMESERVER
+# is baked in at build time, the resulting app refuses to authenticate
+# against any other Matrix instance.
+
+on:
+  workflow_call:
+    inputs:
+      homeserver:
+        description: Matrix homeserver the build is locked to (e.g. matrix.example.org)
+        required: true
+        type: string
+      google_client_id:
+        description: Optional Google OAuth2 client ID to bake in
+        required: false
+        type: string
+        default: ''
+      ref:
+        description: Git ref of this repo to build from (defaults to the ref the caller pinned in `uses:`, via github.workflow_sha)
+        required: false
+        type: string
+        default: ''
+      artifact_name:
+        description: Name of the uploaded build artifact
+        required: false
+        type: string
+        default: eo-db-build
+    outputs:
+      artifact_name:
+        description: Name of the uploaded build artifact
+        value: ${{ inputs.artifact_name }}
+      homeserver:
+        description: Homeserver baked into the build
+        value: ${{ inputs.homeserver }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: clovenbradshaw-ctrl/eo-db
+          # When the caller pins `@v1.2.3` (or any ref) in `uses:`, github.workflow_sha
+          # resolves to that same commit — so by default the source tree matches the
+          # workflow version. Callers can override via the `ref` input.
+          ref: ${{ inputs.ref != '' && inputs.ref || github.workflow_sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: github-matrix-dev/app/package-lock.json
+
+      - name: Install dependencies
+        working-directory: github-matrix-dev/app
+        run: npm ci
+
+      - name: Build (instance-locked)
+        working-directory: github-matrix-dev/app
+        run: npm run build
+        env:
+          VITE_MATRIX_HOMESERVER: ${{ inputs.homeserver }}
+          VITE_GOOGLE_CLIENT_ID: ${{ inputs.google_client_id }}
+
+      - name: Copy standalone /nl/ assets into build output
+        run: |
+          mkdir -p docs/nl
+          cp nl/*.html docs/nl/ 2>/dev/null || true
+          cp nl/*.json docs/nl/ 2>/dev/null || true
+
+      - name: Add .nojekyll
+        run: touch docs/.nojekyll
+
+      - name: Record lock manifest
+        run: |
+          cat > docs/build-manifest.json <<EOF
+          {
+            "homeserver": "${{ inputs.homeserver }}",
+            "workflow_ref": "${{ github.workflow_ref }}",
+            "workflow_sha": "${{ github.workflow_sha }}",
+            "built_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: docs
+          retention-days: 30
