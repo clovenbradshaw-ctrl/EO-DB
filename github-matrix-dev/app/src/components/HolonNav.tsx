@@ -360,6 +360,20 @@ export function HolonNav({ selectedScope, onSelectScope, onSelectSegment, stateP
 
     return [
       {
+        label: `${SLICE_TYPE_META.schema.icon} View schema`,
+        onClick: () => {
+          sliceStore.openScope(target);
+          sliceStore.activateSlice(target, {
+            id: '__schema', name: 'Schema', scope: target, sliceType: 'schema',
+            config: { columnOrder: [], columnWidths: {}, hiddenColumns: [], sorts: [], filters: [], filterConjunction: 'AND', showLastUpdated: false },
+            visibility: 'shared', createdBy: '', createdAt: '', updatedAt: '',
+          });
+          onSelectScope(target);
+          setContextMenu(null);
+        },
+      },
+      { label: '', onClick: () => { /* noop */ }, separator: true },
+      {
         label: currentName ? `Rename (${currentName})` : 'Set display name...',
         onClick: () => {
           setRenaming({ target, currentName });

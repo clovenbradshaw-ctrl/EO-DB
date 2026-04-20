@@ -98,6 +98,7 @@ export function SliceTabs({ openScopes, activeScope, onSelectScope, onCloseScope
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; sliceId: string } | null>(null);
+  const [scopeCtxMenu, setScopeCtxMenu] = useState<{ x: number; y: number; scope: string } | null>(null);
 
   // Load saved slices from DB for all open scopes
   useEffect(() => {
@@ -353,6 +354,41 @@ export function SliceTabs({ openScopes, activeScope, onSelectScope, onCloseScope
     } catch (err) { console.error('[SliceTabs] slice op failed:', err); }
   }
 
+  function activateSchemaForScope(sc: string) {
+    sliceStore.activateSlice(sc, {
+      id: '__schema', name: 'Schema', scope: sc, sliceType: 'schema',
+      config: { columnOrder: [], columnWidths: {}, hiddenColumns: [], sorts: [], filters: [], filterConjunction: 'AND', showLastUpdated: false },
+      visibility: 'shared', createdBy: '', createdAt: '', updatedAt: '',
+    });
+  }
+
+  function getScopeCtxMenuItems(sc: string): ContextMenuItem[] {
+    const scSig = sliceStore.getSig(sc);
+    const isSchema = scSig.activeSliceId === '__schema';
+    const collectionName = formatName(sc.split('.').pop() || sc);
+    return [
+      { label: collectionName, onClick: () => {}, header: true },
+      {
+        label: `${SLICE_TYPE_META.grid.icon} Grid view`,
+        onClick: () => {
+          if (sc !== activeScope) onSelectScope(sc);
+          sliceStore.resetToDefault(sc);
+          setScopeCtxMenu(null);
+        },
+        disabled: scSig.activeSliceId === null,
+      },
+      {
+        label: `${SLICE_TYPE_META.schema.icon} View schema`,
+        onClick: () => {
+          if (sc !== activeScope) onSelectScope(sc);
+          activateSchemaForScope(sc);
+          setScopeCtxMenu(null);
+        },
+        disabled: isSchema,
+      },
+    ];
+  }
+
   function getCtxMenuItems(sliceId: string): ContextMenuItem[] {
     const slice = sliceStore.savedSlices[sliceId];
     if (!slice) return [];
@@ -410,32 +446,26 @@ export function SliceTabs({ openScopes, activeScope, onSelectScope, onCloseScope
 
           return (
             <div key={sc} className="eo-tab-group" style={groupStyle}>
-              {/* Schema tab — first */}
+              {/* Grid tab — right-click opens schema/slice context menu */}
               <button
-                className={`eo-tab${isActive && scSig.activeSliceId === '__schema' ? ' eo-tab-active' : ''}`}
-                style={isActive && scSig.activeSliceId === '__schema' ? s.tabActive : s.tab}
-                onClick={() => handleTabClick(() => sliceStore.activateSlice(sc, {
-                  id: '__schema', name: 'Schema', scope: sc, sliceType: 'schema',
-                  config: { columnOrder: [], columnWidths: {}, hiddenColumns: [], sorts: [], filters: [], filterConjunction: 'AND', showLastUpdated: false },
-                  visibility: 'shared', createdBy: '', createdAt: '', updatedAt: '',
-                }))}
-              >
-                <span style={s.tabIcon}>{SLICE_TYPE_META.schema.icon}</span>
-                <span style={s.tabCollectionLabel}>{collectionName}</span>
-                <span style={s.tabSeparator}>/</span>
-                <span style={s.tabViewLabel}>Schema</span>
-              </button>
-
-              {/* Grid tab — second */}
-              <button
-                className={`eo-tab${isActive && scSig.activeSliceId === null ? ' eo-tab-active' : ''}`}
-                style={isActive && scSig.activeSliceId === null ? s.tabActive : s.tab}
+                className={`eo-tab${isActive && (scSig.activeSliceId === null || scSig.activeSliceId === '__schema') ? ' eo-tab-active' : ''}`}
+                style={isActive && (scSig.activeSliceId === null || scSig.activeSliceId === '__schema') ? s.tabActive : s.tab}
                 onClick={() => handleTabClick(() => sliceStore.resetToDefault(sc))}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  setScopeCtxMenu({ x: e.clientX, y: e.clientY, scope: sc });
+                }}
               >
-                <span style={s.tabIcon}>{SLICE_TYPE_META.grid.icon}</span>
+                <span style={s.tabIcon}>
+                  {isActive && scSig.activeSliceId === '__schema'
+                    ? SLICE_TYPE_META.schema.icon
+                    : SLICE_TYPE_META.grid.icon}
+                </span>
                 <span style={s.tabCollectionLabel}>{collectionName}</span>
                 <span style={s.tabSeparator}>/</span>
-                <span style={s.tabViewLabel}>Grid</span>
+                <span style={s.tabViewLabel}>
+                  {isActive && scSig.activeSliceId === '__schema' ? 'Schema' : 'Grid'}
+                </span>
               </button>
 
               {/* Saved slice tabs — filtered by active user type */}
@@ -771,6 +801,16 @@ export function SliceTabs({ openScopes, activeScope, onSelectScope, onCloseScope
           y={ctxMenu.y}
           items={getCtxMenuItems(ctxMenu.sliceId)}
           onClose={() => setCtxMenu(null)}
+        />
+      )}
+
+      {/* Scope (grid tab) context menu */}
+      {scopeCtxMenu && (
+        <ContextMenu
+          x={scopeCtxMenu.x}
+          y={scopeCtxMenu.y}
+          items={getScopeCtxMenuItems(scopeCtxMenu.scope)}
+          onClose={() => setScopeCtxMenu(null)}
         />
       )}
     </div>
