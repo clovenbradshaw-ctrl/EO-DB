@@ -6,6 +6,7 @@
  */
 
 import type { EoState } from '../db/types';
+import { isDeleted } from '../db/tombstone';
 import type { FilterDefinition } from './filter-types';
 
 // ---------------------------------------------------------------------------
@@ -44,6 +45,10 @@ export function buildTree(states: EoState[], statePrefix: string): TreeNode[] {
 
   for (const s of states) {
     if (s.value?._alias) continue;
+    // Tombstoned records are soft-deleted via db/tombstone.ts. The grid
+    // filters them out in filterDirect(), so the sidebar must too — otherwise
+    // counts disagree with what the user actually sees.
+    if (isDeleted(s)) continue;
     // Skip space-level entries — space navigation is handled by the space selector,
     // not the objects tree. Each space has its own isolated IDB so showing the
     // "space" category is redundant.
@@ -99,7 +104,7 @@ export function buildTree(states: EoState[], statePrefix: string): TreeNode[] {
       const cpSeg = cp.split('.').pop();
       if (cpSeg?.startsWith('_')) continue;
       const childEntry = pathSet.get(cp);
-      if (childEntry?.state) {
+      if (childEntry?.state && !isDeleted(childEntry.state)) {
         const op = childEntry.state.last_op;
         if (op === 'CON') conCount++;
         else if (op === 'SEG') segCount++;
