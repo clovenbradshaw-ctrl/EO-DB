@@ -23,9 +23,7 @@ import {
 } from '../db/lazy-fold';
 import type { EoEvent, EoEventInput, EoState, HorizonResponse } from '../db/types';
 import type { SyncManager } from '../matrix/sync-manager';
-import type { GDriveSyncService } from '../google-drive/gdrive-sync';
 import type { ResolvedPermissions } from '../permissions/types';
-import type { ManifestState as UserManifest } from '../google-drive/space-permissions';
 import { eventHash } from '../db/hash';
 import { pressureMonitor } from '../perf/pressure-monitor';
 
@@ -112,8 +110,6 @@ interface EoDbState {
   workerClient: FoldWorkerClient | null;
   /** The sync manager for sending events to Matrix */
   syncManager: SyncManager | null;
-  /** The Google Drive sync service for backup */
-  gdriveSync: GDriveSyncService | null;
   /** Recent events processed through the fold */
   recentEvents: EoEvent[];
   /** Current sequence number */
@@ -122,8 +118,6 @@ interface EoDbState {
   ready: boolean;
   /** Resolved permissions for the current user in the current space */
   resolvedPermissions: ResolvedPermissions | null;
-  /** Drive-backed permission manifest for the current user (null if not loaded) */
-  userManifest: UserManifest | null;
   /** Currently active user type (selected via header switcher) */
   activeUserType: string | null;
 
@@ -146,9 +140,7 @@ interface EoDbState {
   initLocal: (dbName?: string) => Promise<void>;
 
   setSyncManager: (syncManager: SyncManager) => void;
-  setGDriveSync: (gdriveSync: GDriveSyncService) => void;
   setPermissions: (permissions: ResolvedPermissions | null) => void;
-  setUserManifest: (manifest: UserManifest | null) => void;
   /**
    * Set the active persona. When `persist` is false (admin "preview as"),
    * the selection is NOT written to localStorage, so on refresh the user
@@ -179,12 +171,10 @@ export const useEoStore = create<EoDbState>((set, get) => ({
   store: null,
   workerClient: null,
   syncManager: null,
-  gdriveSync: null,
   recentEvents: [],
   lastSeq: 0,
   ready: false,
   resolvedPermissions: null,
-  userManifest: null,
   activeUserType: null,
   onDispatch: null,
 
@@ -328,16 +318,8 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     set({ syncManager });
   },
 
-  setGDriveSync(gdriveSync: GDriveSyncService) {
-    set({ gdriveSync });
-  },
-
   setPermissions(permissions: ResolvedPermissions | null) {
     set({ resolvedPermissions: permissions });
-  },
-
-  setUserManifest(manifest: UserManifest | null) {
-    set({ userManifest: manifest });
   },
 
   setActiveUserType(typeId: string | null, persist: boolean = true) {
@@ -391,8 +373,6 @@ export const useEoStore = create<EoDbState>((set, get) => ({
           console.warn('[EO-DB] broadcastLocalEvent failed:', e)
         );
       }
-      // Then persist to Google Drive
-      get().gdriveSync?.saveOp(fullEvent).catch(e => console.warn('[EO-DB] saveOp failed:', e));
     });
 
     get().onDispatch?.(populatedEvent);
@@ -420,9 +400,8 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     //      allocations are collectable as soon as the call returns, so
     //      peak memory is O(chunk) not O(total).
     //
-    //   2. We don't accumulate folded events. Previously `imported` grew
-    //      to a 1M-entry array just so we could gate a fullPushToGDrive on
-    //      whether anything was imported. Replaced with a boolean.
+    //   2. We don't accumulate folded events — just a boolean tracking
+    //      whether anything was imported.
     //
     //   3. We throttle progress and recent-events updates. React doesn't
     //      need 20,000 re-renders to show a progress bar — ~30/second is
@@ -541,16 +520,6 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     if (anyImported) emitStoreUpdate(Math.max(lastSeq, maxFoldedSeq));
     onProgress?.(totalEvents, totalEvents);
 
-    const { gdriveSync } = get();
-    if (gdriveSync && anyImported) {
-      // Write the full log immediately so the log file is up-to-date on Drive
-      // (not just the recent buffer). This ensures a reload from a cleared OPFS
-      // always finds the imported data in the log file.
-      gdriveSync.fullPushToGDrive().catch((e) =>
-        console.warn('[EO-DB] Google Drive full push after import failed:', e),
-      );
-    }
-
     return lastSeq;
   },
 
@@ -579,7 +548,7 @@ export const useEoStore = create<EoDbState>((set, get) => ({
   },
 
   async manualSnapshot() {
-    const { store, workerClient, recentEvents, gdriveSync } = get();
+    const { store, workerClient, recentEvents } = get();
     if (!store) throw new Error('Store not initialized');
 
     // Persist the current in-memory KV state to OPFS first. Without this, a
@@ -603,10 +572,7 @@ export const useEoStore = create<EoDbState>((set, get) => ({
       );
     }
 
-    if (gdriveSync) {
-      await gdriveSync.forceSave();
-    }
-    return { mxc: 'gdrive', seq: lastSeq };
+    return { mxc: 'local', seq: lastSeq };
   },
 
   async manualMatrixMediaSnapshot() {
@@ -627,73 +593,12 @@ export const useEoStore = create<EoDbState>((set, get) => ({
       store: null,
       workerClient: null,
       syncManager: null,
-      gdriveSync: null,
       ready: false,
       recentEvents: [],
       lastSeq: 0,
       resolvedPermissions: null,
-      userManifest: null,
       activeUserType: null,
       onDispatch: null,
     });
   },
 }));
-
-/**
- * Throttled per-event listener for bulk-import paths that fold events
- * directly through `processEvent` (e.g. Airtable hydration / update sync,
- * which iterate records one at a time rather than calling `batchImport`).
- *
- * Without this, the events land in the MemoryStore + OPFS log, but the
- * Zustand `recentEvents` / `lastSeq` state is never bumped — so subscribers
- * like TableView (which re-fetches on `lastSeq` change, see TableView.tsx
- * deps array) never refresh and the import appears to vanish until the next
- * page reload.
- *
- * Returns `{ onEvent, finalize }`. Pass `onEvent` as the per-event hook to
- * the import flow, and call `finalize()` after the import settles to flush
- * any pending update so the UI sees the final state immediately.
- *
- * Updates are throttled to ~10 Hz and the recents tail is capped at 100
- * events (mirroring `batchImport`'s RECENTS_WINDOW) so a 30k-event Airtable
- * hydration causes at most a few hundred Zustand updates rather than 30k.
- */
-export function createImportProgressListener(): {
-  onEvent: (event: EoEvent) => void;
-  finalize: () => void;
-} {
-  const RECENTS_WINDOW = 100;
-  const FLUSH_MS = 100;
-  let recentsTail: EoEvent[] = [];
-  let maxSeq = 0;
-  let dirty = false;
-  let pending: ReturnType<typeof setTimeout> | null = null;
-
-  const flush = () => {
-    if (pending !== null) {
-      clearTimeout(pending);
-      pending = null;
-    }
-    if (!dirty) return;
-    const snapshot = recentsTail;
-    const seq = maxSeq;
-    recentsTail = [];
-    dirty = false;
-    useEoStore.setState((state) => ({
-      recentEvents: [...state.recentEvents, ...snapshot].slice(-RECENTS_WINDOW),
-      lastSeq: Math.max(state.lastSeq, seq),
-    }));
-  };
-
-  const onEvent = (event: EoEvent): void => {
-    recentsTail.push(event);
-    if (recentsTail.length > RECENTS_WINDOW) recentsTail.shift();
-    if (event.seq > maxSeq) maxSeq = event.seq;
-    dirty = true;
-    if (pending === null) {
-      pending = setTimeout(flush, FLUSH_MS);
-    }
-  };
-
-  return { onEvent, finalize: flush };
-}

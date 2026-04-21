@@ -38,12 +38,8 @@ interface WizardState {
   step: WizardStep;
   editingConnectionId: string | null;
   // Step 1 — common
-  sourceType: 'airtable' | 'generic_rest';
+  sourceType: 'generic_rest';
   label: string;
-  // Step 1 — Airtable
-  apiKey: string;
-  baseId: string;
-  tableId: string;
   // Step 1 — Generic REST
   baseUrl: string;
   authType: GenericRestCredentials['authType'];
@@ -65,11 +61,8 @@ const WIZARD_INIT: WizardState = {
   open: false,
   step: 1,
   editingConnectionId: null,
-  sourceType: 'airtable',
+  sourceType: 'generic_rest',
   label: '',
-  apiKey: '',
-  baseId: '',
-  tableId: '',
   baseUrl: '',
   authType: 'none',
   authValue: '',
@@ -119,34 +112,19 @@ export function ApiConnectionsView() {
 
   function openEditWizard(config: ApiConnectionConfig) {
     const creds = config.credentials;
-    if (creds.sourceType === 'airtable') {
-      setWiz({
-        ...WIZARD_INIT,
-        open: true,
-        editingConnectionId: config.connectionId,
-        sourceType: 'airtable',
-        label: config.label,
-        apiKey: creds.apiKey,
-        baseId: creds.baseId,
-        tableId: creds.tableId,
-        fieldMappings: { ...config.fieldMappings },
-        minSyncIntervalMs: config.minSyncIntervalMs ?? 60_000,
-      });
-    } else if (creds.sourceType === 'generic_rest') {
-      setWiz({
-        ...WIZARD_INIT,
-        open: true,
-        editingConnectionId: config.connectionId,
-        sourceType: 'generic_rest',
-        label: config.label,
-        baseUrl: creds.baseUrl,
-        authType: creds.authType,
-        authValue: creds.authValue,
-        recordsPath: creds.recordsPath,
-        fieldMappings: { ...config.fieldMappings },
-        minSyncIntervalMs: config.minSyncIntervalMs ?? 60_000,
-      });
-    }
+    setWiz({
+      ...WIZARD_INIT,
+      open: true,
+      editingConnectionId: config.connectionId,
+      sourceType: 'generic_rest',
+      label: config.label,
+      baseUrl: creds.baseUrl,
+      authType: creds.authType,
+      authValue: creds.authValue,
+      recordsPath: creds.recordsPath,
+      fieldMappings: { ...config.fieldMappings },
+      minSyncIntervalMs: config.minSyncIntervalMs ?? 60_000,
+    });
   }
 
   function closeWizard() {
@@ -160,20 +138,13 @@ export function ApiConnectionsView() {
   // Step 1 → 2: test connection and discover fields
   async function handleTestAndContinue() {
     wizSet({ stepLoading: true, stepError: null, stepSuccess: null });
-    const creds: ApiCredentials = wiz.sourceType === 'airtable'
-      ? {
-          sourceType: 'airtable',
-          apiKey: wiz.apiKey.trim(),
-          baseId: wiz.baseId.trim(),
-          tableId: wiz.tableId.trim(),
-        }
-      : {
-          sourceType: 'generic_rest',
-          baseUrl: wiz.baseUrl.trim(),
-          authType: wiz.authType,
-          authValue: wiz.authValue.trim(),
-          recordsPath: wiz.recordsPath.trim(),
-        };
+    const creds: ApiCredentials = {
+      sourceType: 'generic_rest',
+      baseUrl: wiz.baseUrl.trim(),
+      authType: wiz.authType,
+      authValue: wiz.authValue.trim(),
+      recordsPath: wiz.recordsPath.trim(),
+    };
     try {
       const fields = await testAndDiscover(creds);
       // Pre-fill mappings: existing mapping if editing, else source field name
@@ -199,23 +170,14 @@ export function ApiConnectionsView() {
   // Step 3: save
   async function handleSave() {
     wizSet({ stepLoading: true, stepError: null });
-    const creds: ApiCredentials = wiz.sourceType === 'airtable'
-      ? {
-          sourceType: 'airtable',
-          apiKey: wiz.apiKey.trim(),
-          baseId: wiz.baseId.trim(),
-          tableId: wiz.tableId.trim(),
-        }
-      : {
-          sourceType: 'generic_rest',
-          baseUrl: wiz.baseUrl.trim(),
-          authType: wiz.authType,
-          authValue: wiz.authValue.trim(),
-          recordsPath: wiz.recordsPath.trim(),
-        };
-    const fallbackLabel = wiz.sourceType === 'airtable'
-      ? `${wiz.baseId}/${wiz.tableId}`
-      : wiz.baseUrl;
+    const creds: ApiCredentials = {
+      sourceType: 'generic_rest',
+      baseUrl: wiz.baseUrl.trim(),
+      authType: wiz.authType,
+      authValue: wiz.authValue.trim(),
+      recordsPath: wiz.recordsPath.trim(),
+    };
+    const fallbackLabel = wiz.baseUrl;
     // Build _fieldTypes map so the adapter can detect lastModifiedTime fields
     const fieldTypes: Record<string, string> = {};
     for (const f of wiz.discoveredFields) {
@@ -292,16 +254,9 @@ export function ApiConnectionsView() {
             <div style={s.cardTitle}>{config.label}</div>
             <div style={s.cardMeta}>
               <span style={s.pill}>{config.credentials.sourceType}</span>
-              {'baseId' in config.credentials && (
-                <span style={s.cardSub}>
-                  {config.credentials.baseId} / {config.credentials.tableId}
-                </span>
-              )}
-              {'baseUrl' in config.credentials && (
-                <span style={s.cardSub}>
-                  {config.credentials.baseUrl}
-                </span>
-              )}
+              <span style={s.cardSub}>
+                {config.credentials.baseUrl}
+              </span>
             </div>
             <div style={s.cardSub}>
               {mappedFieldCount(config)} fields mapped ·{' '}
@@ -402,28 +357,6 @@ function Step1({ wiz, wizSet }: { wiz: WizardState; wizSet: (p: Partial<WizardSt
   return (
     <div style={s.stepBody}>
       <div style={s.fieldGroup}>
-        <label style={s.label}>Source type</label>
-        <div style={s.radioGroup}>
-          <label style={s.radioLabel}>
-            <input
-              type="radio"
-              checked={wiz.sourceType === 'airtable'}
-              onChange={() => wizSet({ sourceType: 'airtable' })}
-            />
-            {' '}Airtable
-          </label>
-          <label style={s.radioLabel}>
-            <input
-              type="radio"
-              checked={wiz.sourceType === 'generic_rest'}
-              onChange={() => wizSet({ sourceType: 'generic_rest' })}
-            />
-            {' '}Generic REST
-          </label>
-        </div>
-      </div>
-
-      <div style={s.fieldGroup}>
         <label style={s.label}>Label</label>
         <input
           style={s.input}
@@ -434,115 +367,67 @@ function Step1({ wiz, wizSet }: { wiz: WizardState; wizSet: (p: Partial<WizardSt
         />
       </div>
 
-      {wiz.sourceType === 'airtable' && (
-        <>
-          <div style={s.fieldGroup}>
-            <label style={s.label}>Base ID</label>
-            <input
-              style={s.input}
-              value={wiz.baseId}
-              onChange={(e) => wizSet({ baseId: e.target.value })}
-              placeholder="appXYZ123"
-              aria-label="Airtable base ID"
-              autoComplete="off"
-            />
-          </div>
+      <div style={s.fieldGroup}>
+        <label style={s.label}>Base URL</label>
+        <input
+          style={s.input}
+          value={wiz.baseUrl}
+          onChange={(e) => wizSet({ baseUrl: e.target.value })}
+          placeholder="https://api.example.com/v1/users"
+          aria-label="REST endpoint URL"
+          autoComplete="off"
+        />
+      </div>
 
-          <div style={s.fieldGroup}>
-            <label style={s.label}>Table ID or name</label>
-            <input
-              style={s.input}
-              value={wiz.tableId}
-              onChange={(e) => wizSet({ tableId: e.target.value })}
-              placeholder="tblABC456 or Contacts"
-              aria-label="Airtable table ID or name"
-              autoComplete="off"
-            />
-          </div>
+      <div style={s.fieldGroup}>
+        <label style={s.label}>Auth type</label>
+        <select
+          style={s.input}
+          value={wiz.authType}
+          onChange={(e) => wizSet({ authType: e.target.value as GenericRestCredentials['authType'] })}
+          aria-label="Auth type"
+        >
+          <option value="none">No Auth</option>
+          <option value="bearer">Bearer Token</option>
+          <option value="apikey">API Key Header</option>
+        </select>
+      </div>
 
-          <div style={s.fieldGroup}>
-            <label style={s.label}>API Key (Personal Access Token)</label>
-            <input
-              style={s.input}
-              type="password"
-              value={wiz.apiKey}
-              onChange={(e) => wizSet({ apiKey: e.target.value })}
-              placeholder="pat..."
-              aria-label="Airtable API key"
-              autoComplete="new-password"
-            />
-            <div style={s.hint}>
-              Stored encrypted in room state — shared with all space members.
-            </div>
+      {wiz.authType !== 'none' && (
+        <div style={s.fieldGroup}>
+          <label style={s.label}>
+            {wiz.authType === 'bearer' ? 'Bearer Token' : 'API Key Value'}
+          </label>
+          <input
+            style={s.input}
+            type="password"
+            value={wiz.authValue}
+            onChange={(e) => wizSet({ authValue: e.target.value })}
+            placeholder={wiz.authType === 'bearer' ? 'eyJ…' : 'your-api-key'}
+            aria-label="Auth value"
+            autoComplete="new-password"
+          />
+          <div style={s.hint}>
+            Stored encrypted in room state — shared with all space members.
           </div>
-        </>
+        </div>
       )}
 
-      {wiz.sourceType === 'generic_rest' && (
-        <>
-          <div style={s.fieldGroup}>
-            <label style={s.label}>Base URL</label>
-            <input
-              style={s.input}
-              value={wiz.baseUrl}
-              onChange={(e) => wizSet({ baseUrl: e.target.value })}
-              placeholder="https://api.example.com/v1/users"
-              aria-label="REST endpoint URL"
-              autoComplete="off"
-            />
-          </div>
-
-          <div style={s.fieldGroup}>
-            <label style={s.label}>Auth type</label>
-            <select
-              style={s.input}
-              value={wiz.authType}
-              onChange={(e) => wizSet({ authType: e.target.value as GenericRestCredentials['authType'] })}
-              aria-label="Auth type"
-            >
-              <option value="none">No Auth</option>
-              <option value="bearer">Bearer Token</option>
-              <option value="apikey">API Key Header</option>
-            </select>
-          </div>
-
-          {wiz.authType !== 'none' && (
-            <div style={s.fieldGroup}>
-              <label style={s.label}>
-                {wiz.authType === 'bearer' ? 'Bearer Token' : 'API Key Value'}
-              </label>
-              <input
-                style={s.input}
-                type="password"
-                value={wiz.authValue}
-                onChange={(e) => wizSet({ authValue: e.target.value })}
-                placeholder={wiz.authType === 'bearer' ? 'eyJ…' : 'your-api-key'}
-                aria-label="Auth value"
-                autoComplete="new-password"
-              />
-              <div style={s.hint}>
-                Stored encrypted in room state — shared with all space members.
-              </div>
-            </div>
-          )}
-
-          <div style={s.fieldGroup}>
-            <label style={s.label}>Records path</label>
-            <input
-              style={s.input}
-              value={wiz.recordsPath}
-              onChange={(e) => wizSet({ recordsPath: e.target.value })}
-              placeholder="data.items"
-              aria-label="Records path"
-              autoComplete="off"
-            />
-            <div style={s.hint}>
-              Dot-path to the records array in the JSON response (e.g. <code>data.items</code>).
-              Leave blank if the root response is already an array.
-            </div>
-          </div>
-        </>
-      )}
+      <div style={s.fieldGroup}>
+        <label style={s.label}>Records path</label>
+        <input
+          style={s.input}
+          value={wiz.recordsPath}
+          onChange={(e) => wizSet({ recordsPath: e.target.value })}
+          placeholder="data.items"
+          aria-label="Records path"
+          autoComplete="off"
+        />
+        <div style={s.hint}>
+          Dot-path to the records array in the JSON response (e.g. <code>data.items</code>).
+          Leave blank if the root response is already an array.
+        </div>
+      </div>
 
       {wiz.stepError && <div style={s.errorMsg} role="alert">{wiz.stepError}</div>}
       {wiz.stepSuccess && <div style={s.successMsg}>{wiz.stepSuccess}</div>}
@@ -637,41 +522,20 @@ function Step3({ wiz }: { wiz: WizardState }) {
 
   const mappedCount = Object.values(wiz.fieldMappings).filter(Boolean).length;
   const totalCount = wiz.discoveredFields.length;
-  const hasLastModified = wiz.discoveredFields.some(
-    (f) => f.type === 'lastModifiedTime' && wiz.fieldMappings[f.id],
-  );
 
-  const fallbackLabel = wiz.sourceType === 'airtable'
-    ? `${wiz.baseId}/${wiz.tableId}`
-    : wiz.baseUrl;
+  const fallbackLabel = wiz.baseUrl;
 
   return (
     <div style={s.stepBody}>
       <div style={s.reviewCard}>
         <ReviewRow label="Label" value={wiz.label || fallbackLabel} />
-        <ReviewRow label="Source" value={wiz.sourceType === 'airtable' ? 'Airtable' : 'Generic REST'} />
-        {wiz.sourceType === 'airtable' && (
-          <>
-            <ReviewRow label="Base ID" value={wiz.baseId} />
-            <ReviewRow label="Table" value={wiz.tableId} />
-          </>
-        )}
-        {wiz.sourceType === 'generic_rest' && (
-          <>
-            <ReviewRow label="Base URL" value={wiz.baseUrl} />
-            <ReviewRow label="Auth type" value={wiz.authType} />
-            <ReviewRow label="Records path" value={wiz.recordsPath || '(root array)'} />
-          </>
-        )}
+        <ReviewRow label="Source" value="Generic REST" />
+        <ReviewRow label="Base URL" value={wiz.baseUrl} />
+        <ReviewRow label="Auth type" value={wiz.authType} />
+        <ReviewRow label="Records path" value={wiz.recordsPath || '(root array)'} />
         <ReviewRow label="Fields mapped" value={`${mappedCount} / ${totalCount}`} />
         <ReviewRow label="Write-back" value={wiz.writeBackEnabled ? 'Enabled' : 'Disabled'} />
         <ReviewRow label="Min sync interval" value={intervalLabel(wiz.minSyncIntervalMs)} />
-        {wiz.sourceType === 'airtable' && (
-          <ReviewRow
-            label="Sync signal"
-            value={hasLastModified ? '⟳ lastModifiedTime field detected' : 'createdTime (fallback)'}
-          />
-        )}
       </div>
       <div style={s.hint}>
         Credentials are stored encrypted in this space's Matrix room state
@@ -711,9 +575,7 @@ function WizardFooter({
   const { theme } = useTheme();
   const s = makeStyles(theme);
 
-  const canTest = wiz.sourceType === 'airtable'
-    ? Boolean(wiz.apiKey.trim() && wiz.baseId.trim() && wiz.tableId.trim())
-    : Boolean(wiz.baseUrl.trim());
+  const canTest = Boolean(wiz.baseUrl.trim());
 
   return (
     <div style={s.footerRow}>

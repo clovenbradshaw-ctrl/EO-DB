@@ -39,8 +39,6 @@ jobs:
       - name: Build
         working-directory: github-matrix-dev/app
         run: npm run build
-        env:
-          VITE_GOOGLE_CLIENT_ID: ${{ vars.VITE_GOOGLE_CLIENT_ID }}
 
       - name: Copy standalone /nl/ assets into build output
         # Ships the self-contained HTML plus any baked centroids/alignment

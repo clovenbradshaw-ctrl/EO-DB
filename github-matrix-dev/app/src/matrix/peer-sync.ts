@@ -33,7 +33,6 @@ const SYNC_HELLO = _syncTypes.hello;
 const SYNC_OFFER = _syncTypes.offer;
 const SYNC_REQUEST = _syncTypes.request;
 const SYNC_EVENTS = _syncTypes.events;
-const SYNC_GDRIVE = _syncTypes.gdrive;
 
 const BATCH_SIZE = 50;
 
@@ -82,15 +81,7 @@ export class PeerSync {
   private handlerChain: Promise<void> = Promise.resolve();
 
   /**
-   * Called when a peer signals that new ops were written to GDrive.
-   * Wire this to gdriveSync.triggerImmediateCheck() in the app shell.
-   */
-  onGDriveUpdate?: () => void;
-
-  /**
    * Called when the server signals that this user's permissions have changed.
-   * Wire this to re-fetch the Drive UserManifest and call
-   * useEoStore.getState().setUserManifest() in the app shell.
    */
   onPermissionsUpdated?: () => void;
 
@@ -288,12 +279,7 @@ export class PeerSync {
       case SYNC_EVENTS:
         await this.processIncomingPeerEvents(content);
         break;
-      case SYNC_GDRIVE:
-        // A peer wrote new ops to GDrive — trigger an immediate pull instead of waiting 15s.
-        this.onGDriveUpdate?.();
-        break;
       case PERMISSIONS_UPDATED:
-        // The admin updated this user's permissions — re-fetch the Drive manifest.
         this.onPermissionsUpdated?.();
         break;
     }
@@ -476,21 +462,6 @@ export class PeerSync {
           }),
         );
       } catch { /* best-effort — gap-fill is the safety net */ }
-    }
-  }
-
-  async broadcastGDriveUpdate(seq: number): Promise<void> {
-    const room = this.client.getRoom(this.roomId);
-    if (!room) return;
-    const myUserId = this.client.getUserId();
-    const members = room.getJoinedMembers().filter(m => m.userId !== myUserId);
-    for (const member of members) {
-      try {
-        await this.client.sendToDevice(
-          SYNC_GDRIVE,
-          toDeviceContent(member.userId, '*', { seq, room_id: this.roomId }),
-        );
-      } catch { /* best-effort */ }
     }
   }
 

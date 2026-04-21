@@ -19,8 +19,8 @@
  *     as every other mutation, so every device converges to the same
  *     "record is deleted" view without bespoke wiring.
  *   - Idempotent. The caller supplies a stable `client_event_id` derived
- *     from the deletion source (e.g. an Airtable webhook payload) so replays
- *     dedup via the existing idem:{id} check in the fold.
+ *     from the deletion source so replays dedup via the existing
+ *     idem:{id} check in the fold.
  *   - Reversible. A subsequent DEF that sets `_deleted: null` un-tombstones
  *     the record — useful if an upstream system walks back a delete.
  *
@@ -42,9 +42,9 @@ export const TOMBSTONE_KEY = '_deleted' as const;
 export interface TombstoneMarker {
   /** ISO timestamp when the record was marked deleted. */
   at: string;
-  /** Agent identifier that issued the delete (Matrix user id, "airtable-sync", ...). */
+  /** Agent identifier that issued the delete (Matrix user id, ...). */
   by: string;
-  /** Optional free-form provenance tag — e.g. "airtable-webhook" for webhook-driven deletes. */
+  /** Optional free-form provenance tag for the deletion source. */
   source?: string;
 }
 
@@ -69,9 +69,7 @@ export function isDeleted(state: EoState | null | undefined): boolean {
  * dropped by the fold's idempotency table.
  *
  * Does NOT verify that the target exists. The caller is responsible for
- * gating on presence if "delete a record we never had" should be a no-op
- * (for Airtable webhooks it is: destroyedRecordIds can legitimately refer
- * to records that never reached this device).
+ * gating on presence if "delete a record we never had" should be a no-op.
  */
 export async function markDeleted(
   store: EoStore,
