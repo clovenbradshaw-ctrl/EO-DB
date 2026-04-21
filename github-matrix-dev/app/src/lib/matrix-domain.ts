@@ -42,8 +42,6 @@ export function peerSyncEventTypes(prefix?: string) {
     offer: `${p}.sync.offer`,
     request: `${p}.sync.request`,
     events: `${p}.sync.events`,
-    /** Notification that new ops were written to GDrive — triggers immediate pull. */
-    gdrive: `${p}.sync.gdrive`,
   } as const;
 }
 
@@ -147,17 +145,6 @@ export function swarmV2EventTypes(prefix?: string) {
     control: `${p}.swarm.v2.control`,
     bulk: `${p}.swarm.v2.bulk`,
     hello: `${p}.swarm.v2.hello`,
-  } as const;
-}
-
-/** Airtable sync coordination event types (to-device, ephemeral). */
-export function airtableSyncEventTypes(prefix?: string) {
-  const p = prefix ?? _eventPrefix;
-  return {
-    /** Sync status broadcast after completion (to-device). */
-    signal: `${p}.airtable.signal`,
-    /** Sync lock claim/release (to-device). */
-    lock: `${p}.airtable.lock`,
   } as const;
 }
 

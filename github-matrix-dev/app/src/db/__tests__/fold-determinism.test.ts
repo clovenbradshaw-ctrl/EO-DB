@@ -425,8 +425,7 @@ const runBulk: FoldRunner = async (store, events) => {
  * of event batches produces the same projection as a single bulk import."
  *
  * This exercises the real-world scenario where events arrive in batches
- * (e.g. Airtable sync pages, Matrix room pagination) and each batch is
- * folded independently.
+ * (e.g. Matrix room pagination) and each batch is folded independently.
  *
  * CHUNK_COUNT is 3 — enough to exercise the boundary: first chunk
  * establishes helix state, second chunk encounters existing targets,

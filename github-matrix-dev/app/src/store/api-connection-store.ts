@@ -20,7 +20,6 @@ import type {
   FieldMapping,
 } from '../lib/api-adapters/types';
 import { normalizeTimestamp } from '../lib/api-adapters/types';
-import { AirtableAdapter } from '../lib/api-adapters/airtable';
 import { GenericRestAdapter } from '../lib/api-adapters/generic-rest';
 
 // ─── Record cache ─────────────────────────────────────────────────────────────
@@ -98,52 +97,15 @@ interface ApiConnectionState {
 
 // ─── Adapter factory ──────────────────────────────────────────────────────────
 
-function buildAdapter(
-  credentials: ApiCredentials,
-  fieldMappings: FieldMapping = {},
-): ApiAdapter {
-  if (credentials.sourceType === 'airtable') {
-    // Find the remoteFieldId of any lastModifiedTime field so the adapter
-    // can use it for precise per-record modification timestamps.
-    const lastModifiedFieldId: string | null = null;
-    void lastModifiedFieldId; // resolved below via discoverFields at save time — adapter falls back to createdTime
-    return new AirtableAdapter(
-      credentials.baseId,
-      credentials.tableId,
-      credentials.apiKey,
-      null, // injected after discoverFields if a lastModifiedTime field exists in mappings
-    );
-  }
+function buildAdapter(credentials: ApiCredentials): ApiAdapter {
   if (credentials.sourceType === 'generic_rest') {
     return new GenericRestAdapter(credentials);
   }
   throw new Error(`Adapter for sourceType "${(credentials as ApiCredentials).sourceType}" is not yet implemented`);
 }
 
-/**
- * Re-build adapter with lastModifiedFieldId resolved from the connection's
- * fieldMappings and discovered field metadata.
- * We detect it by checking whether any mapped field has type 'lastModifiedTime'
- * — that information is stored as `_fieldTypes` on the config (see saveConnection).
- */
 function buildAdapterForConnection(config: ApiConnectionConfig): ApiAdapter {
-  const { credentials, fieldMappings } = config;
-  if (credentials.sourceType !== 'airtable') {
-    return buildAdapter(credentials, fieldMappings);
-  }
-
-  // Resolve lastModifiedFieldId from _fieldTypes metadata stored at save time
-  const fieldTypes =
-    '_fieldTypes' in config ? (config as ApiConnectionConfig & { _fieldTypes: Record<string, string> })._fieldTypes : {};
-  const lastModifiedFieldId =
-    Object.entries(fieldMappings).find(([fid]) => fieldTypes[fid] === 'lastModifiedTime')?.[0] ?? null;
-
-  return new AirtableAdapter(
-    credentials.baseId,
-    credentials.tableId,
-    credentials.apiKey,
-    lastModifiedFieldId,
-  );
+  return buildAdapter(config.credentials);
 }
 
 // ─── Field translation helpers ────────────────────────────────────────────────

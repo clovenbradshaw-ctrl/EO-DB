@@ -50,18 +50,6 @@ export interface CollectionHeader {
   encodedThrough: number;
   fileVersion: number;
   encryptionParams?: { algorithm: string; keyId: string };
-  /**
-   * Optional Airtable cursor state embedded in the snapshot. Present on
-   * `.eodb` files produced by {@link ../ingestion/airtable-snapshot}; consumers
-   * that don't care about Airtable MUST ignore this field (msgpack round-trip
-   * preserves it but unknown header fields are already ignored by the reader).
-   *
-   * Shape: `{ [baseId]: { [tableId]: { lastModified?: string, webhookCursor?: number } } }`.
-   * Bootstrapping a fresh device seeds its `meta:at_cursor:*` keys from this
-   * map so the first live `updateSync()` picks up only post-snapshot deltas
-   * instead of re-scanning the whole base.
-   */
-  airtable_cursor?: Record<string, Record<string, { lastModified?: string; webhookCursor?: number }>>;
 }
 
 export interface FrameHeader {

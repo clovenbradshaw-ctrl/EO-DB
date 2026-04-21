@@ -1,12 +1,7 @@
 /**
  * Space metadata persistence — saves space UUIDs and associated IDs to
- * localStorage so the app can reconnect to Google Drive without needing
- * Matrix for space discovery.
- *
- * Replaces the previous IDB-based implementation (root `eo-db` database,
- * `spacemeta:` key prefix).  localStorage is sufficient because space
- * metadata is small (a few fields per space) and does not need the
- * range-scan or encryption capabilities of the old IDB layer.
+ * localStorage so the app can find spaces without needing Matrix for
+ * discovery.
  */
 
 export interface SpaceMeta {
@@ -16,8 +11,6 @@ export interface SpaceMeta {
   spaceName: string;
   /** Matrix main room ID (for signaling) */
   mainRoomId: string;
-  /** Google Drive folder ID (if known) */
-  gdriveFolderId?: string;
   /** Last updated timestamp (ISO) */
   updatedAt: string;
 }
