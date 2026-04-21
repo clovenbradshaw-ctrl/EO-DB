@@ -42,13 +42,18 @@ export function Login({ onLogin, onLocalMode }: LoginProps) {
     });
   }, []);
 
+  const parsed = parseUserInput(username);
+  const usernameHasServer = parsed.server !== null;
+  const effectiveHomeserver = usernameHasServer ? parsed.server! : homeserver;
+  const loginUsername = usernameHasServer ? `@${parsed.user}:${parsed.server}` : username;
+
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     setError('');
     setLoading(true);
 
-    const baseUrl = normalizeHomeserver(homeserver);
-    const userId = toMatrixUserId(username, homeserver);
+    const baseUrl = normalizeHomeserver(effectiveHomeserver);
+    const userId = toMatrixUserId(loginUsername, effectiveHomeserver);
 
     try {
       let session: MatrixSession | null = null;
@@ -62,7 +67,7 @@ export function Login({ onLogin, onLocalMode }: LoginProps) {
         }
       } else {
         try {
-          session = await login(homeserver, username, password);
+          session = await login(effectiveHomeserver, loginUsername, password);
           await saveOfflineCredentials(session, password);
         } catch (err: any) {
           if (isNetworkError(err)) {
@@ -162,15 +167,17 @@ export function Login({ onLogin, onLocalMode }: LoginProps) {
           <div style={s.offlineBadge}>Offline Mode</div>
         )}
         <form onSubmit={handleSubmit} style={s.form}>
-          <input
-            type="text"
-            placeholder="Homeserver (e.g. matrix.org)"
-            aria-label="Homeserver"
-            value={homeserver}
-            onChange={(e) => setHomeserver(e.target.value)}
-            disabled={loading}
-            style={{ ...s.input, fontSize: 13, color: theme.loginTextDim }}
-          />
+          {!usernameHasServer && (
+            <input
+              type="text"
+              placeholder="Homeserver (e.g. matrix.org)"
+              aria-label="Homeserver"
+              value={homeserver}
+              onChange={(e) => setHomeserver(e.target.value)}
+              disabled={loading}
+              style={{ ...s.input, fontSize: 13, color: theme.loginTextDim }}
+            />
+          )}
           <input
             type="text"
             placeholder="Matrix username"
@@ -194,10 +201,10 @@ export function Login({ onLogin, onLocalMode }: LoginProps) {
           {error && <div style={s.error} role="alert">{error}</div>}
           <button
             type="submit"
-            disabled={loading || !homeserver || !username || !password}
+            disabled={loading || !effectiveHomeserver || !username || !password}
             style={{
               ...s.button,
-              ...((loading || !homeserver || !username || !password) ? { opacity: 0.5, cursor: 'not-allowed' } : {}),
+              ...((loading || !effectiveHomeserver || !username || !password) ? { opacity: 0.5, cursor: 'not-allowed' } : {}),
             }}
           >
             {loading ? 'Signing in...' : isOffline ? 'Sign in offline' : 'Sign in'}
@@ -218,6 +225,16 @@ export function Login({ onLogin, onLocalMode }: LoginProps) {
       </div>
     </div>
   );
+}
+
+function parseUserInput(username: string): { user: string; server: string | null } {
+  const trimmed = username.trim();
+  const bare = trimmed.startsWith('@') ? trimmed.slice(1) : trimmed;
+  const colonIdx = bare.indexOf(':');
+  if (colonIdx === -1) return { user: bare, server: null };
+  const user = bare.slice(0, colonIdx);
+  const server = bare.slice(colonIdx + 1);
+  return { user, server: server || null };
 }
 
 function isAminoHomeserver(homeserver: string): boolean {
