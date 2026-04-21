@@ -82,9 +82,10 @@ export function Login({ onLogin, onLocalMode }: LoginProps) {
       }
 
       // In n8n mode no Google account is needed — skip the OAuth step.
-      // In oauth mode, always show the GDrive step so the user explicitly connects.
+      // Google Drive sync is only offered for the official Amino homeserver;
+      // custom homeservers skip the GDrive prompt.
       const syncMode = useGDriveStore.getState().syncMode;
-      if (syncMode === 'n8n') {
+      if (syncMode === 'n8n' || !isAminoHomeserver(session.homeserver)) {
         onLogin(session);
         return;
       }
@@ -217,6 +218,15 @@ export function Login({ onLogin, onLocalMode }: LoginProps) {
       </div>
     </div>
   );
+}
+
+function isAminoHomeserver(homeserver: string): boolean {
+  try {
+    const host = new URL(homeserver).hostname.toLowerCase();
+    return host === 'app.aminoimmigration.com';
+  } catch {
+    return false;
+  }
 }
 
 function isNetworkError(err: any): boolean {
