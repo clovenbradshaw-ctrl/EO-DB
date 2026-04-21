@@ -97,17 +97,6 @@ export function Login({ onLogin, onLocalMode }: LoginProps) {
           <div style={s.offlineBadge}>Offline Mode</div>
         )}
         <form onSubmit={handleSubmit} style={s.form}>
-          {!usernameHasServer && (
-            <input
-              type="text"
-              placeholder="Homeserver (e.g. matrix.org)"
-              aria-label="Homeserver"
-              value={homeserver}
-              onChange={(e) => setHomeserver(e.target.value)}
-              disabled={loading}
-              style={{ ...s.input, fontSize: 13, color: theme.loginTextDim }}
-            />
-          )}
           <input
             type="text"
             placeholder="Matrix username"
@@ -128,6 +117,17 @@ export function Login({ onLogin, onLocalMode }: LoginProps) {
             style={s.input}
             autoComplete="current-password"
           />
+          {!usernameHasServer && (
+            <input
+              type="text"
+              placeholder="Homeserver (e.g. matrix.org)"
+              aria-label="Homeserver"
+              value={homeserver}
+              onChange={(e) => setHomeserver(e.target.value)}
+              disabled={loading}
+              style={{ ...s.input, fontSize: 13, color: theme.loginTextDim }}
+            />
+          )}
           {error && <div style={s.error} role="alert">{error}</div>}
           <button
             type="submit"
