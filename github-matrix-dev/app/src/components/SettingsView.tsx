@@ -12,7 +12,7 @@ import { ArchivedSpacesSection } from './ArchivedSpaces';
 import { AirtableSettingsSection } from './AirtableSettings';
 import { GCalendarSettingsSection } from './GCalendarSettings';
 import { useGDriveStore } from '../google-drive/gdrive-store';
-import { clearTokens, startOAuthFlow, getAccessToken } from '../google-drive/gdrive-oauth';
+import { clearTokens, startOAuthFlow, getAccessToken, isGoogleOAuthConfigured } from '../google-drive/gdrive-oauth';
 import { isAminoHomeserver } from '../lib/matrix-domain';
 import { usePresencePrefs } from '../lib/presence-prefs';
 import { useNLPrefs } from '../lib/nl-prefs';
@@ -83,6 +83,7 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
   const [gdriveTestStatus, setGdriveTestStatus] = useState<string | null>(null);
   const [gdriveTestLoading, setGdriveTestLoading] = useState(false);
   const [oauthLoading, setOauthLoading] = useState(false);
+  const googleOAuthConfigured = useMemo(() => isGoogleOAuthConfigured(), []);
 
   const matrixAccessToken = useGDriveStore((s) => s.matrixAccessToken);
 
@@ -474,7 +475,24 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
                   : 'Each user authenticates with their own Google account via OAuth2 (PKCE). Requires VITE_GOOGLE_CLIENT_ID.'}
               </span>
             </div>
-            {gdriveSyncMode === 'oauth' && !gdriveToken && (
+            {gdriveSyncMode === 'oauth' && !googleOAuthConfigured && (
+              <div style={{
+                padding: '8px 12px',
+                background: `${theme.warning || '#f59e0b'}15`,
+                border: `1px solid ${theme.warning || '#f59e0b'}40`,
+                borderRadius: 4,
+                fontFamily: "'JetBrains Mono', monospace",
+                fontSize: 10,
+                color: theme.warning || '#f59e0b',
+                lineHeight: 1.4,
+              }}>
+                Google OAuth is not configured for this build. The deploy is missing
+                <code style={{ margin: '0 4px' }}>VITE_GOOGLE_CLIENT_ID</code>.
+                Switch to <strong>n8n Proxy</strong> mode above, or rebuild with a Google
+                OAuth client ID set.
+              </div>
+            )}
+            {gdriveSyncMode === 'oauth' && googleOAuthConfigured && !gdriveToken && (
               <button
                 onClick={handleSignInWithGoogle}
                 disabled={oauthLoading}

@@ -97,6 +97,17 @@ export function initGoogleOAuth(clientId: string, redirectUri: string): void {
   _redirectUri = redirectUri;
 }
 
+/**
+ * Returns true when the OAuth module has been initialised with a non-empty
+ * client ID. Callers should use this to gate UI (disable sign-in buttons,
+ * show a "not configured" banner) instead of attempting the flow and
+ * catching the thrown error. `VITE_GOOGLE_CLIENT_ID` must be set at build
+ * time for the deployed app to have a client ID.
+ */
+export function isGoogleOAuthConfigured(): boolean {
+  return !!_clientId;
+}
+
 // ──────────────────────────────────────────────────────────────
 // PKCE helpers
 // ──────────────────────────────────────────────────────────────
@@ -125,7 +136,7 @@ async function generateCodeChallenge(verifier: string): Promise<string> {
 
 async function buildAuthUrl(mode: 'popup' | 'redirect'): Promise<{ url: string; verifier: string }> {
   if (!_clientId) {
-    throw new Error('[EO-DB] Google OAuth not initialised — call initGoogleOAuth() first');
+    throw new Error('Google OAuth is not configured for this deployment (VITE_GOOGLE_CLIENT_ID is unset). Use n8n Proxy mode or rebuild with a Google OAuth client ID.');
   }
   const verifier = await generateCodeVerifier();
   const challenge = await generateCodeChallenge(verifier);

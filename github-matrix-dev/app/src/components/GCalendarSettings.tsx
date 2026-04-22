@@ -12,7 +12,7 @@ import { useTheme, type Theme } from '../theme';
 import { useGCalendarStore } from '../google-calendar/gcalendar-store';
 import { useGDriveStore } from '../google-drive/gdrive-store';
 import { pullCalendarEvents, scopeForCalendar } from '../google-calendar/gcalendar-sync';
-import { startOAuthFlow } from '../google-calendar/gcalendar-oauth';
+import { startOAuthFlow, isGoogleOAuthConfigured } from '../google-calendar/gcalendar-oauth';
 
 export function GCalendarSettingsSection() {
   const { theme } = useTheme();
@@ -36,6 +36,7 @@ export function GCalendarSettingsSection() {
 
   const connected = !!gdriveToken;
   const oauthMode = gdriveSyncMode === 'oauth';
+  const oauthConfigured = isGoogleOAuthConfigured();
   const activeWritable = activeCalendarId
     ? writableCalendars.has(activeCalendarId)
     : false;
@@ -79,7 +80,15 @@ export function GCalendarSettingsSection() {
         </div>
       )}
 
-      {oauthMode && !connected && (
+      {oauthMode && !oauthConfigured && (
+        <div style={s.warning}>
+          Google OAuth is not configured for this build (missing
+          <code style={{ margin: '0 4px' }}>VITE_GOOGLE_CLIENT_ID</code>).
+          Calendar sign-in is disabled.
+        </div>
+      )}
+
+      {oauthMode && oauthConfigured && !connected && (
         <div style={s.row}>
           <button style={s.primaryBtn} onClick={handleSignIn}>
             Sign in with Google
