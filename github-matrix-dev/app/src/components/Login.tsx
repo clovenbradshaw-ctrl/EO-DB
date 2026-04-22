@@ -1,7 +1,7 @@
 import { useState, useEffect, type FormEvent } from 'react';
 import { login, normalizeHomeserver, toMatrixUserId, type MatrixSession } from '../matrix/client';
 import { saveOfflineCredentials, verifyOfflineCredentials, listOfflineAccounts } from '../lib/offline-auth';
-import { startOAuthFlow } from '../google-drive/gdrive-oauth';
+import { startOAuthFlow, isGoogleOAuthConfigured } from '../google-drive/gdrive-oauth';
 import { useGDriveStore } from '../google-drive/gdrive-store';
 import { isAminoHomeserver } from '../lib/matrix-domain';
 import { useTheme, type Theme } from '../theme';
@@ -89,9 +89,11 @@ export function Login({ onLogin, onLocalMode }: LoginProps) {
 
       // In n8n mode no Google account is needed — skip the OAuth step.
       // Google Drive sync is only offered for the official Amino homeserver;
-      // custom homeservers skip the GDrive prompt.
+      // custom homeservers skip the GDrive prompt. If the build doesn't have
+      // a Google OAuth client ID configured, the OAuth flow can't run, so
+      // skip straight to the app rather than showing a dead-end prompt.
       const syncMode = useGDriveStore.getState().syncMode;
-      if (syncMode === 'n8n' || !isAminoHomeserver(session.homeserver)) {
+      if (syncMode === 'n8n' || !isAminoHomeserver(session.homeserver) || !isGoogleOAuthConfigured()) {
         onLogin(session);
         return;
       }
