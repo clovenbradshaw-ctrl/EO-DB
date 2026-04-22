@@ -136,12 +136,15 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
 
   const handleSignInWithGoogle = useCallback(async () => {
     setOauthLoading(true);
+    setGdriveTestStatus(null);
     try {
       await startOAuthFlow();
       const token = await getAccessToken();
       useGDriveStore.setState({ googleAccessToken: token, connected: true });
-    } catch {
-      // flow was cancelled or failed — leave user to retry
+      setGdriveTestStatus('✓ Signed in with Google');
+    } catch (e: any) {
+      console.error('[EO-DB] Google sign-in failed:', e);
+      setGdriveTestStatus(`✗ Sign-in failed: ${e?.message ?? 'unknown error'}`);
     } finally {
       setOauthLoading(false);
     }

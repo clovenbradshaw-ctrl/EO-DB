@@ -363,13 +363,18 @@ export async function handleOAuthCallback(): Promise<boolean> {
 export async function startOAuthFlow(): Promise<void> {
   if (isConnected()) return;
 
+  // Open the popup synchronously on the user-activation tick, BEFORE any
+  // async await. buildAuthUrl() awaits crypto.subtle for PKCE, which breaks
+  // the user-gesture chain — Chrome/Safari then silently suppress the popup.
+  // Opening about:blank first preserves the gesture; we navigate it to the
+  // real auth URL once PKCE has been generated.
+  const popup = window.open('about:blank', 'eo-gdrive-auth', 'width=520,height=640,noopener=0');
+
   const { url, verifier } = await buildAuthUrl('popup');
   localStorage.setItem(SS_CODE_VERIFIER, verifier);
 
-  // ── Attempt popup ──────────────────────────────────────────
-  const popup = window.open(url, 'eo-gdrive-auth', 'width=520,height=640,noopener=0');
-
   if (popup && !popup.closed) {
+    try { popup.location.href = url; } catch { /* ignore — popup may have navigated */ }
     sessionStorage.setItem(SS_POPUP_RESOLVE, '1');
     await new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
