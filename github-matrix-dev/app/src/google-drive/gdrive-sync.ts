@@ -775,6 +775,53 @@ export class GDriveSyncService {
   }
 
   /**
+   * Upload a resumable hydration NDJSON bundle under a deterministic
+   * per-import filename. Overwrites the existing file on every call —
+   * that's exactly what the orchestrator wants, because the bundle is
+   * append-only from the caller's perspective and re-uploading the full
+   * file after each completed table is how Drive learns about new pages.
+   *
+   * Mirrors `uploadAirtableSnapshot` (viewer-tier encryption, deterministic
+   * filename) so any space member can consume the bundle, and so resuming
+   * the import on a different device picks up the latest published copy.
+   */
+  async uploadHydrationBundle(
+    bytes: Uint8Array,
+    opts: { fileName: string; importId: string },
+  ): Promise<{ fileName: string; driveFileId: string; byteSize: number }> {
+    if (this.destroyed) throw new Error('GDriveSyncService destroyed');
+    this.activateSpaceRoom();
+    const encrypted = await this.encryptBinary(bytes);
+    const result = await gdriveStoreNamed(this.accessToken, encrypted, this.dataType, opts.fileName);
+    console.log(
+      `[EO-DB] uploadHydrationBundle: stored ${opts.fileName} (${bytes.byteLength} B raw, drive id=${result.drive_file_id}, import=${opts.importId})`,
+    );
+    return {
+      fileName: opts.fileName,
+      driveFileId: result.drive_file_id,
+      byteSize: bytes.byteLength,
+    };
+  }
+
+  /**
+   * Download a previously uploaded hydration bundle by filename. Returns
+   * null if the file isn't present so callers can distinguish "nothing
+   * uploaded yet" from a decryption failure and restart cleanly.
+   */
+  async downloadHydrationBundle(fileName: string): Promise<Uint8Array | null> {
+    if (this.destroyed) return null;
+    this.activateSpaceRoom();
+    try {
+      const result = await gdriveRetrieveNamed(this.accessToken, this.dataType, fileName);
+      if (!result?.ok) return null;
+      return await this.decryptBinary(result.data);
+    } catch (e) {
+      console.warn(`[EO-DB] downloadHydrationBundle failed for ${fileName}:`, e);
+      return null;
+    }
+  }
+
+  /**
    * Download a previously uploaded provenance blob by filename and return the
    * decrypted raw bytes. Used by the UI's "download provenance" action so the
    * user can save the exact payload that produced a given import record.
