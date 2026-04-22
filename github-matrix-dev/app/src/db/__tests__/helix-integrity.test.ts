@@ -15,6 +15,8 @@
  *   Bug A (Level 2): DEF on a fresh target goes through checkAndPromote which
  *     correctly logs a system INS before the DEF. Tests pass.
  *   Bug F (Level 8): cascadeUpward has MAX_CASCADE_DEPTH = 20 guard. Tests pass.
+ *   Bug D (GDrive): hydrateFromGDrive applies all files (new format + legacy).
+ *   Bug E (dispatch): dispatch() calls saveOp inside the processEvent callback.
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';

@@ -1,4 +1,11 @@
-// ─── Credential shapes ────────────────────────────────────────────────────────
+// ─── Credential shapes (discriminated union) ─────────────────────────────────
+
+export interface AirtableCredentials {
+  sourceType: 'airtable';
+  apiKey: string;   // Personal Access Token — stored encrypted, never rendered
+  baseId: string;   // e.g. "appXYZ123"
+  tableId: string;  // e.g. "tblABC456" or a table name string
+}
 
 export interface GenericRestCredentials {
   sourceType: 'generic_rest';
@@ -8,14 +15,14 @@ export interface GenericRestCredentials {
   recordsPath: string;  // dot-path to array in response, e.g. "data.items"
 }
 
-export type ApiCredentials = GenericRestCredentials;
+export type ApiCredentials = AirtableCredentials | GenericRestCredentials;
 
 // ─── Field discovery ──────────────────────────────────────────────────────────
 
 export interface RemoteField {
-  id: string;    // stable source field ID
+  id: string;    // stable source field ID (Airtable: "fldXYZ")
   name: string;  // human display name from source
-  type: string;  // source-native type string
+  type: string;  // source-native type string (e.g. "singleLineText", "lastModifiedTime")
 }
 
 // ─── Records ──────────────────────────────────────────────────────────────────
