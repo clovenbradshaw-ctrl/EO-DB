@@ -158,7 +158,11 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
     setSnapshotStatus('Taking snapshot...');
     try {
       const result = await manualSnapshot();
-      setSnapshotStatus(`Snapshot saved — seq ${result.seq}`);
+      if (result.savedToDrive) {
+        setSnapshotStatus(`Snapshot saved to Drive — seq ${result.seq}`);
+      } else {
+        setSnapshotStatus(`Snapshot saved locally — seq ${result.seq} (Drive not connected)`);
+      }
     } catch (e: any) {
       setSnapshotStatus(`Error: ${e.message}`);
     }

@@ -24,6 +24,7 @@ import {
 import type { EoEvent, EoEventInput, EoState, HorizonResponse } from '../db/types';
 import type { SyncManager } from '../matrix/sync-manager';
 import type { GDriveSyncService } from '../google-drive/gdrive-sync';
+import { useGDriveStore } from '../google-drive/gdrive-store';
 import type { ResolvedPermissions } from '../permissions/types';
 import type { ManifestState as UserManifest } from '../google-drive/space-permissions';
 import { eventHash } from '../db/hash';
@@ -162,7 +163,7 @@ interface EoDbState {
   getState: (target: string) => Promise<EoState | null>;
   getStateByPrefix: (prefix: string) => Promise<EoState[]>;
   getStateByPrefixPage: (prefix: string, limit: number, afterTarget?: string) => Promise<StatePage>;
-  manualSnapshot: () => Promise<{ mxc: string; seq: number }>;
+  manualSnapshot: () => Promise<{ mxc: string; seq: number; savedToDrive: boolean }>;
   /**
    * Manually save current data to the Matrix media store and record the
    * resulting mxc URI in room state (EO_SNAPSHOT_STATE_TYPE) so any device
@@ -603,10 +604,16 @@ export const useEoStore = create<EoDbState>((set, get) => ({
       );
     }
 
+    let savedToDrive = false;
     if (gdriveSync) {
       await gdriveSync.forceSave();
+      savedToDrive = true;
+    } else if (useGDriveStore.getState().connected) {
+      // Drive is marked connected but the sync service never attached — surface
+      // this instead of pretending the snapshot landed on Drive.
+      throw new Error('Google Drive is connected but sync service is not ready — try again in a moment');
     }
-    return { mxc: 'gdrive', seq: lastSeq };
+    return { mxc: savedToDrive ? 'gdrive' : 'local', seq: lastSeq, savedToDrive };
   },
 
   async manualMatrixMediaSnapshot() {
