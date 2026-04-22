@@ -47,6 +47,14 @@ import {
   loadContinuousEnabled,
   isOrphanSnapshot,
 } from '../ingestion/airtable-persistence';
+import {
+  loadCheckpoint as loadHydrationCheckpoint,
+  clearCheckpoint as clearHydrationCheckpoint,
+  summarizeCheckpoint,
+  type HydrationCheckpoint,
+} from '../ingestion/airtable-hydration-checkpoint';
+import { resumableHydrationSync } from '../ingestion/airtable-resumable-hydration';
+import { hydrationBundleFilename, HYDRATION_BUNDLE_MIME } from '../ingestion/airtable-hydration-bundle';
 import { useTheme, type Theme } from '../theme';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -241,6 +249,30 @@ export function AirtableSettingsSection({
   const [orphanSnapshot, setOrphanSnapshot] = useState<
     { phase: string; table?: string; strategy: string; startedAt: number } | null
   >(null);
+
+  // ── Resumable hydration (save-first) state ──
+  //
+  // Holds whatever is known about the current or most-recent run of the
+  // "Airtable → Drive NDJSON bundle → fold" pipeline. The checkpoint is
+  // the source of truth for phase / per-table progress and is persisted to
+  // IndexedDB so a reload resumes cleanly. `bundleBlob` is the tee'd local
+  // copy of the bundle bytes — populated as the fetch progresses so the
+  // "Download" button can serve without a Drive round-trip.
+  const [hydrationCheckpoint, setHydrationCheckpoint] = useState<HydrationCheckpoint | null>(null);
+  const bundleBlobRef = useRef<Blob | null>(null);
+  const [bundleBlobSize, setBundleBlobSize] = useState<number>(0);
+
+  // Load any persisted checkpoint on mount so the "Resume" CTA appears
+  // immediately after a reload without waiting for the user to click anything.
+  useEffect(() => {
+    if (!store) return;
+    let cancelled = false;
+    (async () => {
+      const cp = await loadHydrationCheckpoint(store);
+      if (!cancelled) setHydrationCheckpoint(cp);
+    })();
+    return () => { cancelled = true; };
+  }, [store]);
 
   // ── Rehydrate persisted sync state on mount ──
   //   1. Synclog → Zustand so the Activity Log panel has context immediately.
@@ -1022,6 +1054,194 @@ export function AirtableSettingsSection({
     }
   }
 
+  // ── Resumable hydration (save-first via Drive, then fold) ──
+  //
+  // Three-way entry:
+  //   - No checkpoint → start a fresh run.
+  //   - Incomplete checkpoint matching current customization → resume where
+  //     we left off (skip fully-fetched and fully-folded tables).
+  //   - `restart` flag → wipe the checkpoint and start over from scratch.
+  //
+  // The Drive bundle is the durable artifact — once a table's pages are
+  // appended and uploaded, a reload can re-download and resume without
+  // re-hitting Airtable. The in-memory `bundleBlobRef` is a fast path for
+  // the "Download" button that avoids the Drive round-trip when the user
+  // is still on the same session.
+  async function handleResumableHydrate(restart: boolean): Promise<void> {
+    if (!apiKey || !store) return;
+    setSyncStatus((prev) => ({
+      ...prev,
+      resumableHydrate: {
+        state: 'syncing',
+        message: restart ? 'Starting fresh hydration…' : 'Resuming hydration…',
+      },
+    }));
+    const startedAt = Date.now();
+
+    const client = createAirtableClient({
+      onResponse: (info) => {
+        if (info.ok) return;
+        useAirtableStore.getState().setWebhookHealth(webhookHealthPatch(info));
+      },
+    });
+
+    const customization = buildCustomization();
+    useAirtableStore.getState().addSyncLogEntry({
+      ts: Date.now(),
+      type: 'sync_start',
+      source: 'local',
+      syncer: session.userId,
+      detail: restart ? 'Resumable hydration (fresh)' : 'Resumable hydration (resume)',
+    });
+
+    try {
+      const result = await resumableHydrationSync(store, client, session.userId, gdriveSync ?? null, {
+        customization,
+        forceRestart: restart,
+        onCheckpoint: (cp) => {
+          // Fresh object so React's referential equality notices.
+          setHydrationCheckpoint({ ...cp });
+        },
+        onBundleTee: (blob, size) => {
+          bundleBlobRef.current = blob;
+          setBundleBlobSize(size);
+        },
+        onProgress: (p) => {
+          const parts: string[] = [];
+          if (p.checkpointPhase === 'fetching') parts.push('Fetching');
+          else if (p.checkpointPhase === 'uploading') parts.push('Saving to Drive');
+          else if (p.checkpointPhase === 'folding') parts.push('Ingesting');
+          if (p.table) parts.push(p.table);
+          if (p.records_so_far) parts.push(`${p.records_so_far} records`);
+          if (p.totalTables && p.tableIndex != null) {
+            parts.push(`[${p.tableIndex + 1}/${p.totalTables}]`);
+          }
+          setSyncStatus((prev) => ({
+            ...prev,
+            resumableHydrate: {
+              state: 'syncing',
+              message: parts.join(' · ') || 'Working…',
+            },
+          }));
+        },
+      });
+
+      const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
+      const ingested = result.fold?.total_records_ingested ?? 0;
+      useAirtableStore.getState().addSyncLogEntry({
+        ts: Date.now(),
+        type: 'hydration_complete',
+        source: 'local',
+        syncer: session.userId,
+        detail: `${ingested} records via Drive bundle, ${seconds}s`,
+        durationMs: Date.now() - startedAt,
+        recordsScanned: ingested,
+      });
+      setSyncStatus((prev) => ({
+        ...prev,
+        resumableHydrate: {
+          state: 'done',
+          message: `${ingested} records ingested via bundle`,
+          detail: `Bundle ${(result.bundleBytes.byteLength / 1024).toFixed(1)} KB · ${seconds}s`,
+        },
+      }));
+      // Keep the checkpoint visible in 'complete' state so the user has a
+      // record of the last successful run (and can download its bundle).
+      setHydrationCheckpoint({ ...result.checkpoint });
+    } catch (e: any) {
+      useAirtableStore.getState().addSyncLogEntry({
+        ts: Date.now(),
+        type: 'sync_error',
+        source: 'local',
+        syncer: session.userId,
+        detail: `Resumable hydration failed: ${e.message || e}`,
+        durationMs: Date.now() - startedAt,
+      });
+      setSyncStatus((prev) => ({
+        ...prev,
+        resumableHydrate: {
+          state: 'error',
+          message: e.message || 'Resumable hydration failed',
+          detail: 'Checkpoint preserved — click "Resume" to continue.',
+        },
+      }));
+      // Refresh checkpoint so the UI reflects whatever progress was saved
+      // before the failure.
+      const cp = await loadHydrationCheckpoint(store);
+      setHydrationCheckpoint(cp);
+    }
+  }
+
+  // Download the hydration bundle. Prefers the in-memory tee from the
+  // active (or just-completed) run so the user gets bytes instantly; falls
+  // back to fetching the Drive copy when the tee isn't present (e.g.
+  // after a reload — the checkpoint survived, the blob didn't).
+  async function handleDownloadHydrationBundle(): Promise<void> {
+    const fileName = hydrationCheckpoint?.bundle?.fileName
+      ?? (hydrationCheckpoint
+        ? hydrationBundleFilename(hydrationCheckpoint.importId)
+        : 'airtable-hydration.ndjson');
+    setSyncStatus((prev) => ({
+      ...prev,
+      resumableBundleDownload: { state: 'syncing', message: 'Preparing download…' },
+    }));
+    try {
+      let blob = bundleBlobRef.current;
+      if (!blob) {
+        if (!gdriveSync || !hydrationCheckpoint?.bundle?.fileName) {
+          throw new Error('No local copy and no Drive bundle to download from.');
+        }
+        const bytes = await gdriveSync.downloadHydrationBundle(hydrationCheckpoint.bundle.fileName);
+        if (!bytes) throw new Error(`Drive bundle "${hydrationCheckpoint.bundle.fileName}" not found.`);
+        blob = new Blob([bytes as unknown as BlobPart], { type: HYDRATION_BUNDLE_MIME });
+      }
+      const url = URL.createObjectURL(blob);
+      try {
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = fileName;
+        a.style.display = 'none';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+      } finally {
+        setTimeout(() => URL.revokeObjectURL(url), 0);
+      }
+      setSyncStatus((prev) => ({
+        ...prev,
+        resumableBundleDownload: {
+          state: 'done',
+          message: `Saved ${fileName}`,
+          detail: `${(blob!.size / 1024).toFixed(1)} KB`,
+        },
+      }));
+    } catch (e: any) {
+      setSyncStatus((prev) => ({
+        ...prev,
+        resumableBundleDownload: {
+          state: 'error',
+          message: e.message || 'Download failed',
+        },
+      }));
+    }
+  }
+
+  // Wipe the checkpoint so the next hydration starts fresh. Does NOT delete
+  // the Drive file — the user can always re-download the bundle separately
+  // if they want the raw bytes. Idempotent on repeated clicks.
+  async function handleClearHydrationCheckpoint(): Promise<void> {
+    if (!store) return;
+    await clearHydrationCheckpoint(store);
+    setHydrationCheckpoint(null);
+    bundleBlobRef.current = null;
+    setBundleBlobSize(0);
+    setSyncStatus((prev) => ({
+      ...prev,
+      resumableHydrate: { state: 'idle', message: '' },
+      resumableBundleDownload: { state: 'idle', message: '' },
+    }));
+  }
+
   // ── Toggle continuous sync ──
   function handleToggleContinuousSync() {
     if (continuousSyncEnabled) {
@@ -1496,6 +1716,142 @@ export function AirtableSettingsSection({
                     </label>
                     {(() => {
                       const status = syncStatus.snapshotImport;
+                      if (!status || status.state === 'idle') return null;
+                      return (
+                        <div style={{
+                          ...s.statusMsg,
+                          color: status.state === 'error' ? theme.dangerText : status.state === 'done' ? theme.successText : theme.textSecondary,
+                        }}>
+                          {status.state === 'syncing' && <span style={s.spinner} />}
+                          {status.message}
+                          {status.detail && <span style={s.statusDetail}> {status.detail}</span>}
+                        </div>
+                      );
+                    })()}
+                  </div>
+
+                  {/* Resumable hydration — save Airtable data to Drive as an
+                      NDJSON bundle, then fold from the saved copy. Per-table
+                      checkpoints mean a crashed fetch/fold resumes without
+                      re-hitting Airtable. */}
+                  <div style={s.syncModeCard}>
+                    <div style={s.syncModeTitle}>
+                      Hydrate via Drive
+                      <span style={{
+                        fontSize: 9,
+                        fontWeight: 600,
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.05em',
+                        color: theme.textMuted,
+                        background: theme.bgMuted,
+                        border: `1px solid ${theme.borderLight}`,
+                        padding: '2px 6px',
+                        borderRadius: 4,
+                        marginLeft: 6,
+                      }}>RESUMABLE</span>
+                    </div>
+                    <div style={s.syncModeDesc}>
+                      Airtable → Google Drive NDJSON bundle → local DB. Per-table
+                      checkpoints survive reloads so an interrupted run resumes
+                      without re-fetching. The same bundle backs the{' '}
+                      <strong>Download</strong> button, so you always have a
+                      portable copy of what was ingested.
+                    </div>
+
+                    {hydrationCheckpoint && hydrationCheckpoint.phase !== 'complete' && (() => {
+                      const sum = summarizeCheckpoint(hydrationCheckpoint);
+                      return (
+                        <div style={{
+                          fontSize: 11,
+                          color: theme.textSecondary,
+                          background: theme.bgMuted,
+                          border: `1px solid ${theme.borderLight}`,
+                          borderRadius: 4,
+                          padding: '6px 8px',
+                          margin: '6px 0',
+                        }}>
+                          <strong>Checkpoint:</strong> phase {hydrationCheckpoint.phase} ·{' '}
+                          fetched {sum.tablesFetched}/{sum.tables} tables ({sum.recordsFetched} records) ·{' '}
+                          folded {sum.tablesFolded}/{sum.tables} tables
+                          {hydrationCheckpoint.error && (
+                            <div style={{ color: theme.dangerText, marginTop: 4 }}>
+                              Last error: {hydrationCheckpoint.error}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
+
+                    {/* Primary action: resume if a matching checkpoint exists
+                        and is unfinished, otherwise start fresh. */}
+                    <button
+                      onClick={() => handleResumableHydrate(false)}
+                      disabled={syncStatus.resumableHydrate?.state === 'syncing' || !apiKey}
+                      style={s.syncModeBtn}
+                    >
+                      {syncStatus.resumableHydrate?.state === 'syncing'
+                        ? 'Working…'
+                        : hydrationCheckpoint && hydrationCheckpoint.phase !== 'complete'
+                          ? 'Resume hydration'
+                          : 'Start hydration'}
+                    </button>
+
+                    {/* Secondary controls: force-restart and clear checkpoint.
+                        Only shown when there's a checkpoint to act on. */}
+                    {hydrationCheckpoint && (
+                      <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+                        <button
+                          onClick={() => handleResumableHydrate(true)}
+                          disabled={syncStatus.resumableHydrate?.state === 'syncing'}
+                          style={{ ...s.syncModeBtn, flex: 1 }}
+                          title="Discard checkpoint and re-fetch everything from Airtable"
+                        >
+                          Restart
+                        </button>
+                        <button
+                          onClick={handleClearHydrationCheckpoint}
+                          disabled={syncStatus.resumableHydrate?.state === 'syncing'}
+                          style={{ ...s.syncModeBtn, flex: 1 }}
+                          title="Clear local checkpoint (leaves the Drive file in place)"
+                        >
+                          Clear checkpoint
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Download the current bundle — tee'd from memory when
+                        available, otherwise fetched from Drive. */}
+                    <button
+                      onClick={handleDownloadHydrationBundle}
+                      disabled={syncStatus.resumableBundleDownload?.state === 'syncing' || (!bundleBlobRef.current && !hydrationCheckpoint?.bundle?.fileName)}
+                      style={{ ...s.syncModeBtn, marginTop: 6 }}
+                      title={bundleBlobRef.current
+                        ? 'Download the in-memory copy (no Drive round-trip)'
+                        : 'Download the bundle from Drive'}
+                    >
+                      {syncStatus.resumableBundleDownload?.state === 'syncing'
+                        ? 'Downloading…'
+                        : bundleBlobSize > 0
+                          ? `Download bundle (${(bundleBlobSize / 1024).toFixed(1)} KB)`
+                          : 'Download bundle'}
+                    </button>
+
+                    {(() => {
+                      const status = syncStatus.resumableHydrate;
+                      if (!status || status.state === 'idle') return null;
+                      return (
+                        <div style={{
+                          ...s.statusMsg,
+                          color: status.state === 'error' ? theme.dangerText : status.state === 'done' ? theme.successText : theme.textSecondary,
+                        }}>
+                          {status.state === 'syncing' && <span style={s.spinner} />}
+                          {status.message}
+                          {status.detail && <span style={s.statusDetail}> {status.detail}</span>}
+                        </div>
+                      );
+                    })()}
+                    {(() => {
+                      const status = syncStatus.resumableBundleDownload;
                       if (!status || status.state === 'idle') return null;
                       return (
                         <div style={{
