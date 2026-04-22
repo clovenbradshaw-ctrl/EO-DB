@@ -7,6 +7,7 @@ import { formatName } from './scope-picker-utils';
 import { useTheme, type Theme } from '../theme';
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 import { useIdResolver, isEntityId, isEntityIdArray, type IdResolver } from '../hooks/useIdResolver';
+import { syncEditToAirtable } from '../ingestion/airtable-writeback';
 import { getAirtableTypeIcon, getAirtableTypeColor } from './field-type-icons';
 import { groupSchemaStates, extractEdgeAttrDefs } from '../db/schema-rules';
 import { LinkFieldPicker } from './LinkFieldPicker';
@@ -261,6 +262,7 @@ export function FigureFields({ figure, onNavigate, profileFields, recordTs, allE
         ts: new Date().toISOString(),
         acquired_ts: new Date().toISOString(),
       });
+      syncEditToAirtable({ target: figure.target, fieldKey, value: parsed, getStateByPrefix }).catch(console.warn);
     } catch { /* ignore */ }
   }
 

@@ -8,6 +8,7 @@
 
 import type { MatrixClient, Room } from 'matrix-js-sdk';
 import {
+  type AccessRole,
   type FieldAssignment,
   type ResolvedPermissions,
   type SpaceConfig,
@@ -17,6 +18,11 @@ import {
   powerLevelToRole,
   ROLE_POWER_LEVELS,
 } from './types';
+import {
+  type ManifestState,
+  type SpaceRole,
+  roleAtLeast,
+} from '../google-drive/space-permissions';
 
 /**
  * Read a user's power level from a Matrix Room object.
@@ -205,6 +211,101 @@ export function resolvePermissionsFromSharing(
     restricted_fields: restrictedFields,
     locked_fields: lockedFields,
     redacted_fields: restrictedFields.filter(() => pl < 50),
+
+    user_types: userTypes,
+    active_user_type: effectiveActiveType,
+    type_hidden_fields: typeHiddenFields,
+  };
+}
+
+// ─── Manifest-based resolver (new model) ─────────────────────────────────────
+
+/**
+ * Map a SpaceRole to a numeric power level for capability flag derivation.
+ * Keeps the same thresholds as the Matrix power level model for consistency.
+ */
+function spaceRoleToPowerLevel(role: SpaceRole): number {
+  switch (role) {
+    case 'owner': return 100;
+    case 'admin': return 50;
+    case 'restricted': return 30;  // between editor and admin
+    case 'editor': return 25;
+    case 'viewer': return 0;
+  }
+}
+
+/**
+ * Resolve permissions from a folded manifest state.
+ *
+ * This replaces the Matrix-power-level-based resolver for spaces using the
+ * new Drive-based permission model.  The manifest fold state is downloaded
+ * from manifest.eodb on space open and cached in Zustand.
+ *
+ * Field-level access is determined by the manifest's fieldRestrictions:
+ *   - Fields with sensitivity "restricted" are redacted for viewer/editor roles.
+ *   - Fields with sensitivity "admin" are redacted for everyone below admin.
+ *   - Shadow values from the manifest are used in place of redacted values.
+ */
+export function resolvePermissionsFromManifest(
+  userId: string,
+  manifestState: ManifestState,
+  userTypeAssignments?: UserTypeAssignment[] | null,
+  fieldTypeVisibility?: FieldTypeVisibility[] | null,
+  activeUserType?: string | null,
+): ResolvedPermissions {
+  const member = manifestState.members[userId];
+  const role: SpaceRole = member?.role ?? 'viewer';
+  const pl = spaceRoleToPowerLevel(role);
+  const accessRole = powerLevelToRole(pl);
+
+  // Field-level access from manifest field restrictions.
+  const restrictedFields: string[] = [];
+  const redactedFields: string[] = [];
+
+  for (const [field, config] of Object.entries(manifestState.fields)) {
+    if (config.sensitivity === 'restricted' && !roleAtLeast(role, 'restricted')) {
+      restrictedFields.push(field);
+      redactedFields.push(field);
+    } else if (config.sensitivity === 'admin' && !roleAtLeast(role, 'admin')) {
+      restrictedFields.push(field);
+      redactedFields.push(field);
+    }
+  }
+
+  // User types
+  const userTypes = userTypeAssignments?.find(a => a.user_id === userId)?.type_ids ?? [];
+  const effectiveActiveType = activeUserType ?? null;
+  const typeHiddenFields = pl >= 50 ? [] : (fieldTypeVisibility ?? [])
+    .filter(ftv =>
+      ftv.visible_to_types.length > 0 &&
+      (effectiveActiveType === null || !ftv.visible_to_types.includes(effectiveActiveType))
+    )
+    .map(ftv => ftv.field);
+
+  return {
+    role: accessRole,
+    powerLevel: pl,
+    is_owner: role === 'owner',
+
+    // Simplified: single room per space.
+    in_main_room: !!member,
+    in_restricted_room: roleAtLeast(role, 'restricted'),
+    in_governance_room: roleAtLeast(role, 'admin'),
+
+    can_read: !!member,
+    can_add_records: pl >= 25,
+    can_edit_any_record: pl >= 25,
+    can_edit_own_records: pl >= 25,
+    can_create_fields: pl >= 50,
+    can_build_slices: pl >= 50,
+    can_manage_members: pl >= 50,
+    can_set_governance: pl >= 50,
+    can_manage_keys: pl >= 100,
+    can_share: pl >= 50,
+
+    restricted_fields: restrictedFields,
+    locked_fields: [],
+    redacted_fields: redactedFields,
 
     user_types: userTypes,
     active_user_type: effectiveActiveType,

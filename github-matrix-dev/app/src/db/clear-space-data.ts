@@ -4,7 +4,7 @@
  * Called when the user leaves a space (switch, permanent-delete) so the
  * space's cached state does not leak back into future sessions. This is a
  * *genuine reset* — the next time the space is entered, it starts from a
- * fresh sync with Matrix.
+ * fresh sync with Matrix / Google Drive.
  *
  * Best-effort: individual failures are swallowed so a stuck OPFS handle or
  * a corrupt localStorage entry cannot strand the user mid-switch.
@@ -12,6 +12,8 @@
  * NOT cleared (intentionally global):
  *   - eo-selected-space (the caller reassigns this next)
  *   - Matrix session / device keys
+ *   - Google Drive OAuth tokens
+ *   - eo-gdrive-sync-mode
  */
 
 import { removeSpaceMeta } from './space-meta';

@@ -43,7 +43,7 @@ export interface FieldSchema {
   fieldKey: string;
   /** Display name — from parent _schema.{field} value.name or value._label */
   name?: string;
-  /** Ingestion-provided type — from parent _schema.{field} value.type */
+  /** Airtable-provided type — from parent _schema.{field} value.type */
   ingestedType?: string;
   /** User-declared type definition — from .type child (full operand preserved) */
   typeDef?: { target: string; value: any };

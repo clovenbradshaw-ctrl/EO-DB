@@ -10,6 +10,7 @@ import { RedactedCell, LockIcon, LockedCell } from './RedactedCell';
 import { FilterBar } from './FilterBar';
 import { SortPanel, type SortRule } from './SortPanel';
 import type { ResolvedPermissions } from '../permissions/types';
+import { syncEditToAirtable } from '../ingestion/airtable-writeback';
 import { useSliceStore } from '../store/slice-store';
 import { defaultColumnWidth, MIN_COLUMN_WIDTH } from './slice-types';
 import { formatName } from './scope-picker-utils';
@@ -1626,6 +1627,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
           acquired_ts: new Date().toISOString(),
         });
       }
+      syncEditToAirtable({ target, fieldKey, value: ids, getStateByPrefix }).catch(console.warn);
     } catch { /* ignore */ }
   }
 
@@ -1675,6 +1677,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
           acquired_ts: new Date().toISOString(),
         });
       }
+      syncEditToAirtable({ target, fieldKey, value: parsed, getStateByPrefix }).catch(console.warn);
     } catch { /* ignore */ }
     setEditingCell(null);
   }

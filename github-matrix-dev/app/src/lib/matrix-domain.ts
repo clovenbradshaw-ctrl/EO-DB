@@ -42,6 +42,8 @@ export function peerSyncEventTypes(prefix?: string) {
     offer: `${p}.sync.offer`,
     request: `${p}.sync.request`,
     events: `${p}.sync.events`,
+    /** Notification that new ops were written to GDrive — triggers immediate pull. */
+    gdrive: `${p}.sync.gdrive`,
   } as const;
 }
 
@@ -148,6 +150,17 @@ export function swarmV2EventTypes(prefix?: string) {
   } as const;
 }
 
+/** Airtable sync coordination event types (to-device, ephemeral). */
+export function airtableSyncEventTypes(prefix?: string) {
+  const p = prefix ?? _eventPrefix;
+  return {
+    /** Sync status broadcast after completion (to-device). */
+    signal: `${p}.airtable.signal`,
+    /** Sync lock claim/release (to-device). */
+    lock: `${p}.airtable.lock`,
+  } as const;
+}
+
 export interface MatrixDomainConfig {
   eventPrefix?: string;
   dataRoomAlias?: string;
@@ -156,4 +169,21 @@ export interface MatrixDomainConfig {
 export function configureMatrixDomain(cfg: MatrixDomainConfig): void {
   if (cfg.eventPrefix !== undefined) _eventPrefix = cfg.eventPrefix;
   if (cfg.dataRoomAlias !== undefined) _dataRoomAlias = cfg.dataRoomAlias;
+}
+
+/**
+ * Whether the given homeserver URL belongs to the hosted Amino deployment.
+ *
+ * Drive + Airtable integrations are tied to shared n8n proxy credentials
+ * scoped to `app.aminoimmigration.com` — their UI and network calls are
+ * gated on this check so foreign homeservers never see the endpoints.
+ */
+export function isAminoHomeserver(homeserver: string | undefined | null): boolean {
+  if (!homeserver) return false;
+  try {
+    const host = new URL(homeserver).hostname.toLowerCase();
+    return host === 'app.aminoimmigration.com';
+  } catch {
+    return false;
+  }
 }
