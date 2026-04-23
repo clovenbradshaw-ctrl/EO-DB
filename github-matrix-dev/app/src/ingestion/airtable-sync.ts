@@ -20,17 +20,15 @@ import { markDeleted } from '../db/tombstone';
 import type { EoEvent, Resolution } from '../db/types';
 import {
   AirtableClient,
+  AirtableApiError,
+  ScopeMissingError,
+  WebhookGoneError,
   type AirtableBase,
   type AirtableTable,
   type AirtableRecord,
 } from './airtable-client';
-import {
-  AirtableApiError,
-  ScopeMissingError,
-  WebhookGoneError,
-} from '@shared/airtable/errors';
 import { classifyFieldType, type FieldClassification } from './field-rules';
-import { mapAirtableType } from './airtable-type-map';
+import { mapAirtableTypeOrNull } from './airtable-type-map';
 import { extractValue, valuesEqual, stableStringify } from './value-extract';
 import { isExcluded, EMPTY_EXCLUSIONS, type SyncExclusions } from './exclusions';
 
@@ -987,7 +985,7 @@ function buildAirtableEndpoint(
  * calls `resetWebhookPermissionCache`) re-enables the webhook path without
  * needing a hard refresh.
  */
-const webhookPermissionFailures = new Map<string, ScopeMissingError>();
+const webhookPermissionFailures = new Map<string, AirtableApiError>();
 
 /**
  * Clear the session-scoped 403 cache. Called when credentials change so a
@@ -998,13 +996,19 @@ export function resetWebhookPermissionCache(): void {
 }
 
 /**
- * 403 with `INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND` almost always means the
- * token is missing `webhook:manage`, or this base isn't on the token's
- * allowlist. Either way the error is permanent for the life of the token —
- * retrying on every tick just wastes an API call.
+ * Either a ScopeMissingError (403 INVALID_PERMISSIONS — the PAT lacks a
+ * scope) or a plain AirtableApiError carrying 403 +
+ * INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND against the create endpoint
+ * (base isn't on the token's allowlist). Both are permanent for the life
+ * of the token; retrying on every tick just wastes an API call.
  */
-function isPermanentWebhookPermissionError(err: unknown): err is ScopeMissingError {
-  return err instanceof ScopeMissingError;
+function isPermanentWebhookPermissionError(err: unknown): err is AirtableApiError {
+  if (err instanceof ScopeMissingError) return true;
+  return (
+    err instanceof AirtableApiError
+    && err.status === 403
+    && err.airtableErrorType === 'INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND'
+  );
 }
 
 /**
@@ -1654,10 +1658,10 @@ export async function processHydrationBundle(
       // Emit .type DEF with mapped EO-DB column type.
       // For multipleRecordLinks, also store the linked table's EO target so
       // consumers can resolve the relationship without Airtable API access.
-      const mapped = mapAirtableType(field.type);
-      const eoType = mapped.type;
+      const mapped = mapAirtableTypeOrNull(field.type);
+      const eoType = mapped ?? 'text';
       const typeOperand: Record<string, unknown> = { type: eoType };
-      if (mapped.unknown) typeOperand.unknownAirtableType = mapped.unknown;
+      if (mapped === null) typeOperand.unknownAirtableType = field.type;
       if (field.type === 'multipleRecordLinks' && field.options?.linkedTableId) {
         typeOperand.linkedTable = tableTarget(base.id, field.options.linkedTableId as string);
       }
@@ -2063,10 +2067,10 @@ export async function updateSync(
         } catch { /* idempotent */ }
 
         // Emit .type DEF with mapped EO-DB column type
-        const mapped = mapAirtableType(field.type);
-        const eoType = mapped.type;
+        const mapped = mapAirtableTypeOrNull(field.type);
+        const eoType = mapped ?? 'text';
         const updTypeOperand: Record<string, unknown> = { type: eoType };
-        if (mapped.unknown) updTypeOperand.unknownAirtableType = mapped.unknown;
+        if (mapped === null) updTypeOperand.unknownAirtableType = field.type;
         try {
           await processEvent(store, {
             op: 'DEF',

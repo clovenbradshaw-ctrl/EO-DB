@@ -1,17 +1,21 @@
 import { describe, it, expect } from 'vitest';
 import {
   AirtableApiError,
+  NonJsonResponseError,
   RateLimitedError,
   ScopeMissingError,
   UnknownFieldTypeError,
   WebhookGoneError,
-  buildAirtableApiError,
 } from '../src/shared/airtable/errors.js';
-import { mapAirtableType } from '../src/shared/airtable/type-map.js';
+import {
+  mapAirtableType,
+  mapAirtableTypeOrNull,
+  mapAirtableTypeStrict,
+} from '../src/shared/airtable/type-map.js';
 
 describe('AirtableApiError', () => {
   it('preserves status and airtableErrorType on the base class', () => {
-    const err = new AirtableApiError('boom', { status: 500, airtableErrorType: 'INTERNAL' });
+    const err = new AirtableApiError('boom', 500, 'INTERNAL');
     expect(err).toBeInstanceOf(Error);
     expect(err).toBeInstanceOf(AirtableApiError);
     expect(err.status).toBe(500);
@@ -19,50 +23,41 @@ describe('AirtableApiError', () => {
   });
 });
 
-describe('buildAirtableApiError', () => {
-  it('returns RateLimitedError for 429', () => {
-    const err = buildAirtableApiError({ status: 429, message: 'rate' });
-    expect(err).toBeInstanceOf(RateLimitedError);
+describe('WebhookGoneError', () => {
+  it('is an AirtableApiError carrying the passed status + type', () => {
+    const err = new WebhookGoneError('gone', 404, 'MODEL_NOT_FOUND');
     expect(err).toBeInstanceOf(AirtableApiError);
-    expect(err.status).toBe(429);
-  });
-
-  it('returns WebhookGoneError for 404 on a webhook call', () => {
-    const err = buildAirtableApiError({
-      status: 404,
-      message: 'Webhook not found',
-      isWebhookCall: true,
-    });
     expect(err).toBeInstanceOf(WebhookGoneError);
     expect(err.status).toBe(404);
+    expect(err.airtableErrorType).toBe('MODEL_NOT_FOUND');
   });
+});
 
-  it('returns plain AirtableApiError for 404 on non-webhook calls', () => {
-    const err = buildAirtableApiError({ status: 404, message: 'Record not found' });
-    expect(err).not.toBeInstanceOf(WebhookGoneError);
+describe('ScopeMissingError', () => {
+  it('is an AirtableApiError preserving 403 + scope type', () => {
+    const err = new ScopeMissingError('forbidden', 403, 'INVALID_PERMISSIONS');
     expect(err).toBeInstanceOf(AirtableApiError);
-    expect(err.status).toBe(404);
-  });
-
-  it('returns ScopeMissingError for 403 INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND', () => {
-    const err = buildAirtableApiError({
-      status: 403,
-      message: 'forbidden',
-      airtableErrorType: 'INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND',
-    });
     expect(err).toBeInstanceOf(ScopeMissingError);
     expect(err.status).toBe(403);
-    expect(err.airtableErrorType).toBe('INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND');
+    expect(err.airtableErrorType).toBe('INVALID_PERMISSIONS');
   });
+});
 
-  it('returns plain AirtableApiError for other 403 types', () => {
-    const err = buildAirtableApiError({
-      status: 403,
-      message: 'forbidden',
-      airtableErrorType: 'OTHER',
-    });
-    expect(err).not.toBeInstanceOf(ScopeMissingError);
+describe('RateLimitedError', () => {
+  it('fixes status to 429 with the documented error type', () => {
+    const err = new RateLimitedError('max retries');
     expect(err).toBeInstanceOf(AirtableApiError);
+    expect(err.status).toBe(429);
+    expect(err.airtableErrorType).toBe('RATE_LIMITED');
+  });
+});
+
+describe('NonJsonResponseError', () => {
+  it('carries the body preview so the UI can show what came back', () => {
+    const err = new NonJsonResponseError('HTML body', 200, '<html>...</html>');
+    expect(err).toBeInstanceOf(AirtableApiError);
+    expect(err.status).toBe(200);
+    expect(err.bodyPreview).toBe('<html>...</html>');
   });
 });
 
@@ -70,20 +65,26 @@ describe('UnknownFieldTypeError', () => {
   it('carries the raw Airtable type string', () => {
     const err = new UnknownFieldTypeError('newExperimentalType');
     expect(err).toBeInstanceOf(Error);
-    expect(err.rawType).toBe('newExperimentalType');
+    expect(err.airtableType).toBe('newExperimentalType');
     expect(err.message).toContain('newExperimentalType');
   });
 });
 
-describe('mapAirtableType', () => {
-  it('returns the mapped type for known Airtable types', () => {
-    expect(mapAirtableType('singleLineText')).toEqual({ type: 'text' });
-    expect(mapAirtableType('multipleRecordLinks')).toEqual({ type: 'linkedRecord' });
+describe('type-map accessors', () => {
+  it('mapAirtableType defaults unknown types to "text"', () => {
+    expect(mapAirtableType('singleLineText')).toBe('text');
+    expect(mapAirtableType('multipleRecordLinks')).toBe('linkedRecord');
+    expect(mapAirtableType('someBrandNewType')).toBe('text');
   });
 
-  it('returns { type: "text", unknown: rawType } for unmapped types', () => {
-    const result = mapAirtableType('someBrandNewType');
-    expect(result.type).toBe('text');
-    expect(result.unknown).toBe('someBrandNewType');
+  it('mapAirtableTypeOrNull returns null for unknown types', () => {
+    expect(mapAirtableTypeOrNull('singleLineText')).toBe('text');
+    expect(mapAirtableTypeOrNull('someBrandNewType')).toBeNull();
+  });
+
+  it('mapAirtableTypeStrict throws UnknownFieldTypeError for unknown types', () => {
+    expect(mapAirtableTypeStrict('singleLineText')).toBe('text');
+    expect(() => mapAirtableTypeStrict('someBrandNewType'))
+      .toThrow(UnknownFieldTypeError);
   });
 });

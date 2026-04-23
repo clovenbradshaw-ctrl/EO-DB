@@ -2,7 +2,13 @@
  * Airtable field type → EO-DB column type mapping.
  *
  * Used during ingestion to auto-set the `.type` DEF on schema fields.
+ * Three accessors:
+ *   - `mapAirtableType`       — silent 'text' fallback, for back-compat
+ *   - `mapAirtableTypeOrNull` — returns null for unknown types (projection)
+ *   - `mapAirtableTypeStrict` — throws UnknownFieldTypeError for unknown types
  */
+
+import { UnknownFieldTypeError } from './errors.js';
 
 export const AIRTABLE_TYPE_MAP: Record<string, string> = {
   singleLineText:         'text',
@@ -38,23 +44,19 @@ export const AIRTABLE_TYPE_MAP: Record<string, string> = {
   lastModifiedBy:         'lastModifiedBy',
 };
 
-/**
- * Result of mapping an Airtable field type. When the raw type is not in
- * `AIRTABLE_TYPE_MAP`, `unknown` carries the raw string so callers can
- * distinguish "legitimately a text field" from "unmapped, defaulted to text".
- */
-export type MappedAirtableType =
-  | { type: string; unknown?: undefined }
-  | { type: 'text'; unknown: string };
+/** Map an Airtable field type to EO-DB column type. Unknown → 'text'. */
+export function mapAirtableType(airtableType: string): string {
+  return AIRTABLE_TYPE_MAP[airtableType] ?? 'text';
+}
 
-/**
- * Map an Airtable field type string to the corresponding EO-DB column type.
- * Returns `{ type: 'text', unknown: rawType }` as a fallback so callers can
- * detect unmapped types and surface a telemetry event rather than silently
- * coercing every new Airtable field type to `'text'`.
- */
-export function mapAirtableType(airtableType: string): MappedAirtableType {
+/** Like {@link mapAirtableType} but returns null for unrecognized types. */
+export function mapAirtableTypeOrNull(airtableType: string): string | null {
+  return AIRTABLE_TYPE_MAP[airtableType] ?? null;
+}
+
+/** Like {@link mapAirtableType} but throws {@link UnknownFieldTypeError} for unrecognized types. */
+export function mapAirtableTypeStrict(airtableType: string): string {
   const mapped = AIRTABLE_TYPE_MAP[airtableType];
-  if (mapped != null) return { type: mapped };
-  return { type: 'text', unknown: airtableType };
+  if (mapped === undefined) throw new UnknownFieldTypeError(airtableType);
+  return mapped;
 }

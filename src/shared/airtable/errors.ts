@@ -1,99 +1,86 @@
 /**
- * Typed Airtable API error classes.
+ * Typed errors for the Airtable API client.
  *
- * Replaces string-matching on `e.message?.includes('…')` and probing for an
- * ad-hoc `airtableErrorType` property. Callers should `instanceof` check
- * these subclasses to branch on known failure modes.
- *
- * The HTTP status and Airtable machine-readable error type are always
- * preserved on the base class so the Webhook Health panel (and equivalent
- * server-side telemetry) can render them without re-parsing the message.
+ * Callers branch on `instanceof` instead of pattern-matching error strings.
+ * Every subclass keeps `.status` and `.airtableErrorType` as instance
+ * properties so existing duck-typed handlers (e.g. `e.status === 404`)
+ * continue to work during migration.
  */
 
-/** Base class for every error thrown by the shared Airtable client. */
 export class AirtableApiError extends Error {
   readonly status: number;
   readonly airtableErrorType?: string;
 
-  constructor(message: string, opts: { status: number; airtableErrorType?: string }) {
+  constructor(message: string, status: number, airtableErrorType?: string) {
     super(message);
     this.name = 'AirtableApiError';
-    this.status = opts.status;
-    this.airtableErrorType = opts.airtableErrorType;
+    this.status = status;
+    this.airtableErrorType = airtableErrorType;
   }
 }
 
 /**
- * HTTP 404 on a webhooks/payloads call — the webhook was garbage-collected
- * (7-day inactivity window) or the polling cursor has aged out of retention.
- * Callers must wipe local webhook state and trigger a full re-hydration.
+ * Webhook id is gone from Airtable's side. Seen as:
+ *   - 403 with type=INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND on a /webhooks/* path
+ *   - 404 on a /webhooks/* path (cursor too old; Airtable GC'd the payloads)
+ *
+ * The operator-native recovery is to emit REC recognized="webhook_expired" on
+ * the webhook site and let the scheduler re-register; callers should NOT
+ * retry the same webhook id.
  */
 export class WebhookGoneError extends AirtableApiError {
-  constructor(message: string, opts: { airtableErrorType?: string } = {}) {
-    super(message, { status: 404, airtableErrorType: opts.airtableErrorType });
+  constructor(message: string, status: number, airtableErrorType?: string) {
+    super(message, status, airtableErrorType);
     this.name = 'WebhookGoneError';
   }
 }
 
 /**
- * HTTP 429 — hit Airtable's 5 req/sec ceiling. The client's retry loop
- * handles these internally; this class is thrown only when retries are
- * exhausted.
+ * The PAT lacks a scope the request needs (webhook:manage, schema:read, etc.).
+ * Distinct from WebhookGoneError because re-registering will also fail — the
+ * only fix is a human granting the scope.
  */
+export class ScopeMissingError extends AirtableApiError {
+  constructor(message: string, status: number, airtableErrorType?: string) {
+    super(message, status, airtableErrorType);
+    this.name = 'ScopeMissingError';
+  }
+}
+
+/** 429 retries exhausted. */
 export class RateLimitedError extends AirtableApiError {
   constructor(message: string) {
-    super(message, { status: 429 });
+    super(message, 429, 'RATE_LIMITED');
     this.name = 'RateLimitedError';
   }
 }
 
 /**
- * HTTP 403 with `INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND` — the PAT is
- * missing the required scope (e.g. `webhook:manage`) or the base isn't in
- * its allowlist. Permanent for the life of the token; callers cache a
- * dismissal so we don't hammer the endpoint every tick.
+ * 2xx response whose body wasn't JSON. Almost always a proxy / captive portal
+ * returning HTML. Kept distinct so the UI can say "we got HTML back" instead
+ * of surfacing a cryptic SyntaxError.
  */
-export class ScopeMissingError extends AirtableApiError {
-  constructor(message: string) {
-    super(message, { status: 403, airtableErrorType: 'INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND' });
-    this.name = 'ScopeMissingError';
+export class NonJsonResponseError extends AirtableApiError {
+  readonly bodyPreview: string;
+
+  constructor(message: string, status: number, bodyPreview: string) {
+    super(message, status);
+    this.name = 'NonJsonResponseError';
+    this.bodyPreview = bodyPreview;
   }
 }
 
 /**
- * Thrown (or constructed and reported out-of-band) when an Airtable field
- * type has no mapping in `AIRTABLE_TYPE_MAP`. The caller can decide whether
- * to fall back to `'text'` or propagate the error up.
+ * Airtable reported a field type the type-map doesn't know. Thrown only by
+ * the strict variant of `mapAirtableType`; the loose variant returns 'text'
+ * for back-compat.
  */
 export class UnknownFieldTypeError extends Error {
-  readonly rawType: string;
+  readonly airtableType: string;
 
-  constructor(rawType: string) {
-    super(`Unknown Airtable field type: ${rawType}`);
+  constructor(airtableType: string) {
+    super(`Unknown Airtable field type: ${airtableType}`);
     this.name = 'UnknownFieldTypeError';
-    this.rawType = rawType;
+    this.airtableType = airtableType;
   }
-}
-
-/**
- * Build the right subclass for a parsed Airtable error response. Keeps the
- * classification rules in one place so the client and any future writer
- * paths agree on what counts as a `ScopeMissingError` vs a plain 403.
- */
-export function buildAirtableApiError(opts: {
-  status: number;
-  message: string;
-  airtableErrorType?: string;
-  /** True if this call was a webhooks/payloads request (404 → WebhookGone). */
-  isWebhookCall?: boolean;
-}): AirtableApiError {
-  const { status, message, airtableErrorType, isWebhookCall } = opts;
-  if (status === 429) return new RateLimitedError(message);
-  if (status === 404 && isWebhookCall) {
-    return new WebhookGoneError(message, { airtableErrorType });
-  }
-  if (status === 403 && airtableErrorType === 'INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND') {
-    return new ScopeMissingError(message);
-  }
-  return new AirtableApiError(message, { status, airtableErrorType });
 }

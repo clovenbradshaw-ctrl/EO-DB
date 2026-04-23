@@ -1,6 +1,9 @@
 /**
- * Re-export of the shared Airtable client. Source lives at
- * `src/shared/airtable/client.ts` and is consumed by both the server
- * ingestion path and the browser-side sync.
+ * Re-export shim. The real implementation lives in `src/shared/airtable/`
+ * at the repo root and is consumed by both the browser app (here) and the
+ * Fastify server. Typed error classes are re-exported so callers can
+ * `instanceof`-check them instead of pattern-matching error strings.
  */
-export * from '@shared/airtable/client';
+
+export * from '../../../../src/shared/airtable/client';
+export * from '../../../../src/shared/airtable/errors';

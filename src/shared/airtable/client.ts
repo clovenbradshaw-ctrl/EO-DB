@@ -1,18 +1,22 @@
 /**
- * Rate-limited Airtable API client shared between server and browser.
+ * Rate-limited Airtable API client — shared between the Fastify server
+ * (src/ingestion) and the browser app (github-matrix-dev/app/src/ingestion).
  *
- * Uses fetch() directly against the Airtable API. A token-bucket rate
- * limiter keeps requests under the 5/sec per-base ceiling; 429 responses
- * retry with exponential backoff before surfacing a RateLimitedError.
+ * Before this module existed there were two drifting copies; webhook support
+ * and error parsing only landed on the browser copy. This file is the single
+ * superset. See docs in src/shared/airtable/errors.ts for the typed-error
+ * contract that replaces the old `Error & { status?, airtableErrorType? }`
+ * duck type.
  *
- * Error path throws typed subclasses of AirtableApiError (see ./errors)
- * so callers can branch with `instanceof` rather than probing `.message`.
+ * Runtime dependencies: global `fetch` only — works in Node 18+ and browsers.
  */
 
 import {
   AirtableApiError,
+  NonJsonResponseError,
   RateLimitedError,
-  buildAirtableApiError,
+  ScopeMissingError,
+  WebhookGoneError,
 } from './errors.js';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -154,6 +158,11 @@ export interface AirtableWebhookPayloadsResponse {
 
 // ─── Rate limiter ───────────────────────────────────────────────────────────
 
+/**
+ * Token-bucket rate limiter. Refills at `rate` tokens per second up to `burst`.
+ * Each API call consumes one token; callers await acquire() before firing.
+ * Default stays under Airtable's documented 5/sec per-base ceiling.
+ */
 class TokenBucket {
   private tokens: number;
   private lastRefill: number;
@@ -196,6 +205,8 @@ const AIRTABLE_META_API = 'https://api.airtable.com/v0/meta';
  * Auth is a Matrix access token in the request body — n8n validates the
  * token against `app.aminoimmigration.com` before forwarding, which keeps
  * the shared Airtable PAT on the server instead of in every user's browser.
+ * Only used when `viaAminoProxy: true` is passed; server-side callers
+ * always hit Airtable directly.
  */
 const AIRTABLE_PROXY_WEBHOOK = 'https://n8n.intelechia.com/webhook/airtable-proxy-amino';
 
@@ -205,7 +216,6 @@ const AIRTABLE_PROXY_WEBHOOK = 'https://n8n.intelechia.com/webhook/airtable-prox
  */
 function splitAirtableUrl(url: string): { path: string; query: Record<string, string> } {
   const u = new URL(url);
-  // Strip leading `/v0/` so the proxy (which re-prefixes it) doesn't double up.
   const path = u.pathname.replace(/^\/+/, '').replace(/^v0\//, '');
   const query: Record<string, string> = {};
   u.searchParams.forEach((value, key) => { query[key] = value; });
@@ -214,6 +224,16 @@ function splitAirtableUrl(url: string): { path: string; query: Record<string, st
 
 function safeJsonParse(input: string): unknown {
   try { return JSON.parse(input); } catch { return input; }
+}
+
+/**
+ * `/bases/{baseId}/webhooks/{webhookId}` or any deeper path under it.
+ * Used to narrow error classification: a 403/404 on a specific webhook id
+ * means that id is gone (WebhookGoneError), whereas the same status on the
+ * list/create endpoint is about scopes or the base itself.
+ */
+function isSpecificWebhookPath(url: string): boolean {
+  return /\/bases\/[^/?#]+\/webhooks\/[^/?#]+/.test(url);
 }
 
 /**
@@ -270,9 +290,34 @@ function parseAirtableError(body: string): { message: string; type?: string } {
   return { message: body.slice(0, 200) };
 }
 
-/** Heuristic: does this URL target the webhooks/payloads endpoints? */
-function isWebhookCallUrl(url: string): boolean {
-  return /\/bases\/[^/]+\/webhooks(\/|$|\?)/.test(url);
+/**
+ * Classify a non-2xx Airtable response into the most specific typed error
+ * we can recognize. Callers `instanceof`-check the result. Generic 4xx/5xx
+ * falls through to the base `AirtableApiError`.
+ */
+function classifyError(
+  url: string,
+  status: number,
+  parsed: { message: string; type?: string },
+): AirtableApiError {
+  const msg = `Airtable API ${status}: ${parsed.message}`;
+  // A dead webhook id returns 403 INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND or
+  // 404; the authoritative signal is that the status fires on the id-scoped
+  // webhook subpath. PR #624 tried to recognize this via string matching;
+  // this check replaces that.
+  if (isSpecificWebhookPath(url)) {
+    if (status === 404) return new WebhookGoneError(msg, status, parsed.type);
+    if (status === 403 && parsed.type === 'INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND') {
+      return new WebhookGoneError(msg, status, parsed.type);
+    }
+  }
+  // PAT is missing a scope (webhook:manage, schema:read, data.records:read, …).
+  // Airtable reports this as bare `INVALID_PERMISSIONS`; re-registering a
+  // webhook won't help — a human has to grant the scope.
+  if (status === 403 && parsed.type === 'INVALID_PERMISSIONS') {
+    return new ScopeMissingError(msg, status, parsed.type);
+  }
+  return new AirtableApiError(msg, status, parsed.type);
 }
 
 export type AirtableResponseHook = (info: AirtableResponseInfo) => void;
@@ -343,8 +388,6 @@ export class AirtableClient {
           });
         }
       } catch (e) {
-        // Network-level failure — emit a synthetic info record so the UI
-        // can surface it before re-throwing.
         const msg = (e as Error)?.message ?? String(e);
         try {
           this.onResponse?.({
@@ -378,16 +421,11 @@ export class AirtableClient {
             errorType: parsed.type,
           });
         } catch { /* ignore */ }
-        throw buildAirtableApiError({
-          status: res.status,
-          message: `Airtable API ${res.status}: ${parsed.message}`,
-          airtableErrorType: parsed.type,
-          isWebhookCall: isWebhookCallUrl(url),
-        });
+        throw classifyError(url, res.status, parsed);
       }
 
       // Read body as text first so we can detect HTML-where-JSON-was-expected
-      // and surface a helpful error rather than the cryptic SyntaxError. This
+      // and surface a typed error rather than the cryptic SyntaxError. This
       // handles the common case where a captive portal / proxy / CDN returns
       // an HTML error page with a 200 status.
       const text = await res.text();
@@ -414,9 +452,10 @@ export class AirtableClient {
         const hint = looksLikeHtml
           ? 'Airtable returned HTML instead of JSON — likely a network proxy, captive portal, or expired credentials redirect.'
           : 'Airtable returned a non-JSON body.';
-        throw new AirtableApiError(
+        throw new NonJsonResponseError(
           `${hint} (${res.status} ${res.statusText}; body: ${preview})`,
-          { status: res.status },
+          res.status,
+          preview,
         );
       }
     }
@@ -447,10 +486,7 @@ export class AirtableClient {
     return res.tables;
   }
 
-  /**
-   * Update a single record's fields via PATCH.
-   * Returns the updated Airtable record.
-   */
+  /** Update a single record's fields via PATCH. Returns the updated record. */
   async updateRecord(
     baseId: string,
     tableIdOrName: string,
@@ -544,6 +580,8 @@ export class AirtableClient {
     const url = `${AIRTABLE_API}/bases/${baseId}/webhooks/${webhookId}/payloads${qs ? `?${qs}` : ''}`;
     return this.request<AirtableWebhookPayloadsResponse>(url);
   }
+
+  // ─── Records API ────────────────────────────────────────────────────────
 
   async *paginateRecords(
     baseId: string,
