@@ -24,6 +24,32 @@ async function checkStatus(res: Response, context: string): Promise<void> {
   }
 }
 
+/**
+ * Read a Response body as JSON with a useful error when the body isn't JSON.
+ *
+ * Drive occasionally returns HTML with a 2xx status — typically from an
+ * intermediate proxy, captive portal, or session-expired redirect. In that
+ * case `res.json()` throws `SyntaxError: Unexpected token '<'…`, which tells
+ * the user nothing. This helper detects HTML, tags the error so callers can
+ * recognize it as transient, and includes a body preview for diagnosis.
+ */
+async function parseJsonResponse<T = unknown>(res: Response, context: string): Promise<T> {
+  const text = await res.text();
+  if (!text) return {} as T;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    const preview = text.slice(0, 200).replace(/\s+/g, ' ').trim();
+    const looksHtml = /^\s*<(!doctype|html|head|body)/i.test(text);
+    const label = looksHtml
+      ? 'Drive returned HTML instead of JSON (transient Google outage, proxy interference, or expired session — retry in a moment)'
+      : 'Drive returned an unparseable response';
+    const err = new Error(`Drive API ${context}: ${label} — ${preview}`);
+    (err as Error & { isTransient?: boolean }).isTransient = true;
+    throw err;
+  }
+}
+
 // ──────────────────────────────────────────────────────────────
 // JSON operations
 // ──────────────────────────────────────────────────────────────
@@ -36,8 +62,7 @@ export async function driveGet(token: string, url: string): Promise<any> {
   const res = await fetch(url, { headers: authHeaders(token) });
   if (res.status === 404) return { files: [] };
   await checkStatus(res, `GET ${url}`);
-  const text = await res.text();
-  return text ? JSON.parse(text) : {};
+  return parseJsonResponse(res, `GET ${url}`);
 }
 
 /**
@@ -56,8 +81,7 @@ export async function driveMutation(
     ...(body ? { body: JSON.stringify(body) } : {}),
   });
   await checkStatus(res, `${method} ${url}`);
-  const text = await res.text();
-  return text ? JSON.parse(text) : {};
+  return parseJsonResponse(res, `${method} ${url}`);
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -153,7 +177,7 @@ export async function driveUploadMultipart(
     body,
   });
   await checkStatus(res, 'multipart upload');
-  return res.json();
+  return parseJsonResponse<{ id: string }>(res, 'multipart upload');
 }
 
 /**
