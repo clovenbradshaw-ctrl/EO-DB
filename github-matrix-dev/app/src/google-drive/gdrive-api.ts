@@ -519,8 +519,40 @@ export async function gdriveStoreNamed(
     // resolveDataFolder will create a new folder automatically.
     console.warn('[EO-DB] gdriveStoreNamed failed, clearing folder cache and retrying:', fileName, e);
     clearFolderCacheForDataType(dataType);
-    return doStore();
   }
+
+  // Transient-failure retry: HTML responses from proxies/captive portals, 5xx
+  // gateway errors, and network hiccups. Retrying through the full doStore() is
+  // safe because findFileInFolder() detects any partially-created file and
+  // switches to the idempotent PATCH path on the next attempt — no duplicates.
+  let lastError: unknown;
+  const backoffsMs = [500, 1500, 4000];
+  for (let attempt = 0; attempt < backoffsMs.length; attempt++) {
+    try {
+      return await doStore();
+    } catch (e) {
+      lastError = e;
+      if (!isTransientDriveError(e)) break;
+      const delay = backoffsMs[attempt];
+      console.warn(
+        `[EO-DB] gdriveStoreNamed transient failure (attempt ${attempt + 1}/${backoffsMs.length}), retrying in ${delay}ms:`,
+        fileName,
+        (e as Error).message ?? e,
+      );
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+  throw lastError;
+}
+
+function isTransientDriveError(e: unknown): boolean {
+  if (!e) return false;
+  if ((e as { isTransient?: boolean }).isTransient) return true;
+  const msg = (e as Error).message ?? '';
+  // Drive API checkStatus messages include the status code; retry on 5xx and 429.
+  if (/\b(500|502|503|504|429)\b/.test(msg)) return true;
+  if (/network|failed to fetch|load failed/i.test(msg)) return true;
+  return false;
 }
 
 /**
