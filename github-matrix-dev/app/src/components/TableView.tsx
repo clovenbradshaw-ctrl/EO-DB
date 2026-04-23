@@ -18,7 +18,7 @@ import { useIdResolver, isEntityId, isEntityIdArray, type IdResolver } from '../
 import { groupSchemaStates, extractColumnTypeOverrides, schemaTypeTarget, schemaConstraintTarget, schemaResolveTarget, type FieldSchema } from '../db/schema-rules';
 import { ColumnTypeSelector, COLUMN_TYPE_ICON_MAP } from './ColumnTypeSelector';
 import { ResolutionPolicyComposer, summarizePolicy, normalizeResolvePolicy, type ResolvePolicy } from './ResolutionPolicyComposer';
-import { buildNulClearingEvent } from './cell-events';
+import { buildNulClearingEvent, buildMakingDefEvent, isFieldEmpty } from './cell-events';
 import { ConstraintComposer } from './ConstraintComposer';
 import { useIsMobile, useIsNarrow } from '../hooks/useIsMobile';
 import { ColumnManagerPanel } from './ColumnManagerPanel';
@@ -1302,19 +1302,27 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     let parsed: any = rawValue;
     try { parsed = JSON.parse(rawValue); } catch { /* keep as string */ }
 
-    const operand = useFieldsSub
-      ? { fields: { [fieldKey]: parsed } }
-      : { [fieldKey]: parsed };
+    // A.6/5: first-fill detection — if the prior value is empty, this DEF
+    // is composing the field into existence → stamp resolution 'Making'.
+    const rec = records.find((r) => r.target === target);
+    const prior = rec ? getFieldValue(rec, fieldKey, useFieldsSub) : undefined;
 
     try {
-      await dispatch({
-        op: 'DEF',
-        target,
-        operand,
-        agent: `user:${session.userId}`,
-        ts: new Date().toISOString(),
-        acquired_ts: new Date().toISOString(),
-      });
+      if (isFieldEmpty(prior)) {
+        await dispatch(buildMakingDefEvent(target, fieldKey, parsed, `user:${session.userId}`, useFieldsSub));
+      } else {
+        const operand = useFieldsSub
+          ? { fields: { [fieldKey]: parsed } }
+          : { [fieldKey]: parsed };
+        await dispatch({
+          op: 'DEF',
+          target,
+          operand,
+          agent: `user:${session.userId}`,
+          ts: new Date().toISOString(),
+          acquired_ts: new Date().toISOString(),
+        });
+      }
       syncEditToAirtable({ target, fieldKey, value: parsed, getStateByPrefix }).catch(console.warn);
     } catch { /* ignore */ }
     setEditingCell(null);
