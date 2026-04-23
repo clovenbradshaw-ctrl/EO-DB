@@ -27,7 +27,7 @@ import {
   type AirtableRecord,
 } from './airtable-client';
 import { classifyFieldType, type FieldClassification } from './field-rules';
-import { mapAirtableType } from './airtable-type-map';
+import { mapAirtableTypeOrNull } from './airtable-type-map';
 import { extractValue, valuesEqual, stableStringify } from './value-extract';
 import { isExcluded, EMPTY_EXCLUSIONS, type SyncExclusions } from './exclusions';
 
@@ -1653,8 +1653,19 @@ export async function processHydrationBundle(
       // Emit .type DEF with mapped EO-DB column type.
       // For multipleRecordLinks, also store the linked table's EO target so
       // consumers can resolve the relationship without Airtable API access.
-      const eoType = mapAirtableType(field.type);
+      // An unknown Airtable field type silently fell back to 'text' before —
+      // now we record the raw type on the DEF operand and log it to the sync
+      // log so schema drift is visible instead of invisible (P6 of redesign).
+      const mapped = mapAirtableTypeOrNull(field.type);
+      const eoType = mapped ?? 'text';
       const typeOperand: Record<string, unknown> = { type: eoType };
+      if (mapped === null) {
+        typeOperand.airtableType = field.type;
+        typeOperand.unknown = true;
+        console.warn(
+          `[EO-DB] Unknown Airtable field type "${field.type}" on ${table.name}.${field.name} — falling back to 'text'. Add a mapping in src/shared/airtable/type-map.ts to silence this warning.`,
+        );
+      }
       if (field.type === 'multipleRecordLinks' && field.options?.linkedTableId) {
         typeOperand.linkedTable = tableTarget(base.id, field.options.linkedTableId as string);
       }
@@ -2059,13 +2070,23 @@ export async function updateSync(
           }, opts?.onEvent);
         } catch { /* idempotent */ }
 
-        // Emit .type DEF with mapped EO-DB column type
-        const eoType = mapAirtableType(field.type);
+        // Emit .type DEF with mapped EO-DB column type. See the hydration
+        // path above for why we record the raw Airtable type on unknowns.
+        const mappedUpd = mapAirtableTypeOrNull(field.type);
+        const eoType = mappedUpd ?? 'text';
+        const typeOperand: Record<string, unknown> = { type: eoType };
+        if (mappedUpd === null) {
+          typeOperand.airtableType = field.type;
+          typeOperand.unknown = true;
+          console.warn(
+            `[EO-DB] Unknown Airtable field type "${field.type}" on ${table.name}.${field.name} — falling back to 'text'. Add a mapping in src/shared/airtable/type-map.ts to silence this warning.`,
+          );
+        }
         try {
           await processEvent(store, {
             op: 'DEF',
             target: `${fieldTarget}.type`,
-            operand: { type: eoType },
+            operand: typeOperand,
             agent,
             ts: new Date().toISOString(),
             acquired_ts: new Date().toISOString(),

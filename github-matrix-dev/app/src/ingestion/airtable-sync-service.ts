@@ -506,7 +506,9 @@ export class AirtableSyncService {
       device: this.deviceId,
     });
 
-    // Mark syncing in room state
+    // Mark syncing in room state. If this write fails, other clients can't
+    // see we're syncing and may attempt to claim primary themselves — log
+    // it so the failure isn't silent (see P3/P5 in the sync redesign).
     const headBefore = this.readHead();
     if (headBefore && headBefore.syncer === this.agent) {
       try {
@@ -514,7 +516,9 @@ export class AirtableSyncService {
           ...headBefore,
           syncing: true,
         }, '');
-      } catch { /* best-effort */ }
+      } catch (e) {
+        console.warn('[EO-DB] Failed to mark syncing=true on head state:', e);
+      }
     }
 
     const tickStart = Date.now();
@@ -716,7 +720,9 @@ export class AirtableSyncService {
         durationMs: Date.now() - tickStart,
       });
 
-      // Update head to reflect sync failure (not syncing anymore)
+      // Update head to reflect sync failure (not syncing anymore). Silent
+      // failure here leaves the head stuck at syncing=true, which other
+      // clients treat as "active primary" until the stale threshold elapses.
       const headAfter = this.readHead();
       if (headAfter && headAfter.syncer === this.agent) {
         try {
@@ -724,7 +730,9 @@ export class AirtableSyncService {
             ...headAfter,
             syncing: false,
           }, '');
-        } catch { /* best-effort */ }
+        } catch (e) {
+          console.warn('[EO-DB] Failed to mark syncing=false after sync error:', e);
+        }
       }
     } finally {
       this.syncing = false;
