@@ -20,12 +20,15 @@ import { markDeleted } from '../db/tombstone';
 import type { EoEvent, Resolution } from '../db/types';
 import {
   AirtableClient,
+  AirtableApiError,
+  ScopeMissingError,
+  WebhookGoneError,
   type AirtableBase,
   type AirtableTable,
   type AirtableRecord,
 } from './airtable-client';
 import { classifyFieldType, type FieldClassification } from './field-rules';
-import { mapAirtableType } from './airtable-type-map';
+import { mapAirtableTypeOrNull } from './airtable-type-map';
 import { extractValue, valuesEqual, stableStringify } from './value-extract';
 import { isExcluded, EMPTY_EXCLUSIONS, type SyncExclusions } from './exclusions';
 
@@ -982,7 +985,7 @@ function buildAirtableEndpoint(
  * calls `resetWebhookPermissionCache`) re-enables the webhook path without
  * needing a hard refresh.
  */
-const webhookPermissionFailures = new Map<string, { status: number; message: string; errorType?: string }>();
+const webhookPermissionFailures = new Map<string, AirtableApiError>();
 
 /**
  * Clear the session-scoped 403 cache. Called when credentials change so a
@@ -993,14 +996,19 @@ export function resetWebhookPermissionCache(): void {
 }
 
 /**
- * 403 with `INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND` almost always means the
- * token is missing `webhook:manage`, or this base isn't on the token's
- * allowlist. Either way the error is permanent for the life of the token —
- * retrying on every tick just wastes an API call.
+ * Either a ScopeMissingError (403 INVALID_PERMISSIONS — the PAT lacks a
+ * scope) or a plain AirtableApiError carrying 403 +
+ * INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND against the create endpoint
+ * (base isn't on the token's allowlist). Both are permanent for the life
+ * of the token; retrying on every tick just wastes an API call.
  */
-function isPermanentWebhookPermissionError(err: unknown): boolean {
-  const e = err as { status?: number; airtableErrorType?: string };
-  return e?.status === 403 && e.airtableErrorType === 'INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND';
+function isPermanentWebhookPermissionError(err: unknown): err is AirtableApiError {
+  if (err instanceof ScopeMissingError) return true;
+  return (
+    err instanceof AirtableApiError
+    && err.status === 403
+    && err.airtableErrorType === 'INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND'
+  );
 }
 
 /**
@@ -1014,13 +1022,7 @@ async function ensureWebhook(
 ): Promise<WebhookState> {
   const priorFailure = webhookPermissionFailures.get(baseId);
   if (priorFailure) {
-    const err = new Error(
-      `Airtable API ${priorFailure.status}: ${priorFailure.message}`,
-    ) as Error & { status?: number; airtableErrorType?: string; cached?: true };
-    err.status = priorFailure.status;
-    err.airtableErrorType = priorFailure.errorType;
-    err.cached = true;
-    throw err;
+    throw priorFailure;
   }
   const existing = await getWebhookState(store, baseId);
   if (existing) {
@@ -1058,12 +1060,7 @@ async function ensureWebhook(
     });
   } catch (e: unknown) {
     if (isPermanentWebhookPermissionError(e)) {
-      const err = e as { status: number; message?: string; airtableErrorType?: string };
-      webhookPermissionFailures.set(baseId, {
-        status: err.status,
-        message: err.message ?? 'INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND',
-        errorType: err.airtableErrorType,
-      });
+      webhookPermissionFailures.set(baseId, e);
     }
     throw e;
   }
@@ -1163,11 +1160,10 @@ async function webhookIncrementalSyncBase(
     try {
       page = await client.listWebhookPayloads(baseId, state.webhookId, { cursor });
     } catch (e: unknown) {
-      const err = e as { status?: number; message?: string };
       // 404 means the webhook was GC'd or the cursor is older than the
       // 7-day payload retention window. Either way local state is dead —
       // wipe it so the caller can trigger a full re-hydration.
-      if (err.status === 404) {
+      if (e instanceof WebhookGoneError) {
         await clearWebhookState(store, baseId);
       }
       throw e;
@@ -1214,10 +1210,9 @@ async function webhookIncrementalSyncBase(
           try {
             rec = await client.getRecord(baseId, tableId, recordId, { returnFieldsByFieldId: true });
           } catch (e: unknown) {
-            const err = e as { status?: number };
             // Record was deleted between the payload being queued and our
             // fetch — treat as destroyed, don't fail the whole sync.
-            if (err.status === 404) continue;
+            if (e instanceof AirtableApiError && e.status === 404) continue;
             throw e;
           }
           const result = await ingestRecord(
@@ -1335,9 +1330,8 @@ async function refreshKnownWebhooks(
     try {
       await client.refreshWebhook(baseId, state.webhookId);
     } catch (e: unknown) {
-      const err = e as { status?: number };
       // 404 → webhook is gone; clear so ensureWebhook re-creates it.
-      if (err.status === 404) await clearWebhookState(store, baseId);
+      if (e instanceof WebhookGoneError) await clearWebhookState(store, baseId);
       // Other errors (network blip, rate limit) — ignore; the next poll
       // will surface them if they're persistent.
     }
@@ -1377,10 +1371,11 @@ export async function registerWebhooksForBases(
       const state = await ensureWebhook(store, client, baseId);
       results.push({ baseId, webhookId: state.webhookId, cursor: state.cursor });
     } catch (e: unknown) {
-      const err = e as { status?: number; message?: string };
+      const status = e instanceof AirtableApiError ? e.status : undefined;
+      const message = e instanceof Error ? e.message : String(e);
       results.push({
         baseId,
-        error: `${err.status ?? '?'}: ${err.message ?? String(e)}`,
+        error: `${status ?? '?'}: ${message}`,
       });
     }
   }
@@ -1663,8 +1658,10 @@ export async function processHydrationBundle(
       // Emit .type DEF with mapped EO-DB column type.
       // For multipleRecordLinks, also store the linked table's EO target so
       // consumers can resolve the relationship without Airtable API access.
-      const eoType = mapAirtableType(field.type);
+      const mapped = mapAirtableTypeOrNull(field.type);
+      const eoType = mapped ?? 'text';
       const typeOperand: Record<string, unknown> = { type: eoType };
+      if (mapped === null) typeOperand.unknownAirtableType = field.type;
       if (field.type === 'multipleRecordLinks' && field.options?.linkedTableId) {
         typeOperand.linkedTable = tableTarget(base.id, field.options.linkedTableId as string);
       }
@@ -2070,12 +2067,15 @@ export async function updateSync(
         } catch { /* idempotent */ }
 
         // Emit .type DEF with mapped EO-DB column type
-        const eoType = mapAirtableType(field.type);
+        const mapped = mapAirtableTypeOrNull(field.type);
+        const eoType = mapped ?? 'text';
+        const updTypeOperand: Record<string, unknown> = { type: eoType };
+        if (mapped === null) updTypeOperand.unknownAirtableType = field.type;
         try {
           await processEvent(store, {
             op: 'DEF',
             target: `${fieldTarget}.type`,
-            operand: { type: eoType },
+            operand: updTypeOperand,
             agent,
             ts: new Date().toISOString(),
             acquired_ts: new Date().toISOString(),

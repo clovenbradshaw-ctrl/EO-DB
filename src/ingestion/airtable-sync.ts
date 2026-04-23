@@ -34,7 +34,7 @@ import {
   type AirtableRecord,
 } from './airtable-client.js';
 import { classifyFieldType, type FieldClassification } from './field-rules.js';
-import { mapAirtableType } from './airtable-type-map.js';
+import { mapAirtableTypeOrNull } from './airtable-type-map.js';
 import { extractValue, valuesEqual, stableStringify } from './value-extract.js';
 import { isExcluded, EMPTY_EXCLUSIONS, type SyncExclusions } from './exclusions.js';
 
@@ -867,8 +867,10 @@ export async function hydrationSync(
           // Emit .type DEF with mapped EO-DB column type.
           // For multipleRecordLinks, also store the linked table's EO target so
           // consumers can resolve the relationship without Airtable API access.
-          const eoType = mapAirtableType(field.type);
+          const mapped = mapAirtableTypeOrNull(field.type);
+          const eoType = mapped ?? 'text';
           const typeOperand: Record<string, unknown> = { type: eoType };
+          if (mapped === null) typeOperand.unknownAirtableType = field.type;
           if (field.type === 'multipleRecordLinks' && field.options?.linkedTableId) {
             typeOperand.linkedTable = tableTarget(base.id, field.options.linkedTableId as string);
           }
