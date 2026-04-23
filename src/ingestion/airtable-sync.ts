@@ -867,8 +867,10 @@ export async function hydrationSync(
           // Emit .type DEF with mapped EO-DB column type.
           // For multipleRecordLinks, also store the linked table's EO target so
           // consumers can resolve the relationship without Airtable API access.
-          const eoType = mapAirtableType(field.type);
+          const mapped = mapAirtableType(field.type);
+          const eoType = mapped.type;
           const typeOperand: Record<string, unknown> = { type: eoType };
+          if (mapped.unknown) typeOperand.unknownAirtableType = mapped.unknown;
           if (field.type === 'multipleRecordLinks' && field.options?.linkedTableId) {
             typeOperand.linkedTable = tableTarget(base.id, field.options.linkedTableId as string);
           }

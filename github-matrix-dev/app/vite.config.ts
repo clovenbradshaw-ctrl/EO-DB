@@ -1,11 +1,17 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+import { fileURLToPath } from 'node:url';
 
 export default defineConfig({
   plugins: [
     react(),
   ],
   base: './',
+  resolve: {
+    alias: {
+      '@shared': fileURLToPath(new URL('../../src/shared', import.meta.url)),
+    },
+  },
   // Shard-fold worker (`src/workers/fold-shard.worker.ts`) is a module worker
   // (constructed with `{ type: 'module' }`) and uses a dynamic import from
   // fold-worker-transport → fold.ts to break a module cycle. That dynamic
