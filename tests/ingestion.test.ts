@@ -436,45 +436,44 @@ describe('extractStorableFields', () => {
 
 describe('Ingestion API routes', () => {
   beforeAll(async () => {
+    // The shared Airtable client reads res.text() first (to detect HTML-
+    // where-JSON-was-expected — see src/shared/airtable/client.ts) so mocks
+    // must supply both text() and json(). mockOk() keeps the two in sync.
+    const mockOk = (data: unknown) => ({
+      ok: true,
+      json: async () => data,
+      text: async () => JSON.stringify(data),
+    });
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
       const urlStr = String(url);
       // Mock Matrix token verification
       if (urlStr.includes('/_matrix/')) {
-        return {
-          ok: true,
-          json: async () => ({ user_id: '@testuser:matrix.example.com' }),
-        } as any;
+        return mockOk({ user_id: '@testuser:matrix.example.com' }) as any;
       }
       // Mock Airtable API — bases list
       if (urlStr.includes('/meta/bases') && !urlStr.includes('/tables')) {
-        return {
-          ok: true,
-          json: async () => ({
-            bases: [
-              { id: 'appTEST1', name: 'Test Base', permissionLevel: 'create' },
-            ],
-          }),
-        } as any;
+        return mockOk({
+          bases: [
+            { id: 'appTEST1', name: 'Test Base', permissionLevel: 'create' },
+          ],
+        }) as any;
       }
       // Mock Airtable API — table schema
       if (urlStr.includes('/meta/bases/') && urlStr.includes('/tables')) {
-        return {
-          ok: true,
-          json: async () => ({
-            tables: [
-              {
-                id: 'tblTEST1',
-                name: 'Clients',
-                primaryFieldId: 'fldName',
-                fields: [
-                  { id: 'fldName', name: 'Name', type: 'singleLineText' },
-                  { id: 'fldEmail', name: 'Email', type: 'email' },
-                  { id: 'fldFormula', name: 'FullName', type: 'formula' },
-                ],
-              },
-            ],
-          }),
-        } as any;
+        return mockOk({
+          tables: [
+            {
+              id: 'tblTEST1',
+              name: 'Clients',
+              primaryFieldId: 'fldName',
+              fields: [
+                { id: 'fldName', name: 'Name', type: 'singleLineText' },
+                { id: 'fldEmail', name: 'Email', type: 'email' },
+                { id: 'fldFormula', name: 'FullName', type: 'formula' },
+              ],
+            },
+          ],
+        }) as any;
       }
       // Mock Airtable API — list records
       if (urlStr.includes('/appTEST1/')) {
@@ -489,10 +488,7 @@ describe('Ingestion API routes', () => {
               { id: 'recA', createdTime: '2025-01-01T00:00:00Z', fields: { Name: 'Alice', Email: 'alice@test.com', FullName: 'Alice Smith' } },
               { id: 'recB', createdTime: '2025-01-01T00:00:00Z', fields: { Name: 'Bob', Email: 'bob@test.com', FullName: 'Bob Jones' } },
             ];
-        return {
-          ok: true,
-          json: async () => ({ records }),
-        } as any;
+        return mockOk({ records }) as any;
       }
       return { ok: false, status: 404, text: async () => 'Not found' } as any;
     });
