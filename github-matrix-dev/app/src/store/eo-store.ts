@@ -163,7 +163,7 @@ interface EoDbState {
   getState: (target: string) => Promise<EoState | null>;
   getStateByPrefix: (prefix: string) => Promise<EoState[]>;
   getStateByPrefixPage: (prefix: string, limit: number, afterTarget?: string) => Promise<StatePage>;
-  manualSnapshot: () => Promise<{ mxc: string; seq: number; savedToDrive: boolean }>;
+  manualSnapshot: () => Promise<{ mxc: string; seq: number; savedToDrive: boolean; driveConnected: boolean }>;
   /**
    * Manually save current data to the Matrix media store and record the
    * resulting mxc URI in room state (EO_SNAPSHOT_STATE_TYPE) so any device
@@ -605,15 +605,18 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     }
 
     let savedToDrive = false;
+    let driveConnected = false;
     if (gdriveSync) {
-      await gdriveSync.forceSave();
-      savedToDrive = true;
+      driveConnected = true;
+      // forceSave() returns false when the local store has no events to push,
+      // so we only mark savedToDrive when something actually landed on Drive.
+      savedToDrive = await gdriveSync.forceSave();
     } else if (useGDriveStore.getState().connected) {
       // Drive is marked connected but the sync service never attached — surface
       // this instead of pretending the snapshot landed on Drive.
       throw new Error('Google Drive is connected but sync service is not ready — try again in a moment');
     }
-    return { mxc: savedToDrive ? 'gdrive' : 'local', seq: lastSeq, savedToDrive };
+    return { mxc: savedToDrive ? 'gdrive' : 'local', seq: lastSeq, savedToDrive, driveConnected };
   },
 
   async manualMatrixMediaSnapshot() {

@@ -161,6 +161,8 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
       const result = await manualSnapshot();
       if (result.savedToDrive) {
         setSnapshotStatus(`Snapshot saved to Drive — seq ${result.seq}`);
+      } else if (result.driveConnected) {
+        setSnapshotStatus(`Nothing to snapshot — store is empty (0 events to push)`);
       } else {
         setSnapshotStatus(`Snapshot saved locally — seq ${result.seq} (Drive not connected)`);
       }

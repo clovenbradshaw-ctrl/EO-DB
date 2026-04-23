@@ -413,10 +413,10 @@ export class GDriveSyncService {
     }
   }
 
-  async forceSave(): Promise<void> {
-    if (this.destroyed) return;
+  async forceSave(): Promise<boolean> {
+    if (this.destroyed) return false;
 
-    await this.fullPushToGDrive();
+    return this.fullPushToGDrive();
   }
 
   // ── Per-op save ──────────────────────────────────────────
@@ -598,8 +598,8 @@ export class GDriveSyncService {
    * Used by forceSave() ("Take Snapshot") and auto-triggered on start()
    * when the local store has data but GDrive is empty.
    */
-  async fullPushToGDrive(): Promise<void> {
-    if (this.destroyed) return;
+  async fullPushToGDrive(): Promise<boolean> {
+    if (this.destroyed) return false;
     const dt = this.dataType;
 
     // Read all events from the local OPFS store
@@ -612,7 +612,7 @@ export class GDriveSyncService {
 
     if (merged.size === 0) {
       console.log('[EO-DB] fullPushToGDrive: no events to push');
-      return;
+      return false;
     }
 
     const events = Array.from(merged.values()).sort((a, b) => a.seq - b.seq);
@@ -676,6 +676,7 @@ export class GDriveSyncService {
     useGDriveStore.getState().recordSync(this.spaceId);
     this.onStatus?.('synced');
     console.log(`[EO-DB] fullPushToGDrive: complete — ${events.length} events at seq ${toSeq}`);
+    return true;
   }
 
   // ── Provenance blobs ──────────────────────────────────────────

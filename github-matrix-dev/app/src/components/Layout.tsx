@@ -2042,7 +2042,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   async function handleLogout() {
     // Save snapshots for ALL cached spaces before clearing state
     const cache = spaceCacheRef.current;
-    const savePromises: Promise<void>[] = [];
+    const savePromises: Promise<unknown>[] = [];
     for (const [, cached] of cache) {
       if (cached.syncManager) {
         savePromises.push(cached.syncManager.saveSnapshot().catch((err) => {
@@ -2108,7 +2108,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       if (fullSaveInFlight) return;
       fullSaveInFlight = true;
       try {
-        const promises: Promise<void>[] = [];
+        const promises: Promise<unknown>[] = [];
         for (const [, cached] of spaceCacheRef.current) {
           if (cached.syncManager) {
             promises.push(cached.syncManager.saveSnapshot().catch((err) => {
