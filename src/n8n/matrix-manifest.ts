@@ -66,6 +66,8 @@ async function updateIndex(
     {
       latest_data_id: entry.data_id,
       latest_hash: entry.content_hash,
+      latest_version: entry.version,
+      latest_uri: entry.uri,
       data_type: entry.data_type,
       key_id: entry.key_id,
       size: entry.size,

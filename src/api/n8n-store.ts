@@ -1,14 +1,18 @@
 /**
- * n8n Google Drive storage API routes.
+ * n8n blob storage API routes.
  *
- * Google Drive is a dumb encrypted blob store — not a source of truth.
+ * Talks to the deployed "EO Blob Store" workflow on n8n. That workflow
+ * stores encrypted blobs on the n8n host's filesystem (/mnt/eo-blobs)
+ * with a 5-version rolling history per data_id, and authorizes every
+ * call by checking Matrix room membership.
+ *
  * Devices signal each other via Matrix room state (manifest entries),
- * not by polling Drive for changes.
+ * not by polling the workflow for changes.
  *
  * Routes:
- *   POST /n8n/store     — encrypt & store a blob via n8n → Google Drive
- *   POST /n8n/retrieve  — fetch & decrypt a blob from Google Drive via n8n
- *   POST /n8n/list      — list stored blobs (optionally filtered)
+ *   POST /n8n/store     — encrypt & store a blob via n8n
+ *   POST /n8n/retrieve  — fetch & decrypt a blob via n8n
+ *   POST /n8n/versions  — list server-retained versions of a single data_id
  *   GET  /n8n/status    — check if n8n integration is configured
  */
 
@@ -20,9 +24,8 @@ import type { ManifestDataType, ManifestEntry } from '../n8n/types.js';
 import { getN8nConfig } from '../n8n/config.js';
 import {
   storeViaN8n,
-  storeBinaryViaN8n,
   retrieveViaN8n,
-  listViaN8n,
+  versionsViaN8n,
 } from '../n8n/webhook-client.js';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
@@ -57,12 +60,13 @@ export function registerN8nRoutes(
   });
 
   /**
-   * POST /n8n/store — encrypt and store data via the n8n → Google Drive pipeline.
+   * POST /n8n/store — encrypt and store data via the n8n workflow.
    *
    * Body: {
    *   data: any,              — the payload to encrypt and store
    *   data_type: string,      — "snapshot" | "event-batch" | "import-archive" | "attachment" | "backup"
    *   target: string,         — EO target path for key resolution
+   *   room_id: string,        — Matrix room id (must start with "!")
    *   label?: string,         — optional human-readable label
    *   seq_range?: { from: number, to: number }
    * }
@@ -82,14 +86,15 @@ export function registerN8nRoutes(
       data: unknown;
       data_type: ManifestDataType;
       target: string;
+      room_id: string;
       label?: string;
       seq_range?: { from: number; to: number };
       keyring: any;
     };
 
-    if (!body.data || !body.data_type || !body.target || !body.keyring) {
+    if (!body.data || !body.data_type || !body.target || !body.room_id || !body.keyring) {
       return reply.code(400).send({
-        error: 'Missing required fields: data, data_type, target, keyring',
+        error: 'Missing required fields: data, data_type, target, room_id, keyring',
       });
     }
 
@@ -97,6 +102,7 @@ export function registerN8nRoutes(
 
     try {
       const result = await storeViaN8n(body.data, body.keyring, {
+        roomId: body.room_id,
         target: body.target,
         dataType: body.data_type,
         label: body.label,
@@ -108,7 +114,7 @@ export function registerN8nRoutes(
       return reply.send({
         ok: true,
         manifest: result.manifest,
-        drive_file_id: result.driveFileId,
+        response: result.response,
       });
     } catch (e: any) {
       return reply.code(502).send({ error: e.message });
@@ -116,7 +122,7 @@ export function registerN8nRoutes(
   });
 
   /**
-   * POST /n8n/retrieve — fetch and decrypt a blob from Google Drive via n8n.
+   * POST /n8n/retrieve — fetch and decrypt a blob via n8n.
    *
    * Body: {
    *   manifest: ManifestEntry, — the manifest entry identifying the blob
@@ -154,13 +160,14 @@ export function registerN8nRoutes(
   });
 
   /**
-   * POST /n8n/list — list blobs stored in Google Drive via n8n.
+   * POST /n8n/versions — list server-retained versions of one data_id.
    *
    * Body: {
-   *   data_type?: string — optional filter by data type
+   *   room_id: string,
+   *   data_id: string
    * }
    */
-  app.post('/n8n/list', async (request: AuthenticatedRequest, reply) => {
+  app.post('/n8n/versions', async (request: AuthenticatedRequest, reply) => {
     const config = getN8nConfig();
     if (!config) {
       return reply.code(503).send({ error: 'n8n webhook not configured' });
@@ -172,11 +179,18 @@ export function registerN8nRoutes(
     }
 
     const body = request.body as {
-      data_type?: ManifestDataType;
+      room_id: string;
+      data_id: string;
     };
 
+    if (!body.room_id || !body.data_id) {
+      return reply.code(400).send({
+        error: 'Missing required fields: room_id, data_id',
+      });
+    }
+
     try {
-      const result = await listViaN8n(matrixToken, body.data_type);
+      const result = await versionsViaN8n(body.room_id, body.data_id, matrixToken);
       return reply.send(result);
     } catch (e: any) {
       return reply.code(502).send({ error: e.message });
