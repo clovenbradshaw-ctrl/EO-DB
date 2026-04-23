@@ -20,6 +20,8 @@ import { markDeleted } from '../db/tombstone';
 import type { EoEvent, Resolution } from '../db/types';
 import {
   AirtableClient,
+  WebhookAccessError,
+  WebhookGoneError,
   type AirtableBase,
   type AirtableTable,
   type AirtableRecord,
@@ -993,19 +995,12 @@ export function resetWebhookPermissionCache(): void {
 }
 
 /**
- * 403 with `INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND` almost always means the
- * token is missing `webhook:manage`, or this base isn't on the token's
- * allowlist. Either way the error is permanent for the life of the token —
- * retrying on every tick just wastes an API call.
- */
-function isPermanentWebhookPermissionError(err: unknown): boolean {
-  const e = err as { status?: number; airtableErrorType?: string };
-  return e?.status === 403 && e.airtableErrorType === 'INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND';
-}
-
-/**
  * Register a webhook for this base that watches tableData changes across
  * all tables. Returns the starting cursor the next poll should use.
+ *
+ * Permanent token-scope failures (403 INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND
+ * on the base-level /webhooks endpoint) are thrown as `WebhookAccessError`
+ * by the shared client and cached here so we don't retry on every tick.
  */
 async function ensureWebhook(
   store: EoStore,
@@ -1014,13 +1009,11 @@ async function ensureWebhook(
 ): Promise<WebhookState> {
   const priorFailure = webhookPermissionFailures.get(baseId);
   if (priorFailure) {
-    const err = new Error(
+    throw new WebhookAccessError(
       `Airtable API ${priorFailure.status}: ${priorFailure.message}`,
-    ) as Error & { status?: number; airtableErrorType?: string; cached?: true };
-    err.status = priorFailure.status;
-    err.airtableErrorType = priorFailure.errorType;
-    err.cached = true;
-    throw err;
+      priorFailure.status,
+      priorFailure.errorType,
+    );
   }
   const existing = await getWebhookState(store, baseId);
   if (existing) {
@@ -1057,12 +1050,11 @@ async function ensureWebhook(
       },
     });
   } catch (e: unknown) {
-    if (isPermanentWebhookPermissionError(e)) {
-      const err = e as { status: number; message?: string; airtableErrorType?: string };
+    if (e instanceof WebhookAccessError) {
       webhookPermissionFailures.set(baseId, {
-        status: err.status,
-        message: err.message ?? 'INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND',
-        errorType: err.airtableErrorType,
+        status: e.status,
+        message: e.message ?? 'INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND',
+        errorType: e.airtableErrorType,
       });
     }
     throw e;
@@ -1163,11 +1155,10 @@ async function webhookIncrementalSyncBase(
     try {
       page = await client.listWebhookPayloads(baseId, state.webhookId, { cursor });
     } catch (e: unknown) {
-      const err = e as { status?: number; message?: string };
-      // 404 means the webhook was GC'd or the cursor is older than the
-      // 7-day payload retention window. Either way local state is dead —
-      // wipe it so the caller can trigger a full re-hydration.
-      if (err.status === 404) {
+      // Webhook was GC'd or the cursor is older than the 7-day payload
+      // retention window. Either way local state is dead — wipe it so the
+      // caller can trigger a full re-hydration.
+      if (e instanceof WebhookGoneError) {
         await clearWebhookState(store, baseId);
       }
       throw e;
@@ -1335,11 +1326,10 @@ async function refreshKnownWebhooks(
     try {
       await client.refreshWebhook(baseId, state.webhookId);
     } catch (e: unknown) {
-      const err = e as { status?: number };
-      // 404 → webhook is gone; clear so ensureWebhook re-creates it.
-      if (err.status === 404) await clearWebhookState(store, baseId);
-      // Other errors (network blip, rate limit) — ignore; the next poll
-      // will surface them if they're persistent.
+      // Webhook is gone — clear so ensureWebhook re-creates it on the next
+      // Update Sync. Other errors (network blip, rate limit) are ignored
+      // here; the next poll will surface them if they're persistent.
+      if (e instanceof WebhookGoneError) await clearWebhookState(store, baseId);
     }
   }
 }

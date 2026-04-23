@@ -21,8 +21,8 @@ export class AirtableApiError extends Error {
 
 /**
  * Webhook id is gone from Airtable's side. Seen as:
- *   - 403 with type=INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND on a /webhooks/* path
- *   - 404 on a /webhooks/* path (cursor too old; Airtable GC'd the payloads)
+ *   - 403 with type=INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND on a /webhooks/{id} path
+ *   - 404 on a /webhooks/{id} path (cursor too old; Airtable GC'd the payloads)
  *
  * The operator-native recovery is to emit REC recognized="webhook_expired" on
  * the webhook site and let the scheduler re-register; callers should NOT
@@ -32,6 +32,22 @@ export class WebhookGoneError extends AirtableApiError {
   constructor(message: string, status: number, airtableErrorType?: string) {
     super(message, status, airtableErrorType);
     this.name = 'WebhookGoneError';
+  }
+}
+
+/**
+ * This token cannot manage webhooks on this base at all — seen as 403
+ * INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND against the base-level /webhooks
+ * list/create endpoints (not an id-specific path). Airtable uses the same
+ * error type for "scope missing" and "base not on allowlist"; both are
+ * permanent for the life of the token. Callers should cache the failure
+ * and stop retrying on every tick — no amount of re-registration will
+ * help until the human fixes the PAT.
+ */
+export class WebhookAccessError extends AirtableApiError {
+  constructor(message: string, status: number, airtableErrorType?: string) {
+    super(message, status, airtableErrorType);
+    this.name = 'WebhookAccessError';
   }
 }
 

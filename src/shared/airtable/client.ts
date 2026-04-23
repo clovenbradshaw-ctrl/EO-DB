@@ -16,6 +16,7 @@ import {
   NonJsonResponseError,
   RateLimitedError,
   ScopeMissingError,
+  WebhookAccessError,
   WebhookGoneError,
 } from './errors.js';
 
@@ -237,6 +238,15 @@ function isSpecificWebhookPath(url: string): boolean {
 }
 
 /**
+ * `/bases/{baseId}/webhooks` (the list/create endpoint, no id). A 403
+ * INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND here means the token can't manage
+ * webhooks on this base — distinct from "this specific id is gone."
+ */
+function isWebhookCollectionPath(url: string): boolean {
+  return /\/bases\/[^/?#]+\/webhooks(?:\?|$)/.test(url);
+}
+
+/**
  * Optional callback invoked for every HTTP request the client makes.
  * Wired by `AirtableSyncService` to populate the Webhook Health panel —
  * specifically the "200 OK / 401 Unauthorized" indicator the user sees
@@ -310,6 +320,17 @@ function classifyError(
     if (status === 403 && parsed.type === 'INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND') {
       return new WebhookGoneError(msg, status, parsed.type);
     }
+  }
+  // 403 INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND on the base-level /webhooks
+  // list/create endpoint means the token can't manage webhooks on this base
+  // — missing scope or base not on the token's allowlist. Both are permanent
+  // for this token; callers cache the failure instead of retrying.
+  if (
+    isWebhookCollectionPath(url) &&
+    status === 403 &&
+    parsed.type === 'INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND'
+  ) {
+    return new WebhookAccessError(msg, status, parsed.type);
   }
   // PAT is missing a scope (webhook:manage, schema:read, data.records:read, …).
   // Airtable reports this as bare `INVALID_PERMISSIONS`; re-registering a
