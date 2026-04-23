@@ -28,6 +28,17 @@ import {
   downloadUserCorrections,
 } from '../nl/nl-export';
 
+const BLOB_WEBHOOK_ENDPOINT = 'https://n8n.intelechia.com/webhook/eo-blob';
+
+async function computeBlobRoomPrefix(roomId: string): Promise<string> {
+  const bytes = new TextEncoder().encode(roomId);
+  const digest = await crypto.subtle.digest('SHA-256', bytes as unknown as BufferSource);
+  const hex = Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+  return 'r_' + hex.slice(0, 8);
+}
+
 interface SettingsViewProps {
   session: MatrixSession;
   matrixClient?: MatrixClient | null;
@@ -86,6 +97,55 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
   const googleOAuthConfigured = useMemo(() => isGoogleOAuthConfigured(), []);
 
   const matrixAccessToken = useGDriveStore((s) => s.matrixAccessToken);
+
+  const [blobRoomPrefix, setBlobRoomPrefix] = useState<string | null>(null);
+  const [blobTestStatus, setBlobTestStatus] = useState<string | null>(null);
+  const [blobTestLoading, setBlobTestLoading] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!roomId) { setBlobRoomPrefix(null); return; }
+    computeBlobRoomPrefix(roomId).then((prefix) => {
+      if (!cancelled) setBlobRoomPrefix(prefix);
+    }).catch(() => { if (!cancelled) setBlobRoomPrefix(null); });
+    return () => { cancelled = true; };
+  }, [roomId]);
+
+  const handleTestBlob = useCallback(async () => {
+    setBlobTestLoading(true);
+    setBlobTestStatus(null);
+    try {
+      const token = matrixAccessToken ?? session.accessToken;
+      if (!token) { setBlobTestStatus('✗ No Matrix token'); return; }
+      if (!roomId) { setBlobTestStatus('✗ No room connected'); return; }
+      const prefix = blobRoomPrefix ?? (await computeBlobRoomPrefix(roomId));
+      const data_id = `${prefix}:_healthcheck`;
+      const res = await fetch(BLOB_WEBHOOK_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          matrix_token: token,
+          op: 'versions',
+          room_id: roomId,
+          data_id,
+        }),
+      });
+      const text = await res.text();
+      let parsed: any = null;
+      try { parsed = JSON.parse(text); } catch { /* keep raw */ }
+      if (res.ok) {
+        const count = Array.isArray(parsed?.versions) ? parsed.versions.length : 0;
+        setBlobTestStatus(`✓ Reachable — ${count} version(s) for ${data_id}`);
+      } else {
+        const detail = parsed?.error ?? text.slice(0, 160) ?? `HTTP ${res.status}`;
+        setBlobTestStatus(`✗ HTTP ${res.status}: ${detail}`);
+      }
+    } catch (e: any) {
+      setBlobTestStatus(`✗ Network error: ${e?.message ?? 'unknown'}`);
+    } finally {
+      setBlobTestLoading(false);
+    }
+  }, [matrixAccessToken, session.accessToken, roomId, blobRoomPrefix]);
 
   const handleTestGDrive = useCallback(async () => {
     setGdriveTestLoading(true);
@@ -322,6 +382,19 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
                 label="Google Drive"
                 status={gdriveSync ? 'ok' : gdriveConnected ? 'pending' : 'off'}
                 detail={gdriveSync ? 'Backup sync active' : gdriveConnected ? 'Initializing...' : 'Not connected'}
+              />
+            )}
+            {/* Encrypted Blob Store — amino-hosted n8n webhook */}
+            {isAmino && (
+              <StatusRow
+                theme={theme}
+                label="Blob Store"
+                status={roomId && (matrixAccessToken ?? session.accessToken) ? 'ok' : 'off'}
+                detail={
+                  !roomId ? 'Waiting for room'
+                  : blobRoomPrefix ? `${BLOB_WEBHOOK_ENDPOINT} (prefix ${blobRoomPrefix})`
+                  : 'Computing room prefix…'
+                }
               />
             )}
 
@@ -582,6 +655,41 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
             {(gdriveSync || gdriveConnected) && <GDriveStorageWidget />}
           </div>
         </Section>
+        )}
+
+        {/* Encrypted Blob Store — amino deployment only */}
+        {isAmino && (
+          <Section title="Encrypted Blob Store" theme={theme}>
+            <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 10 }}>
+              <Field label="Endpoint" value={BLOB_WEBHOOK_ENDPOINT} theme={theme} />
+              <Field label="Room Prefix" value={blobRoomPrefix ?? (roomId ? 'computing…' : '— (no room)')} theme={theme} />
+              <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, color: theme.textMuted }}>
+                Room-scoped encrypted blobs via the <code>/webhook/eo-blob</code> endpoint.
+                Every <code>data_id</code> is prefixed with <code>r_&lt;sha256(roomId)[0..8]&gt;</code>;
+                the server rejects mismatched claims. Currently unused — click Test Connection to
+                send a harmless <code>versions</code> probe and verify the webhook is live.
+              </span>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' as const }}>
+                <button
+                  style={s.actionBtn}
+                  onClick={handleTestBlob}
+                  disabled={blobTestLoading || !roomId || !(matrixAccessToken ?? session.accessToken)}
+                  title={!roomId ? 'Connect to a space first' : 'Probe the webhook with a versions request'}
+                >
+                  {blobTestLoading ? 'Testing…' : 'Test Connection'}
+                </button>
+                {blobTestStatus && (
+                  <span style={{
+                    fontFamily: "'JetBrains Mono', monospace",
+                    fontSize: 10,
+                    color: blobTestStatus.startsWith('✓') ? theme.success : theme.danger,
+                  }}>
+                    {blobTestStatus}
+                  </span>
+                )}
+              </div>
+            </div>
+          </Section>
         )}
 
         {/* Google Calendar — amino deployment only */}
