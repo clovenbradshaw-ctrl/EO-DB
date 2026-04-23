@@ -350,6 +350,21 @@ async function clearWebhookState(store: EoStore, baseId: string): Promise<void> 
   await store.del(webhookKey(baseId));
 }
 
+// Airtable returns 404 when a webhook ID is unknown (deleted, GC'd after 7
+// days of inactivity, or the cursor is older than the payload retention
+// window). It returns 403 with type=INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND
+// for the same condition when the resource lookup happens before the perms
+// check — empirically this is what we see when a webhook silently disappears.
+// Both states mean the local { webhookId, cursor } is dead and must be wiped
+// so ensureWebhook re-registers (or the caller falls back to LAST_MODIFIED).
+function isWebhookGoneError(e: unknown): boolean {
+  const err = e as { status?: number; message?: string };
+  if (err.status === 404) return true;
+  if (err.status !== 403) return false;
+  const msg = err.message ?? '';
+  return msg.includes('INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND');
+}
+
 /**
  * Returns the set of tables that have been successfully synced at least once,
  * keyed by baseId → tableId[]. Derived from stored cursor keys so it never
@@ -1163,11 +1178,11 @@ async function webhookIncrementalSyncBase(
     try {
       page = await client.listWebhookPayloads(baseId, state.webhookId, { cursor });
     } catch (e: unknown) {
-      const err = e as { status?: number; message?: string };
-      // 404 means the webhook was GC'd or the cursor is older than the
-      // 7-day payload retention window. Either way local state is dead —
-      // wipe it so the caller can trigger a full re-hydration.
-      if (err.status === 404) {
+      // 404 / 403-INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND both indicate the
+      // webhook is gone (GC'd after 7 days, cursor stale, or manually
+      // deleted). Clear local state so the next tick re-registers — without
+      // this we'd hammer the dead webhook ID forever.
+      if (isWebhookGoneError(e)) {
         await clearWebhookState(store, baseId);
       }
       throw e;
@@ -1335,11 +1350,10 @@ async function refreshKnownWebhooks(
     try {
       await client.refreshWebhook(baseId, state.webhookId);
     } catch (e: unknown) {
-      const err = e as { status?: number };
-      // 404 → webhook is gone; clear so ensureWebhook re-creates it.
-      if (err.status === 404) await clearWebhookState(store, baseId);
-      // Other errors (network blip, rate limit) — ignore; the next poll
-      // will surface them if they're persistent.
+      // 404 or 403-INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND → webhook is gone;
+      // clear so ensureWebhook re-creates it. Other errors (network blip,
+      // rate limit) — ignore; the next poll will surface them if persistent.
+      if (isWebhookGoneError(e)) await clearWebhookState(store, baseId);
     }
   }
 }
