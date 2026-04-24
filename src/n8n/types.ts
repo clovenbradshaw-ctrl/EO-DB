@@ -1,11 +1,16 @@
 /**
- * n8n webhook storage types.
+ * n8n webhook storage types — "EO Blob Store" workflow contract.
  *
- * Single-endpoint design: every request is a POST to /webhook/eo-store
- * with an `action` field that routes inside n8n via a Switch node.
+ * Single endpoint, op-routed: every request is a POST whose body carries
+ *   { matrix_token, op, room_id, data_id, ... }
+ * The deployed workflow validates that data_id is room-scoped (must start
+ * with `r_<sha256(room_id)[:8]>:`) before accepting the write.
  *
- * All data encrypted with AES-256-GCM before it leaves the device.
- * The Matrix room holds a manifest so any client knows what to request.
+ * Storage backend is filesystem (/mnt/eo-blobs on the n8n host), with up
+ * to 5 versions per data_id. Listing across blobs is not a server op —
+ * the Matrix room state IS the cross-blob index.
+ *
+ * All payloads encrypted with AES-256-GCM before they leave the device.
  */
 
 // ─── Configuration ─────────────────────────────────────────────────────────
@@ -13,7 +18,7 @@
 export interface N8nWebhookConfig {
   /** Base URL of the n8n instance (e.g. "https://n8n.example.com"). */
   baseUrl: string;
-  /** Webhook path (e.g. "/webhook/eo-store"). */
+  /** Webhook path (e.g. "/webhook/eo-blob"). */
   webhookPath: string;
   /** Optional static auth token n8n expects in the Authorization header. */
   webhookAuthToken?: string;
@@ -32,7 +37,7 @@ export interface EncryptedWebhookEnvelope {
   iv: string;
   /** Encrypted payload (base64). */
   ct: string;
-  /** SHA-256 hash of the plaintext, hex-encoded — used as content address. */
+  /** SHA-256 hash of the plaintext, hex-encoded — verified after decrypt. */
   content_hash: string;
   /** Key ID from the local keyring that encrypted this payload. */
   key_id: string;
@@ -44,15 +49,23 @@ export interface EncryptedWebhookEnvelope {
 
 /**
  * A manifest entry stored as a Matrix state event:
- *   type  = "eo.n8n.manifest"
+ *   type      = "eo.n8n.manifest"
  *   state_key = data_id
  *
  * This is how the Matrix room "knows what data it's looking for".
+ * Retrieval keys off (room_id, data_id, version) — content_hash is verified
+ * after decrypt but is no longer the server-side lookup key.
  */
 export interface ManifestEntry {
-  /** Unique identifier for this data blob. */
+  /** Room-scoped data id: "r_<8hex>:<uuid>". */
   data_id: string;
-  /** SHA-256 content hash — the lookup key when calling GET on n8n. */
+  /** Matrix room id this blob belongs to (must match the data_id prefix). */
+  room_id: string;
+  /** Server-assigned version (1-based, monotonic per data_id). */
+  version: number;
+  /** Canonical URI: "eo-blob://<data_id>/v<version>". */
+  uri: string;
+  /** SHA-256 content hash — verified client-side after decrypt. */
   content_hash: string;
   /** Encryption key_id that was used. */
   key_id: string;
@@ -77,65 +90,93 @@ export type ManifestDataType =
   | 'attachment'
   | 'backup';
 
-// ─── Single-Endpoint Action Requests ───────────────────────────────────────
+// ─── Single-Endpoint Op Requests ───────────────────────────────────────────
 
-/** Every request to /webhook/eo-store is a POST with an `action` field. */
-export type WebhookAction = 'store' | 'retrieve' | 'list';
+export type WebhookOp = 'store' | 'get' | 'versions';
 
-export interface WebhookStoreRequest {
-  action: 'store';
-  /** The encrypted envelope. */
+interface WebhookRequestBase {
+  /** Matrix access token — workflow calls /whoami + room membership check. */
+  matrix_token: string;
+  /** Matrix room id (must start with "!"). */
+  room_id: string;
+  /** Room-scoped data id — must start with `r_<8hex>:`. */
+  data_id: string;
+}
+
+export interface WebhookStoreRequest extends WebhookRequestBase {
+  op: 'store';
   envelope: EncryptedWebhookEnvelope;
-  /** Data ID (so n8n can key the storage). */
-  data_id: string;
-  /** Data type hint for n8n routing / Drive folder selection. */
-  data_type: ManifestDataType;
+  /** Optional EO target path (informational, persisted in server-side meta). */
+  target?: string;
+  /** Optional human-readable label (persisted in server-side meta). */
+  label?: string;
 }
 
-export interface WebhookRetrieveRequest {
-  action: 'retrieve';
-  /** Content hash to look up. */
-  content_hash: string;
-  /** Data ID as a secondary key. */
-  data_id: string;
+export interface WebhookGetRequest extends WebhookRequestBase {
+  op: 'get';
+  /** Specific version, or omit/"latest" for the newest. */
+  version?: number | 'latest';
 }
 
-export interface WebhookListRequest {
-  action: 'list';
-  /** Optional: filter to a specific data type subfolder. */
-  data_type?: ManifestDataType;
+export interface WebhookVersionsRequest extends WebhookRequestBase {
+  op: 'versions';
 }
 
-/** Union of all possible request bodies. */
 export type WebhookRequest =
   | WebhookStoreRequest
-  | WebhookRetrieveRequest
-  | WebhookListRequest;
+  | WebhookGetRequest
+  | WebhookVersionsRequest;
 
 // ─── Responses ─────────────────────────────────────────────────────────────
 
-export interface WebhookStoreResponse {
-  ok: boolean;
-  /** The content_hash echoed back for verification. */
+/**
+ * Server-side per-version meta (written next to each blob).
+ * Mirrors what the workflow's Store node persists in v<n>.meta.json.
+ */
+export interface BlobMeta {
+  version: number;
+  writer: string;
+  auth_user_id: string;
+  room_id: string;
+  target: string | null;
+  label: string | null;
   content_hash: string;
-  /** Optional Google Drive file ID. */
-  drive_file_id?: string;
+  plaintext_size: number | null;
+  key_id: string | null;
+  created_at: string;
 }
 
-export interface WebhookRetrieveResponse {
-  ok: boolean;
-  /** The encrypted envelope (if found). */
-  envelope?: EncryptedWebhookEnvelope;
+export interface WebhookStoreResponse {
+  data_id: string;
+  version: number;
+  writer: string;
+  auth_user_id: string;
+  room_id: string;
+  /** Canonical URI: "eo-blob://<data_id>/v<version>". */
+  uri: string;
+  content_hash: string;
+  created_at: string;
+  /** Versions pruned by the rolling-history cap. */
+  pruned: number[];
+  storage_base: string;
 }
 
-export interface WebhookListResponse {
-  ok: boolean;
-  /** List of { data_id, content_hash, data_type, stored_at } entries. */
-  entries: Array<{
-    data_id: string;
-    content_hash: string;
-    data_type: string;
-    stored_at: string;
-  }>;
+export interface WebhookGetResponse {
+  data_id: string;
+  version: number;
+  uri: string;
+  envelope: EncryptedWebhookEnvelope;
+  meta: BlobMeta | null;
 }
 
+export interface WebhookVersionsResponse {
+  data_id: string;
+  versions: Array<{ version: number; uri: string; meta: BlobMeta | null }>;
+  latest: number | null;
+}
+
+/** Error shape returned on non-2xx responses from the workflow. */
+export interface WebhookErrorResponse {
+  error: string;
+  detail?: unknown;
+}
