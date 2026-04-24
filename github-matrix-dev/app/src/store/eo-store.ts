@@ -164,12 +164,6 @@ interface EoDbState {
   getStateByPrefix: (prefix: string) => Promise<EoState[]>;
   getStateByPrefixPage: (prefix: string, limit: number, afterTarget?: string) => Promise<StatePage>;
   manualSnapshot: () => Promise<{ mxc: string; seq: number; savedToDrive: boolean; driveConnected: boolean }>;
-  /**
-   * Manually save current data to the Matrix media store and record the
-   * resulting mxc URI in room state (EO_SNAPSHOT_STATE_TYPE) so any device
-   * joining the space can hydrate from it via findLatestSnapshot().
-   */
-  manualMatrixMediaSnapshot: () => Promise<{ mxc: string; seq: number }>;
   teardown: () => void;
 
   onDispatch: ((event: EoEventInput) => void) | null;
@@ -617,13 +611,6 @@ export const useEoStore = create<EoDbState>((set, get) => ({
       throw new Error('Google Drive is connected but sync service is not ready — try again in a moment');
     }
     return { mxc: savedToDrive ? 'gdrive' : 'local', seq: lastSeq, savedToDrive, driveConnected };
-  },
-
-  async manualMatrixMediaSnapshot() {
-    const { store, syncManager } = get();
-    if (!store) throw new Error('Store not initialized');
-    if (!syncManager) throw new Error('Matrix sync manager not initialized — connect to a space first');
-    return syncManager.manualSnapshot();
   },
 
   teardown() {
