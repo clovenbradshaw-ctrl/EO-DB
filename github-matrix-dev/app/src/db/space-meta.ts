@@ -16,8 +16,6 @@ export interface SpaceMeta {
   spaceName: string;
   /** Matrix main room ID (for signaling) */
   mainRoomId: string;
-  /** Google Drive folder ID (if known) */
-  gdriveFolderId?: string;
   /** Last updated timestamp (ISO) */
   updatedAt: string;
 }

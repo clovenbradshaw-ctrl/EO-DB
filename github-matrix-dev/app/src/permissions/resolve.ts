@@ -22,7 +22,7 @@ import {
   type ManifestState,
   type SpaceRole,
   roleAtLeast,
-} from '../google-drive/space-permissions';
+} from './space-manifest';
 
 /**
  * Read a user's power level from a Matrix Room object.
