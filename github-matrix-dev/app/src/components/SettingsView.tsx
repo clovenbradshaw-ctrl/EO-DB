@@ -308,11 +308,11 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
                 : 'Not started'
               }
             />
-            {/* Encrypted Blob Store — amino-hosted n8n webhook */}
+            {/* Encrypted Drive Store — amino-hosted n8n webhook */}
             {isAmino && (
               <StatusRow
                 theme={theme}
-                label="Blob Store"
+                label="Drive"
                 status={roomId && session.accessToken ? 'ok' : 'off'}
                 detail={!roomId ? 'Waiting for room' : EO_STORE_WEBHOOK}
               />
@@ -430,13 +430,13 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
           </Section>
         )}
 
-        {/* Encrypted Blob Store — amino deployment only */}
+        {/* Encrypted Drive Store — amino deployment only */}
         {isAmino && (
-          <Section title="Encrypted Blob Store" theme={theme}>
+          <Section title="Encrypted Drive Store" theme={theme}>
             <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 10 }}>
               <Field label="Endpoint" value={EO_STORE_WEBHOOK} theme={theme} />
               <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, color: theme.textMuted }}>
-                Encrypted blobs are stored as Google Drive files via the
+                Encrypted data is stored as Google Drive files via the
                 <code>/webhook/eo-store</code> proxy. Each room maps to a single file
                 <code>{'{dataId}'}.json</code> whose body is the AES-GCM envelope; writes
                 find-or-create the file and PATCH the media. Auto-save runs whenever the
@@ -458,9 +458,9 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
                   style={{ ...s.actionBtn, background: 'transparent', color: theme.accent, border: `1px solid ${theme.accent}` }}
                   onClick={() => setShowBlobStore(true)}
                   disabled={!roomId || !session.accessToken}
-                  title={!roomId ? 'Connect to a space first' : 'Fetch blobs by data_id from the Drive proxy'}
+                  title={!roomId ? 'Connect to a space first' : 'Fetch files by data_id from the Drive proxy'}
                 >
-                  Open Blob Store
+                  Open Drive Store
                 </button>
                 <button
                   style={{ ...s.actionBtn, background: 'transparent', color: theme.accent, border: `1px solid ${theme.accent}` }}
