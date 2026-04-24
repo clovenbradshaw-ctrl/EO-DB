@@ -66,7 +66,6 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
   const gdriveSpaceFileGuids = useGDriveStore((s) => s.spaceFileGuids);
   const currentFileGuids = gdriveCurrentSpaceId ? (gdriveSpaceFileGuids[gdriveCurrentSpaceId] ?? null) : null;
   const manualSnapshot = useEoStore((s) => s.manualSnapshot);
-  const manualMatrixMediaSnapshot = useEoStore((s) => s.manualMatrixMediaSnapshot);
   const [showRoomData, setShowRoomData] = useState(false);
   const [showAllRooms, setShowAllRooms] = useState(false);
   const [showRoomsBySpaces, setShowRoomsBySpaces] = useState(false);
@@ -209,16 +208,6 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
       } else {
         setSnapshotStatus(`Snapshot saved locally — seq ${result.seq} (Drive not connected)`);
       }
-    } catch (e: any) {
-      setSnapshotStatus(`Error: ${e.message}`);
-    }
-  }
-
-  async function handleMatrixMediaSnapshot() {
-    setSnapshotStatus('Uploading to Matrix media...');
-    try {
-      const result = await manualMatrixMediaSnapshot();
-      setSnapshotStatus(`Matrix media saved — seq ${result.seq} (${result.mxc})`);
     } catch (e: any) {
       setSnapshotStatus(`Error: ${e.message}`);
     }
@@ -464,16 +453,6 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' as const }}>
             <button style={s.actionBtn} onClick={handleSnapshot}>
               Take Snapshot
-            </button>
-            <button
-              style={s.actionBtn}
-              onClick={handleMatrixMediaSnapshot}
-              disabled={!syncManager}
-              title={syncManager
-                ? 'Upload the current data to Matrix media and save the mxc URI in room state for hydration'
-                : 'Connect to a Matrix space to enable'}
-            >
-              Save to Matrix Media
             </button>
             <button
               style={{ ...s.actionBtn, background: 'transparent', color: theme.accent, border: `1px solid ${theme.accent}` }}
