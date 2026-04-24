@@ -7,15 +7,18 @@
  * -------------
  * POST JSON with `op` ∈ { store | get | versions }. Every request carries
  * `matrix_token`, `op`, `room_id`, `data_id`. The `data_id` MUST be prefixed
- * with the room hash:
+ * with the room-derived string:
  *
- *   roomPrefix(roomId) = "r_" + sha256hex(roomId).slice(0, 8)
+ *   roomPrefix(roomId) = "r_" + roomId.replace(/^!/, '')
+ *                                     .replace(/[^a-zA-Z0-9]/g, '_')
+ *                                     .slice(0, 40)
  *   data_id            = `${roomPrefix}:${localId}`
  *
- * The server re-derives the prefix from `room_id` and rejects mismatched IDs
- * with HTTP 400. Five most recent versions are retained per `data_id`; older
- * versions are pruned on each store. Version numbers are monotonic — pruning
- * v1 and writing again produces v6, not v1.
+ * The server re-derives the prefix from `room_id` with the same string
+ * operations and rejects mismatched IDs with HTTP 400. Five most recent
+ * versions are retained per `data_id`; older versions are pruned on each
+ * store. Version numbers are monotonic — pruning v1 and writing again
+ * produces v6, not v1.
  *
  * Reuses:
  *   - EncryptedWebhookEnvelope from ../n8n/types
@@ -102,38 +105,19 @@ export interface VersionListing {
 
 // ─── Internals ─────────────────────────────────────────────────────────────
 
-const HEX_CHARS = '0123456789abcdef';
-
-function bytesToHex(bytes: Uint8Array): string {
-  let out = '';
-  for (let i = 0; i < bytes.length; i++) {
-    const b = bytes[i]!;
-    out += HEX_CHARS[(b >> 4) & 0xf];
-    out += HEX_CHARS[b & 0xf];
-  }
-  return out;
-}
-
-async function sha256hex(text: string): Promise<string> {
-  const bytes = new TextEncoder().encode(text);
-  const digest = await crypto.subtle.digest(
-    'SHA-256',
-    bytes as unknown as BufferSource,
-  );
-  return bytesToHex(new Uint8Array(digest));
-}
-
-/** `r_` + first 8 hex chars of SHA-256(roomId). Must match the n8n workflow. */
-export async function roomPrefix(roomId: string): Promise<string> {
-  return 'r_' + (await sha256hex(roomId)).slice(0, 8);
+/**
+ * Derives the room prefix via the same string operations the n8n workflow
+ * performs: strip a leading `!`, replace every non-alphanumeric character
+ * with `_`, and cap at 40 characters. Trailing underscores are preserved —
+ * the server does not trim them, so clients must not either.
+ */
+export function roomPrefix(roomId: string): string {
+  return 'r_' + roomId.replace(/^!/, '').replace(/[^a-zA-Z0-9]/g, '_').slice(0, 40);
 }
 
 /** Build a room-scoped `data_id` from a `localId`. */
-export async function roomScopedDataId(
-  roomId: string,
-  localId: string,
-): Promise<string> {
-  return `${await roomPrefix(roomId)}:${localId}`;
+export function roomScopedDataId(roomId: string, localId: string): string {
+  return `${roomPrefix(roomId)}:${localId}`;
 }
 
 const DATA_ID_PATTERN = /^[a-zA-Z0-9_:-]{1,128}$/;
@@ -177,8 +161,8 @@ export class BlobClient {
     return this.roomId;
   }
 
-  async dataIdFor(localId: string): Promise<string> {
-    const id = await roomScopedDataId(this.roomId, localId);
+  dataIdFor(localId: string): string {
+    const id = roomScopedDataId(this.roomId, localId);
     if (!DATA_ID_PATTERN.test(id)) {
       throw new Error(
         `BlobClient: derived data_id "${id}" is not valid (allowed: [a-zA-Z0-9_:-]{1,128})`,
@@ -195,7 +179,7 @@ export class BlobClient {
       );
     }
 
-    const data_id = await this.dataIdFor(opts.localId);
+    const data_id = this.dataIdFor(opts.localId);
     const body = {
       matrix_token: this.matrixToken,
       op: 'store' as const,
@@ -233,7 +217,7 @@ export class BlobClient {
   }
 
   async retrieve(opts: RetrieveOptions): Promise<RetrieveResult> {
-    const data_id = await this.dataIdFor(opts.localId);
+    const data_id = this.dataIdFor(opts.localId);
     const body: Record<string, unknown> = {
       matrix_token: this.matrixToken,
       op: 'get',
@@ -256,7 +240,7 @@ export class BlobClient {
   }
 
   async listVersions(localId: string): Promise<VersionListing[]> {
-    const data_id = await this.dataIdFor(localId);
+    const data_id = this.dataIdFor(localId);
     const body = {
       matrix_token: this.matrixToken,
       op: 'versions' as const,
