@@ -24,10 +24,8 @@ import {
 import type { EoEvent, EoEventInput, EoState, HorizonResponse } from '../db/types';
 import type { SyncManager } from '../matrix/sync-manager';
 import type { EodbBlobWriter } from '../storage/eodb-blob-writer';
-import type { GDriveSyncService } from '../google-drive/gdrive-sync';
-import { useGDriveStore } from '../google-drive/gdrive-store';
 import type { ResolvedPermissions } from '../permissions/types';
-import type { ManifestState as UserManifest } from '../google-drive/space-permissions';
+import type { ManifestState as UserManifest } from '../permissions/space-manifest';
 import { eventHash } from '../db/hash';
 import { pressureMonitor } from '../perf/pressure-monitor';
 
@@ -114,8 +112,6 @@ interface EoDbState {
   workerClient: FoldWorkerClient | null;
   /** The sync manager for sending events to Matrix */
   syncManager: SyncManager | null;
-  /** The Google Drive sync service for backup */
-  gdriveSync: GDriveSyncService | null;
   /** Proactive encrypted-blob writer for the n8n eo-blob webhook */
   eodbBlobWriter: EodbBlobWriter | null;
   /** Recent events processed through the fold */
@@ -126,7 +122,7 @@ interface EoDbState {
   ready: boolean;
   /** Resolved permissions for the current user in the current space */
   resolvedPermissions: ResolvedPermissions | null;
-  /** Drive-backed permission manifest for the current user (null if not loaded) */
+  /** Permission manifest for the current user (null if not loaded) */
   userManifest: UserManifest | null;
   /** Currently active user type (selected via header switcher) */
   activeUserType: string | null;
@@ -150,7 +146,6 @@ interface EoDbState {
   initLocal: (dbName?: string) => Promise<void>;
 
   setSyncManager: (syncManager: SyncManager) => void;
-  setGDriveSync: (gdriveSync: GDriveSyncService) => void;
   setEodbBlobWriter: (writer: EodbBlobWriter | null) => void;
   setPermissions: (permissions: ResolvedPermissions | null) => void;
   setUserManifest: (manifest: UserManifest | null) => void;
@@ -167,7 +162,7 @@ interface EoDbState {
   getState: (target: string) => Promise<EoState | null>;
   getStateByPrefix: (prefix: string) => Promise<EoState[]>;
   getStateByPrefixPage: (prefix: string, limit: number, afterTarget?: string) => Promise<StatePage>;
-  manualSnapshot: () => Promise<{ mxc: string; seq: number; savedToDrive: boolean; driveConnected: boolean }>;
+  manualSnapshot: () => Promise<{ seq: number }>;
   teardown: () => void;
 
   onDispatch: ((event: EoEventInput) => void) | null;
@@ -178,7 +173,6 @@ export const useEoStore = create<EoDbState>((set, get) => ({
   store: null,
   workerClient: null,
   syncManager: null,
-  gdriveSync: null,
   eodbBlobWriter: null,
   recentEvents: [],
   lastSeq: 0,
@@ -328,10 +322,6 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     set({ syncManager });
   },
 
-  setGDriveSync(gdriveSync: GDriveSyncService) {
-    set({ gdriveSync });
-  },
-
   setEodbBlobWriter(writer: EodbBlobWriter | null) {
     const existing = get().eodbBlobWriter;
     if (existing && existing !== writer) {
@@ -392,15 +382,13 @@ export const useEoStore = create<EoDbState>((set, get) => ({
         recentEvents: [...state.recentEvents, fullEvent],
         lastSeq: fullEvent.seq,
       }));
-      // Broadcast to peers first (encrypted, via Matrix to-device)
+      // Broadcast to peers (encrypted, via Matrix to-device)
       const sm = get().syncManager;
       if (sm && 'broadcastLocalEvent' in sm) {
         (sm as any).broadcastLocalEvent(fullEvent).catch((e: unknown) =>
           console.warn('[EO-DB] broadcastLocalEvent failed:', e)
         );
       }
-      // Then persist to Google Drive
-      get().gdriveSync?.saveOp(fullEvent).catch(e => console.warn('[EO-DB] saveOp failed:', e));
     });
 
     get().onDispatch?.(populatedEvent);
@@ -429,8 +417,8 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     //      peak memory is O(chunk) not O(total).
     //
     //   2. We don't accumulate folded events. Previously `imported` grew
-    //      to a 1M-entry array just so we could gate a fullPushToGDrive on
-    //      whether anything was imported. Replaced with a boolean.
+    //      to a 1M-entry array just so we could gate a full post-import push
+    //      on whether anything was imported. Replaced with a boolean.
     //
     //   3. We throttle progress and recent-events updates. React doesn't
     //      need 20,000 re-renders to show a progress bar — ~30/second is
@@ -549,16 +537,6 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     if (anyImported) emitStoreUpdate(Math.max(lastSeq, maxFoldedSeq));
     onProgress?.(totalEvents, totalEvents);
 
-    const { gdriveSync } = get();
-    if (gdriveSync && anyImported) {
-      // Write the full log immediately so the log file is up-to-date on Drive
-      // (not just the recent buffer). This ensures a reload from a cleared OPFS
-      // always finds the imported data in the log file.
-      gdriveSync.fullPushToGDrive().catch((e) =>
-        console.warn('[EO-DB] Google Drive full push after import failed:', e),
-      );
-    }
-
     return lastSeq;
   },
 
@@ -587,15 +565,10 @@ export const useEoStore = create<EoDbState>((set, get) => ({
   },
 
   async manualSnapshot() {
-    const { store, workerClient, recentEvents, gdriveSync } = get();
+    const { store, workerClient, recentEvents } = get();
     if (!store) throw new Error('Store not initialized');
 
-    // Persist the current in-memory KV state to OPFS first. Without this, a
-    // page refresh after a bulk import + "Take Snapshot" would load the last
-    // *init-time* snapshot (which predates the import) and — depending on
-    // whether the stale fold-position checkpoint matches that snapshot — could
-    // short-circuit the scanLog/replayFromLog recovery path entirely. Saving
-    // the kv-snapshot here makes the Snapshot button actually durable locally.
+    // Persist the current in-memory KV state to OPFS.
     const lastSeq = await store.getCurrentSeq();
     const memStore = store as MemoryStore;
     if (workerClient && typeof memStore.getKvEntries === 'function') {
@@ -611,19 +584,7 @@ export const useEoStore = create<EoDbState>((set, get) => ({
       );
     }
 
-    let savedToDrive = false;
-    let driveConnected = false;
-    if (gdriveSync) {
-      driveConnected = true;
-      // forceSave() returns false when the local store has no events to push,
-      // so we only mark savedToDrive when something actually landed on Drive.
-      savedToDrive = await gdriveSync.forceSave();
-    } else if (useGDriveStore.getState().connected) {
-      // Drive is marked connected but the sync service never attached — surface
-      // this instead of pretending the snapshot landed on Drive.
-      throw new Error('Google Drive is connected but sync service is not ready — try again in a moment');
-    }
-    return { mxc: savedToDrive ? 'gdrive' : 'local', seq: lastSeq, savedToDrive, driveConnected };
+    return { seq: lastSeq };
   },
 
   teardown() {
@@ -638,7 +599,6 @@ export const useEoStore = create<EoDbState>((set, get) => ({
       store: null,
       workerClient: null,
       syncManager: null,
-      gdriveSync: null,
       eodbBlobWriter: null,
       ready: false,
       recentEvents: [],

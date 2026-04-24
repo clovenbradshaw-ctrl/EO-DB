@@ -201,10 +201,9 @@ export async function decodeAirtableSnapshot(
 // ─── Filename helpers ───────────────────────────────────────────────────────
 
 /**
- * Deterministic filename for a base's snapshot on Google Drive. Using a
- * stable name means `gdriveStoreNamed()` overwrites the previous version
- * on rebake, and any device can find the current snapshot without an
- * index lookup.
+ * Deterministic filename for a base's snapshot. Using a stable name means
+ * rebake overwrites the previous version, and any device can find the
+ * current snapshot without an index lookup.
  */
 export function airtableSnapshotFilename(baseId: string): string {
   const safe = baseId.replace(/[^a-zA-Z0-9_-]/g, '_');

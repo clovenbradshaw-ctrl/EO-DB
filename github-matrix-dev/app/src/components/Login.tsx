@@ -1,9 +1,6 @@
 import { useState, useEffect, type FormEvent } from 'react';
 import { login, normalizeHomeserver, toMatrixUserId, type MatrixSession } from '../matrix/client';
 import { saveOfflineCredentials, verifyOfflineCredentials, listOfflineAccounts } from '../lib/offline-auth';
-import { startOAuthFlow, isGoogleOAuthConfigured } from '../google-drive/gdrive-oauth';
-import { useGDriveStore } from '../google-drive/gdrive-store';
-import { isAminoHomeserver } from '../lib/matrix-domain';
 import { useTheme, type Theme } from '../theme';
 
 interface LoginProps {
@@ -19,10 +16,6 @@ export function Login({ onLogin, onLocalMode }: LoginProps) {
   const [loading, setLoading] = useState(false);
   const [isOffline, setIsOffline] = useState(!navigator.onLine);
   const [hasOfflineAccounts, setHasOfflineAccounts] = useState(false);
-  // Two-step flow: 'credentials' -> matrix login, 'gdrive' -> ask about Google Drive
-  const [step, setStep] = useState<'credentials' | 'gdrive'>('credentials');
-  const [pendingSession, setPendingSession] = useState<MatrixSession | null>(null);
-  const [gdriveLoading, setGdriveLoading] = useState(false);
   const { theme } = useTheme();
   const s = makeStyles(theme);
 
@@ -87,78 +80,12 @@ export function Login({ onLogin, onLocalMode }: LoginProps) {
         }
       }
 
-      // In n8n mode no Google account is needed — skip the OAuth step.
-      // Google Drive sync is only offered for the official Amino homeserver;
-      // custom homeservers skip the GDrive prompt. If the build doesn't have
-      // a Google OAuth client ID configured, the OAuth flow can't run, so
-      // skip straight to the app rather than showing a dead-end prompt.
-      const syncMode = useGDriveStore.getState().syncMode;
-      if (syncMode === 'n8n' || !isAminoHomeserver(session.homeserver) || !isGoogleOAuthConfigured()) {
-        onLogin(session);
-        return;
-      }
-      setPendingSession(session);
-      setStep('gdrive');
+      onLogin(session);
     } catch (err: any) {
       setError(err.message || 'Login failed');
     } finally {
       setLoading(false);
     }
-  }
-
-  async function handleConnectGDrive() {
-    if (!pendingSession) return;
-    setGdriveLoading(true);
-    setError('');
-    try {
-      await startOAuthFlow();
-      onLogin(pendingSession);
-    } catch (err: any) {
-      setError(err.message || 'Google Drive sign-in failed');
-      setGdriveLoading(false);
-    }
-  }
-
-  function handleSkipGDrive() {
-    if (pendingSession) onLogin(pendingSession);
-  }
-
-  if (step === 'gdrive') {
-    return (
-      <div style={s.container}>
-        <div style={s.card}>
-          <h1 style={s.title}>EO///DB</h1>
-          <p style={s.subtitle}>Sync with Google Drive?</p>
-          <p style={{ ...s.hint, marginBottom: 24 }}>
-            Connect your Google account to sync encrypted backups across devices.
-            You can switch to the n8n proxy mode (no Google account needed) in Settings → Drive Sync Mode.
-          </p>
-          {error && <div style={s.error} role="alert">{error}</div>}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            <button
-              type="button"
-              onClick={handleConnectGDrive}
-              disabled={gdriveLoading}
-              style={{
-                ...s.button,
-                ...(gdriveLoading ? { opacity: 0.5, cursor: 'not-allowed' } : {}),
-              }}
-            >
-              {gdriveLoading ? 'Connecting...' : 'Connect Google Drive'}
-            </button>
-            <button
-              type="button"
-              onClick={handleSkipGDrive}
-              disabled={gdriveLoading}
-              style={s.localButton}
-            >
-              Continue without Drive
-            </button>
-          </div>
-          <p style={s.server}>Data stays local until Google Drive is connected</p>
-        </div>
-      </div>
-    );
   }
 
   return (

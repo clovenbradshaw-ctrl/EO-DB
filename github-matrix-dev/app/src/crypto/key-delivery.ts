@@ -27,7 +27,7 @@ import {
   type SpaceRole,
   type ManifestState,
   roleAtLeast,
-} from '../google-drive/space-permissions';
+} from '../permissions/space-manifest';
 import { getKeyById } from './segment-keys';
 import { bufferToBase64, base64ToBuffer } from './segment-keys';
 

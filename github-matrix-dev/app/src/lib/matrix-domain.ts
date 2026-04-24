@@ -42,8 +42,6 @@ export function peerSyncEventTypes(prefix?: string) {
     offer: `${p}.sync.offer`,
     request: `${p}.sync.request`,
     events: `${p}.sync.events`,
-    /** Notification that new ops were written to GDrive — triggers immediate pull. */
-    gdrive: `${p}.sync.gdrive`,
   } as const;
 }
 

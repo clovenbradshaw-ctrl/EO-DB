@@ -6,14 +6,11 @@ import type { MatrixSession } from '../matrix/client';
 import { RoomDataViewer } from './RoomDataViewer';
 import { MatrixRoomsViewer } from './MatrixRoomsViewer';
 import { UserRoomsBySpaces } from './UserRoomsBySpaces';
-import { GDriveStorageWidget } from './GDriveStorageWidget';
 import { BlobStoreViewer } from './BlobStoreViewer';
 import { OP_COLORS, TRIAD_LABELS } from './LogView';
 import { ArchivedSpacesSection } from './ArchivedSpaces';
 import { AirtableSettingsSection } from './AirtableSettings';
 import { GCalendarSettingsSection } from './GCalendarSettings';
-import { useGDriveStore } from '../google-drive/gdrive-store';
-import { clearTokens, startOAuthFlow, getAccessToken, isGoogleOAuthConfigured } from '../google-drive/gdrive-oauth';
 import { isAminoHomeserver } from '../lib/matrix-domain';
 import { usePresencePrefs } from '../lib/presence-prefs';
 import { useNLPrefs } from '../lib/nl-prefs';
@@ -71,19 +68,14 @@ interface SettingsViewProps {
 
 export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnarchive, connectionState, connectionError, matrixReady, onRetry, onLogout }: SettingsViewProps) {
   const { theme } = useTheme();
-  // Google Drive / Calendar / Airtable are tied to shared n8n proxy
-  // credentials on the hosted Amino deployment. Only surface those
-  // sections for users logged into app.aminoimmigration.com.
+  // Calendar / Airtable are tied to shared n8n proxy credentials on the
+  // hosted Amino deployment. Only surface those sections for users logged
+  // into app.aminoimmigration.com.
   const isAmino = isAminoHomeserver(session.homeserver);
   const lastSeq = useEoStore((s) => s.lastSeq);
   const recentEvents = useEoStore((s) => s.recentEvents);
   const store = useEoStore((s) => s.store);
   const syncManager = useEoStore((s) => s.syncManager);
-  const gdriveSync = useEoStore((s) => s.gdriveSync);
-  const gdriveConnected = useGDriveStore((s) => s.connected);
-  const gdriveCurrentSpaceId = useGDriveStore((s) => s.currentSpaceId);
-  const gdriveSpaceFileGuids = useGDriveStore((s) => s.spaceFileGuids);
-  const currentFileGuids = gdriveCurrentSpaceId ? (gdriveSpaceFileGuids[gdriveCurrentSpaceId] ?? null) : null;
   const manualSnapshot = useEoStore((s) => s.manualSnapshot);
   const [showRoomData, setShowRoomData] = useState(false);
   const [showAllRooms, setShowAllRooms] = useState(false);
@@ -98,17 +90,6 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
   const [deleteError, setDeleteError] = useState('');
   const [showEraseConfirm, setShowEraseConfirm] = useState(false);
 
-  const gdriveToken = useGDriveStore((s) => s.googleAccessToken);
-  const gdriveOffline = useGDriveStore((s) => s.gdriveOffline);
-  const gdriveSyncMode = useGDriveStore((s) => s.syncMode);
-  const setGdriveSyncMode = useGDriveStore((s) => s.setSyncMode);
-  const [gdriveTestStatus, setGdriveTestStatus] = useState<string | null>(null);
-  const [gdriveTestLoading, setGdriveTestLoading] = useState(false);
-  const [oauthLoading, setOauthLoading] = useState(false);
-  const googleOAuthConfigured = useMemo(() => isGoogleOAuthConfigured(), []);
-
-  const matrixAccessToken = useGDriveStore((s) => s.matrixAccessToken);
-
   const [blobTestStatus, setBlobTestStatus] = useState<string | null>(null);
   const [blobTestLoading, setBlobTestLoading] = useState(false);
 
@@ -116,7 +97,7 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
     setBlobTestLoading(true);
     setBlobTestStatus(null);
     try {
-      const token = matrixAccessToken ?? session.accessToken;
+      const token = session.accessToken;
       if (!token) { setBlobTestStatus('✗ No Matrix token'); return; }
       if (!roomId) { setBlobTestStatus('✗ No room connected'); return; }
 
@@ -170,7 +151,7 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
     } finally {
       setBlobTestLoading(false);
     }
-  }, [matrixAccessToken, session.accessToken, roomId]);
+  }, [session.accessToken, roomId]);
 
   const eodbBlobWriter = useEoStore((s) => s.eodbBlobWriter);
   const [blobWriterStatus, setBlobWriterStatus] = useState<BlobWriterStatus | null>(null);
@@ -178,70 +159,6 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
     if (!eodbBlobWriter) { setBlobWriterStatus(null); return; }
     return eodbBlobWriter.subscribe(setBlobWriterStatus);
   }, [eodbBlobWriter]);
-
-  const handleTestGDrive = useCallback(async () => {
-    setGdriveTestLoading(true);
-    setGdriveTestStatus(null);
-    try {
-      if (gdriveSyncMode === 'oauth') {
-        const token = gdriveToken;
-        if (!token) { setGdriveTestStatus('✗ Not connected (no OAuth token)'); return; }
-        const res = await fetch('https://www.googleapis.com/drive/v3/about?fields=user', {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (res.ok) {
-          const data = await res.json();
-          const email = data?.user?.emailAddress ?? 'unknown';
-          setGdriveTestStatus(`✓ Connected as ${email}`);
-        } else {
-          const text = await res.text().catch(() => String(res.status));
-          setGdriveTestStatus(`✗ Failed: ${text.slice(0, 120)}`);
-        }
-      } else {
-        // n8n mode — ping the proxy endpoint with the Matrix token
-        const token = matrixAccessToken ?? session.accessToken;
-        if (!token) { setGdriveTestStatus('✗ Not connected (no Matrix token)'); return; }
-        const res = await fetch('https://n8n.intelechia.com/webhook/eo-store', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            matrix_token: token,
-            drive_url: 'https://www.googleapis.com/drive/v3/about?fields=user',
-            drive_method: 'GET',
-          }),
-        });
-        if (res.ok) {
-          const data = await res.json().catch(() => ({}));
-          const email = data?.user?.emailAddress ?? 'proxy';
-          setGdriveTestStatus(`✓ n8n proxy connected (${email})`);
-        } else {
-          setGdriveTestStatus(`✗ n8n proxy error: ${res.status}`);
-        }
-      }
-    } catch (e: any) {
-      setGdriveTestStatus(`✗ Failed: ${e.message}`);
-    } finally {
-      setGdriveTestLoading(false);
-    }
-  }, [gdriveToken, matrixAccessToken, gdriveSyncMode, session.accessToken]);
-
-
-
-  const handleSignInWithGoogle = useCallback(async () => {
-    setOauthLoading(true);
-    setGdriveTestStatus(null);
-    try {
-      await startOAuthFlow();
-      const token = await getAccessToken();
-      useGDriveStore.setState({ googleAccessToken: token, connected: true });
-      setGdriveTestStatus('✓ Signed in with Google');
-    } catch (e: any) {
-      console.error('[EO-DB] Google sign-in failed:', e);
-      setGdriveTestStatus(`✗ Sign-in failed: ${e?.message ?? 'unknown error'}`);
-    } finally {
-      setOauthLoading(false);
-    }
-  }, []);
 
   useEffect(() => {
     setEventCount(recentEvents.length);
@@ -251,13 +168,7 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
     setSnapshotStatus('Taking snapshot...');
     try {
       const result = await manualSnapshot();
-      if (result.savedToDrive) {
-        setSnapshotStatus(`Snapshot saved to Drive — seq ${result.seq}`);
-      } else if (result.driveConnected) {
-        setSnapshotStatus(`Nothing to snapshot — store is empty (0 events to push)`);
-      } else {
-        setSnapshotStatus(`Snapshot saved locally — seq ${result.seq} (Drive not connected)`);
-      }
+      setSnapshotStatus(`Snapshot saved — seq ${result.seq}`);
     } catch (e: any) {
       setSnapshotStatus(`Error: ${e.message}`);
     }
@@ -311,7 +222,7 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
         onBack={() => setShowBlobStore(false)}
         endpoint={EODB_BLOB_ENDPOINT}
         roomId={roomId ?? null}
-        matrixToken={matrixAccessToken ?? session.accessToken ?? null}
+        matrixToken={session.accessToken ?? null}
       />
     );
   }
@@ -408,21 +319,12 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
                 : 'Not started'
               }
             />
-            {/* Google Drive — only on the hosted Amino deployment */}
-            {isAmino && (
-              <StatusRow
-                theme={theme}
-                label="Google Drive"
-                status={gdriveSync ? 'ok' : gdriveConnected ? 'pending' : 'off'}
-                detail={gdriveSync ? 'Backup sync active' : gdriveConnected ? 'Initializing...' : 'Not connected'}
-              />
-            )}
             {/* Encrypted Blob Store — amino-hosted n8n webhook */}
             {isAmino && (
               <StatusRow
                 theme={theme}
                 label="Blob Store"
-                status={roomId && (matrixAccessToken ?? session.accessToken) ? 'ok' : 'off'}
+                status={roomId && session.accessToken ? 'ok' : 'off'}
                 detail={!roomId ? 'Waiting for room' : EODB_BLOB_ENDPOINT}
               />
             )}
@@ -539,143 +441,6 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
           </Section>
         )}
 
-        {/* Google Drive Cloud Storage — amino deployment only */}
-        {isAmino && (
-        <Section title="Google Drive Storage" theme={theme}>
-          <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 10 }}>
-            {/* Drive Sync Mode selector */}
-            <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 6 }}>
-              <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, fontWeight: 700, textTransform: 'uppercase' as const, letterSpacing: '0.06em', color: theme.textMuted }}>
-                Drive Sync Mode
-              </span>
-              <div style={{ display: 'flex', gap: 6 }}>
-                {(['n8n', 'oauth'] as const).map((mode) => (
-                  <button
-                    key={mode}
-                    style={{
-                      ...s.actionBtn,
-                      background: gdriveSyncMode === mode ? theme.accent : 'transparent',
-                      color: gdriveSyncMode === mode ? '#fff' : theme.textMuted,
-                      borderColor: gdriveSyncMode === mode ? theme.accent : theme.border,
-                    }}
-                    onClick={() => {
-                      if (mode === 'oauth') clearTokens();
-                      setGdriveSyncMode(mode);
-                    }}
-                  >
-                    {mode === 'n8n' ? 'n8n Proxy' : 'Google OAuth'}
-                  </button>
-                ))}
-              </div>
-              <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, color: theme.textMuted }}>
-                {gdriveSyncMode === 'n8n'
-                  ? 'Drive requests are proxied through n8n using its own Google credentials — no Google account needed.'
-                  : 'Each user authenticates with their own Google account via OAuth2 (PKCE). Requires VITE_GOOGLE_CLIENT_ID.'}
-              </span>
-            </div>
-            {gdriveSyncMode === 'oauth' && !googleOAuthConfigured && (
-              <div style={{
-                padding: '8px 12px',
-                background: `${theme.warning || '#f59e0b'}15`,
-                border: `1px solid ${theme.warning || '#f59e0b'}40`,
-                borderRadius: 4,
-                fontFamily: "'JetBrains Mono', monospace",
-                fontSize: 10,
-                color: theme.warning || '#f59e0b',
-                lineHeight: 1.4,
-              }}>
-                Google OAuth is not configured for this build. The deploy is missing
-                <code style={{ margin: '0 4px' }}>VITE_GOOGLE_CLIENT_ID</code>.
-                Switch to <strong>n8n Proxy</strong> mode above, or rebuild with a Google
-                OAuth client ID set.
-              </div>
-            )}
-            {gdriveSyncMode === 'oauth' && googleOAuthConfigured && !gdriveToken && (
-              <button
-                onClick={handleSignInWithGoogle}
-                disabled={oauthLoading}
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: 10,
-                  padding: '8px 14px',
-                  background: '#fff',
-                  color: '#3c4043',
-                  border: '1px solid #dadce0',
-                  borderRadius: 4,
-                  fontFamily: "'JetBrains Mono', monospace",
-                  fontSize: 11,
-                  fontWeight: 500,
-                  cursor: oauthLoading ? 'not-allowed' : 'pointer',
-                  opacity: oauthLoading ? 0.6 : 1,
-                  boxShadow: '0 1px 2px rgba(0,0,0,0.08)',
-                  letterSpacing: '0.01em',
-                  alignSelf: 'flex-start',
-                }}
-              >
-                <svg width="16" height="16" viewBox="0 0 48 48" aria-hidden="true">
-                  <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
-                  <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
-                  <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
-                  <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
-                </svg>
-                {oauthLoading ? 'Signing in…' : 'Sign in with Google'}
-              </button>
-            )}
-            {gdriveOffline && (
-              <div style={{
-                padding: '6px 10px',
-                background: `${theme.warning || '#f59e0b'}15`,
-                border: `1px solid ${theme.warning || '#f59e0b'}40`,
-                borderRadius: 4,
-                fontFamily: "'JetBrains Mono', monospace",
-                fontSize: 10,
-                color: theme.warning || '#f59e0b',
-              }}>
-                GDrive offline — working locally
-              </div>
-            )}
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-              <button
-                style={{ ...s.actionBtn }}
-                onClick={handleTestGDrive}
-                disabled={gdriveTestLoading}
-              >
-                {gdriveTestLoading ? 'Testing…' : 'Test Connection'}
-              </button>
-              {gdriveTestStatus && (
-                <span style={{
-                  fontFamily: "'JetBrains Mono', monospace",
-                  fontSize: 10,
-                  color: gdriveTestStatus.startsWith('✓') ? theme.success : theme.danger,
-                }}>
-                  {gdriveTestStatus}
-                </span>
-              )}
-            </div>
-            {currentFileGuids && (
-              <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 2 }}>
-                <div style={{
-                  fontFamily: "'JetBrains Mono', monospace",
-                  fontSize: 9,
-                  fontWeight: 700,
-                  textTransform: 'uppercase' as const,
-                  letterSpacing: '0.06em',
-                  color: theme.textMuted,
-                  marginBottom: 4,
-                }}>
-                  Drive File IDs
-                </div>
-                <Field label="Log" value={`${currentFileGuids.log}.eodb`} theme={theme} />
-                <Field label="Recent" value={`${currentFileGuids.recent}.eodb`} theme={theme} />
-                <Field label="Manifest" value={`${currentFileGuids.manifest}.json`} theme={theme} />
-              </div>
-            )}
-            {(gdriveSync || gdriveConnected) && <GDriveStorageWidget />}
-          </div>
-        </Section>
-        )}
-
         {/* Encrypted Blob Store — amino deployment only */}
         {isAmino && (
           <Section title="Encrypted Blob Store" theme={theme}>
@@ -694,7 +459,7 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
                 <button
                   style={s.actionBtn}
                   onClick={handleTestBlob}
-                  disabled={blobTestLoading || !roomId || !(matrixAccessToken ?? session.accessToken)}
+                  disabled={blobTestLoading || !roomId || !session.accessToken}
                   title={!roomId ? 'Connect to a space first' : 'Probe the webhook with OPTIONS + a get request'}
                 >
                   {blobTestLoading ? 'Testing…' : 'Test Connection'}
@@ -702,7 +467,7 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
                 <button
                   style={{ ...s.actionBtn, background: 'transparent', color: theme.accent, border: `1px solid ${theme.accent}` }}
                   onClick={() => setShowBlobStore(true)}
-                  disabled={!roomId || !(matrixAccessToken ?? session.accessToken)}
+                  disabled={!roomId || !session.accessToken}
                   title={!roomId ? 'Connect to a space first' : 'Fetch blobs by data_id from the eo-blob webhook'}
                 >
                   Open Blob Store

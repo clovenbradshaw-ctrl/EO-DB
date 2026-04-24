@@ -2,9 +2,7 @@
  * Google Calendar v3 API — direct fetch wrappers.
  *
  * All calls attach `Authorization: Bearer ${token}` and parse JSON responses.
- * Callers pass a token obtained from gcalendar-oauth (which re-exports
- * gdrive-oauth). There is no n8n-proxy mode for Calendar — the existing
- * n8n webhook only holds Drive credentials.
+ * Callers pass a token obtained from gcalendar-oauth.
  */
 
 const CAL_BASE = 'https://www.googleapis.com/calendar/v3';
