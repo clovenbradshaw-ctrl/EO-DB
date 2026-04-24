@@ -1,0 +1,649 @@
+{
+  "name": "EO Blob Store (minimal)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "eo-blob",
+        "responseMode": "responseNode",
+        "options": {
+          "allowedOrigins": "*"
+        }
+      },
+      "id": "4ac9a3e6-bb8d-461c-8ac2-2d2dd03e16da",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -320,
+        1376
+      ],
+      "webhookId": "eo-blob"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse & validate. No fs, no crypto — pure JS only.\n\nfunction homeserverFromRoomId(roomId) {\n  const idx = roomId.indexOf(':');\n  if (idx < 0) return null;\n  const hs = roomId.slice(idx + 1).trim();\n  if (!/^[a-zA-Z0-9.\\-]+(:[0-9]+)?$/.test(hs)) return null;\n  return hs;\n}\n\nconst item = $input.first().json;\nlet req = item.body || {};\nif (typeof req === 'string') { try { req = JSON.parse(req); } catch { req = {}; } }\n\nconst { matrix_token, op, room_id, data_id, envelope } = req;\n\nif (!matrix_token) return [{ json: { __error: true, statusCode: 401, errorBody: { error: 'missing matrix_token' } } }];\nif (!['store','get'].includes(op)) return [{ json: { __error: true, statusCode: 400, errorBody: { error: `invalid op (got ${op})` } } }];\nif (!room_id || !room_id.startsWith('!')) return [{ json: { __error: true, statusCode: 400, errorBody: { error: 'room_id required (must start with !)' } } }];\n\nconst homeserver = homeserverFromRoomId(room_id);\nif (!homeserver) return [{ json: { __error: true, statusCode: 400, errorBody: { error: 'malformed room_id' } } }];\n\nif (!data_id || !/^[a-zA-Z0-9_:-]{1,128}$/.test(data_id)) {\n  return [{ json: { __error: true, statusCode: 400, errorBody: { error: 'data_id required, [a-zA-Z0-9_:-]{1,128}' } } }];\n}\n\nif (op === 'store') {\n  if (!envelope || !envelope.iv || !envelope.ct || !envelope.content_hash) {\n    return [{ json: { __error: true, statusCode: 400, errorBody: { error: 'store needs envelope with iv, ct, content_hash' } } }];\n  }\n}\n\nreturn [{ json: {\n  __error: false,\n  matrix_token, op, room_id, homeserver, data_id,\n  envelope: envelope || null,\n  file_path: `/mnt/eo-blobs/${data_id}.enc`,\n}}];"
+      },
+      "id": "6585722b-4f9f-4385-b9a8-72e3a992514f",
+      "name": "Parse",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -96,
+        1376
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://{{ $json.homeserver }}/_matrix/client/v3/account/whoami",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $json.matrix_token }}"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "744671d6-61d4-434a-b08c-a13fbe1e85b1",
+      "name": "Matrix whoami",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        352,
+        1504
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const resp = $input.first().json;\nif (resp.statusCode !== 200 || !resp.body?.user_id) {\n  return [{ json: { __error: true, statusCode: 401, errorBody: { error: 'invalid matrix_token' } } }];\n}\nconst prev = $('Parse').first().json;\nreturn [{ json: {\n  __error: false,\n  user_id: resp.body.user_id,\n  matrix_token: prev.matrix_token,\n  op: prev.op,\n  room_id: prev.room_id,\n  homeserver: prev.homeserver,\n  data_id: prev.data_id,\n  envelope: prev.envelope,\n  file_path: prev.file_path,\n}}];"
+      },
+      "id": "03005bb6-1c8f-408e-aeae-4b3dc12c613d",
+      "name": "Check whoami",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        576,
+        1504
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "we",
+              "leftValue": "={{ $json.__error }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b562bb4c-d737-4703-ba26-0b0b935a485d",
+      "name": "whoami Error?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.1,
+      "position": [
+        800,
+        1504
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://{{ $json.homeserver }}/_matrix/client/v3/rooms/{{ encodeURIComponent($json.room_id) }}/state/m.room.member/{{ encodeURIComponent($json.user_id) }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $json.matrix_token }}"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "e4955a36-d73d-494d-a9a0-0cf2b95b76f7",
+      "name": "Room Membership",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1040,
+        1616
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "s",
+                    "leftValue": "={{ $json.op }}",
+                    "rightValue": "store",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "store"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "g",
+                    "leftValue": "={{ $json.op }}",
+                    "rightValue": "get",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "get"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "91ed131b-011c-4ed8-921c-2b0f83981e3c",
+      "name": "Switch on op",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        1696,
+        1616
+      ]
+    },
+    {
+      "parameters": {
+        "command": "mkdir -p /mnt/eo-blobs && chmod 755 /mnt/eo-blobs"
+      },
+      "id": "a11b2c3d-4e5f-6789-abcd-ef0123456789",
+      "name": "Store: ensure dir",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        1840,
+        1376
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Prepare envelope for write — convert to binary for the file node.\n// Pull from Authorize1 explicitly so upstream pass-through nodes (e.g.\n// Store: ensure dir) can be inserted without breaking this node's data.\nconst d = $('Authorize1').first().json;\nreturn [{\n  json: { file_path: d.file_path, data_id: d.data_id, room_id: d.room_id },\n  binary: {\n    data: {\n      data: Buffer.from(JSON.stringify(d.envelope)).toString('base64'),\n      mimeType: 'application/json',\n      fileName: `${d.data_id}.enc`,\n    }\n  }\n}];"
+      },
+      "id": "c79ea39f-c14f-42af-a3c8-325dffb4b8f3",
+      "name": "Store: prep",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2032,
+        1376
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "write",
+        "fileName": "={{ $json.file_path }}",
+        "options": {
+          "append": false
+        }
+      },
+      "id": "8cdf5805-94eb-457f-bcc5-952eca2259e7",
+      "name": "Store: write file",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [
+        2224,
+        1376
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const d = $input.first().json;\nreturn [{ json: {\n  statusCode: 200,\n  body: {\n    data_id: d.data_id,\n    room_id: d.room_id,\n    file_path: d.file_path,\n    uri: `eo-blob://${d.data_id}`,\n  }\n}}];"
+      },
+      "id": "7e5bb08a-2d05-419f-b091-68084baa5cc0",
+      "name": "Store: respond",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2416,
+        1376
+      ]
+    },
+    {
+      "parameters": {
+        "fileSelector": "={{ $json.file_path }}",
+        "options": {}
+      },
+      "id": "9697ad9c-6922-4678-9528-e2e7e93d8248",
+      "name": "Get: read file",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [
+        1936,
+        1760
+      ],
+      "continueOnFail": true,
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Emit 404 when the read-file node produced no binary (missing file, or\n// error with alwaysOutputData=true). Otherwise decode the envelope and\n// return it. Pulling data_id/room_id from Authorize1 lets us respond even\n// when $input is an empty/error passthrough.\nconst item = $input.first();\nconst prev = $('Authorize1').first().json;\n\nif (!item?.binary?.data?.data) {\n  return [{ json: { statusCode: 404, body: { error: 'blob not found', data_id: prev.data_id } } }];\n}\n\nlet envelope;\ntry {\n  const raw = Buffer.from(item.binary.data.data, 'base64').toString('utf8');\n  envelope = JSON.parse(raw);\n} catch (e) {\n  return [{ json: { statusCode: 500, body: { error: 'corrupt blob', detail: String(e.message || e) } } }];\n}\n\nreturn [{ json: {\n  statusCode: 200,\n  body: {\n    data_id: prev.data_id,\n    room_id: prev.room_id,\n    uri: `eo-blob://${prev.data_id}`,\n    envelope,\n  }\n}}];"
+      },
+      "id": "a2468e4d-20d0-4c8c-a966-b4dab8096658",
+      "name": "Get: respond",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2160,
+        1760
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json.body }}",
+        "options": {
+          "responseCode": "={{ $json.statusCode }}",
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Access-Control-Allow-Origin",
+                "value": "*"
+              },
+              {
+                "name": "Access-Control-Allow-Methods",
+                "value": "POST, OPTIONS"
+              },
+              {
+                "name": "Access-Control-Allow-Headers",
+                "value": "Content-Type, Authorization"
+              }
+            ]
+          }
+        }
+      },
+      "id": "5bfd11d4-029f-40ad-af34-685f062d04d1",
+      "name": "Respond Success",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.2,
+      "position": [
+        2640,
+        1616
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json.errorBody) }}",
+        "options": {
+          "responseCode": "={{ $json.statusCode }}",
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Access-Control-Allow-Origin",
+                "value": "*"
+              },
+              {
+                "name": "Access-Control-Allow-Methods",
+                "value": "POST, OPTIONS"
+              },
+              {
+                "name": "Access-Control-Allow-Headers",
+                "value": "Content-Type, Authorization"
+              },
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          }
+        }
+      },
+      "id": "f5723938-7ece-47e8-a546-f980235713f6",
+      "name": "Respond Error",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.2,
+      "position": [
+        352,
+        1136
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "pe",
+              "leftValue": "={{ $json.__error }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "678b8bdd-dd76-4c85-99b3-21d8e3f89413",
+      "name": "Parse Error?1",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.1,
+      "position": [
+        112,
+        1376
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const resp = $input.first().json;\nif (resp.statusCode === 403 || resp.statusCode === 404) {\n  return [{ json: { __error: true, statusCode: 403, errorBody: { error: 'forbidden: not a member of this room' } } }];\n}\nif (resp.statusCode !== 200) {\n  return [{ json: { __error: true, statusCode: 502, errorBody: { error: 'membership check failed', detail: resp.statusCode } } }];\n}\nif (resp.body?.membership !== 'join') {\n  return [{ json: { __error: true, statusCode: 403, errorBody: { error: `forbidden: membership=${resp.body?.membership || 'unknown'}` } } }];\n}\nconst prev = $('Check whoami').first().json;\nreturn [{ json: {\n  __error: false,\n  user_id: prev.user_id,\n  op: prev.op,\n  room_id: prev.room_id,\n  data_id: prev.data_id,\n  envelope: prev.envelope,\n  file_path: prev.file_path,\n}}];"
+      },
+      "id": "35c89706-d553-44e3-9eee-e4ad6f2c5944",
+      "name": "Authorize1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1264,
+        1616
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "ae",
+              "leftValue": "={{ $json.__error }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "c7bba0af-c8c0-455d-a5d7-e87f76441bc7",
+      "name": "Auth Error?1",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.1,
+      "position": [
+        1472,
+        1616
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Parse",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse": {
+      "main": [
+        [
+          {
+            "node": "Parse Error?1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Matrix whoami": {
+      "main": [
+        [
+          {
+            "node": "Check whoami",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check whoami": {
+      "main": [
+        [
+          {
+            "node": "whoami Error?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "whoami Error?": {
+      "main": [
+        [
+          {
+            "node": "Respond Error",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Room Membership",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Room Membership": {
+      "main": [
+        [
+          {
+            "node": "Authorize1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch on op": {
+      "main": [
+        [
+          {
+            "node": "Store: ensure dir",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Get: read file",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store: ensure dir": {
+      "main": [
+        [
+          {
+            "node": "Store: prep",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store: prep": {
+      "main": [
+        [
+          {
+            "node": "Store: write file",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store: write file": {
+      "main": [
+        [
+          {
+            "node": "Store: respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store: respond": {
+      "main": [
+        [
+          {
+            "node": "Respond Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get: read file": {
+      "main": [
+        [
+          {
+            "node": "Get: respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get: respond": {
+      "main": [
+        [
+          {
+            "node": "Respond Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Error?1": {
+      "main": [
+        [
+          {
+            "node": "Respond Error",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Matrix whoami",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Authorize1": {
+      "main": [
+        [
+          {
+            "node": "Auth Error?1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Auth Error?1": {
+      "main": [
+        [
+          {
+            "node": "Respond Error",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Switch on op",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "5c737be3fd9beebae6ccb42a087a71b95589b90d613100d5ba10c73188a40d22"
+  }
+}
