@@ -31,13 +31,10 @@ import {
 
 const BLOB_WEBHOOK_ENDPOINT = 'https://n8n.intelechia.com/webhook/eo-blob';
 
-async function computeBlobRoomPrefix(roomId: string): Promise<string> {
-  const bytes = new TextEncoder().encode(roomId);
-  const digest = await crypto.subtle.digest('SHA-256', bytes as unknown as BufferSource);
-  const hex = Array.from(new Uint8Array(digest))
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
-  return 'r_' + hex.slice(0, 8);
+// Must match the n8n workflow's roomPrefix() exactly: strip leading !,
+// replace non-alphanumerics with _, cap at 40 chars, keep trailing _'s.
+function computeBlobRoomPrefix(roomId: string): string {
+  return 'r_' + roomId.replace(/^!/, '').replace(/[^a-zA-Z0-9]/g, '_').slice(0, 40);
 }
 
 interface SettingsViewProps {
@@ -105,12 +102,8 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
   const [blobTestLoading, setBlobTestLoading] = useState(false);
 
   useEffect(() => {
-    let cancelled = false;
     if (!roomId) { setBlobRoomPrefix(null); return; }
-    computeBlobRoomPrefix(roomId).then((prefix) => {
-      if (!cancelled) setBlobRoomPrefix(prefix);
-    }).catch(() => { if (!cancelled) setBlobRoomPrefix(null); });
-    return () => { cancelled = true; };
+    setBlobRoomPrefix(computeBlobRoomPrefix(roomId));
   }, [roomId]);
 
   const handleTestBlob = useCallback(async () => {
@@ -120,7 +113,7 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
       const token = matrixAccessToken ?? session.accessToken;
       if (!token) { setBlobTestStatus('✗ No Matrix token'); return; }
       if (!roomId) { setBlobTestStatus('✗ No room connected'); return; }
-      const prefix = blobRoomPrefix ?? (await computeBlobRoomPrefix(roomId));
+      const prefix = blobRoomPrefix ?? computeBlobRoomPrefix(roomId);
       const data_id = `${prefix}:_healthcheck`;
       const res = await fetch(BLOB_WEBHOOK_ENDPOINT, {
         method: 'POST',
@@ -679,9 +672,11 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
               <Field label="Room Prefix" value={blobRoomPrefix ?? (roomId ? 'computing…' : '— (no room)')} theme={theme} />
               <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, color: theme.textMuted }}>
                 Room-scoped encrypted blobs via the <code>/webhook/eo-blob</code> endpoint.
-                Every <code>data_id</code> is prefixed with <code>r_&lt;sha256(roomId)[0..8]&gt;</code>;
-                the server rejects mismatched claims. Currently unused — click Test Connection to
-                send a harmless <code>versions</code> probe and verify the webhook is live.
+                Every <code>data_id</code> is prefixed with <code>r_&lt;roomId&gt;</code> (leading
+                <code>!</code> stripped, non-alphanumerics replaced with <code>_</code>, capped at
+                40 chars); the server rejects mismatched claims. Currently unused — click Test
+                Connection to send a harmless <code>versions</code> probe and verify the webhook
+                is live.
               </span>
               <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' as const }}>
                 <button

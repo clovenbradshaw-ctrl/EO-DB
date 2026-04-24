@@ -33,24 +33,26 @@ function errJson(status: number, body: unknown): Response {
 }
 
 describe('roomPrefix / roomScopedDataId', () => {
-  it('produces the documented format: r_ + 8 hex chars of sha256(roomId)', async () => {
-    const prefix = await roomPrefix(ROOM);
-    expect(prefix).toMatch(/^r_[0-9a-f]{8}$/);
+  it('strips leading !, replaces non-alphanumerics with _, caps at 40 chars', () => {
+    expect(roomPrefix('!CwJtfqnUDbyfMHIRwp:app.aminoimmigration.com')).toBe(
+      'r_CwJtfqnUDbyfMHIRwp_app_aminoimmigration_',
+    );
+    expect(roomPrefix('!abc:hyphae.social')).toBe('r_abc_hyphae_social');
+    expect(roomPrefix('!xyz123:matrix.org')).toBe('r_xyz123_matrix_org');
   });
 
-  it('is stable for the same roomId', async () => {
-    expect(await roomPrefix(ROOM)).toBe(await roomPrefix(ROOM));
+  it('is stable for the same roomId', () => {
+    expect(roomPrefix(ROOM)).toBe(roomPrefix(ROOM));
   });
 
-  it('differs across rooms', async () => {
-    const a = await roomPrefix('!room-a:hyphae.social');
-    const b = await roomPrefix('!room-b:hyphae.social');
+  it('differs across rooms', () => {
+    const a = roomPrefix('!room-a:hyphae.social');
+    const b = roomPrefix('!room-b:hyphae.social');
     expect(a).not.toBe(b);
   });
 
-  it('roomScopedDataId prepends the prefix with a colon', async () => {
-    const id = await roomScopedDataId(ROOM, 'local-1');
-    expect(id).toMatch(/^r_[0-9a-f]{8}:local-1$/);
+  it('roomScopedDataId prepends the prefix with a colon', () => {
+    expect(roomScopedDataId(ROOM, 'local-1')).toBe('r_abc_hyphae_social:local-1');
   });
 });
 
@@ -88,7 +90,7 @@ describe('BlobClient constructor', () => {
 
 describe('BlobClient wire format', () => {
   it('listVersions sends op=versions with room-prefixed data_id', async () => {
-    const expectedDataId = await roomScopedDataId(ROOM, 'doc-42');
+    const expectedDataId = roomScopedDataId(ROOM, 'doc-42');
     const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
       okJson({ data_id: expectedDataId, versions: [], latest: null }),
     );
@@ -135,7 +137,7 @@ describe('BlobClient wire format', () => {
       key_id: 'k',
       created_at: new Date().toISOString(),
     };
-    const expectedDataId = await roomScopedDataId(ROOM, 'doc-42');
+    const expectedDataId = roomScopedDataId(ROOM, 'doc-42');
     const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
       okJson({
         data_id: expectedDataId,
