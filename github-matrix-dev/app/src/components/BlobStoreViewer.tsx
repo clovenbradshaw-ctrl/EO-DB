@@ -1,8 +1,8 @@
 /**
- * BlobStoreViewer — fetches individual encrypted blobs by `data_id` from the
- * n8n `/webhook/eo-store` Drive proxy. Each `data_id` maps to a single Drive
- * file `{dataId}.json` whose body is the AES-GCM envelope. Users enter a
- * `data_id` and the viewer reports whether the file exists in Drive and
+ * BlobStoreViewer — fetches individual encrypted Drive files by `data_id` from
+ * the n8n `/webhook/eo-store` Drive proxy. Each `data_id` maps to a single
+ * Drive file `{dataId}.json` whose body is the AES-GCM envelope. Users enter
+ * a `data_id` and the viewer reports whether the file exists in Drive and
  * surfaces the envelope size when found.
  */
 
@@ -100,8 +100,8 @@ export function BlobStoreViewer({ onBack, endpoint, roomId, matrixToken }: BlobS
           Settings
         </button>
 
-        <div style={s.title}>Blob Store</div>
-        <div style={s.subtitle}>Fetch encrypted blobs by data_id via /webhook/eo-store (Google Drive)</div>
+        <div style={s.title}>Drive Store</div>
+        <div style={s.subtitle}>Fetch encrypted Drive files by data_id via /webhook/eo-store (Google Drive)</div>
 
         {!ready && (
           <div style={s.errorBox}>
@@ -122,7 +122,7 @@ export function BlobStoreViewer({ onBack, endpoint, roomId, matrixToken }: BlobS
                 value={probeInput}
                 onChange={(e) => setProbeInput(e.target.value)}
                 placeholder="data_id (e.g. manifest, my-field)"
-                aria-label="Blob data_id to fetch"
+                aria-label="Drive data_id to fetch"
               />
               <button type="submit" style={s.probeBtn} disabled={!probeInput.trim() || loading !== null}>
                 {loading ? 'Fetching…' : 'Fetch'}
@@ -131,7 +131,7 @@ export function BlobStoreViewer({ onBack, endpoint, roomId, matrixToken }: BlobS
 
             {resultList.length === 0 && (
               <div style={s.emptyNote}>
-                Enter a data_id above and click Fetch to retrieve a blob.
+                Enter a data_id above and click Fetch to retrieve from Drive.
               </div>
             )}
 
