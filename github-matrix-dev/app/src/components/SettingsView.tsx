@@ -7,6 +7,7 @@ import { RoomDataViewer } from './RoomDataViewer';
 import { MatrixRoomsViewer } from './MatrixRoomsViewer';
 import { UserRoomsBySpaces } from './UserRoomsBySpaces';
 import { GDriveStorageWidget } from './GDriveStorageWidget';
+import { BlobStoreViewer } from './BlobStoreViewer';
 import { OP_COLORS, TRIAD_LABELS } from './LogView';
 import { ArchivedSpacesSection } from './ArchivedSpaces';
 import { AirtableSettingsSection } from './AirtableSettings';
@@ -78,6 +79,7 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
   const [showRoomData, setShowRoomData] = useState(false);
   const [showAllRooms, setShowAllRooms] = useState(false);
   const [showRoomsBySpaces, setShowRoomsBySpaces] = useState(false);
+  const [showBlobStore, setShowBlobStore] = useState(false);
   const [presencePrefs, setPresencePrefs] = usePresencePrefs();
   const s = styles(theme);
 
@@ -281,6 +283,18 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
 
   if (showRoomData) {
     return <RoomDataViewer onBack={() => setShowRoomData(false)} matrixClient={matrixClient} roomId={roomId} />;
+  }
+
+  if (showBlobStore) {
+    return (
+      <BlobStoreViewer
+        onBack={() => setShowBlobStore(false)}
+        endpoint={BLOB_WEBHOOK_ENDPOINT}
+        roomId={roomId ?? null}
+        roomPrefix={blobRoomPrefix}
+        matrixToken={matrixAccessToken ?? session.accessToken ?? null}
+      />
+    );
   }
 
   return (
@@ -677,6 +691,14 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
                   title={!roomId ? 'Connect to a space first' : 'Probe the webhook with a versions request'}
                 >
                   {blobTestLoading ? 'Testing…' : 'Test Connection'}
+                </button>
+                <button
+                  style={{ ...s.actionBtn, background: 'transparent', color: theme.accent, border: `1px solid ${theme.accent}` }}
+                  onClick={() => setShowBlobStore(true)}
+                  disabled={!roomId || !(matrixAccessToken ?? session.accessToken)}
+                  title={!roomId ? 'Connect to a space first' : 'Browse room-scoped blobs stored at the eo-blob webhook'}
+                >
+                  View Blob Store Files
                 </button>
                 {blobTestStatus && (
                   <span style={{
