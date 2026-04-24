@@ -28,8 +28,27 @@ import {
   downloadClassifiedClauses,
   downloadUserCorrections,
 } from '../nl/nl-export';
+import { EODB_BLOB_ENDPOINT } from '../storage/eodb-blob-endpoint';
+import type { BlobWriterStatus } from '../storage/eodb-blob-writer';
 
-const BLOB_WEBHOOK_ENDPOINT = 'https://n8n.intelechia.com/webhook/eo-blob';
+function classifyNetworkError(err: unknown): string {
+  if (err && typeof err === 'object') {
+    const e = err as { name?: string; message?: string };
+    if (e.name === 'TimeoutError') return 'Timed out';
+    if (e.name === 'AbortError') return 'Aborted';
+    if (e.name === 'TypeError') return `Network/CORS error: ${e.message ?? 'Failed to fetch'}`;
+    if (typeof e.message === 'string' && e.message.length > 0) return e.message;
+  }
+  return String(err);
+}
+
+function formatRelativeTime(epochMs: number | null | undefined): string {
+  if (!epochMs) return 'never';
+  const deltaSec = Math.max(0, Math.round((Date.now() - epochMs) / 1000));
+  if (deltaSec < 60) return `${deltaSec}s ago`;
+  if (deltaSec < 3600) return `${Math.round(deltaSec / 60)}m ago`;
+  return `${Math.round(deltaSec / 3600)}h ago`;
+}
 
 interface SettingsViewProps {
   session: MatrixSession;
@@ -101,10 +120,34 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
       const token = matrixAccessToken ?? session.accessToken;
       if (!token) { setBlobTestStatus('✗ No Matrix token'); return; }
       if (!roomId) { setBlobTestStatus('✗ No room connected'); return; }
+
+      // Preflight probe: surface CORS / proxy problems before the POST would
+      // hang at preflight. OPTIONS should succeed regardless of n8n workflow
+      // state because n8n core handles it when allowedOrigins is set.
+      try {
+        const pre = await fetch(EODB_BLOB_ENDPOINT, {
+          method: 'OPTIONS',
+          headers: {
+            'Access-Control-Request-Method': 'POST',
+            'Access-Control-Request-Headers': 'content-type',
+          },
+          signal: AbortSignal.timeout(8_000),
+        });
+        if (!pre.ok && pre.status !== 204) {
+          setBlobTestStatus(`✗ Preflight failed — OPTIONS returned ${pre.status}. Check reverse proxy / CORS on n8n.`);
+          return;
+        }
+      } catch (preErr: unknown) {
+        const reason = classifyNetworkError(preErr);
+        setBlobTestStatus(`✗ Preflight unreachable — ${reason}. DNS, TLS, or blocklist?`);
+        return;
+      }
+
       const data_id = '_healthcheck';
-      const res = await fetch(BLOB_WEBHOOK_ENDPOINT, {
+      const res = await fetch(EODB_BLOB_ENDPOINT, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(15_000),
         body: JSON.stringify({
           matrix_token: token,
           op: 'get',
@@ -118,17 +161,24 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
       if (res.ok) {
         setBlobTestStatus(`✓ Reachable — blob ${data_id} exists`);
       } else if (res.status === 404) {
-        setBlobTestStatus(`✓ Reachable — ${data_id} not found (404)`);
+        setBlobTestStatus(`✓ Reachable — ${data_id} not found (404 as expected)`);
       } else {
         const detail = parsed?.error ?? text.slice(0, 160) ?? `HTTP ${res.status}`;
         setBlobTestStatus(`✗ HTTP ${res.status}: ${detail}`);
       }
-    } catch (e: any) {
-      setBlobTestStatus(`✗ Network error: ${e?.message ?? 'unknown'}`);
+    } catch (e: unknown) {
+      setBlobTestStatus(`✗ ${classifyNetworkError(e)}`);
     } finally {
       setBlobTestLoading(false);
     }
   }, [matrixAccessToken, session.accessToken, roomId]);
+
+  const eodbBlobWriter = useEoStore((s) => s.eodbBlobWriter);
+  const [blobWriterStatus, setBlobWriterStatus] = useState<BlobWriterStatus | null>(null);
+  useEffect(() => {
+    if (!eodbBlobWriter) { setBlobWriterStatus(null); return; }
+    return eodbBlobWriter.subscribe(setBlobWriterStatus);
+  }, [eodbBlobWriter]);
 
   const handleTestGDrive = useCallback(async () => {
     setGdriveTestLoading(true);
@@ -270,7 +320,7 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
     return (
       <BlobStoreViewer
         onBack={() => setShowBlobStore(false)}
-        endpoint={BLOB_WEBHOOK_ENDPOINT}
+        endpoint={EODB_BLOB_ENDPOINT}
         roomId={roomId ?? null}
         matrixToken={matrixAccessToken ?? session.accessToken ?? null}
       />
@@ -384,7 +434,7 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
                 theme={theme}
                 label="Blob Store"
                 status={roomId && (matrixAccessToken ?? session.accessToken) ? 'ok' : 'off'}
-                detail={!roomId ? 'Waiting for room' : BLOB_WEBHOOK_ENDPOINT}
+                detail={!roomId ? 'Waiting for room' : EODB_BLOB_ENDPOINT}
               />
             )}
 
@@ -651,20 +701,22 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
         {isAmino && (
           <Section title="Encrypted Blob Store" theme={theme}>
             <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 10 }}>
-              <Field label="Endpoint" value={BLOB_WEBHOOK_ENDPOINT} theme={theme} />
+              <Field label="Endpoint" value={EODB_BLOB_ENDPOINT} theme={theme} />
               <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, color: theme.textMuted }}>
                 Encrypted blobs via the <code>/webhook/eo-blob</code> endpoint. Two ops:
                 <code>store</code> (overwrites on every write) and <code>get</code>. One file per
-                <code>data_id</code>, no versioning. Click Test Connection to send a harmless
-                <code>get</code> probe for <code>_healthcheck</code> and verify the webhook is live
-                (404 is expected and confirms reachability).
+                <code>data_id</code>, no versioning. Auto-save runs whenever the local log
+                advances (10s debounce + 5min heartbeat); devices raise hands via the Matrix
+                snapshot-claim state event so only one writes at a time. Click Test Connection
+                to send a harmless <code>get</code> probe for <code>_healthcheck</code> and
+                verify the webhook is live (404 is expected and confirms reachability).
               </span>
               <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' as const }}>
                 <button
                   style={s.actionBtn}
                   onClick={handleTestBlob}
                   disabled={blobTestLoading || !roomId || !(matrixAccessToken ?? session.accessToken)}
-                  title={!roomId ? 'Connect to a space first' : 'Probe the webhook with a get request'}
+                  title={!roomId ? 'Connect to a space first' : 'Probe the webhook with OPTIONS + a get request'}
                 >
                   {blobTestLoading ? 'Testing…' : 'Test Connection'}
                 </button>
@@ -676,6 +728,14 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
                 >
                   Open Blob Store
                 </button>
+                <button
+                  style={{ ...s.actionBtn, background: 'transparent', color: theme.accent, border: `1px solid ${theme.accent}` }}
+                  onClick={() => { eodbBlobWriter?.flushNow().catch(() => {}); }}
+                  disabled={!eodbBlobWriter}
+                  title={!eodbBlobWriter ? 'Auto-save not initialized yet' : 'Force an immediate save attempt'}
+                >
+                  Flush Now
+                </button>
                 {blobTestStatus && (
                   <span style={{
                     fontFamily: "'JetBrains Mono', monospace",
@@ -684,6 +744,37 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
                   }}>
                     {blobTestStatus}
                   </span>
+                )}
+              </div>
+              <div style={{
+                fontFamily: "'JetBrains Mono', monospace",
+                fontSize: 10,
+                color: theme.textMuted,
+                display: 'flex',
+                flexDirection: 'column' as const,
+                gap: 2,
+              }}>
+                <span>
+                  Auto-save:{' '}
+                  {blobWriterStatus
+                    ? (blobWriterStatus.enabled
+                        ? (blobWriterStatus.inFlight
+                            ? 'writing…'
+                            : (blobWriterStatus.backoffUntil && blobWriterStatus.backoffUntil > Date.now()
+                                ? `backing off ${Math.ceil((blobWriterStatus.backoffUntil - Date.now())/1000)}s`
+                                : 'idle'))
+                        : 'stopped')
+                    : 'not started (connect to a space)'}
+                  {blobWriterStatus && (
+                    <> · pending {blobWriterStatus.pendingCount} · last save {formatRelativeTime(blobWriterStatus.lastSaveAt)}
+                    {blobWriterStatus.lastSavedSeq !== null && <> (seq {blobWriterStatus.lastSavedSeq})</>}</>
+                  )}
+                </span>
+                {blobWriterStatus?.lastError && (
+                  <span style={{ color: theme.danger }}>✗ {blobWriterStatus.lastError}</span>
+                )}
+                {blobWriterStatus?.lastDiagnostic && !blobWriterStatus.lastError && (
+                  <span style={{ color: theme.textMuted }}>{blobWriterStatus.lastDiagnostic}</span>
                 )}
               </div>
             </div>
