@@ -25,7 +25,7 @@ import {
   downloadClassifiedClauses,
   downloadUserCorrections,
 } from '../nl/nl-export';
-import { EODB_BLOB_ENDPOINT } from '../storage/eodb-blob-endpoint';
+import { EO_STORE_WEBHOOK, pingDriveProxy } from '../storage/eodb-blob-endpoint';
 import type { BlobWriterStatus } from '../storage/eodb-blob-writer';
 
 function classifyNetworkError(err: unknown): string {
@@ -105,7 +105,7 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
       // hang at preflight. OPTIONS should succeed regardless of n8n workflow
       // state because n8n core handles it when allowedOrigins is set.
       try {
-        const pre = await fetch(EODB_BLOB_ENDPOINT, {
+        const pre = await fetch(EO_STORE_WEBHOOK, {
           method: 'OPTIONS',
           headers: {
             'Access-Control-Request-Method': 'POST',
@@ -123,28 +123,17 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
         return;
       }
 
-      const data_id = '_healthcheck';
-      const res = await fetch(EODB_BLOB_ENDPOINT, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        signal: AbortSignal.timeout(15_000),
-        body: JSON.stringify({
-          matrix_token: token,
-          op: 'get',
-          room_id: roomId,
-          data_id,
-        }),
-      });
-      const text = await res.text();
-      let parsed: any = null;
-      try { parsed = JSON.parse(text); } catch { /* keep raw */ }
-      if (res.ok) {
-        setBlobTestStatus(`✓ Reachable — blob ${data_id} exists`);
-      } else if (res.status === 404) {
-        setBlobTestStatus(`✓ Reachable — ${data_id} not found (404 as expected)`);
+      const ping = await pingDriveProxy(token, roomId);
+      if (ping.ok) {
+        setBlobTestStatus('✓ Reachable — Drive proxy authenticated');
+      } else if (ping.status === 401) {
+        setBlobTestStatus('✗ Unauthorized — Matrix token invalid');
+      } else if (ping.status === 403) {
+        setBlobTestStatus('✗ Forbidden — not a member of this space');
+      } else if (ping.status === 0) {
+        setBlobTestStatus(`✗ ${ping.detail ?? 'Network error'}`);
       } else {
-        const detail = parsed?.error ?? text.slice(0, 160) ?? `HTTP ${res.status}`;
-        setBlobTestStatus(`✗ HTTP ${res.status}: ${detail}`);
+        setBlobTestStatus(`✗ HTTP ${ping.status}: ${ping.detail ?? ''}`);
       }
     } catch (e: unknown) {
       setBlobTestStatus(`✗ ${classifyNetworkError(e)}`);
@@ -220,7 +209,7 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
     return (
       <BlobStoreViewer
         onBack={() => setShowBlobStore(false)}
-        endpoint={EODB_BLOB_ENDPOINT}
+        endpoint={EO_STORE_WEBHOOK}
         roomId={roomId ?? null}
         matrixToken={session.accessToken ?? null}
       />
@@ -325,7 +314,7 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
                 theme={theme}
                 label="Blob Store"
                 status={roomId && session.accessToken ? 'ok' : 'off'}
-                detail={!roomId ? 'Waiting for room' : EODB_BLOB_ENDPOINT}
+                detail={!roomId ? 'Waiting for room' : EO_STORE_WEBHOOK}
               />
             )}
 
@@ -445,22 +434,23 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
         {isAmino && (
           <Section title="Encrypted Blob Store" theme={theme}>
             <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 10 }}>
-              <Field label="Endpoint" value={EODB_BLOB_ENDPOINT} theme={theme} />
+              <Field label="Endpoint" value={EO_STORE_WEBHOOK} theme={theme} />
               <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, color: theme.textMuted }}>
-                Encrypted blobs via the <code>/webhook/eo-blob</code> endpoint. Two ops:
-                <code>store</code> (overwrites on every write) and <code>get</code>. One file per
-                <code>data_id</code>, no versioning. Auto-save runs whenever the local log
-                advances (10s debounce + 5min heartbeat); devices raise hands via the Matrix
-                snapshot-claim state event so only one writes at a time. Click Test Connection
-                to send a harmless <code>get</code> probe for <code>_healthcheck</code> and
-                verify the webhook is live (404 is expected and confirms reachability).
+                Encrypted blobs are stored as Google Drive files via the
+                <code>/webhook/eo-store</code> proxy. Each room maps to a single file
+                <code>{'{dataId}'}.json</code> whose body is the AES-GCM envelope; writes
+                find-or-create the file and PATCH the media. Auto-save runs whenever the
+                local log advances (10s debounce + 5min heartbeat); devices raise hands via
+                the Matrix snapshot-claim state event so only one writes at a time. Click
+                Test Connection to round-trip the proxy with a no-op Drive list query and
+                verify Matrix auth + Drive credentials are live.
               </span>
               <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' as const }}>
                 <button
                   style={s.actionBtn}
                   onClick={handleTestBlob}
                   disabled={blobTestLoading || !roomId || !session.accessToken}
-                  title={!roomId ? 'Connect to a space first' : 'Probe the webhook with OPTIONS + a get request'}
+                  title={!roomId ? 'Connect to a space first' : 'Probe the proxy with OPTIONS + a Drive list query'}
                 >
                   {blobTestLoading ? 'Testing…' : 'Test Connection'}
                 </button>
@@ -468,7 +458,7 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
                   style={{ ...s.actionBtn, background: 'transparent', color: theme.accent, border: `1px solid ${theme.accent}` }}
                   onClick={() => setShowBlobStore(true)}
                   disabled={!roomId || !session.accessToken}
-                  title={!roomId ? 'Connect to a space first' : 'Fetch blobs by data_id from the eo-blob webhook'}
+                  title={!roomId ? 'Connect to a space first' : 'Fetch blobs by data_id from the Drive proxy'}
                 >
                   Open Blob Store
                 </button>

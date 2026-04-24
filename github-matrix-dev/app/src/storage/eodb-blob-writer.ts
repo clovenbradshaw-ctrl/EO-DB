@@ -1,8 +1,8 @@
 /**
- * Proactive writer that pushes the room's integral log to the n8n
- * encrypted-blob webhook. Coordinates across devices via the existing
- * snapshot-claim lease (Matrix room state), so the single-file
- * overwrite-on-write contract at the server is safe under concurrent writers.
+ * Proactive writer that pushes the room's integral log to Google Drive
+ * (proxied via the n8n `/webhook/eo-store` workflow). Coordinates across
+ * devices via the snapshot-claim lease in Matrix room state, so the
+ * find-or-create + media-PATCH contract is safe under concurrent writers.
  *
  * Trigger: debounce on local log growth (10s idle) + 5-minute heartbeat
  * whenever there are events newer than the last successful save.
@@ -20,11 +20,14 @@ import {
   setSnapshotStateEvent,
   tryClaimSnapshotLease,
 } from '../matrix/snapshot';
-import { EODB_BLOB_ENDPOINT, eodbBlobDataIdForRoom } from './eodb-blob-endpoint';
+import {
+  eodbBlobDataIdForRoom,
+  storeBlobToDrive,
+  type BlobEnvelope,
+} from './eodb-blob-endpoint';
 
 const DEBOUNCE_MS = 10_000;
 const HEARTBEAT_MS = 5 * 60_000;
-const POST_TIMEOUT_MS = 20_000;
 const MAX_BACKOFF_MS = 5 * 60_000;
 
 export interface BlobWriterStatus {
@@ -50,15 +53,6 @@ export interface BlobWriterDeps {
   store: EoStore;
   userId: string;
   deviceId: string;
-}
-
-interface BlobEnvelope {
-  v: 1;
-  iv: string;
-  ct: string;
-  content_hash: string;
-  key_id: string;
-  plaintext_size: number;
 }
 
 interface EodbBlobPayload {
@@ -226,26 +220,8 @@ export class EodbBlobWriter {
       };
 
       const dataId = await eodbBlobDataIdForRoom(roomId);
-      const res = await fetch(EODB_BLOB_ENDPOINT, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        signal: AbortSignal.timeout(POST_TIMEOUT_MS),
-        body: JSON.stringify({
-          matrix_token: matrixToken,
-          op: 'store',
-          room_id: roomId,
-          data_id: dataId,
-          envelope,
-        }),
-      });
-
-      if (!res.ok) {
-        const text = await safeText(res);
-        throw new Error(`HTTP ${res.status}: ${text.slice(0, 200) || res.statusText}`);
-      }
-
-      const body: unknown = await res.json().catch(() => ({}));
-      const uri = extractUri(body) ?? `eo-blob://${dataId}`;
+      const stored = await storeBlobToDrive(matrixToken, dataId, envelope, roomId);
+      const uri = stored.uri;
 
       await setSnapshotStateEvent(client, roomId, uri, currentSeq, keyId);
 
@@ -301,22 +277,10 @@ async function sha256hex(data: Uint8Array): Promise<string> {
   return hex;
 }
 
-async function safeText(res: Response): Promise<string> {
-  try { return await res.text(); } catch { return ''; }
-}
-
-function extractUri(body: unknown): string | null {
-  if (body && typeof body === 'object' && 'uri' in body) {
-    const uri = (body as { uri?: unknown }).uri;
-    if (typeof uri === 'string') return uri;
-  }
-  return null;
-}
-
 function classifyError(err: unknown): string {
   if (err && typeof err === 'object') {
     const e = err as { name?: string; message?: string };
-    if (e.name === 'TimeoutError') return `Timed out after ${POST_TIMEOUT_MS / 1000}s`;
+    if (e.name === 'TimeoutError') return 'Drive proxy timed out';
     if (e.name === 'AbortError') return 'Aborted';
     if (e.name === 'TypeError') return `Network/CORS error: ${e.message ?? 'Failed to fetch'}`;
     if (typeof e.message === 'string' && e.message.length > 0) return e.message;

@@ -1,12 +1,14 @@
 /**
  * BlobStoreViewer — fetches individual encrypted blobs by `data_id` from the
- * n8n `/webhook/eo-blob` endpoint. The workflow exposes two operations
- * (`store` | `get`) with one file per `data_id` and no versioning. Users
- * enter a `data_id` and the viewer fetches the current blob or reports 404.
+ * n8n `/webhook/eo-store` Drive proxy. Each `data_id` maps to a single Drive
+ * file `{dataId}.json` whose body is the AES-GCM envelope. Users enter a
+ * `data_id` and the viewer reports whether the file exists in Drive and
+ * surfaces the envelope size when found.
  */
 
 import { useState, useCallback } from 'react';
 import { useTheme, type Theme } from '../theme';
+import { fetchBlobFromDrive } from '../storage/eodb-blob-endpoint';
 
 interface BlobStoreViewerProps {
   onBack: () => void;
@@ -39,47 +41,23 @@ export function BlobStoreViewer({ onBack, endpoint, roomId, matrixToken }: BlobS
       if (!ready) return;
       setLoading(dataId);
       try {
-        const res = await fetch(endpoint, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            matrix_token: matrixToken,
-            op: 'get',
-            room_id: roomId,
-            data_id: dataId,
-          }),
-        });
-        const text = await res.text();
-        let parsed: any = null;
-        try { parsed = JSON.parse(text); } catch { /* keep raw */ }
-        if (res.ok) {
-          const envelope = parsed?.envelope;
-          const envelopeSize = envelope ? JSON.stringify(envelope).length : undefined;
+        const result = await fetchBlobFromDrive(matrixToken!, dataId, roomId!);
+        if (result) {
+          const envelopeSize = JSON.stringify(result.envelope).length;
           setResults((prev) => ({
             ...prev,
             [dataId]: {
               dataId,
               status: 'found',
-              uri: typeof parsed?.uri === 'string' ? parsed.uri : undefined,
+              uri: result.uri,
               envelopeSize,
               fetchedAt: Date.now(),
             },
           }));
-        } else if (res.status === 404) {
+        } else {
           setResults((prev) => ({
             ...prev,
             [dataId]: { dataId, status: 'not-found', fetchedAt: Date.now() },
-          }));
-        } else {
-          const detail = parsed?.error ?? text.slice(0, 200) ?? `HTTP ${res.status}`;
-          setResults((prev) => ({
-            ...prev,
-            [dataId]: {
-              dataId,
-              status: 'error',
-              error: `HTTP ${res.status}: ${detail}`,
-              fetchedAt: Date.now(),
-            },
           }));
         }
       } catch (e: any) {
@@ -88,7 +66,7 @@ export function BlobStoreViewer({ onBack, endpoint, roomId, matrixToken }: BlobS
           [dataId]: {
             dataId,
             status: 'error',
-            error: `Network: ${e?.message ?? 'unknown'}`,
+            error: `Drive: ${e?.message ?? 'unknown'}`,
             fetchedAt: Date.now(),
           },
         }));
@@ -96,7 +74,7 @@ export function BlobStoreViewer({ onBack, endpoint, roomId, matrixToken }: BlobS
         setLoading(null);
       }
     },
-    [ready, endpoint, matrixToken, roomId],
+    [ready, matrixToken, roomId],
   );
 
   const handleSubmit = useCallback(
@@ -123,7 +101,7 @@ export function BlobStoreViewer({ onBack, endpoint, roomId, matrixToken }: BlobS
         </button>
 
         <div style={s.title}>Blob Store</div>
-        <div style={s.subtitle}>Fetch encrypted blobs by data_id via /webhook/eo-blob</div>
+        <div style={s.subtitle}>Fetch encrypted blobs by data_id via /webhook/eo-store (Google Drive)</div>
 
         {!ready && (
           <div style={s.errorBox}>
