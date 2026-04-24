@@ -31,12 +31,6 @@ import {
 
 const BLOB_WEBHOOK_ENDPOINT = 'https://n8n.intelechia.com/webhook/eo-blob';
 
-// Must match the n8n workflow's roomPrefix() exactly: strip leading !,
-// replace non-alphanumerics with _, cap at 40 chars, keep trailing _'s.
-function computeBlobRoomPrefix(roomId: string): string {
-  return 'r_' + roomId.replace(/^!/, '').replace(/[^a-zA-Z0-9]/g, '_').slice(0, 40);
-}
-
 interface SettingsViewProps {
   session: MatrixSession;
   matrixClient?: MatrixClient | null;
@@ -97,14 +91,8 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
 
   const matrixAccessToken = useGDriveStore((s) => s.matrixAccessToken);
 
-  const [blobRoomPrefix, setBlobRoomPrefix] = useState<string | null>(null);
   const [blobTestStatus, setBlobTestStatus] = useState<string | null>(null);
   const [blobTestLoading, setBlobTestLoading] = useState(false);
-
-  useEffect(() => {
-    if (!roomId) { setBlobRoomPrefix(null); return; }
-    setBlobRoomPrefix(computeBlobRoomPrefix(roomId));
-  }, [roomId]);
 
   const handleTestBlob = useCallback(async () => {
     setBlobTestLoading(true);
@@ -113,14 +101,13 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
       const token = matrixAccessToken ?? session.accessToken;
       if (!token) { setBlobTestStatus('✗ No Matrix token'); return; }
       if (!roomId) { setBlobTestStatus('✗ No room connected'); return; }
-      const prefix = blobRoomPrefix ?? computeBlobRoomPrefix(roomId);
-      const data_id = `${prefix}:_healthcheck`;
+      const data_id = '_healthcheck';
       const res = await fetch(BLOB_WEBHOOK_ENDPOINT, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           matrix_token: token,
-          op: 'versions',
+          op: 'get',
           room_id: roomId,
           data_id,
         }),
@@ -129,8 +116,9 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
       let parsed: any = null;
       try { parsed = JSON.parse(text); } catch { /* keep raw */ }
       if (res.ok) {
-        const count = Array.isArray(parsed?.versions) ? parsed.versions.length : 0;
-        setBlobTestStatus(`✓ Reachable — ${count} version(s) for ${data_id}`);
+        setBlobTestStatus(`✓ Reachable — blob ${data_id} exists`);
+      } else if (res.status === 404) {
+        setBlobTestStatus(`✓ Reachable — ${data_id} not found (404)`);
       } else {
         const detail = parsed?.error ?? text.slice(0, 160) ?? `HTTP ${res.status}`;
         setBlobTestStatus(`✗ HTTP ${res.status}: ${detail}`);
@@ -140,7 +128,7 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
     } finally {
       setBlobTestLoading(false);
     }
-  }, [matrixAccessToken, session.accessToken, roomId, blobRoomPrefix]);
+  }, [matrixAccessToken, session.accessToken, roomId]);
 
   const handleTestGDrive = useCallback(async () => {
     setGdriveTestLoading(true);
@@ -284,7 +272,6 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
         onBack={() => setShowBlobStore(false)}
         endpoint={BLOB_WEBHOOK_ENDPOINT}
         roomId={roomId ?? null}
-        roomPrefix={blobRoomPrefix}
         matrixToken={matrixAccessToken ?? session.accessToken ?? null}
       />
     );
@@ -397,11 +384,7 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
                 theme={theme}
                 label="Blob Store"
                 status={roomId && (matrixAccessToken ?? session.accessToken) ? 'ok' : 'off'}
-                detail={
-                  !roomId ? 'Waiting for room'
-                  : blobRoomPrefix ? `${BLOB_WEBHOOK_ENDPOINT} (prefix ${blobRoomPrefix})`
-                  : 'Computing room prefix…'
-                }
+                detail={!roomId ? 'Waiting for room' : BLOB_WEBHOOK_ENDPOINT}
               />
             )}
 
@@ -669,21 +652,19 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
           <Section title="Encrypted Blob Store" theme={theme}>
             <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 10 }}>
               <Field label="Endpoint" value={BLOB_WEBHOOK_ENDPOINT} theme={theme} />
-              <Field label="Room Prefix" value={blobRoomPrefix ?? (roomId ? 'computing…' : '— (no room)')} theme={theme} />
               <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, color: theme.textMuted }}>
-                Room-scoped encrypted blobs via the <code>/webhook/eo-blob</code> endpoint.
-                Every <code>data_id</code> is prefixed with <code>r_&lt;roomId&gt;</code> (leading
-                <code>!</code> stripped, non-alphanumerics replaced with <code>_</code>, capped at
-                40 chars); the server rejects mismatched claims. Currently unused — click Test
-                Connection to send a harmless <code>versions</code> probe and verify the webhook
-                is live.
+                Encrypted blobs via the <code>/webhook/eo-blob</code> endpoint. Two ops:
+                <code>store</code> (overwrites on every write) and <code>get</code>. One file per
+                <code>data_id</code>, no versioning. Click Test Connection to send a harmless
+                <code>get</code> probe for <code>_healthcheck</code> and verify the webhook is live
+                (404 is expected and confirms reachability).
               </span>
               <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' as const }}>
                 <button
                   style={s.actionBtn}
                   onClick={handleTestBlob}
                   disabled={blobTestLoading || !roomId || !(matrixAccessToken ?? session.accessToken)}
-                  title={!roomId ? 'Connect to a space first' : 'Probe the webhook with a versions request'}
+                  title={!roomId ? 'Connect to a space first' : 'Probe the webhook with a get request'}
                 >
                   {blobTestLoading ? 'Testing…' : 'Test Connection'}
                 </button>
@@ -691,9 +672,9 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
                   style={{ ...s.actionBtn, background: 'transparent', color: theme.accent, border: `1px solid ${theme.accent}` }}
                   onClick={() => setShowBlobStore(true)}
                   disabled={!roomId || !(matrixAccessToken ?? session.accessToken)}
-                  title={!roomId ? 'Connect to a space first' : 'Browse room-scoped blobs stored at the eo-blob webhook'}
+                  title={!roomId ? 'Connect to a space first' : 'Fetch blobs by data_id from the eo-blob webhook'}
                 >
-                  View Blob Store Files
+                  Open Blob Store
                 </button>
                 {blobTestStatus && (
                   <span style={{
