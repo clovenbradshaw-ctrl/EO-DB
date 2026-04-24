@@ -33,9 +33,10 @@ function errJson(status: number, body: unknown): Response {
 }
 
 describe('roomPrefix / roomScopedDataId', () => {
-  it('produces the documented format: r_ + 8 hex chars of sha256(roomId)', async () => {
+  it('produces the documented format: r_ + filesystem-safe slug of roomId', async () => {
     const prefix = await roomPrefix(ROOM);
-    expect(prefix).toMatch(/^r_[0-9a-f]{8}$/);
+    // !abc:hyphae.social → strip "!", non-alnum → "_" → "abc_hyphae_social"
+    expect(prefix).toBe('r_abc_hyphae_social');
   });
 
   it('is stable for the same roomId', async () => {
@@ -48,9 +49,15 @@ describe('roomPrefix / roomScopedDataId', () => {
     expect(a).not.toBe(b);
   });
 
+  it('caps the slug at 40 chars', async () => {
+    const long = '!' + 'a'.repeat(80) + ':hyphae.social';
+    const prefix = await roomPrefix(long);
+    expect(prefix.slice(2).length).toBe(40);
+  });
+
   it('roomScopedDataId prepends the prefix with a colon', async () => {
     const id = await roomScopedDataId(ROOM, 'local-1');
-    expect(id).toMatch(/^r_[0-9a-f]{8}:local-1$/);
+    expect(id).toBe('r_abc_hyphae_social:local-1');
   });
 });
 

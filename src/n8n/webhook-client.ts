@@ -39,27 +39,21 @@ import type {
 
 // ─── Room-scoped data_id helpers ───────────────────────────────────────────
 
-/** SHA-256 hex digest. */
-async function sha256hex(input: string): Promise<string> {
-  const bytes = new TextEncoder().encode(input);
-  const hash = new Uint8Array(
-    await crypto.subtle.digest('SHA-256', bytes as unknown as BufferSource),
-  );
-  return Array.from(hash)
-    .map(b => b.toString(16).padStart(2, '0'))
-    .join('');
+/**
+ * Filesystem-safe prefix the workflow derives from room_id:
+ *   "r_" + roomId with leading "!" stripped, non-alphanumerics → "_",
+ *   capped at 40 chars.
+ */
+export function roomDataIdPrefix(roomId: string): string {
+  return 'r_' + roomId
+    .replace(/^!/, '')
+    .replace(/[^a-zA-Z0-9]/g, '_')
+    .slice(0, 40);
 }
 
-/** "r_<first-8-hex-of-sha256(room_id)>" — must match the workflow's check. */
-export async function roomDataIdPrefix(roomId: string): Promise<string> {
-  const hex = await sha256hex(roomId);
-  return `r_${hex.slice(0, 8)}`;
-}
-
-/** Mint a fresh room-scoped data_id: "r_<8hex>:<uuid>". */
-export async function makeDataId(roomId: string): Promise<string> {
-  const prefix = await roomDataIdPrefix(roomId);
-  return `${prefix}:${uuid()}`;
+/** Mint a fresh room-scoped data_id: "r_<prefix>:<uuid>". */
+export function makeDataId(roomId: string): string {
+  return `${roomDataIdPrefix(roomId)}:${uuid()}`;
 }
 
 // ─── Shared fetch helper ───────────────────────────────────────────────────
@@ -152,7 +146,7 @@ async function performStore(
   envelope: Awaited<ReturnType<typeof encryptForWebhook>> & object,
   opts: StoreOptions,
 ): Promise<StoreResult> {
-  const dataId = await makeDataId(opts.roomId);
+  const dataId = makeDataId(opts.roomId);
   const body: WebhookStoreRequest = {
     op: 'store',
     matrix_token: opts.matrixToken,

@@ -7,15 +7,19 @@
  * -------------
  * POST JSON with `op` ∈ { store | get | versions }. Every request carries
  * `matrix_token`, `op`, `room_id`, `data_id`. The `data_id` MUST be prefixed
- * with the room hash:
+ * with the room prefix:
  *
- *   roomPrefix(roomId) = "r_" + sha256hex(roomId).slice(0, 8)
+ *   roomPrefix(roomId) = "r_" + roomId.replace(/^!/,'')
+ *                                     .replace(/[^a-zA-Z0-9]/g,'_')
+ *                                     .slice(0, 40)
  *   data_id            = `${roomPrefix}:${localId}`
  *
- * The server re-derives the prefix from `room_id` and rejects mismatched IDs
- * with HTTP 400. Five most recent versions are retained per `data_id`; older
- * versions are pruned on each store. Version numbers are monotonic — pruning
- * v1 and writing again produces v6, not v1.
+ * The derivation is plain-string, not a hash — the room_id isn't secret
+ * (it's in the request) and we just need a stable, filesystem-safe prefix
+ * that the server can re-derive. The server rejects mismatched IDs with
+ * HTTP 400. Five most recent versions are retained per `data_id`; older
+ * versions are pruned on each store. Version numbers are monotonic —
+ * pruning v1 and writing again produces v6, not v1.
  *
  * Reuses:
  *   - EncryptedWebhookEnvelope from ../n8n/types
@@ -102,30 +106,16 @@ export interface VersionListing {
 
 // ─── Internals ─────────────────────────────────────────────────────────────
 
-const HEX_CHARS = '0123456789abcdef';
-
-function bytesToHex(bytes: Uint8Array): string {
-  let out = '';
-  for (let i = 0; i < bytes.length; i++) {
-    const b = bytes[i]!;
-    out += HEX_CHARS[(b >> 4) & 0xf];
-    out += HEX_CHARS[b & 0xf];
-  }
-  return out;
-}
-
-async function sha256hex(text: string): Promise<string> {
-  const bytes = new TextEncoder().encode(text);
-  const digest = await crypto.subtle.digest(
-    'SHA-256',
-    bytes as unknown as BufferSource,
-  );
-  return bytesToHex(new Uint8Array(digest));
-}
-
-/** `r_` + first 8 hex chars of SHA-256(roomId). Must match the n8n workflow. */
+/**
+ * `r_<filesystem-safe(roomId)>` — must match the n8n workflow's derivation.
+ * The `async` signature is kept for callers/tests that already `await` it;
+ * no async work happens.
+ */
 export async function roomPrefix(roomId: string): Promise<string> {
-  return 'r_' + (await sha256hex(roomId)).slice(0, 8);
+  return 'r_' + roomId
+    .replace(/^!/, '')
+    .replace(/[^a-zA-Z0-9]/g, '_')
+    .slice(0, 40);
 }
 
 /** Build a room-scoped `data_id` from a `localId`. */
