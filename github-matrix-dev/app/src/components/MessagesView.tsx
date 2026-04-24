@@ -19,7 +19,7 @@
  *     not even the fact that a preserved record exists (the target path itself
  *     is encrypted in the log via the room's encryption scope)
  */
-import { useState, useRef, useEffect, useCallback, type CSSProperties } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo, type CSSProperties } from 'react';
 import type { MatrixClient, MatrixEvent, Room } from 'matrix-js-sdk';
 import { useTheme, type Theme } from '../theme';
 import { useEoStore } from '../store/eo-store';
@@ -71,6 +71,170 @@ const OP_COLORS: Record<string, { bg: string; text: string; border: string }> = 
   NUL: { bg: '#FEF3C7', text: '#92400E', border: '#F59E0B' },
   DEF: { bg: '#FFF7ED', text: '#9A3412', border: '#F97316' },
 };
+
+// ─── Slash commands + record link tokens ────────────────────────────────────
+//
+// Users can type slash commands in the composer to insert links to EO-DB
+// records. Selecting a record from the autocomplete emits a token of the form
+// `[[record:<target>|<display>]]` into the outgoing message body. On receive,
+// MessageText parses these tokens and renders clickable chips that route
+// to the record via the app's hash router.
+
+/** Token format for inline record links inside a message body. */
+const RECORD_TOKEN_RE = /\[\[record:([^|\]]+)\|([^\]]+)\]\]/g;
+
+/** A parsed segment of a message body. */
+type MessageSegment =
+  | { kind: 'text'; text: string }
+  | { kind: 'record'; target: string; display: string };
+
+function parseMessageBody(body: string): MessageSegment[] {
+  const out: MessageSegment[] = [];
+  let lastIdx = 0;
+  // Build a fresh regex each call so concurrent callers don't share lastIndex.
+  const re = new RegExp(RECORD_TOKEN_RE.source, 'g');
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(body)) !== null) {
+    if (m.index > lastIdx) out.push({ kind: 'text', text: body.slice(lastIdx, m.index) });
+    out.push({ kind: 'record', target: m[1], display: m[2] });
+    lastIdx = m.index + m[0].length;
+  }
+  if (lastIdx < body.length) out.push({ kind: 'text', text: body.slice(lastIdx) });
+  if (out.length === 0) out.push({ kind: 'text', text: '' });
+  return out;
+}
+
+/** Build the `#/...` hash for a given record target. */
+function recordHash(target: string): string {
+  const parts = target.split('.');
+  if (parts.length < 2) return `#/`;
+  const recSeg = parts[parts.length - 1];
+  const scope = parts.slice(0, -1).join('.');
+  const spaceMatch = window.location.hash.match(/#\/s\/([^/?]+)/);
+  const spacePrefix = spaceMatch ? `/s/${spaceMatch[1]}` : '';
+  return `#${spacePrefix}/t/${scope}/r/${recSeg}`;
+}
+
+/** Slash commands shown in the palette (before a record has been picked). */
+interface SlashCommand {
+  name: string;
+  aliases: string[];
+  description: string;
+}
+
+const SLASH_COMMANDS: SlashCommand[] = [
+  { name: 'record', aliases: ['r', 'rec', 'link'], description: 'Link to a record' },
+  { name: 'help', aliases: ['?'], description: 'Show available commands' },
+];
+
+/**
+ * Parse the composer's current input into a slash-command state.
+ *
+ * Returns null if the input does NOT represent an active slash command at the
+ * caret (e.g. it's plain text, or the slash has been committed with a newline).
+ *
+ * Only the first line is considered, so a user can compose multi-line
+ * messages that merely happen to contain '/' characters later on.
+ */
+interface SlashState {
+  commandName: string | null;   // null = still typing the command name
+  args: string;                 // text after the first space (the search query)
+  raw: string;                  // the raw slash expression (for replacement)
+}
+
+function parseSlashInput(text: string): SlashState | null {
+  if (!text.startsWith('/')) return null;
+  // Only treat the first line as a slash expression.
+  const firstNl = text.indexOf('\n');
+  const line = firstNl === -1 ? text : text.slice(0, firstNl);
+  const body = line.slice(1); // strip leading '/'
+  const spaceIdx = body.indexOf(' ');
+  if (spaceIdx === -1) {
+    return { commandName: null, args: body, raw: line };
+  }
+  const name = body.slice(0, spaceIdx).toLowerCase();
+  const args = body.slice(spaceIdx + 1);
+  return { commandName: name, args, raw: line };
+}
+
+/** Resolve a command name or alias to the canonical SlashCommand, or null. */
+function resolveCommand(nameOrAlias: string): SlashCommand | null {
+  const lc = nameOrAlias.toLowerCase();
+  for (const c of SLASH_COMMANDS) {
+    if (c.name === lc || c.aliases.includes(lc)) return c;
+  }
+  return null;
+}
+
+// ─── Record search index (populated on-demand when the palette opens) ────────
+
+interface RecordIndexEntry {
+  target: string;
+  display: string;
+  haystack: string; // lowercased `display + target` for matching
+}
+
+/** Extract a human-readable display name from an EoState value. */
+function deriveDisplay(st: EoState): string {
+  const v = st.value ?? {};
+  const candidate =
+    v.name ??
+    v.title ??
+    v.displayName ??
+    v.label ??
+    v.fields?.name ??
+    v.fields?.title ??
+    null;
+  if (candidate != null) return String(candidate);
+  return st.target.split('.').pop() || st.target;
+}
+
+/**
+ * Build a flat list of records suitable for slash-command autocomplete.
+ * Filters out schema/layout/system targets and unresolved aliases.
+ */
+function buildRecordIndex(states: EoState[]): RecordIndexEntry[] {
+  const out: RecordIndexEntry[] = [];
+  for (const st of states) {
+    const t = st.target;
+    // Skip clearly internal paths — these aren't user records.
+    if (
+      t.includes('._schema') ||
+      t.includes('._detail_layout') ||
+      t.includes('._encryption') ||
+      t.includes('._layout') ||
+      t.includes('._displayField') ||
+      t.endsWith('.preserved') ||
+      t.startsWith('preserved.')
+    ) continue;
+    // Skip table/collection roots (no dot segments below).
+    if (!t.includes('.')) continue;
+    if (st.value?._alias) continue;
+    const display = deriveDisplay(st);
+    out.push({ target: t, display, haystack: (display + ' ' + t).toLowerCase() });
+  }
+  return out;
+}
+
+/** Unified item shown in the slash-command palette. */
+type PaletteItem =
+  | { kind: 'command'; command: SlashCommand }
+  | { kind: 'record'; record: RecordIndexEntry };
+
+/** Rank record index entries against a query; returns the top N matches. */
+function filterRecords(index: RecordIndexEntry[], query: string, limit: number): RecordIndexEntry[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return index.slice(0, limit);
+  const scored: Array<{ e: RecordIndexEntry; score: number }> = [];
+  for (const e of index) {
+    const idx = e.haystack.indexOf(q);
+    if (idx === -1) continue;
+    // Prefer earlier matches and shorter targets.
+    scored.push({ e, score: idx * 1000 + e.target.length });
+  }
+  scored.sort((a, b) => a.score - b.score);
+  return scored.slice(0, limit).map((s) => s.e);
+}
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
@@ -162,6 +326,54 @@ export function MessagesView({ scope, userId, activeRoomId: initialRoomId, matri
     message: null, visible: false, linkTarget: '', edgeType: 'references',
     edges: [], preserving: false,
   });
+
+  // ─── Slash command palette state ────────────────────────────────────────
+  const [recordIndex, setRecordIndex] = useState<RecordIndexEntry[]>([]);
+  const [paletteIndex, setPaletteIndex] = useState(0);
+  const getStateByPrefix = useEoStore((st) => st.getStateByPrefix);
+  const lastSeq = useEoStore((st) => st.lastSeq);
+  const composerInputRef = useRef<HTMLInputElement>(null);
+
+  const slashState = useMemo(() => parseSlashInput(inputText), [inputText]);
+  const paletteOpen = slashState !== null;
+
+  // Lazy-load the record index the first time the palette opens, and refresh
+  // it when the event log advances while the palette is open.
+  useEffect(() => {
+    if (!paletteOpen || !ready) return;
+    let cancelled = false;
+    getStateByPrefix('').then((states) => {
+      if (cancelled) return;
+      setRecordIndex(buildRecordIndex(states));
+    }).catch(() => { /* ignore — palette will show "no matches" */ });
+    return () => { cancelled = true; };
+  }, [paletteOpen, ready, lastSeq, getStateByPrefix]);
+
+  // Build the palette's current suggestion list based on the slash state.
+  const paletteItems = useMemo<PaletteItem[]>(() => {
+    if (!slashState) return [];
+    // Command picker (user hasn't typed a space yet).
+    if (slashState.commandName === null) {
+      const q = slashState.args.toLowerCase();
+      const cmds = SLASH_COMMANDS.filter((c) =>
+        c.name.startsWith(q) || c.aliases.some((a) => a.startsWith(q))
+      );
+      return cmds.map((c) => ({ kind: 'command' as const, command: c }));
+    }
+    const cmd = resolveCommand(slashState.commandName);
+    if (!cmd) return [];
+    if (cmd.name === 'help') {
+      return SLASH_COMMANDS.map((c) => ({ kind: 'command' as const, command: c }));
+    }
+    if (cmd.name === 'record') {
+      return filterRecords(recordIndex, slashState.args, 8)
+        .map((r) => ({ kind: 'record' as const, record: r }));
+    }
+    return [];
+  }, [slashState, recordIndex]);
+
+  // Reset the palette cursor whenever the list of items changes.
+  useEffect(() => { setPaletteIndex(0); }, [paletteItems.length, slashState?.commandName]);
 
   // ─── Load rooms from Matrix client + keep in sync ───────────────────────
   useEffect(() => {
@@ -269,6 +481,65 @@ export function MessagesView({ scope, userId, activeRoomId: initialRoomId, matri
       setSending(false);
     }
   }, [inputText, matrixClient, activeRoomId, sending]);
+
+  // ─── Slash-command palette selection ────────────────────────────────────
+  //
+  // Picking a command (when the user is still typing the name) rewrites the
+  // input to `/<command> ` so the same palette switches modes to the argument
+  // picker. Picking a record replaces the entire slash expression with the
+  // token `[[record:<target>|<display>]]` followed by a trailing space so the
+  // caret sits after the chip, ready to continue typing.
+  const selectPaletteItem = useCallback((item: PaletteItem) => {
+    if (!slashState) return;
+    if (item.kind === 'command') {
+      // When the user picks /help we don't rewrite — help is informational.
+      if (item.command.name === 'help') return;
+      const rest = inputText.slice(slashState.raw.length);
+      setInputText(`/${item.command.name} ` + rest);
+      // Refocus for continued typing.
+      requestAnimationFrame(() => composerInputRef.current?.focus());
+      return;
+    }
+    // Record: swap out the whole slash expression for a chip token.
+    const token = `[[record:${item.record.target}|${item.record.display}]] `;
+    const rest = inputText.slice(slashState.raw.length);
+    setInputText(token + rest);
+    requestAnimationFrame(() => composerInputRef.current?.focus());
+  }, [inputText, slashState]);
+
+  // Keyboard handling for the composer. When the palette is open, Up/Down
+  // move the cursor, Enter/Tab commit the highlighted item, Esc closes the
+  // palette (by clearing the leading slash). Otherwise Enter sends.
+  const handleComposerKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (paletteOpen && paletteItems.length > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setPaletteIndex((i) => (i + 1) % paletteItems.length);
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setPaletteIndex((i) => (i - 1 + paletteItems.length) % paletteItems.length);
+        return;
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault();
+        const item = paletteItems[paletteIndex];
+        if (item) selectPaletteItem(item);
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        // Strip the slash expression so the palette closes.
+        if (slashState) setInputText(inputText.slice(slashState.raw.length));
+        return;
+      }
+    }
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      void sendMessage();
+    }
+  }, [paletteOpen, paletteItems, paletteIndex, selectPaletteItem, slashState, inputText, sendMessage]);
 
   // ─── Start a new direct message with a homeserver user ──────────────────
   const startDirectMessage = useCallback(async (otherUserId: string) => {
@@ -518,12 +789,26 @@ export function MessagesView({ scope, userId, activeRoomId: initialRoomId, matri
               border: `1px solid ${theme.danger}`,
             }}>{sendError}</div>
           )}
+
+          {/* Slash-command autocomplete */}
+          {paletteOpen && slashState && (
+            <SlashPalette
+              theme={theme}
+              slashState={slashState}
+              items={paletteItems}
+              activeIndex={paletteIndex}
+              onHover={setPaletteIndex}
+              onPick={selectPaletteItem}
+            />
+          )}
+
           <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
             <input
+              ref={composerInputRef}
               value={inputText}
               onChange={(e) => setInputText(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void sendMessage(); } }}
-              placeholder={activeRoom ? `Message ${activeRoom.name}...` : 'Select a room to message'}
+              onKeyDown={handleComposerKeyDown}
+              placeholder={activeRoom ? `Message ${activeRoom.name}... (type "/" for commands)` : 'Select a room to message'}
               disabled={!activeRoom || !matrixClient}
               style={s.composerInput}
             />
@@ -806,7 +1091,9 @@ function MessageBubble({
             </div>
           )}
         </div>
-        <div style={{ fontSize: 13, color: theme.text, lineHeight: 1.5 }}>{msg.body}</div>
+        <div style={{ fontSize: 13, color: theme.text, lineHeight: 1.5 }}>
+          <MessageText body={msg.body} theme={theme} />
+        </div>
 
         {/* Preserved metadata */}
         {preserved && msg.preservedTarget && (
@@ -1020,6 +1307,159 @@ function PreserveDialog({
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ─── Inline message renderer: parses record link tokens into chips ──────────
+
+function MessageText({ body, theme }: { body: string; theme: Theme }) {
+  const segments = useMemo(() => parseMessageBody(body), [body]);
+  return (
+    <>
+      {segments.map((seg, i) => {
+        if (seg.kind === 'text') return <span key={i}>{seg.text}</span>;
+        return (
+          <a
+            key={i}
+            href={recordHash(seg.target)}
+            title={seg.target}
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 4,
+              padding: '1px 7px', margin: '0 1px',
+              borderRadius: 4, fontSize: 12, fontWeight: 500,
+              background: theme.accentBg, color: theme.accent,
+              border: `1px solid ${theme.accentBorder}`,
+              textDecoration: 'none', lineHeight: 1.4,
+              verticalAlign: 'baseline',
+            }}
+          >
+            <span style={{ fontFamily: 'var(--mono, monospace)', fontSize: 10, opacity: 0.7 }}>@</span>
+            {seg.display}
+          </a>
+        );
+      })}
+    </>
+  );
+}
+
+// ─── Slash-command palette ──────────────────────────────────────────────────
+
+function SlashPalette({
+  theme, slashState, items, activeIndex, onHover, onPick,
+}: {
+  theme: Theme;
+  slashState: SlashState;
+  items: PaletteItem[];
+  activeIndex: number;
+  onHover: (i: number) => void;
+  onPick: (item: PaletteItem) => void;
+}) {
+  // Header reflects the current mode so users know what typing does next.
+  const header = slashState.commandName === null
+    ? 'Commands'
+    : slashState.commandName === 'record' || slashState.commandName === 'r' || slashState.commandName === 'rec' || slashState.commandName === 'link'
+      ? `Link a record${slashState.args ? ` · "${slashState.args}"` : ''}`
+      : slashState.commandName === 'help' || slashState.commandName === '?'
+        ? 'Help'
+        : `Unknown command: ${slashState.commandName}`;
+
+  return (
+    <div
+      style={{
+        position: 'relative',
+        marginBottom: 8,
+        borderRadius: 8,
+        border: `1px solid ${theme.border}`,
+        background: theme.bgCard,
+        boxShadow: theme.shadowOverlay,
+        maxHeight: 280,
+        overflow: 'auto',
+        fontSize: 12,
+      }}
+    >
+      <div style={{
+        padding: '6px 10px', fontSize: 10, fontWeight: 700,
+        color: theme.textMuted, letterSpacing: 0.5, textTransform: 'uppercase',
+        borderBottom: `1px solid ${theme.borderLight ?? theme.border}`,
+        background: theme.bgMuted,
+        fontFamily: 'var(--mono, monospace)',
+      }}>{header}</div>
+
+      {items.length === 0 && (
+        <div style={{ padding: '10px 12px', color: theme.textMuted, fontSize: 12 }}>
+          {slashState.commandName === null
+            ? 'No matching commands.'
+            : slashState.commandName === 'record' || slashState.commandName === 'r' || slashState.commandName === 'rec' || slashState.commandName === 'link'
+              ? (slashState.args ? 'No records match.' : 'Start typing to search records…')
+              : 'Nothing to show.'}
+        </div>
+      )}
+
+      {items.map((item, i) => {
+        const active = i === activeIndex;
+        if (item.kind === 'command') {
+          return (
+            <button
+              key={`cmd-${item.command.name}`}
+              onMouseEnter={() => onHover(i)}
+              onClick={() => onPick(item)}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 10, width: '100%',
+                padding: '8px 12px', border: 'none', textAlign: 'left',
+                background: active ? theme.bgActive : 'transparent',
+                color: theme.text, cursor: 'pointer',
+              }}
+            >
+              <span style={{
+                fontFamily: 'var(--mono, monospace)', fontSize: 11, fontWeight: 700,
+                color: theme.accent, minWidth: 64,
+              }}>/{item.command.name}</span>
+              <span style={{ color: theme.textSecondary, fontSize: 12, flex: 1 }}>
+                {item.command.description}
+              </span>
+              {item.command.aliases.length > 0 && (
+                <span style={{
+                  fontFamily: 'var(--mono, monospace)', fontSize: 10,
+                  color: theme.textMuted,
+                }}>
+                  {item.command.aliases.map((a) => `/${a}`).join(' ')}
+                </span>
+              )}
+            </button>
+          );
+        }
+        return (
+          <button
+            key={`rec-${item.record.target}`}
+            onMouseEnter={() => onHover(i)}
+            onClick={() => onPick(item)}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 10, width: '100%',
+              padding: '8px 12px', border: 'none', textAlign: 'left',
+              background: active ? theme.bgActive : 'transparent',
+              color: theme.text, cursor: 'pointer',
+            }}
+          >
+            <span style={{
+              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+              width: 22, height: 22, borderRadius: 4,
+              background: theme.accentBg, color: theme.accent,
+              fontSize: 11, fontWeight: 700, flexShrink: 0,
+            }}>@</span>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{
+                fontSize: 13, fontWeight: 500, color: theme.text,
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              }}>{item.record.display}</div>
+              <div style={{
+                fontSize: 10, color: theme.textMuted, fontFamily: 'var(--mono, monospace)',
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              }}>{item.record.target}</div>
+            </div>
+          </button>
+        );
+      })}
     </div>
   );
 }
