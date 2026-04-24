@@ -1460,6 +1460,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       let writer: EodbBlobWriter | null = null;
       let unsub: (() => void) | null = null;
       let toDeviceHandler: ((event: any) => void) | null = null;
+      let healFallbackTimer: ReturnType<typeof setTimeout> | null = null;
 
       (async () => {
         const keyring = await loadSpaceKeyring(roomId);
@@ -1524,6 +1525,31 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             } catch (e) {
               console.warn('[EO-DB blob-writer] Heal request failed:', e);
             }
+
+            // Fallback: if no peer delivers a key within HEAL_TIMEOUT_MS,
+            // mint locally so the writer isn't stranded forever. Any
+            // existing remote ciphertext is cryptographically unreadable
+            // to us without the missing key, so overwriting it is strictly
+            // better than accumulating pending saves that never flush.
+            const HEAL_TIMEOUT_MS = 30_000;
+            healFallbackTimer = setTimeout(() => {
+              healFallbackTimer = null;
+              if (cancelled) return;
+              if (keyring.keys.size > 0) return;
+              void (async () => {
+                try {
+                  await generateSpaceKey(roomId, keyring, `${roomId}.blob`);
+                  console.warn(
+                    '[EO-DB blob-writer] Heal timed out after',
+                    HEAL_TIMEOUT_MS / 1000,
+                    `s (probe=${probe}, other members=${otherMembers.length}) — minted fresh key as fallback.`,
+                  );
+                  writer?.flushNow().catch(() => {});
+                } catch (err) {
+                  console.warn('[EO-DB blob-writer] Fallback key mint failed:', err);
+                }
+              })();
+            }, HEAL_TIMEOUT_MS);
           }
         }
         if (cancelled) return;
@@ -1570,6 +1596,10 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                 }
                 if (imported > 0) {
                   console.log('[EO-DB blob-writer] Imported', imported, 'delivered key(s) for', roomId);
+                  if (healFallbackTimer) {
+                    clearTimeout(healFallbackTimer);
+                    healFallbackTimer = null;
+                  }
                   writer?.flushNow().catch(() => {});
                 }
                 return;
@@ -1592,6 +1622,10 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                 }
                 if (imported > 0) {
                   console.log('[EO-DB blob-writer] Imported', imported, 'healed key(s) for', roomId);
+                  if (healFallbackTimer) {
+                    clearTimeout(healFallbackTimer);
+                    healFallbackTimer = null;
+                  }
                   writer?.flushNow().catch(() => {});
                 }
                 return;
@@ -1644,6 +1678,10 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
 
       return () => {
         cancelled = true;
+        if (healFallbackTimer) {
+          clearTimeout(healFallbackTimer);
+          healFallbackTimer = null;
+        }
         if (toDeviceHandler) {
           try { (client as any).removeListener('toDeviceEvent', toDeviceHandler); } catch { /* noop */ }
           toDeviceHandler = null;
