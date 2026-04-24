@@ -18,6 +18,21 @@ import { usePresencePrefs } from '../lib/presence-prefs';
 import { OnlineUsers } from './OnlineUsers';
 import { GDriveSyncService } from '../google-drive/gdrive-sync';
 import { EodbBlobWriter } from '../storage/eodb-blob-writer';
+import { eodbBlobDataIdForRoom, probeBlobExists } from '../storage/eodb-blob-endpoint';
+import {
+  loadSpaceKeyring,
+  generateSpaceKey,
+  importDeliveredKey,
+  exportKeyMaterial,
+} from '../crypto/keyring-store';
+import {
+  KEY_DELIVER_TYPE,
+  KEY_HEAL_REQUEST_TYPE,
+  KEY_HEAL_RESPONSE_TYPE,
+  type KeyDeliverPayload,
+  type KeyHealRequest,
+  type KeyHealResponse,
+} from '../crypto/key-delivery';
 import { useGDriveStore } from '../google-drive/gdrive-store';
 import { useAirtableStore } from '../ingestion/airtable-store';
 import { resolveDataRoom } from '../matrix/event-bridge';
@@ -1459,25 +1474,194 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       const client = matrixClientRef.current;
       const store = useEoStore.getState().store;
       if (!client || !store || !roomId) return () => {};
-      const writer = new EodbBlobWriter({
-        client,
-        roomId,
-        matrixToken: session.accessToken,
-        keyring: { keys: new Map() },
-        store,
-        userId: session.userId,
-        deviceId: client.getDeviceId() ?? '',
+
+      // Load the persisted keyring synchronously into a reference the writer
+      // will share. The writer reads `keyring.keys` every tick, so later
+      // mutations (key generation, delivery, heal) become visible without
+      // needing any explicit setKeyring() call.
+      let cancelled = false;
+      let writer: EodbBlobWriter | null = null;
+      let unsub: (() => void) | null = null;
+      let toDeviceHandler: ((event: any) => void) | null = null;
+
+      (async () => {
+        const keyring = await loadSpaceKeyring(roomId);
+        if (cancelled) return;
+
+        // If we don't have a key yet, only mint one when it's safe — i.e. the
+        // remote blob doesn't already hold ciphertext encrypted under a key
+        // some other device owns. Otherwise generating here would overwrite
+        // unreadable data. When the probe is inconclusive (network/5xx),
+        // stay conservative and wait for key delivery.
+        if (keyring.keys.size === 0) {
+          const dataId = await eodbBlobDataIdForRoom(roomId);
+          const probe = await probeBlobExists(session.accessToken, roomId, dataId);
+          if (cancelled) return;
+          if (probe === 'missing') {
+            await generateSpaceKey(roomId, keyring, `${roomId}.blob`);
+            console.log('[EO-DB blob-writer] Minted fresh space key for', roomId);
+          } else {
+            console.warn(
+              '[EO-DB blob-writer] No local key and remote blob probe returned',
+              probe,
+              '— awaiting key delivery. Sending heal request.',
+            );
+            // Best-effort heal: ask all joined members for the key. Whoever
+            // has it will respond via KEY_HEAL_RESPONSE and our handler
+            // below will import it.
+            try {
+              const room = client.getRoom(roomId);
+              const myUserId = client.getUserId();
+              const myDevice = client.getDeviceId() ?? '';
+              if (room && myUserId) {
+                const members = room.getJoinedMembers();
+                const req: KeyHealRequest = {
+                  space_id: roomId,
+                  known_key_ids: [],
+                  from_device: myDevice,
+                };
+                for (const m of members) {
+                  if (m.userId === myUserId) continue;
+                  const inner = new Map<string, object>();
+                  inner.set('*', req);
+                  const outer = new Map<string, Map<string, object>>();
+                  outer.set(m.userId, inner);
+                  await (client as any).sendToDevice(KEY_HEAL_REQUEST_TYPE, outer);
+                }
+              }
+            } catch (e) {
+              console.warn('[EO-DB blob-writer] Heal request failed:', e);
+            }
+          }
+        }
+        if (cancelled) return;
+
+        writer = new EodbBlobWriter({
+          client,
+          roomId,
+          matrixToken: session.accessToken,
+          keyring,
+          store,
+          userId: session.userId,
+          deviceId: client.getDeviceId() ?? '',
+        });
+        writer.start();
+        useEoStore.getState().setEodbBlobWriter(writer);
+        unsub = useEoStore.subscribe((state, prev) => {
+          if (state.lastSeq > prev.lastSeq) writer!.notifyDirty(state.lastSeq);
+        });
+
+        // To-device handler: accept delivered keys and answer heal requests.
+        // Scoped to this room — the handler ignores events for other spaces.
+        toDeviceHandler = (event: any) => {
+          void (async () => {
+            try {
+              const type = event.getType();
+              const content = event.getContent();
+              const sender: string | undefined = event.getSender?.();
+              const senderDevice: string | undefined = content?.from_device;
+
+              if (type === KEY_DELIVER_TYPE) {
+                const payload = content as KeyDeliverPayload;
+                if (!payload || payload.space_id !== roomId) return;
+                let imported = 0;
+                for (const [keyId, rawB64] of Object.entries(payload.keys ?? {})) {
+                  if (typeof rawB64 !== 'string') continue;
+                  const ok = await importDeliveredKey(
+                    roomId,
+                    keyring,
+                    keyId,
+                    rawB64,
+                    `${roomId}.blob`,
+                  );
+                  if (ok) imported += 1;
+                }
+                if (imported > 0) {
+                  console.log('[EO-DB blob-writer] Imported', imported, 'delivered key(s) for', roomId);
+                  writer?.flushNow().catch(() => {});
+                }
+                return;
+              }
+
+              if (type === KEY_HEAL_RESPONSE_TYPE) {
+                const payload = content as KeyHealResponse;
+                if (!payload || payload.space_id !== roomId) return;
+                let imported = 0;
+                for (const [keyId, rawB64] of Object.entries(payload.keys ?? {})) {
+                  if (typeof rawB64 !== 'string') continue;
+                  const ok = await importDeliveredKey(
+                    roomId,
+                    keyring,
+                    keyId,
+                    rawB64,
+                    `${roomId}.blob`,
+                  );
+                  if (ok) imported += 1;
+                }
+                if (imported > 0) {
+                  console.log('[EO-DB blob-writer] Imported', imported, 'healed key(s) for', roomId);
+                  writer?.flushNow().catch(() => {});
+                }
+                return;
+              }
+
+              if (type === KEY_HEAL_REQUEST_TYPE) {
+                const req = content as KeyHealRequest;
+                if (!req || req.space_id !== roomId) return;
+                if (!sender || !senderDevice) return;
+                // Only respond to joined members of the room — the Matrix
+                // homeserver prevents non-members from being in the room's
+                // member list, so this is a cheap gate.
+                const room = client.getRoom(roomId);
+                const isMember = room
+                  ?.getJoinedMembers()
+                  .some((m: any) => m.userId === sender) ?? false;
+                if (!isMember) return;
+
+                const known = new Set(req.known_key_ids ?? []);
+                const out: Record<string, string> = {};
+                for (const [keyId] of keyring.keys) {
+                  if (known.has(keyId)) continue;
+                  const raw = await exportKeyMaterial(keyring, keyId);
+                  if (raw) out[keyId] = raw;
+                }
+                if (Object.keys(out).length === 0) return;
+                const resp: KeyHealResponse = { space_id: roomId, keys: out };
+                const inner = new Map<string, object>();
+                inner.set(senderDevice, resp);
+                const outer = new Map<string, Map<string, object>>();
+                outer.set(sender, inner);
+                await (client as any).sendToDevice(KEY_HEAL_RESPONSE_TYPE, outer);
+                console.log(
+                  '[EO-DB blob-writer] Sent',
+                  Object.keys(out).length,
+                  'key(s) to',
+                  sender,
+                  'in response to heal request',
+                );
+              }
+            } catch (e) {
+              console.warn('[EO-DB blob-writer] to-device handler error:', e);
+            }
+          })();
+        };
+        (client as any).on('toDeviceEvent', toDeviceHandler);
+      })().catch((e) => {
+        console.warn('[EO-DB blob-writer] init failed:', e);
       });
-      writer.start();
-      useEoStore.getState().setEodbBlobWriter(writer);
-      const unsub = useEoStore.subscribe((state, prev) => {
-        if (state.lastSeq > prev.lastSeq) writer.notifyDirty(state.lastSeq);
-      });
+
       return () => {
-        unsub();
-        writer.stop();
-        if (useEoStore.getState().eodbBlobWriter === writer) {
-          useEoStore.getState().setEodbBlobWriter(null);
+        cancelled = true;
+        if (toDeviceHandler) {
+          try { (client as any).removeListener('toDeviceEvent', toDeviceHandler); } catch { /* noop */ }
+          toDeviceHandler = null;
+        }
+        if (unsub) { unsub(); unsub = null; }
+        if (writer) {
+          writer.stop();
+          if (useEoStore.getState().eodbBlobWriter === writer) {
+            useEoStore.getState().setEodbBlobWriter(null);
+          }
         }
       };
     };
