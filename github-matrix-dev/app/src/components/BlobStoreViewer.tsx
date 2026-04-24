@@ -1,95 +1,50 @@
 /**
- * BlobStoreViewer — browses the room-scoped encrypted blobs stored at the
- * n8n `/webhook/eo-blob` endpoint.
- *
- * The webhook exposes three operations (store | get | versions). There is no
- * `list` op, so this viewer speculatively tries `list` first and — regardless
- * of that outcome — always allows the user to probe individual local IDs,
- * enumerating up to 5 most-recent versions per blob.
+ * BlobStoreViewer — fetches individual encrypted blobs by `data_id` from the
+ * n8n `/webhook/eo-blob` endpoint. The workflow exposes two operations
+ * (`store` | `get`) with one file per `data_id` and no versioning. Users
+ * enter a `data_id` and the viewer fetches the current blob or reports 404.
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useCallback } from 'react';
 import { useTheme, type Theme } from '../theme';
 
 interface BlobStoreViewerProps {
   onBack: () => void;
   endpoint: string;
   roomId: string | null;
-  roomPrefix: string | null;
   matrixToken: string | null;
 }
 
-interface BlobMeta {
-  version: number;
-  writer?: string;
-  auth_user_id?: string;
-  room_id?: string;
-  target?: string | null;
-  label?: string | null;
-  content_hash?: string;
-  plaintext_size?: number | null;
-  key_id?: string | null;
-  created_at?: string;
-}
-
-interface VersionListing {
-  version: number;
-  uri?: string;
-  meta: BlobMeta;
-}
-
-interface BlobEntry {
+interface BlobResult {
   dataId: string;
-  localId: string;
-  versions: VersionListing[];
-  latest: number | null;
-  error: string | null;
-  loading: boolean;
+  status: 'found' | 'not-found' | 'error';
+  uri?: string;
+  envelopeSize?: number;
+  error?: string;
+  fetchedAt: number;
 }
 
-const DEFAULT_PROBES = ['_healthcheck'];
-
-export function BlobStoreViewer({ onBack, endpoint, roomId, roomPrefix, matrixToken }: BlobStoreViewerProps) {
+export function BlobStoreViewer({ onBack, endpoint, roomId, matrixToken }: BlobStoreViewerProps) {
   const { theme } = useTheme();
   const s = styles(theme);
 
-  const [entries, setEntries] = useState<Record<string, BlobEntry>>({});
-  const [listAttempted, setListAttempted] = useState(false);
-  const [listSupported, setListSupported] = useState<boolean | null>(null);
-  const [listError, setListError] = useState<string | null>(null);
+  const [results, setResults] = useState<Record<string, BlobResult>>({});
   const [probeInput, setProbeInput] = useState('');
-  const [expanded, setExpanded] = useState<string | null>(null);
-  const [initialLoading, setInitialLoading] = useState(true);
+  const [loading, setLoading] = useState<string | null>(null);
 
-  const ready = !!(roomId && roomPrefix && matrixToken);
+  const ready = !!(roomId && matrixToken);
 
-  const buildDataId = useCallback(
-    (localId: string) => (roomPrefix ? `${roomPrefix}:${localId}` : localId),
-    [roomPrefix],
-  );
-
-  const probe = useCallback(
-    async (localId: string): Promise<void> => {
+  const fetchBlob = useCallback(
+    async (dataId: string): Promise<void> => {
       if (!ready) return;
-      const dataId = buildDataId(localId);
-      setEntries((prev) => ({
-        ...prev,
-        [dataId]: {
-          dataId,
-          localId,
-          versions: prev[dataId]?.versions ?? [],
-          latest: prev[dataId]?.latest ?? null,
-          error: null,
-          loading: true,
-        },
-      }));
+      setLoading(dataId);
       try {
         const res = await fetch(endpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             matrix_token: matrixToken,
-            op: 'versions',
+            op: 'get',
             room_id: roomId,
             data_id: dataId,
           }),
@@ -97,114 +52,65 @@ export function BlobStoreViewer({ onBack, endpoint, roomId, roomPrefix, matrixTo
         const text = await res.text();
         let parsed: any = null;
         try { parsed = JSON.parse(text); } catch { /* keep raw */ }
-        if (!res.ok) {
-          const detail = parsed?.error ?? text.slice(0, 200) ?? `HTTP ${res.status}`;
-          setEntries((prev) => ({
+        if (res.ok) {
+          const envelope = parsed?.envelope;
+          const envelopeSize = envelope ? JSON.stringify(envelope).length : undefined;
+          setResults((prev) => ({
             ...prev,
-            [dataId]: { ...prev[dataId]!, loading: false, error: `HTTP ${res.status}: ${detail}` },
+            [dataId]: {
+              dataId,
+              status: 'found',
+              uri: typeof parsed?.uri === 'string' ? parsed.uri : undefined,
+              envelopeSize,
+              fetchedAt: Date.now(),
+            },
           }));
-          return;
+        } else if (res.status === 404) {
+          setResults((prev) => ({
+            ...prev,
+            [dataId]: { dataId, status: 'not-found', fetchedAt: Date.now() },
+          }));
+        } else {
+          const detail = parsed?.error ?? text.slice(0, 200) ?? `HTTP ${res.status}`;
+          setResults((prev) => ({
+            ...prev,
+            [dataId]: {
+              dataId,
+              status: 'error',
+              error: `HTTP ${res.status}: ${detail}`,
+              fetchedAt: Date.now(),
+            },
+          }));
         }
-        const versions: VersionListing[] = Array.isArray(parsed?.versions) ? parsed.versions : [];
-        const latest: number | null = typeof parsed?.latest === 'number' ? parsed.latest : null;
-        setEntries((prev) => ({
-          ...prev,
-          [dataId]: { dataId, localId, versions, latest, error: null, loading: false },
-        }));
       } catch (e: any) {
-        setEntries((prev) => ({
+        setResults((prev) => ({
           ...prev,
-          [dataId]: { ...prev[dataId]!, loading: false, error: `Network: ${e?.message ?? 'unknown'}` },
+          [dataId]: {
+            dataId,
+            status: 'error',
+            error: `Network: ${e?.message ?? 'unknown'}`,
+            fetchedAt: Date.now(),
+          },
         }));
+      } finally {
+        setLoading(null);
       }
     },
-    [ready, buildDataId, endpoint, matrixToken, roomId],
+    [ready, endpoint, matrixToken, roomId],
   );
 
-  // Attempt a speculative `list` request once. If the webhook supports it,
-  // populate entries from the response. If it rejects, fall back to probes.
-  useEffect(() => {
-    if (!ready || listAttempted) return;
-    setListAttempted(true);
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await fetch(endpoint, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            matrix_token: matrixToken,
-            op: 'list',
-            room_id: roomId,
-          }),
-        });
-        const text = await res.text();
-        let parsed: any = null;
-        try { parsed = JSON.parse(text); } catch { /* keep raw */ }
-        if (cancelled) return;
-        if (res.ok && Array.isArray(parsed?.blobs ?? parsed?.entries ?? parsed?.data_ids)) {
-          const rows: any[] = parsed.blobs ?? parsed.entries ?? parsed.data_ids;
-          setListSupported(true);
-          const next: Record<string, BlobEntry> = {};
-          for (const row of rows) {
-            const dataId = typeof row === 'string' ? row : (row.data_id ?? row.dataId);
-            if (!dataId) continue;
-            const localId = roomPrefix && dataId.startsWith(`${roomPrefix}:`)
-              ? dataId.slice(roomPrefix.length + 1)
-              : dataId;
-            next[dataId] = {
-              dataId,
-              localId,
-              versions: Array.isArray(row.versions) ? row.versions : [],
-              latest: typeof row.latest === 'number' ? row.latest : null,
-              error: null,
-              loading: false,
-            };
-          }
-          setEntries((prev) => ({ ...next, ...prev }));
-        } else {
-          setListSupported(false);
-          if (!res.ok) {
-            const detail = parsed?.error ?? text.slice(0, 200) ?? `HTTP ${res.status}`;
-            setListError(`list not supported (HTTP ${res.status}: ${detail})`);
-          } else {
-            setListError('list returned unexpected shape — falling back to probes');
-          }
-        }
-      } catch (e: any) {
-        if (cancelled) return;
-        setListSupported(false);
-        setListError(`list probe failed: ${e?.message ?? 'unknown'}`);
-      } finally {
-        if (!cancelled) {
-          // Always probe default IDs so users see something on first load.
-          for (const lid of DEFAULT_PROBES) await probe(lid);
-          if (!cancelled) setInitialLoading(false);
-        }
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [ready, listAttempted, endpoint, matrixToken, roomId, roomPrefix, probe]);
-
-  const handleSubmitProbe = useCallback(
+  const handleSubmit = useCallback(
     (e: React.FormEvent) => {
       e.preventDefault();
       const id = probeInput.trim();
       if (!id) return;
       setProbeInput('');
-      void probe(id);
+      void fetchBlob(id);
     },
-    [probeInput, probe],
+    [probeInput, fetchBlob],
   );
 
-  const handleRefreshAll = useCallback(() => {
-    for (const entry of Object.values(entries)) {
-      void probe(entry.localId);
-    }
-  }, [entries, probe]);
-
-  const entryList = Object.values(entries).sort((a, b) => a.dataId.localeCompare(b.dataId));
-  const totalVersions = entryList.reduce((n, e) => n + e.versions.length, 0);
+  const resultList = Object.values(results).sort((a, b) => b.fetchedAt - a.fetchedAt);
 
   return (
     <div style={s.container}>
@@ -217,130 +123,68 @@ export function BlobStoreViewer({ onBack, endpoint, roomId, roomPrefix, matrixTo
         </button>
 
         <div style={s.title}>Blob Store</div>
-        <div style={s.subtitle}>Room-scoped encrypted blobs via /webhook/eo-blob</div>
+        <div style={s.subtitle}>Fetch encrypted blobs by data_id via /webhook/eo-blob</div>
 
         {!ready && (
           <div style={s.errorBox}>
-            {!roomId ? 'No room connected — open a space first.'
-              : !matrixToken ? 'No Matrix token available.'
-              : 'Computing room prefix…'}
+            {!roomId ? 'No room connected — open a space first.' : 'No Matrix token available.'}
           </div>
         )}
 
         {ready && (
           <>
-            {/* Connection summary */}
             <div style={s.connBox}>
               <Field label="Endpoint" value={endpoint} theme={theme} />
               <Field label="Room ID" value={roomId!} theme={theme} />
-              <Field label="Room Prefix" value={roomPrefix!} theme={theme} />
-              <Field
-                label="List op"
-                value={
-                  listSupported === true ? 'Supported'
-                  : listSupported === false ? 'Unsupported — probe by local ID'
-                  : 'Probing…'
-                }
-                theme={theme}
-              />
-              {listError && listSupported === false && (
-                <div style={s.listNote}>{listError}</div>
-              )}
             </div>
 
-            {/* Probe form */}
-            <form onSubmit={handleSubmitProbe} style={s.probeRow}>
-              <span style={s.prefixChip}>{roomPrefix}:</span>
+            <form onSubmit={handleSubmit} style={s.probeRow}>
               <input
                 style={s.probeInput}
                 value={probeInput}
                 onChange={(e) => setProbeInput(e.target.value)}
-                placeholder="local-id (e.g. manifest, my-field)"
-                aria-label="Blob local ID to probe"
+                placeholder="data_id (e.g. manifest, my-field)"
+                aria-label="Blob data_id to fetch"
               />
-              <button type="submit" style={s.probeBtn} disabled={!probeInput.trim()}>
-                Probe
-              </button>
-              <button type="button" style={s.refreshBtn} onClick={handleRefreshAll} disabled={entryList.length === 0}>
-                Refresh All
+              <button type="submit" style={s.probeBtn} disabled={!probeInput.trim() || loading !== null}>
+                {loading ? 'Fetching…' : 'Fetch'}
               </button>
             </form>
 
-            {/* Summary bar */}
-            <div style={s.summaryBar}>
-              <span style={s.summaryItem}>{entryList.length} data_id{entryList.length === 1 ? '' : 's'}</span>
-              <span style={s.summaryDot}>·</span>
-              <span style={s.summaryItem}>{totalVersions} version{totalVersions === 1 ? '' : 's'} total</span>
-              {initialLoading && <span style={{ ...s.summaryItem, fontStyle: 'italic' as const }}>  loading…</span>}
-            </div>
+            {resultList.length === 0 && (
+              <div style={s.emptyNote}>
+                Enter a data_id above and click Fetch to retrieve a blob.
+              </div>
+            )}
 
-            {/* Entry list */}
             <div style={s.list}>
-              {entryList.length === 0 && !initialLoading && (
-                <div style={s.emptyNote}>
-                  No blobs discovered. Enter a local ID above and click Probe to check for versions.
-                </div>
-              )}
-
-              {entryList.map((entry) => {
-                const isExpanded = expanded === entry.dataId;
-                const hasVersions = entry.versions.length > 0;
-                const hasError = !!entry.error;
-                const statusColor = hasError ? theme.danger : hasVersions ? theme.success : theme.textMuted;
-
+              {resultList.map((r) => {
+                const statusColor =
+                  r.status === 'found' ? theme.success
+                  : r.status === 'not-found' ? theme.textMuted
+                  : theme.danger;
                 return (
-                  <div key={entry.dataId} style={s.entryCard}>
-                    <div
-                      style={{ ...s.entryHeader, cursor: hasVersions ? 'pointer' : 'default' }}
-                      onClick={() => hasVersions && setExpanded(isExpanded ? null : entry.dataId)}
-                    >
-                      <span style={{ ...s.entryDot, background: statusColor, boxShadow: hasVersions ? `0 0 6px ${statusColor}` : 'none' }} />
-                      <span style={s.entryId}>{entry.dataId}</span>
+                  <div key={`${r.dataId}:${r.fetchedAt}`} style={s.entryCard}>
+                    <div style={s.entryHeader}>
+                      <span style={{ ...s.entryDot, background: statusColor, boxShadow: r.status === 'found' ? `0 0 6px ${statusColor}` : 'none' }} />
+                      <span style={s.entryId}>{r.dataId}</span>
                       <span style={s.entryCount}>
-                        {entry.loading ? 'loading…'
-                          : hasError ? 'error'
-                          : `${entry.versions.length} version${entry.versions.length === 1 ? '' : 's'}`}
+                        {r.status === 'found' ? 'found'
+                          : r.status === 'not-found' ? '404 not found'
+                          : 'error'}
                       </span>
-                      {hasVersions && (
-                        <span style={s.chevron}>{isExpanded ? '▴' : '▾'}</span>
-                      )}
                     </div>
-                    {hasError && (
-                      <div style={s.entryError}>{entry.error}</div>
-                    )}
-                    {isExpanded && hasVersions && (
-                      <div style={s.versionsPane}>
-                        {entry.versions
-                          .slice()
-                          .sort((a, b) => (b.version ?? 0) - (a.version ?? 0))
-                          .map((v) => {
-                            const m = v.meta ?? ({} as BlobMeta);
-                            const isLatest = entry.latest != null && v.version === entry.latest;
-                            return (
-                              <div key={`${entry.dataId}:${v.version}`} style={s.versionRow}>
-                                <div style={s.versionHead}>
-                                  <span style={s.versionNum}>v{v.version}</span>
-                                  {isLatest && <span style={s.latestTag}>LATEST</span>}
-                                  {m.created_at && (
-                                    <span style={s.versionTime}>{new Date(m.created_at).toLocaleString()}</span>
-                                  )}
-                                </div>
-                                <div style={s.versionDetails}>
-                                  {m.writer && <DetailRow label="Writer" value={m.writer} theme={theme} />}
-                                  {m.auth_user_id && <DetailRow label="Author" value={m.auth_user_id} theme={theme} />}
-                                  {m.target && <DetailRow label="Target" value={m.target} theme={theme} />}
-                                  {m.label && <DetailRow label="Label" value={m.label} theme={theme} />}
-                                  {m.content_hash && <DetailRow label="Content Hash" value={m.content_hash} theme={theme} />}
-                                  {m.key_id && <DetailRow label="Key ID" value={m.key_id} theme={theme} />}
-                                  {m.plaintext_size != null && (
-                                    <DetailRow label="Plaintext Size" value={`${m.plaintext_size} bytes`} theme={theme} />
-                                  )}
-                                  {v.uri && <DetailRow label="URI" value={v.uri} theme={theme} />}
-                                </div>
-                              </div>
-                            );
-                          })}
+                    {r.status === 'found' && (
+                      <div style={s.detailsPane}>
+                        {r.uri && <DetailRow label="URI" value={r.uri} theme={theme} />}
+                        {r.envelopeSize != null && (
+                          <DetailRow label="Envelope Size" value={`${r.envelopeSize} bytes`} theme={theme} />
+                        )}
+                        <DetailRow label="Fetched" value={new Date(r.fetchedAt).toLocaleString()} theme={theme} />
                       </div>
+                    )}
+                    {r.status === 'error' && r.error && (
+                      <div style={s.entryError}>{r.error}</div>
                     )}
                   </div>
                 );
@@ -444,28 +288,12 @@ function styles(t: Theme): Record<string, React.CSSProperties> {
       flexDirection: 'column' as const,
       gap: 2,
     },
-    listNote: {
-      marginTop: 6,
-      fontFamily: mono,
-      fontSize: 9,
-      color: t.warning,
-    },
     probeRow: {
       display: 'flex',
       alignItems: 'center',
       gap: 6,
-      marginBottom: 8,
+      marginBottom: 12,
       flexWrap: 'wrap' as const,
-    },
-    prefixChip: {
-      padding: '6px 8px',
-      background: t.bgMuted,
-      border: `1px solid ${t.border}`,
-      borderRadius: 4,
-      fontFamily: mono,
-      fontSize: 11,
-      color: t.textMuted,
-      whiteSpace: 'nowrap' as const,
     },
     probeInput: {
       flex: 1,
@@ -489,34 +317,6 @@ function styles(t: Theme): Record<string, React.CSSProperties> {
       fontSize: 10,
       fontWeight: 600,
       cursor: 'pointer',
-    },
-    refreshBtn: {
-      padding: '6px 14px',
-      background: 'transparent',
-      color: t.accent,
-      border: `1px solid ${t.accent}`,
-      borderRadius: 4,
-      fontFamily: mono,
-      fontSize: 10,
-      fontWeight: 600,
-      cursor: 'pointer',
-    },
-    summaryBar: {
-      display: 'flex',
-      alignItems: 'center',
-      gap: 6,
-      padding: '6px 0',
-      marginBottom: 6,
-    },
-    summaryItem: {
-      fontFamily: mono,
-      fontSize: 10,
-      color: t.textMuted,
-    },
-    summaryDot: {
-      fontFamily: mono,
-      fontSize: 10,
-      color: t.textMuted,
     },
     list: {
       display: 'flex',
@@ -562,13 +362,6 @@ function styles(t: Theme): Record<string, React.CSSProperties> {
       color: t.textMuted,
       flexShrink: 0,
     },
-    chevron: {
-      fontSize: 10,
-      color: t.textMuted,
-      width: 12,
-      textAlign: 'center' as const,
-      flexShrink: 0,
-    },
     entryError: {
       padding: '6px 12px',
       fontFamily: mono,
@@ -577,50 +370,10 @@ function styles(t: Theme): Record<string, React.CSSProperties> {
       background: t.dangerBg,
       borderTop: `1px solid ${t.dangerBorder}`,
     },
-    versionsPane: {
+    detailsPane: {
       borderTop: `1px solid ${t.border}`,
-      padding: '6px 12px',
+      padding: '8px 12px',
       background: t.bgMuted,
-      display: 'flex',
-      flexDirection: 'column' as const,
-      gap: 6,
-    },
-    versionRow: {
-      padding: '6px 8px',
-      border: `1px solid ${t.borderLight}`,
-      borderRadius: 4,
-      background: t.bg,
-    },
-    versionHead: {
-      display: 'flex',
-      alignItems: 'center',
-      gap: 8,
-      marginBottom: 4,
-    },
-    versionNum: {
-      fontFamily: mono,
-      fontSize: 11,
-      fontWeight: 700,
-      color: t.text,
-    },
-    latestTag: {
-      fontFamily: mono,
-      fontSize: 8,
-      fontWeight: 700,
-      letterSpacing: '0.06em',
-      padding: '1px 5px',
-      borderRadius: 3,
-      background: `${t.success}20`,
-      color: t.success,
-      border: `1px solid ${t.success}40`,
-    },
-    versionTime: {
-      fontFamily: mono,
-      fontSize: 9,
-      color: t.textMuted,
-      marginLeft: 'auto',
-    },
-    versionDetails: {
       display: 'flex',
       flexDirection: 'column' as const,
       gap: 1,
