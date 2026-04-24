@@ -2,25 +2,22 @@
  * Google Calendar settings panel section — shown inside SettingsView.
  *
  * Lets the user refresh the list of accessible calendars, pick an active
- * one, trigger a sync, and see the last-sync timestamp. Connection state
- * is shared with the Google Drive section because both APIs use the same
- * OAuth token.
+ * one, trigger a sync, and see the last-sync timestamp.
  */
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useTheme, type Theme } from '../theme';
 import { useGCalendarStore } from '../google-calendar/gcalendar-store';
-import { useGDriveStore } from '../google-drive/gdrive-store';
 import { pullCalendarEvents, scopeForCalendar } from '../google-calendar/gcalendar-sync';
-import { startOAuthFlow, isGoogleOAuthConfigured } from '../google-calendar/gcalendar-oauth';
+import {
+  startOAuthFlow,
+  isGoogleOAuthConfigured,
+  isConnected as isGoogleConnected,
+} from '../google-calendar/gcalendar-oauth';
 
 export function GCalendarSettingsSection() {
   const { theme } = useTheme();
   const s = makeStyles(theme);
-
-  // Share connection state with Drive (same OAuth token).
-  const gdriveToken = useGDriveStore((st) => st.googleAccessToken);
-  const gdriveSyncMode = useGDriveStore((st) => st.syncMode);
 
   const calendars = useGCalendarStore((st) => st.calendars);
   const activeCalendarId = useGCalendarStore((st) => st.activeCalendarId);
@@ -33,9 +30,13 @@ export function GCalendarSettingsSection() {
   const needsReauth = useGCalendarStore((st) => st.needsReauth);
 
   const [busy, setBusy] = useState<'list' | 'sync' | null>(null);
+  const [connected, setConnected] = useState(isGoogleConnected());
 
-  const connected = !!gdriveToken;
-  const oauthMode = gdriveSyncMode === 'oauth';
+  useEffect(() => {
+    const interval = setInterval(() => setConnected(isGoogleConnected()), 2000);
+    return () => clearInterval(interval);
+  }, []);
+
   const oauthConfigured = isGoogleOAuthConfigured();
   const activeWritable = activeCalendarId
     ? writableCalendars.has(activeCalendarId)
@@ -44,6 +45,7 @@ export function GCalendarSettingsSection() {
   const handleSignIn = async () => {
     try {
       await startOAuthFlow();
+      setConnected(isGoogleConnected());
       await refreshCalendarList();
     } catch (e) {
       console.warn('[GCalendar] sign-in failed:', e);
@@ -73,14 +75,7 @@ export function GCalendarSettingsSection() {
 
   return (
     <div style={s.container}>
-      {!oauthMode && (
-        <div style={s.warning}>
-          Google Calendar requires OAuth sync mode. Switch Drive Sync Mode to
-          "Google OAuth" above to enable this section.
-        </div>
-      )}
-
-      {oauthMode && !oauthConfigured && (
+      {!oauthConfigured && (
         <div style={s.warning}>
           Google OAuth is not configured for this build (missing
           <code style={{ margin: '0 4px' }}>VITE_GOOGLE_CLIENT_ID</code>).
@@ -88,25 +83,25 @@ export function GCalendarSettingsSection() {
         </div>
       )}
 
-      {oauthMode && oauthConfigured && !connected && (
+      {oauthConfigured && !connected && (
         <div style={s.row}>
           <button style={s.primaryBtn} onClick={handleSignIn}>
             Sign in with Google
           </button>
           <span style={s.help}>
-            Grants access to Drive + Calendar scopes.
+            Grants access to Calendar scopes.
           </span>
         </div>
       )}
 
-      {oauthMode && needsReauth && (
+      {needsReauth && (
         <div style={s.warning}>
           Your Google session is missing the Calendar scope. Click "Sign in
           with Google" above to re-authenticate.
         </div>
       )}
 
-      {oauthMode && connected && (
+      {connected && (
         <>
           <div style={s.row}>
             <button

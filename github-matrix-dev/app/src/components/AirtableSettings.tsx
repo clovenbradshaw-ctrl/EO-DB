@@ -24,8 +24,6 @@ import {
   updateSync,
   type HydrationManifest,
   type SyncCustomization,
-  type RawImportBundle,
-  type ProvenanceResult,
 } from '../ingestion/airtable-sync';
 import {
   encodeAirtableSnapshot,
@@ -36,7 +34,6 @@ import {
 import { createMemoryStore } from '../db/memory-store';
 import { AirtableSyncTransparency } from './AirtableSyncTransparency';
 import type { Resolution } from '../db/types';
-import type { GDriveSyncService } from '../google-drive/gdrive-sync';
 import { useAirtableStore, createAirtableClient, webhookHealthPatch, DEFAULT_SYNC_SETTINGS, type SyncLogEntry, type CurrentSyncSnapshot } from '../ingestion/airtable-store';
 import { AirtableSyncService } from '../ingestion/airtable-sync-service';
 import {
@@ -54,7 +51,7 @@ import {
   type HydrationCheckpoint,
 } from '../ingestion/airtable-hydration-checkpoint';
 import { resumableHydrationSync } from '../ingestion/airtable-resumable-hydration';
-import { hydrationBundleFilename, HYDRATION_BUNDLE_MIME } from '../ingestion/airtable-hydration-bundle';
+import { hydrationBundleFilename } from '../ingestion/airtable-hydration-bundle';
 import { useTheme, type Theme } from '../theme';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -100,31 +97,6 @@ function guessNameField(fields: Array<{ id: string; name: string; type: string }
 }
 
 /**
- * Pack a RawImportBundle as msgpack and upload it to Drive for provenance.
- *
- * Returns undefined when gdriveSync isn't available yet (the hydration will
- * still run, but without a linked import record — same behaviour as before
- * this feature was added). Throws if the upload itself fails so the caller's
- * hydration aborts before any records are folded.
- */
-async function uploadBulkImportProvenance(
-  bundle: RawImportBundle,
-  gdriveSync: GDriveSyncService | null,
-): Promise<ProvenanceResult | void> {
-  if (!gdriveSync) return;
-  const packed = pack(bundle) as Uint8Array;
-  const rawBytes = new Uint8Array(
-    packed.buffer.slice(packed.byteOffset, packed.byteOffset + packed.byteLength),
-  );
-  return gdriveSync.uploadProvenance(rawBytes, {
-    source: 'airtable',
-    importId: bundle.importId,
-    contentType: 'application/vnd.eo-db.airtable-import.msgpack',
-    label: `airtable-${bundle.importId}`,
-  });
-}
-
-/**
  * Trigger a regular browser file download for an in-memory byte array.
  * Used by the manual "Download from Airtable" snapshot flow so the user
  * ends up with a `.eodb` on disk that can be re-imported (or shared)
@@ -167,7 +139,6 @@ export function AirtableSettingsSection({
   roomId?: string | null;
 }) {
   const store = useEoStore((s) => s.store);
-  const gdriveSync = useEoStore((s) => s.gdriveSync);
   const { theme } = useTheme();
   const s = makeStyles(theme);
 
@@ -322,7 +293,6 @@ export function AirtableSettingsSection({
             session.userId,
             () => useAirtableStore.getState().apiKey,
             buildCustomization(),
-            gdriveSync ?? undefined,
           );
           syncServiceRef.current = service;
           useAirtableStore.getState().setContinuousSync(true);
@@ -674,11 +644,6 @@ export function AirtableSettingsSection({
               onProgress,
               onEvent: progressListener.onEvent,
               customization,
-              // Provenance-first bulk import: upload the raw bundle to Drive
-              // BEFORE anything gets folded, then emit an import record that
-              // links to the blob. If gdriveSync isn't hooked up yet, the hook
-              // is a no-op and the old behaviour is preserved.
-              onRawImport: (bundle) => uploadBulkImportProvenance(bundle, gdriveSync),
             })
           : await updateSync(store, client, session.userId, {
               onProgress,
@@ -716,15 +681,6 @@ export function AirtableSettingsSection({
         // Flush any pending throttled update so the UI sees the final
         // lastSeq even if the sync ended on an in-flight timer.
         progressListener.finalize();
-      }
-
-      // After a successful hydration, rewrite the on-Drive .eodb log file so
-      // the cumulative log reflects the freshly-folded state (step (3) of the
-      // provenance-first bulk import flow).
-      if (mode === 'hydrate' && gdriveSync && result.total_records_ingested > 0) {
-        gdriveSync.fullPushToGDrive().catch((e) =>
-          console.warn('[EO-DB] post-hydration fullPushToGDrive failed:', e),
-        );
       }
 
       const ingested = result.total_records_ingested;
@@ -971,73 +927,46 @@ export function AirtableSettingsSection({
       // the per-table LAST_MODIFIED_TIME filter. The next continuous tick
       // picks up any edits the user made in Airtable between import and now.)
 
-      // Bake the replayed state into the local KV snapshot and push the whole
-      // log to Google Drive. Without this, the in-memory fold lives only in
-      // the MemoryStore + (async, fire-and-forget) OPFS appends — a refresh
-      // can land on the stale pre-import snapshot, and no second device ever
-      // sees the imported records. Mirrors the "Take Snapshot" button: same
-      // kv-snapshot bake, same init-cache refresh, same fullPushToGDrive.
+      // Bake the replayed state into the local KV snapshot so a refresh lands
+      // on the post-import snapshot instead of the stale pre-import one.
       setSyncStatus((prev) => ({
         ...prev,
         snapshotImport: {
           state: 'syncing',
-          message: `Saving ${replay.eventsReplayed} events to Drive…`,
+          message: `Baking local snapshot of ${replay.eventsReplayed} events…`,
         },
       }));
-      let driveSeq: number | null = null;
-      let driveError: string | null = null;
       try {
-        const result = await useEoStore.getState().manualSnapshot();
-        driveSeq = result.seq;
+        await useEoStore.getState().manualSnapshot();
       } catch (e: any) {
-        driveError = e?.message || String(e);
-        console.warn('[EO-DB] snapshot import: Drive push failed:', e);
+        console.warn('[EO-DB] snapshot import: local bake failed:', e);
       }
 
       const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
       const skippedSuffix = replay.insSkippedExisting > 0
         ? `, ${replay.insSkippedExisting} existing target(s) skipped`
         : '';
-      const driveSuffix = driveError
-        ? `, Drive push FAILED: ${driveError}`
-        : driveSeq !== null
-          ? `, pushed to Drive @ seq ${driveSeq}`
-          : '';
       useAirtableStore.getState().addSyncLogEntry({
         ts: Date.now(),
         type: 'snapshot_imported',
         source: 'local',
         syncer: session.userId,
-        detail: `${file.name}: replayed ${replay.eventsReplayed} events${skippedSuffix}, seeded ${replay.tablesSeeded} table cursor(s)${driveSuffix}, ${seconds}s`,
+        detail: `${file.name}: replayed ${replay.eventsReplayed} events${skippedSuffix}, seeded ${replay.tablesSeeded} table cursor(s), ${seconds}s`,
         durationMs: Date.now() - startedAt,
         recordsScanned: replay.eventsReplayed,
       });
       // Refresh the synced index so the table picker reflects what just landed.
       getSyncedTableIds(store).then(setSyncedTableIds);
-      if (driveError) {
-        setSyncStatus((prev) => ({
-          ...prev,
-          snapshotImport: {
-            state: 'error',
-            message: `Imported locally but Drive push failed: ${driveError}`,
-            detail: `${replay.eventsReplayed} events replayed into the local store — retry by taking a manual snapshot once Drive is reachable.`,
-          },
-        }));
-      } else {
-        const driveDetail = driveSeq !== null
-          ? ` Pushed to Drive @ seq ${driveSeq}.`
-          : '';
-        setSyncStatus((prev) => ({
-          ...prev,
-          snapshotImport: {
-            state: 'done',
-            message: `Imported ${replay.eventsReplayed} events from ${file.name}`,
-            detail: (replay.insSkippedExisting > 0
-              ? `${replay.tablesSeeded} table cursor(s) seeded; ${replay.insSkippedExisting} target(s) already existed locally (new content folded in).`
-              : `${replay.tablesSeeded} table cursor(s) seeded — Update Sync will pull post-snapshot deltas.`) + driveDetail,
-          },
-        }));
-      }
+      setSyncStatus((prev) => ({
+        ...prev,
+        snapshotImport: {
+          state: 'done',
+          message: `Imported ${replay.eventsReplayed} events from ${file.name}`,
+          detail: replay.insSkippedExisting > 0
+            ? `${replay.tablesSeeded} table cursor(s) seeded; ${replay.insSkippedExisting} target(s) already existed locally (new content folded in).`
+            : `${replay.tablesSeeded} table cursor(s) seeded — Update Sync will pull post-snapshot deltas.`,
+        },
+      }));
     } catch (e: any) {
       useAirtableStore.getState().addSyncLogEntry({
         ts: Date.now(),
@@ -1095,7 +1024,7 @@ export function AirtableSettingsSection({
     });
 
     try {
-      const result = await resumableHydrationSync(store, client, session.userId, gdriveSync ?? null, {
+      const result = await resumableHydrationSync(store, client, session.userId, null, {
         customization,
         forceRestart: restart,
         onCheckpoint: (cp) => {
@@ -1172,10 +1101,9 @@ export function AirtableSettingsSection({
     }
   }
 
-  // Download the hydration bundle. Prefers the in-memory tee from the
-  // active (or just-completed) run so the user gets bytes instantly; falls
-  // back to fetching the Drive copy when the tee isn't present (e.g.
-  // after a reload — the checkpoint survived, the blob didn't).
+  // Download the hydration bundle from the in-memory tee of the active (or
+  // just-completed) run. Without a durable backend the bundle does not
+  // survive a page reload.
   async function handleDownloadHydrationBundle(): Promise<void> {
     const fileName = hydrationCheckpoint?.bundle?.fileName
       ?? (hydrationCheckpoint
@@ -1186,14 +1114,9 @@ export function AirtableSettingsSection({
       resumableBundleDownload: { state: 'syncing', message: 'Preparing download…' },
     }));
     try {
-      let blob = bundleBlobRef.current;
+      const blob = bundleBlobRef.current;
       if (!blob) {
-        if (!gdriveSync || !hydrationCheckpoint?.bundle?.fileName) {
-          throw new Error('No local copy and no Drive bundle to download from.');
-        }
-        const bytes = await gdriveSync.downloadHydrationBundle(hydrationCheckpoint.bundle.fileName);
-        if (!bytes) throw new Error(`Drive bundle "${hydrationCheckpoint.bundle.fileName}" not found.`);
-        blob = new Blob([bytes as unknown as BlobPart], { type: HYDRATION_BUNDLE_MIME });
+        throw new Error('No bundle available — start a hydration to produce one.');
       }
       const url = URL.createObjectURL(blob);
       try {
@@ -1212,7 +1135,7 @@ export function AirtableSettingsSection({
         resumableBundleDownload: {
           state: 'done',
           message: `Saved ${fileName}`,
-          detail: `${(blob!.size / 1024).toFixed(1)} KB`,
+          detail: `${(blob.size / 1024).toFixed(1)} KB`,
         },
       }));
     } catch (e: any) {
@@ -1258,10 +1181,6 @@ export function AirtableSettingsSection({
         session.userId,
         () => useAirtableStore.getState().apiKey,
         buildCustomization(),
-        // Pass gdriveSync so the service can upload provenance blobs and
-        // rewrite the .eodb log after bulk hydrations. Undefined means the
-        // Drive features degrade gracefully to no-ops.
-        gdriveSync ?? undefined,
       );
       syncServiceRef.current = service;
       useAirtableStore.getState().setContinuousSync(true);

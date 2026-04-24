@@ -22,9 +22,7 @@
  */
 
 import type { MatrixClient, MatrixEvent } from 'matrix-js-sdk';
-import { pack } from 'msgpackr';
 import type { EoStore } from '../db/encrypted-store';
-import { AirtableClient } from './airtable-client';
 import {
   hydrationSync,
   seedCursorsFromMap,
@@ -33,9 +31,6 @@ import {
   type SyncProgress,
   type HydrationResult,
   type UpdateSyncResult,
-  type RawImportBundle,
-  type ProvenanceResult,
-  type HydrationSnapshotPayload,
 } from './airtable-sync';
 import {
   useAirtableStore,
@@ -49,18 +44,8 @@ import {
 import {
   saveContinuousEnabled,
   saveCurrentSync,
-  loadPublishedSnapshotRef,
-  savePublishedSnapshotRef,
-  type PublishedSnapshotRef,
 } from './airtable-persistence';
-import {
-  encodeAirtableSnapshot,
-  decodeAirtableSnapshot,
-  replayAirtableSnapshot,
-  airtableSnapshotFilename,
-} from './airtable-snapshot';
 import { airtableSyncEventTypes } from '../lib/matrix-domain';
-import type { GDriveSyncService } from '../google-drive/gdrive-sync';
 import { createImportProgressListener } from '../store/eo-store';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
@@ -115,13 +100,6 @@ export class AirtableSyncService {
     private agent: string,
     private getApiKey: () => string | null,
     private customization?: SyncCustomization,
-    /**
-     * Optional Google Drive sync reference. When supplied, bulk hydrations
-     * upload the raw Airtable payload to Drive for provenance BEFORE any
-     * records are folded, and then rewrite the on-Drive .eodb log with the
-     * processed events when the sync finishes.
-     */
-    private gdriveSync?: GDriveSyncService,
   ) {
     this.deviceId = this.matrixClient.getDeviceId() ?? `browser-${Date.now()}`;
   }
@@ -593,35 +571,14 @@ export class AirtableSyncService {
       const progressListener = createImportProgressListener();
       try {
         if (!isHydrated) {
-          // Before running a full Airtable pull, see if a baked snapshot
-          // exists on Drive for any of the bases this token can see. A
-          // snapshot replay folds the same events a hydration would have
-          // emitted AND seeds per-table cursors, so the subsequent
-          // updateSync() picks up only post-snapshot deltas — no 20k+
-          // record scan on fresh devices.
-          const bootstrap = await this.tryBootstrapFromSnapshots(client, progressListener.onEvent);
-          if (bootstrap.replayed > 0) {
-            result = this.synthesizeBootstrapResult(bootstrap);
-            useAirtableStore.getState().addSyncLogEntry({
-              ts: Date.now(),
-              type: 'hydration_complete',
-              source: 'local',
-              syncer: this.agent,
-              device: this.deviceId,
-              detail: `Snapshot bootstrap: replayed ${bootstrap.eventsReplayed} events from ${bootstrap.replayed} base(s)`,
-              strategy: 'hydration',
-              preserveExisting: !!effectiveCustomization.preserveExisting,
-            });
-          } else {
-            result = await hydrationSync(this.store, client, this.agent, {
-              customization: effectiveCustomization,
-              onEvent: progressListener.onEvent,
-              onProgress,
-              onRawImport: (bundle) => this.persistBulkImportProvenance(bundle),
-              onSnapshotReady: (payload) => this.publishHydrationSnapshot(payload),
-            });
-            ranHydration = true;
-          }
+          // TODO: reinstate snapshot bootstrap via n8n blob store so fresh
+          // devices can skip a 20k+ record Airtable scan.
+          result = await hydrationSync(this.store, client, this.agent, {
+            customization: effectiveCustomization,
+            onEvent: progressListener.onEvent,
+            onProgress,
+          });
+          ranHydration = true;
         } else {
           // 'fullDiff' strategy: pass null cursor by re-hydrating with
           // preserveExisting=false, so every field is compared.
@@ -631,12 +588,6 @@ export class AirtableSyncService {
               customization: { ...effectiveCustomization, preserveExisting: false },
               onEvent: progressListener.onEvent,
               onProgress,
-              onRawImport: (bundle) => this.persistBulkImportProvenance(bundle),
-              // A full-diff re-pull is also an opportunity to rebake the
-              // snapshot — the folded state just got reconciled against
-              // Airtable, so the freshly captured event stream is the
-              // cleanest starting point a new device could hope for.
-              onSnapshotReady: (payload) => this.publishHydrationSnapshot(payload),
             });
             ranHydration = true;
           } else {
@@ -680,17 +631,6 @@ export class AirtableSyncService {
         // Flush any pending throttled Zustand update so the UI sees the
         // final lastSeq even if the sync ended on an in-flight timer.
         progressListener.finalize();
-      }
-
-      // After a bulk hydration completes, rewrite the .eodb log file on
-      // Drive so the cumulative log matches the freshly-folded state. This
-      // is the "upload the content to google drive by rewriting the .eodb"
-      // step of the provenance-first bulk import flow. Fire-and-forget: if
-      // Drive is flaky, the normal rolling buffer + next bake will catch up.
-      if (ranHydration && this.gdriveSync && result.total_records_ingested > 0) {
-        this.gdriveSync.fullPushToGDrive().catch((e) =>
-          console.warn('[EO-DB] post-hydration fullPushToGDrive failed:', e),
-        );
       }
 
       useAirtableStore.getState().setLastSyncResult(result);
@@ -823,203 +763,6 @@ export class AirtableSyncService {
     if (phase === 'table_done' || phase !== prev.phase) {
       saveCurrentSync(this.store, next);
     }
-  }
-
-  /**
-   * Provenance step (1) of the bulk import flow — pack the raw bundle into a
-   * binary blob and upload it to Drive BEFORE the fold runs. The returned
-   * ProvenanceResult is handed back to processHydrationBundle which emits an
-   * `import.airtable.<importId>` record linking to the Drive file, so future
-   * UI can list imports and offer a one-click re-download.
-   *
-   * Throws if upload fails, which aborts the hydration (we only fold after
-   * provenance is durably stored).
-   */
-  private async persistBulkImportProvenance(
-    bundle: RawImportBundle,
-  ): Promise<ProvenanceResult | void> {
-    if (!this.gdriveSync) return;
-
-    // Serialize the bundle exactly as collected — no field normalization,
-    // no renaming, no flattening. Msgpack gives us a compact, deterministic
-    // binary that round-trips through unpack() for later re-imports.
-    const packed = pack(bundle) as Uint8Array;
-    const rawBytes = new Uint8Array(
-      packed.buffer.slice(packed.byteOffset, packed.byteOffset + packed.byteLength),
-    );
-
-    const totalRecords = bundle.tables.reduce((s, t) => s + t.records.length, 0);
-    console.log(
-      `[EO-DB] Airtable bulk import: uploading provenance (${totalRecords} records, ${rawBytes.byteLength} bytes)…`,
-    );
-
-    const result = await this.gdriveSync.uploadProvenance(rawBytes, {
-      source: 'airtable',
-      importId: bundle.importId,
-      contentType: 'application/vnd.eo-db.airtable-import.msgpack',
-      label: `airtable-${bundle.importId}`,
-    });
-
-    useAirtableStore.getState().addSyncLogEntry({
-      ts: Date.now(),
-      type: 'provenance_uploaded',
-      source: 'local',
-      syncer: this.agent,
-      device: this.deviceId,
-      detail: `${totalRecords} records → ${result.fileName} (${rawBytes.byteLength} B)`,
-    });
-
-    return result;
-  }
-
-  // ─── Snapshot bootstrap / publish ──────────────────────────────────────
-
-  /**
-   * Bake the captured hydration event stream into an `.eodb` snapshot and
-   * publish it to Drive, one file per base. Called by `hydrationSync()` via
-   * its `onSnapshotReady` callback after a successful fold.
-   *
-   * Best-effort by design: a failed upload does NOT roll back the local
-   * hydration. The next run will retry (overwrite) via `gdriveStoreNamed`.
-   *
-   * Per-base split: events that reference a specific baseId via
-   * `operand._airtable.base_id` land in that base's snapshot; events not
-   * tied to a single base (e.g. the top-level `import.airtable.<id>`
-   * record) are replicated into every base's snapshot so each file is
-   * self-contained and replayable in isolation.
-   */
-  private async publishHydrationSnapshot(payload: HydrationSnapshotPayload): Promise<void> {
-    if (!this.gdriveSync) return;
-
-    for (const baseId of payload.baseIds) {
-      const events = payload.events.filter((ev: any) => {
-        const ref = ev?.operand?._airtable?.base_id;
-        // No base tag → shared record (e.g. the import bundle), replicate.
-        if (!ref) return true;
-        return ref === baseId;
-      });
-      if (events.length === 0) continue;
-
-      const cursors = payload.cursors[baseId]
-        ? { [baseId]: payload.cursors[baseId] }
-        : {};
-      const fileName = airtableSnapshotFilename(baseId);
-
-      try {
-        const bytes = await encodeAirtableSnapshot(events, cursors, {
-          collectionId: `airtable-hydration-${baseId}`,
-          name: `Airtable hydration snapshot for ${baseId}`,
-        });
-        const up = await this.gdriveSync.uploadAirtableSnapshot(fileName, bytes);
-        const ref: PublishedSnapshotRef = {
-          baseId,
-          driveFileId: up.driveFileId,
-          fileName: up.fileName,
-          byteSize: up.byteSize,
-          publishedAt: new Date().toISOString(),
-          eventCount: events.length,
-        };
-        await savePublishedSnapshotRef(this.store, ref);
-        useAirtableStore.getState().addSyncLogEntry({
-          ts: Date.now(),
-          type: 'provenance_uploaded',
-          source: 'local',
-          syncer: this.agent,
-          device: this.deviceId,
-          detail: `Snapshot: ${events.length} events → ${fileName} (${up.byteSize} B)`,
-          baseId,
-        });
-      } catch (e) {
-        console.warn(`[EO-DB] publishHydrationSnapshot(${baseId}) failed:`, e);
-      }
-    }
-  }
-
-  /**
-   * On a fresh device (`isHydrated === false`), try to substitute a full
-   * Airtable pull with one or more baked snapshots from Drive. Relies on
-   * the Airtable token only to list bases — the actual record pull is
-   * replaced by a Drive download + local replay.
-   *
-   * Returns the number of bases replayed. Zero means "no snapshot found,
-   * fall through to live hydration".
-   */
-  private async tryBootstrapFromSnapshots(
-    client: AirtableClient,
-    onEvent: (event: any) => void,
-  ): Promise<{ replayed: number; eventsReplayed: number; tablesSeeded: number }> {
-    if (!this.gdriveSync) return { replayed: 0, eventsReplayed: 0, tablesSeeded: 0 };
-
-    let bases: Awaited<ReturnType<AirtableClient['listBases']>>;
-    try {
-      bases = await client.listBases();
-    } catch (e) {
-      console.warn('[EO-DB] tryBootstrapFromSnapshots: listBases failed:', e);
-      return { replayed: 0, eventsReplayed: 0, tablesSeeded: 0 };
-    }
-
-    let replayed = 0;
-    let eventsReplayed = 0;
-    let tablesSeeded = 0;
-
-    for (const base of bases) {
-      const fileName = airtableSnapshotFilename(base.id);
-      let bytes: Uint8Array | null = null;
-      try {
-        bytes = await this.gdriveSync.downloadAirtableSnapshot(fileName);
-      } catch (e) {
-        console.warn(`[EO-DB] snapshot download failed for ${base.id}:`, e);
-        continue;
-      }
-      if (!bytes) continue;
-
-      try {
-        const snapshot = await decodeAirtableSnapshot(bytes);
-        const r = await replayAirtableSnapshot(this.store, snapshot, onEvent);
-        replayed++;
-        eventsReplayed += r.eventsReplayed;
-        tablesSeeded += r.tablesSeeded;
-
-        // Remember the ref locally so diagnostics can surface what was
-        // replayed and a future admin "rebake" command knows where the
-        // current file lives.
-        const existing = await loadPublishedSnapshotRef(this.store, base.id);
-        if (!existing) {
-          await savePublishedSnapshotRef(this.store, {
-            baseId: base.id,
-            driveFileId: '', // unknown without a second GET; not used on the read path
-            fileName,
-            byteSize: bytes.byteLength,
-            publishedAt: snapshot.header.updatedAt,
-            eventCount: snapshot.events.length,
-          });
-        }
-      } catch (e) {
-        console.warn(`[EO-DB] snapshot replay failed for ${base.id}:`, e);
-      }
-    }
-
-    return { replayed, eventsReplayed, tablesSeeded };
-  }
-
-  /**
-   * Produce a HydrationResult-shaped object from a successful snapshot
-   * bootstrap so the rest of the tick pipeline (sync log, Zustand store,
-   * Matrix head event) treats it like a normal hydration completion.
-   * No per-table sync_results — the snapshot already holds everything
-   * needed, and the next tick's `updateSync()` will produce real counts.
-   */
-  private synthesizeBootstrapResult(
-    bootstrap: { replayed: number; eventsReplayed: number; tablesSeeded: number },
-  ): HydrationResult {
-    return {
-      manifest: { bases: [], discovered_at: new Date().toISOString() },
-      sync_results: [],
-      total_records_ingested: bootstrap.eventsReplayed,
-      total_records_overwritten: 0,
-      total_records_skipped: 0,
-      duration_ms: 0,
-    };
   }
 
   private async signalCompletion(

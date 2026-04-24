@@ -16,7 +16,6 @@ import {
 import { Presence, type PresenceUser } from '../matrix/presence';
 import { usePresencePrefs } from '../lib/presence-prefs';
 import { OnlineUsers } from './OnlineUsers';
-import { GDriveSyncService } from '../google-drive/gdrive-sync';
 import { EodbBlobWriter } from '../storage/eodb-blob-writer';
 import { eodbBlobDataIdForRoom, probeBlobExists } from '../storage/eodb-blob-endpoint';
 import {
@@ -33,7 +32,6 @@ import {
   type KeyHealRequest,
   type KeyHealResponse,
 } from '../crypto/key-delivery';
-import { useGDriveStore } from '../google-drive/gdrive-store';
 import { useAirtableStore } from '../ingestion/airtable-store';
 import { resolveDataRoom } from '../matrix/event-bridge';
 import { configureMatrixDomain, isAminoHomeserver } from '../lib/matrix-domain';
@@ -129,7 +127,6 @@ import { EO_POWER_LEVEL_CONTENT } from '../permissions/types';
 import { listAllHomeserverUsers } from '../matrix/user-discovery';
 import { withRetry } from '../matrix/connection-resilience';
 import { invalidateStatsCache } from '../db/space-statistics';
-import { clearFolderIdCache, setActiveSpaceRoomId } from '../google-drive/gdrive-api';
 import { useApiConnectionStore } from '../store/api-connection-store';
 
 /** Set to false to disable all Matrix activity (sync, room creation, discovery). */
@@ -499,21 +496,10 @@ interface CachedSpace {
   syncManager: SyncManager | null;
   peerSync: PeerSync | null;
   webrtcPeer: WebRTCPeer | null;
-  gdriveSync: GDriveSyncService | null;
   mainRoomId: string | null;
   presence: Presence | null;
   /** Full room topology from SpaceConfig (when available) */
   spaceRooms?: { main: string; restricted?: string; governance?: string } | null;
-}
-
-/** Stable per-tab session ID — used by GDriveSyncService for bake intent files. */
-function getSessionId(): string {
-  let id = sessionStorage.getItem('eo-gdrive-session');
-  if (!id) {
-    id = Math.random().toString(36).slice(2, 10);
-    sessionStorage.setItem('eo-gdrive-session', id);
-  }
-  return id;
 }
 
 export function Layout({ session, onLogout, localMode }: LayoutProps) {
@@ -522,9 +508,9 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   const ready = useEoStore((s) => s.ready);
   const lastSeq = useEoStore((s) => s.lastSeq);
   const recentEvents = useEoStore((s) => s.recentEvents);
-  // Drive + Airtable integrations rely on shared n8n proxy credentials
-  // scoped to the hosted Amino deployment. Gate UI on the homeserver so
-  // users on foreign Matrix servers never see the endpoints.
+  // Airtable integration relies on shared n8n proxy credentials scoped to the
+  // hosted Amino deployment. Gate UI on the homeserver so users on foreign
+  // Matrix servers never see the endpoints.
   const isAmino = isAminoHomeserver(session.homeserver);
   const { route, navigate } = useHashRoute();
   const activeView = route.view;
@@ -744,7 +730,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     const canonical = normalizeSpaceTarget(target);
     // Hardwall: purge all caches not scoped to a space before loading new space data.
     invalidateStatsCache();
-    clearFolderIdCache();
     useApiConnectionStore.getState().reset();
     setSelectedSpace(canonical);
     localStorage.setItem('eo-selected-space', canonical);
@@ -772,7 +757,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     const cached = spaceCacheRef.current.get(target);
     if (!cached) return;
     try { cached.workerClient.worker.terminate(); } catch { /* best effort */ }
-    try { cached.gdriveSync?.stop(); } catch { /* best effort */ }
     try { cached.peerSync?.destroy(); } catch { /* best effort */ }
     try { cached.webrtcPeer?.stop(); } catch { /* best effort */ }
     try { cached.syncManager?.destroy(); } catch { /* best effort */ }
@@ -1401,13 +1385,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         oldSyncManager.destroy();
       }
 
-      if (prevSpaceRef.current) {
-        const oldCached = spaceCacheRef.current.get(prevSpaceRef.current);
-        if (oldCached?.gdriveSync) {
-          oldCached.gdriveSync.stop();
-        }
-      }
-
       prevSpaceRef.current = selectedSpace;
       // Clear Layout-level state so old space data doesn't flash
       setAllStates([]);
@@ -1873,13 +1850,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         recentEvents: [...st.recentEvents.slice(-99), event],
         lastSeq: event.seq,
       }));
-      // NOTE: do NOT call gdriveSync.saveOp() here.
-      // This callback fires for ALL folded events: Drive pulls, peer events,
-      // server events, and local dispatches.  Calling saveOp() here would
-      // cross-contaminate spaces — when Space A's background timer pulls new
-      // events, this callback runs while Zustand may already point at Space B,
-      // so saveOp() would write Space A events into Space B's Drive folder.
-      // Local dispatches are saved by dispatch()/batchImport() in eo-store.ts.
     };
 
     async function setupSpaceStore() {
@@ -1940,54 +1910,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           cleanupFns.push(() => {});
         }
 
-        // Restart Google Drive sync for cached space
-        if (existing.gdriveSync) {
-          // Refresh the room ID in case it was resolved after initial construction.
-          if (spaceRoomId) existing.gdriveSync.setSpaceRoomId(spaceRoomId);
-          // setGDriveSync BEFORE start() so dispatches during hydration are saved
-          useEoStore.getState().setGDriveSync(existing.gdriveSync);
-          existing.gdriveSync.start().catch(e =>
-            console.warn('[EO-DB] Google Drive sync restart failed for cached space', selectedSpace, e),
-          );
-        } else if (selectedSpace && session.accessToken && matrixClientRef.current) {
-          // GDrive wasn't started on the first run (Matrix wasn't ready yet). Try now.
-          const gdriveState = useGDriveStore.getState();
-          if (!gdriveState.connected && gdriveState.syncMode === 'n8n') {
-            const capturedSpaceRoomId = spaceRoomId;
-            const capturedEntry = existing;
-            const spaceEntry = mergedEntries.find(e => e.spaceTarget === selectedSpace);
-            const spaceName = spaceEntry?.displayName ?? selectedSpace!;
-            gdriveState.connect(matrixClientRef.current, capturedSpaceRoomId ?? '', session.accessToken)
-              .then(() => {
-                if (isStale()) return;
-                const stateAfter = useGDriveStore.getState();
-                const effectiveToken = stateAfter.matrixAccessToken;
-                if (!effectiveToken) return;
-                useGDriveStore.getState().setCurrentSpace(selectedSpace!, spaceName, capturedSpaceRoomId ?? undefined);
-                const gs = new GDriveSyncService({
-                  store: useEoStore.getState().store!,
-                  spaceId: selectedSpace!,
-                  spaceName,
-                  userId: session.userId,
-                  sessionId: getSessionId(),
-                  accessToken: effectiveToken,
-                  spaceRoomId: capturedSpaceRoomId ?? undefined,
-                  onEvent: onFoldEvent,
-                  onHydrated: () => { init(capturedEntry.workerClient); },
-                });
-                capturedEntry.gdriveSync = gs;
-                useEoStore.getState().setGDriveSync(gs);
-                if (capturedEntry.peerSync) {
-                  const ps = capturedEntry.peerSync;
-                  gs.onOpSaved = (seq: number) => { ps.broadcastGDriveUpdate(seq).catch(() => {}); };
-                  ps.onGDriveUpdate = () => { gs.triggerImmediateCheck(); };
-                }
-                return gs.start();
-              })
-              .catch(e => console.warn('[EO-DB] GDrive lazy start failed for cached space', selectedSpace, e));
-          }
-        }
-
         // Start a fresh presence instance for the cached space.
         // (Previous instance was stopped on unmount; creating a new one ensures
         // subscriber effects re-fire with fresh state.)
@@ -2012,7 +1934,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       const eager = eagerWorkerRef.current;
       const usingEager = eager !== null && eager.spaceId === selectedSpace!;
       const workerClient = usingEager ? eager.client : createFoldWorkerClient();
-      cache.set(selectedSpace!, { workerClient, syncManager: null, peerSync: null, webrtcPeer: null, gdriveSync: null, mainRoomId: null, presence: null, spaceRooms: null });
+      cache.set(selectedSpace!, { workerClient, syncManager: null, peerSync: null, webrtcPeer: null, mainRoomId: null, presence: null, spaceRooms: null });
 
       let initError: unknown;
       // Captured from the ready message so eo-store.init can compare it
@@ -2123,82 +2045,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         }
       }
 
-      // Start Google Drive sync (n8n proxy by default; direct OAuth2 if mode=oauth)
-      let gdriveSync: GDriveSyncService | null = null;
-
-      if (selectedSpace && session.accessToken && matrixClientRef.current) {
-        try {
-          // Connect to Google Drive — mode dispatched inside connect()
-          const gdriveState = useGDriveStore.getState();
-          if (!gdriveState.connected) {
-            if (gdriveState.syncMode === 'n8n') {
-              await gdriveState.connect(matrixClientRef.current, spaceRoomId ?? '', session.accessToken);
-              console.log('[EO-DB] Google Drive auto-connected via n8n proxy');
-            }
-            // oauth mode: never auto-connect — user must trigger from Settings
-          }
-
-          // Resolve the effective token depending on active sync mode
-          const gdriveStateAfter = useGDriveStore.getState();
-          const effectiveToken = gdriveStateAfter.syncMode === 'n8n'
-            ? gdriveStateAfter.matrixAccessToken
-            : gdriveStateAfter.googleAccessToken;
-          if (!effectiveToken) throw new Error('Google Drive token unavailable after connect');
-
-          // Find the space display name for Drive folder labelling
-          const gdriveSpaceEntry = mergedEntriesRef.current.find(e => e.spaceTarget === selectedSpace);
-          const gdriveSpaceName = gdriveSpaceEntry?.displayName ?? selectedSpace!;
-
-          // Activate the space room for n8n proxy auth BEFORE setting currentSpace,
-          // so the widget's immediate loadFiles() call includes the correct space_room_id.
-          setActiveSpaceRoomId(spaceRoomId ?? undefined);
-
-          // Set current space in GDrive store (pass room ID so folder lookup uses it)
-          useGDriveStore.getState().setCurrentSpace(selectedSpace, gdriveSpaceName, spaceRoomId ?? undefined);
-
-          // GDriveSyncService.start() handles initial hydration immediately.
-          // setGDriveSync BEFORE start() so dispatches during hydration are saved.
-          gdriveSync = new GDriveSyncService({
-            store: useEoStore.getState().store!,
-            spaceId: selectedSpace,
-            spaceName: gdriveSpaceName,
-            userId: session.userId,
-            sessionId: getSessionId(),
-            accessToken: effectiveToken,
-            spaceRoomId: spaceRoomId ?? undefined,
-            onEvent: onFoldEvent,
-            onHydrated: () => { init(workerClient); },
-          });
-          useEoStore.getState().setGDriveSync(gdriveSync);
-
-          // Wire GDrive ↔ PeerSync notifications:
-          // After a GDrive write confirms, broadcast to peers so they pull immediately
-          // instead of waiting up to 15s. Peers respond by calling triggerImmediateCheck().
-          if (peerSync) {
-            const ps = peerSync;
-            const gs = gdriveSync;
-            gs.onOpSaved = (seq: number) => {
-              ps.broadcastGDriveUpdate(seq).catch(() => {});
-            };
-            ps.onGDriveUpdate = () => {
-              gs.triggerImmediateCheck();
-            };
-          }
-
-          // Don't await — let GDrive hydration race in the background with
-          // peer-sync timeline events. Whichever source produces events first
-          // appends them; fold dedup by client_event_id keeps the result
-          // identical regardless of arrival order. Awaiting here would gate
-          // setup completion on a single source coming online first.
-          gdriveSync.start().catch(e =>
-            console.warn('[EO-DB] Google Drive sync start failed for space', selectedSpace, e),
-          );
-        } catch (e) {
-          console.warn('[EO-DB] Google Drive sync start failed for space', selectedSpace, e);
-          gdriveSync = null;
-        }
-      }
-
       // Start presence heartbeat for the space room (Matrix to-device pings).
       // Independent of SyncManager — works in all sync modes.
       let presenceInstance: Presence | null = null;
@@ -2236,7 +2082,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
 
       // Update the cached entry with sync services (worker was cached earlier
       // to prevent race conditions; now enrich with fully-initialized services).
-      cache.set(selectedSpace!, { workerClient, syncManager: null, peerSync, webrtcPeer, gdriveSync, mainRoomId: spaceRoomId, presence: presenceInstance, spaceRooms: resolvedSpaceRooms });
+      cache.set(selectedSpace!, { workerClient, syncManager: null, peerSync, webrtcPeer, mainRoomId: spaceRoomId, presence: presenceInstance, spaceRooms: resolvedSpaceRooms });
     }
 
     setupSpaceStore();
@@ -2263,16 +2109,10 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               console.warn('[EO-DB] Snapshot save failed:', err);
             }));
       }
-      if (cached.gdriveSync) {
-        savePromises.push(cached.gdriveSync.forceSave().catch((err) => {
-              console.warn('[EO-DB] Google Drive save failed:', err);
-            }));
-      }
     }
     await Promise.all(savePromises);
 
     for (const [, cached] of cache) {
-      if (cached.gdriveSync) cached.gdriveSync.stop();
       cached.workerClient.worker.terminate();
     }
     cache.clear();
@@ -2301,20 +2141,13 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
 
   // Handle tab visibility changes.
   //
-  // On `hidden`: do NOT run the heavy gdriveSync.forceSave() (fullPushToGDrive) —
-  //   every dispatched event is already flushed to Drive in saveOp() via
-  //   flushBuffer(), so ops are durable without a full rewrite. The legacy
-  //   SyncManager path still saves its snapshot (cheap; only fires for older
-  //   spaces that don't use PeerSync).
+  // On `hidden`: save SyncManager snapshot (cheap; only fires for older spaces
+  //   that don't use PeerSync).
   //
-  // On `visible`: proactively re-sync so the user doesn't wait for
-  //   browser-throttled timers to catch up. Background tabs throttle
-  //   setInterval to ~1 min, so GDrive's 15 s cycle and PeerSync's 30 s
-  //   heartbeat effectively pause. Without an explicit kick here, the user
-  //   sees stale data for 30-60+ s after tabbing back in.
+  // On `visible`: re-announce PeerSync presence so peers push us anything we
+  //   missed while the tab was backgrounded.
   //
-  // On `beforeunload`: run the full forceSave for durability before the tab
-  //   is closed. This is the only path where a full rewrite is warranted.
+  // On `beforeunload`: save snapshots for durability before the tab closes.
   useEffect(() => {
     let fullSaveInFlight = false;
 
@@ -2329,11 +2162,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               console.warn('[EO-DB] Snapshot save failed:', err);
             }));
           }
-          if (cached.gdriveSync) {
-            promises.push(cached.gdriveSync.forceSave().catch((err) => {
-              console.warn('[EO-DB] Google Drive save failed:', err);
-            }));
-          }
         }
         await Promise.all(promises);
       } finally {
@@ -2342,10 +2170,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     };
 
     const lightSaveOnHide = () => {
-      // Legacy SyncManager snapshot only (cheap). Skip gdriveSync.forceSave —
-      // ops are already flushed to Drive in saveOp() so there's nothing
-      // unsaved, and fullPushToGDrive is expensive enough that running it on
-      // every tab-out causes the slow-load-on-return the user sees.
       for (const [, cached] of spaceCacheRef.current) {
         if (cached.syncManager) {
           cached.syncManager.saveSnapshot().catch((err) => {
@@ -2356,21 +2180,8 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     };
 
     const refreshOnVisible = () => {
-      // Kick browser-throttled timers back into action:
-      //   1. Pull any new events from Drive immediately (instead of waiting
-      //      up to 15 s for the next setInterval tick).
-      //   2. Re-announce PeerSync presence so peers push us anything we
-      //      missed while the tab was backgrounded.
       for (const [, cached] of spaceCacheRef.current) {
-        if (cached.gdriveSync) {
-          try {
-            cached.gdriveSync.triggerImmediateCheck();
-          } catch (err) {
-            console.warn('[EO-DB] GDrive immediate check failed:', err);
-          }
-        }
         if (cached.peerSync) {
-          // Re-run start() — it cancels the old heartbeat and re-announces.
           cached.peerSync.start().catch((err) => {
             console.warn('[EO-DB] PeerSync re-announce failed:', err);
           });
@@ -2386,9 +2197,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       }
     };
 
-    // beforeunload can't await — fire-and-forget is the best we can do there.
-    // This is the ONE place we still run the heavy fullPushToGDrive, because
-    // the tab is about to close and we need full durability.
     const handleBeforeUnload = () => { fullSaveAll(); };
 
     document.addEventListener('visibilitychange', handleVisibilityChange);
@@ -2707,7 +2515,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                   syncManager: null,
                   peerSync: null,
                   webrtcPeer: null,
-                  gdriveSync: null,
                   mainRoomId,
                   presence: null,
                   spaceRooms,

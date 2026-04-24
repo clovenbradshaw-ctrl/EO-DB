@@ -2,15 +2,13 @@
  * Sync consistency tests — multi-step data flow checks across the full pipeline.
  *
  * These tests verify invariants that span log↔state, graph symmetry,
- * reload consistency, idempotency, and GDrive hydration completeness.
+ * reload consistency, and idempotency.
  *
  * Real bugs confirmed:
  *   Bug B (Level 7): reload does not recompute EVA → _computed is stale.
  *   Bug C (Level 4): fold position applyEvent doesn't handle { added:[...] } CON.
  *
  * Pre-existing fixes confirmed (tests pass):
- *   Bug D: hydrateFromGDrive applies all files in new format.
- *   Bug E: dispatch() saveOp is called inside the processEvent callback.
  *   Bug F: cascadeUpward has MAX_CASCADE_DEPTH = 20 guard.
  */
 
@@ -363,23 +361,9 @@ describe('Graph ↔ FoldPosition consistency', () => {
   });
 });
 
-// ─── GDrive hydration completeness ───────────────────────────────────────────
+// ─── Hydration idempotency ───────────────────────────────────────────────────
 
-describe('GDrive hydration completeness — confirms Bug D is fixed', () => {
-  it('hydrateFromGDrive applies all three log tiers (new format)', async () => {
-    // This test verifies the structure of hydrateFromGDrive without mocking GDrive.
-    // The key property to verify: the function downloads ALL log tiers (viewer,
-    // restricted, admin) and ALL recent buffers, merging with dedup.
-    //
-    // Structural verification: read the source to confirm all tiers are applied.
-    // The real integration test would require a GDrive mock — deferred to e2e.
-    //
-    // Bug D was: hydrateFromGDrive broke on first successful file and skipped rest.
-    // Fix: collect ALL events from ALL files into a merged Map, then apply in order.
-    // Confirmed by reading gdrive-sync.ts: allLogEvents Map collects from all tiers.
-    expect(true).toBe(true); // structural fix confirmed by code review
-  });
-
+describe('Hydration idempotency', () => {
   it('hydration from two stores is idempotent', async () => {
     // Simulate what hydration does: apply events from one store to another
     const sourceStore = createTestStore();
@@ -406,14 +390,10 @@ describe('GDrive hydration completeness — confirms Bug D is fixed', () => {
   });
 });
 
-// ─── dispatch() saveOp — confirms Bug E is fixed ─────────────────────────────
+// ─── dispatch() onEvent callback ─────────────────────────────────────────────
 
-describe('dispatch() saveOp — confirms Bug E is fixed', () => {
-  it('processEvent callback receives the full event (GDrive would receive it)', async () => {
-    // Bug E was: dispatch() in eo-store.ts didn't call gdriveSync.saveOp().
-    // Fix: saveOp is called inside the processEvent onEvent callback.
-    // This test verifies the callback mechanism works — the store's processEvent
-    // correctly calls the onEvent callback with the committed event.
+describe('dispatch() onEvent callback', () => {
+  it('processEvent callback receives the full committed event', async () => {
     const store = createTestStore();
     const received: any[] = [];
 
@@ -426,7 +406,5 @@ describe('dispatch() saveOp — confirms Bug E is fixed', () => {
     expect(received.length).toBe(1);
     expect(received[0].op).toBe('INS');
     expect(received[0].seq).toBeDefined();
-    // In eo-store.ts dispatch(), gdriveSync.saveOp(fullEvent) is called here.
-    // Bug E is confirmed fixed by code inspection of eo-store.ts lines ~218.
   });
 });

@@ -5,7 +5,7 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 import { restoreSession, type MatrixSession } from './matrix/client';
 import { useEoStore } from './store/eo-store';
 import { ThemeProvider, useTheme } from './theme';
-import { initGoogleOAuth, handleOAuthCallback } from './google-drive/gdrive-oauth';
+import { initGoogleOAuth, handleOAuthCallback } from './google-oauth/google-oauth';
 import { startWriteBackListener } from './google-calendar/gcalendar-sync';
 
 /** Synthetic session used for local-only mode (no Matrix server). */
@@ -106,8 +106,6 @@ function AppMain() {
 
   // Guard: if this is the OAuth popup callback, show a minimal placeholder
   // until handleOAuthCallback() (running in useEffect) closes the popup.
-  // Without this guard the popup renders the full app, including another
-  // "Connect Google Drive" button, which re-triggers the OAuth flow (loop).
   //
   // Under Chrome's COOP enforcement, `window.close()` in the popup can
   // silently fail after the round-trip through accounts.google.com. When

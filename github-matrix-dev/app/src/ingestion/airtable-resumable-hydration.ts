@@ -71,7 +71,7 @@ import {
 
 /**
  * Narrow interface a Drive backend must satisfy. Lets the orchestrator run
- * against the real `GDriveSyncService` in production and against an
+ * against a future durable backend in production and against an
  * in-memory fake in tests without coupling to the full Drive service.
  */
 export interface HydrationBundleDrive {
