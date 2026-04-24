@@ -17,6 +17,7 @@ import { Presence, type PresenceUser } from '../matrix/presence';
 import { usePresencePrefs } from '../lib/presence-prefs';
 import { OnlineUsers } from './OnlineUsers';
 import { GDriveSyncService } from '../google-drive/gdrive-sync';
+import { EodbBlobWriter } from '../storage/eodb-blob-writer';
 import { useGDriveStore } from '../google-drive/gdrive-store';
 import { useAirtableStore } from '../ingestion/airtable-store';
 import { resolveDataRoom } from '../matrix/event-bridge';
@@ -1454,6 +1455,33 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     const isStale = () => !mounted || setupGenRef.current !== generation;
     const cleanupFns: (() => void)[] = [];
 
+    const startEodbBlobWriter = (roomId: string): (() => void) => {
+      const client = matrixClientRef.current;
+      const store = useEoStore.getState().store;
+      if (!client || !store || !roomId) return () => {};
+      const writer = new EodbBlobWriter({
+        client,
+        roomId,
+        matrixToken: session.accessToken,
+        keyring: { keys: new Map() },
+        store,
+        userId: session.userId,
+        deviceId: client.getDeviceId() ?? '',
+      });
+      writer.start();
+      useEoStore.getState().setEodbBlobWriter(writer);
+      const unsub = useEoStore.subscribe((state, prev) => {
+        if (state.lastSeq > prev.lastSeq) writer.notifyDirty(state.lastSeq);
+      });
+      return () => {
+        unsub();
+        writer.stop();
+        if (useEoStore.getState().eodbBlobWriter === writer) {
+          useEoStore.getState().setEodbBlobWriter(null);
+        }
+      };
+    };
+
     // Holds the room topology discovered during resolution (used to populate cache).
     let resolvedSpaceRooms: SpaceConfig['rooms'] | null = null;
 
@@ -1714,6 +1742,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               existing.webrtcPeer = wrtc;
               useEoStore.getState().setSyncManager(ps as any);
               cleanupFns.push(() => { ps.stop(); wrtc.stop(); });
+              cleanupFns.push(startEodbBlobWriter(spaceRoomId));
             } else {
               ps.stop(); wrtc.stop();
             }
@@ -1900,6 +1929,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             if (isStale()) { peerSync.stop(); webrtcPeer.stop(); return; }
             useEoStore.getState().setSyncManager(peerSync as any);
             cleanupFns.push(() => { peerSync!.stop(); webrtcPeer!.stop(); });
+            cleanupFns.push(startEodbBlobWriter(spaceRoomId));
           }
         } catch (e) {
           console.warn('[EO-DB] Sync init failed for', selectedSpace, e);

@@ -23,6 +23,7 @@ import {
 } from '../db/lazy-fold';
 import type { EoEvent, EoEventInput, EoState, HorizonResponse } from '../db/types';
 import type { SyncManager } from '../matrix/sync-manager';
+import type { EodbBlobWriter } from '../storage/eodb-blob-writer';
 import type { GDriveSyncService } from '../google-drive/gdrive-sync';
 import { useGDriveStore } from '../google-drive/gdrive-store';
 import type { ResolvedPermissions } from '../permissions/types';
@@ -115,6 +116,8 @@ interface EoDbState {
   syncManager: SyncManager | null;
   /** The Google Drive sync service for backup */
   gdriveSync: GDriveSyncService | null;
+  /** Proactive encrypted-blob writer for the n8n eo-blob webhook */
+  eodbBlobWriter: EodbBlobWriter | null;
   /** Recent events processed through the fold */
   recentEvents: EoEvent[];
   /** Current sequence number */
@@ -148,6 +151,7 @@ interface EoDbState {
 
   setSyncManager: (syncManager: SyncManager) => void;
   setGDriveSync: (gdriveSync: GDriveSyncService) => void;
+  setEodbBlobWriter: (writer: EodbBlobWriter | null) => void;
   setPermissions: (permissions: ResolvedPermissions | null) => void;
   setUserManifest: (manifest: UserManifest | null) => void;
   /**
@@ -175,6 +179,7 @@ export const useEoStore = create<EoDbState>((set, get) => ({
   workerClient: null,
   syncManager: null,
   gdriveSync: null,
+  eodbBlobWriter: null,
   recentEvents: [],
   lastSeq: 0,
   ready: false,
@@ -325,6 +330,14 @@ export const useEoStore = create<EoDbState>((set, get) => ({
 
   setGDriveSync(gdriveSync: GDriveSyncService) {
     set({ gdriveSync });
+  },
+
+  setEodbBlobWriter(writer: EodbBlobWriter | null) {
+    const existing = get().eodbBlobWriter;
+    if (existing && existing !== writer) {
+      existing.stop();
+    }
+    set({ eodbBlobWriter: writer });
   },
 
   setPermissions(permissions: ResolvedPermissions | null) {
@@ -614,7 +627,8 @@ export const useEoStore = create<EoDbState>((set, get) => ({
   },
 
   teardown() {
-    const { store, workerClient } = get();
+    const { store, workerClient, eodbBlobWriter } = get();
+    if (eodbBlobWriter) eodbBlobWriter.stop();
     if (store) store.close();
     if (workerClient) workerClient.worker.terminate();
     // Drop the shard-worker pool alongside the fold worker so teardown is
@@ -625,6 +639,7 @@ export const useEoStore = create<EoDbState>((set, get) => ({
       workerClient: null,
       syncManager: null,
       gdriveSync: null,
+      eodbBlobWriter: null,
       ready: false,
       recentEvents: [],
       lastSeq: 0,

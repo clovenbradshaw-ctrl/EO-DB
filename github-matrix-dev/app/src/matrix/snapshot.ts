@@ -173,7 +173,7 @@ function isClaimableByUs(existing: SnapshotClaim | null, myDeviceId: string, now
   return existing.device_id === myDeviceId;
 }
 
-async function tryClaimSnapshotLease(
+export async function tryClaimSnapshotLease(
   client: MatrixClient,
   roomId: string,
   targetSeq: number,
@@ -202,7 +202,7 @@ async function tryClaimSnapshotLease(
   return afterWrite.device_id === deviceId && afterWrite.status === 'pending';
 }
 
-async function recordSnapshotClaimResult(
+export async function recordSnapshotClaimResult(
   client: MatrixClient,
   roomId: string,
   deviceId: string,
