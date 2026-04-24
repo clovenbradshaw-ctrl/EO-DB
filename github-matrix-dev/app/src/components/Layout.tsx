@@ -1465,46 +1465,61 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         const keyring = await loadSpaceKeyring(roomId);
         if (cancelled) return;
 
-        // If we don't have a key yet, only mint one when it's safe — i.e. the
-        // remote blob doesn't already hold ciphertext encrypted under a key
-        // some other device owns. Otherwise generating here would overwrite
-        // unreadable data. When the probe is inconclusive (network/5xx),
-        // stay conservative and wait for key delivery.
+        // If we don't have a key yet, mint one when it's safe — either the
+        // remote is known to be empty, or we're the only joined member of the
+        // room (so no peer could have written ciphertext under a key we don't
+        // hold, and no peer could deliver a key to us). Otherwise wait for key
+        // delivery from a peer.
         if (keyring.keys.size === 0) {
           const dataId = await eodbBlobDataIdForRoom(roomId);
           const probe = await probeBlobExists(session.accessToken, roomId, dataId);
           if (cancelled) return;
-          if (probe === 'missing') {
+
+          const room = client.getRoom(roomId);
+          const myUserId = client.getUserId();
+          const myDevice = client.getDeviceId() ?? '';
+          const otherMembers = room && myUserId
+            ? room.getJoinedMembers().filter((m: any) => m.userId !== myUserId)
+            : [];
+          const isAlone = otherMembers.length === 0;
+
+          // Safe to mint:
+          //  - probe === 'missing': remote has nothing, fresh start.
+          //  - isAlone && probe !== 'exists': no peer could have written
+          //    ciphertext under a foreign key, and none could heal us. Even
+          //    when the probe is inconclusive, staying idle here strands the
+          //    writer forever with no way out — so mint locally.
+          const canMint =
+            probe === 'missing' || (isAlone && probe !== 'exists');
+
+          if (canMint) {
             await generateSpaceKey(roomId, keyring, `${roomId}.blob`);
-            console.log('[EO-DB blob-writer] Minted fresh space key for', roomId);
+            console.log(
+              '[EO-DB blob-writer] Minted fresh space key for',
+              roomId,
+              `(probe=${probe}, alone=${isAlone})`,
+            );
           } else {
             console.warn(
               '[EO-DB blob-writer] No local key and remote blob probe returned',
               probe,
-              '— awaiting key delivery. Sending heal request.',
+              `(other members=${otherMembers.length}) — awaiting key delivery. Sending heal request.`,
             );
-            // Best-effort heal: ask all joined members for the key. Whoever
-            // has it will respond via KEY_HEAL_RESPONSE and our handler
-            // below will import it.
+            // Best-effort heal: ask all other joined members for the key.
+            // Whoever has it will respond via KEY_HEAL_RESPONSE and our
+            // handler below will import it.
             try {
-              const room = client.getRoom(roomId);
-              const myUserId = client.getUserId();
-              const myDevice = client.getDeviceId() ?? '';
-              if (room && myUserId) {
-                const members = room.getJoinedMembers();
-                const req: KeyHealRequest = {
-                  space_id: roomId,
-                  known_key_ids: [],
-                  from_device: myDevice,
-                };
-                for (const m of members) {
-                  if (m.userId === myUserId) continue;
-                  const inner = new Map<string, object>();
-                  inner.set('*', req);
-                  const outer = new Map<string, Map<string, object>>();
-                  outer.set(m.userId, inner);
-                  await (client as any).sendToDevice(KEY_HEAL_REQUEST_TYPE, outer);
-                }
+              const req: KeyHealRequest = {
+                space_id: roomId,
+                known_key_ids: [],
+                from_device: myDevice,
+              };
+              for (const m of otherMembers) {
+                const inner = new Map<string, object>();
+                inner.set('*', req);
+                const outer = new Map<string, Map<string, object>>();
+                outer.set(m.userId, inner);
+                await (client as any).sendToDevice(KEY_HEAL_REQUEST_TYPE, outer);
               }
             } catch (e) {
               console.warn('[EO-DB blob-writer] Heal request failed:', e);
