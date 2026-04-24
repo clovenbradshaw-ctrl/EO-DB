@@ -180,6 +180,13 @@ function composeValues(values: unknown[]): unknown {
 
 export interface ProjectionEngineOpts {
   store: EoStore;
+  /**
+   * Optional provider of events that are NOT in the backing store but should
+   * still participate in projections — used by the Branch Explorer's
+   * counterfactual demo overlay. Return value is read on every `loadEvents`
+   * cache miss; callers must call `invalidate()` when the overlay changes.
+   */
+  getExtraEvents?: () => EoEvent[];
 }
 
 export class ProjectionEngine {
@@ -203,6 +210,8 @@ export class ProjectionEngine {
   private async loadEvents(): Promise<EoEvent[]> {
     if (this.logCache) return this.logCache;
     const all = await readLogSince(this.opts.store, 0);
+    const extras = this.opts.getExtraEvents?.();
+    if (extras && extras.length) all.push(...extras);
     all.sort(compareEvents);
     this.logCache = all;
     return all;

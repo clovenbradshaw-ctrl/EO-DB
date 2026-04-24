@@ -19,6 +19,18 @@ import type {
   WorldType,
 } from '../types/branch';
 import { readLogSince } from '../db/log';
+import {
+  BRANCHING_FIXTURES,
+  buildDemoEvents,
+  type BranchingFixtureKey,
+} from '../projection/__tests__/fixtures/branching-demo';
+
+/**
+ * Synthetic seq numbers for counterfactual demo events live in a reserved
+ * range well above any realistic user log. Keeps (ts, seq) ordering
+ * deterministic when demo events are merged with real ones.
+ */
+const DEMO_SEQ_BASE = 10_000_000;
 
 interface BranchStoreState {
   /** Active branches loaded for the current session, keyed by branch_id. */
@@ -41,6 +53,31 @@ interface BranchStoreState {
 
   /** The shared ProjectionEngine instance — created lazily on first use. */
   engine: ProjectionEngine | null;
+
+  // ─── Counterfactual demo overlay ──────────────────────────────────────────
+  //
+  // Ephemeral, in-memory only. When enabled, demo events with seq numbers in
+  // the reserved DEMO_SEQ_BASE+ range are injected into the ProjectionEngine
+  // via getExtraEvents — they flow through projections and appear in the SYN
+  // sidebar but are never written to the log or synced to peers.
+
+  /** True when the counterfactual demo overlay is active. */
+  demoEnabled: boolean;
+  /** Which preset fixture the overlay is loaded from. */
+  demoFixtureKey: BranchingFixtureKey | null;
+  /** Demo events with synthetic seqs — empty when demo is off. */
+  demoEvents: EoEvent[];
+  /** Three synthesized W-0/W-1/W-2 branch records for the demo SYN. */
+  demoBranches: BranchRecord[];
+  /** Seq of the demo SYN event — the policy branch point. */
+  demoSynSeq: number | null;
+  /** Subject string of the demo SYN (e.g. "contact:a,contact:b"). */
+  demoSubject: string | null;
+
+  /** Load the demo overlay for a given fixture key (defaults to the CRM merge). */
+  loadCounterfactualDemo(key?: BranchingFixtureKey): void;
+  /** Clear the demo overlay and invalidate dependent caches. */
+  unloadCounterfactualDemo(): void;
 
   // ─── Actions ──────────────────────────────────────────────────────────────
 
@@ -87,20 +124,88 @@ export const useBranchStore = create<BranchStoreState>((set, get) => ({
   projecting: false,
   engine: null,
 
+  demoEnabled: false,
+  demoFixtureKey: null,
+  demoEvents: [],
+  demoBranches: [],
+  demoSynSeq: null,
+  demoSubject: null,
+
+  loadCounterfactualDemo(key = 'contact_j_walker') {
+    const existing = get();
+    if (existing.demoEnabled && existing.demoFixtureKey === key) return;
+
+    const fixture = BRANCHING_FIXTURES[key];
+    if (!fixture) {
+      console.warn('[branch-store] unknown demo fixture key:', key);
+      return;
+    }
+
+    const { events, synSeq, buildBranch } = buildDemoEvents(fixture, DEMO_SEQ_BASE);
+    const worlds: WorldType[] = ['canonical', 'never-merged', 'always-merged'];
+    const demoBranches = worlds.map((w) =>
+      buildBranch(w, w === 'always-merged' ? existing.selectedStance : null),
+    );
+    const subject = fixture.sources.join(',');
+
+    set((state) => ({
+      demoEnabled: true,
+      demoFixtureKey: key,
+      demoEvents: events,
+      demoBranches,
+      demoSynSeq: synSeq,
+      demoSubject: subject,
+      // Merge demo branches into the active list so visibleBranches sees them.
+      branches: [
+        ...state.branches.filter((b) => b.subject !== subject),
+        ...demoBranches,
+      ],
+      activeBranchSubject: subject,
+      // Snap the scrubber to the fixture's demo cursor so the first frame
+      // shows post-merge state where the three worlds differ most.
+      scrubberT: 0.75,
+    }));
+    get().invalidate();
+  },
+
+  unloadCounterfactualDemo() {
+    const state = get();
+    if (!state.demoEnabled) return;
+    const demoIds = new Set(state.demoBranches.map((b) => b.branch_id));
+    const wasActive = state.activeBranchSubject === state.demoSubject;
+    set({
+      demoEnabled: false,
+      demoFixtureKey: null,
+      demoEvents: [],
+      demoBranches: [],
+      demoSynSeq: null,
+      demoSubject: null,
+      branches: state.branches.filter((b) => !demoIds.has(b.branch_id)),
+      activeBranchSubject: wasActive ? null : state.activeBranchSubject,
+    });
+    get().invalidate();
+  },
+
   ensureEngine() {
     const existing = get().engine;
     if (existing) return existing;
     const store = useEoStore.getState().store;
     if (!store) return null;
-    const engine = new ProjectionEngine({ store });
+    const engine = new ProjectionEngine({
+      store,
+      getExtraEvents: () => get().demoEvents,
+    });
     set({ engine });
     return engine;
   },
 
   async loadBranchesForSubject(subject: string) {
     const store = useEoStore.getState().store;
+    const demoBranches = get().demoEnabled && get().demoSubject === subject
+      ? get().demoBranches
+      : [];
     if (!store) {
-      set({ branches: [], activeBranchSubject: subject });
+      set({ branches: demoBranches, activeBranchSubject: subject });
       return;
     }
     // Branch entities live at state:branch.<branch_id>. We scan the prefix
@@ -114,7 +219,7 @@ export const useBranchStore = create<BranchStoreState>((set, get) => ({
       const record = parseBranchRecord(inner);
       if (record && record.subject === subject) branches.push(record);
     }
-    set({ branches, activeBranchSubject: subject });
+    set({ branches: [...branches, ...demoBranches], activeBranchSubject: subject });
   },
 
   async createBranchSet(synEvent: EoEvent) {
@@ -248,6 +353,27 @@ export const useBranchStore = create<BranchStoreState>((set, get) => ({
   },
 }));
 
+// When the EoStore is replaced (space switch, key change, reset), drop the
+// engine and any demo overlay so we don't project against a stale backing
+// store. Demo data is ephemeral by design — it is not restored across spaces.
+useEoStore.subscribe((state, prev) => {
+  if (state.store === prev.store) return;
+  const branchState = useBranchStore.getState();
+  if (branchState.engine) branchState.engine.invalidate();
+  useBranchStore.setState({
+    engine: null,
+    branches: [],
+    projectionCache: new Map(),
+    activeBranchSubject: null,
+    demoEnabled: false,
+    demoFixtureKey: null,
+    demoEvents: [],
+    demoBranches: [],
+    demoSynSeq: null,
+    demoSubject: null,
+  });
+});
+
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
 function defaultLabel(world: WorldType): string {
@@ -305,10 +431,21 @@ function synSurvivor(event: EoEvent): string | null {
 /**
  * Convenience helper for the BranchExplorer: enumerate all SYN events from
  * the live log so the UI can list available merge points to branch from.
+ * When the counterfactual demo overlay is active, the demo SYN is included
+ * so the sidebar can list it alongside any real merges.
  */
 export async function listSynEvents(): Promise<EoEvent[]> {
   const store = useEoStore.getState().store;
-  if (!store) return [];
+  const demoSyns = useBranchStore
+    .getState()
+    .demoEvents.filter((e) => e.op === 'SYN');
+  if (!store) return demoSyns;
   const all = await readLogSince(store, 0);
-  return all.filter((e) => e.op === 'SYN');
+  const realSyns = all.filter((e) => e.op === 'SYN');
+  return [...realSyns, ...demoSyns];
+}
+
+/** True if `seq` is in the reserved range used by the demo overlay. */
+export function isDemoSeq(seq: number): boolean {
+  return seq >= DEMO_SEQ_BASE;
 }
