@@ -46,7 +46,7 @@ import {
   saveCurrentSync,
 } from './airtable-persistence';
 import { airtableSyncEventTypes } from '../lib/matrix-domain';
-import { createImportProgressListener } from '../store/eo-store';
+import { createImportProgressListener, useEoStore } from '../store/eo-store';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -634,6 +634,14 @@ export class AirtableSyncService {
       }
 
       useAirtableStore.getState().setLastSyncResult(result);
+
+      if (result.total_records_ingested > 0) {
+        try {
+          await useEoStore.getState().flushToOpfs();
+        } catch (e) {
+          console.warn('[EO-DB] post-sync flushToOpfs failed:', e);
+        }
+      }
 
       await this.signalCompletion(result, !isHydrated, plannedStrategy);
     } catch (e: any) {

@@ -683,6 +683,14 @@ export function AirtableSettingsSection({
         progressListener.finalize();
       }
 
+      if (result.total_records_ingested > 0) {
+        try {
+          await useEoStore.getState().flushToOpfs();
+        } catch (e) {
+          console.warn('[EO-DB] post-sync flushToOpfs failed:', e);
+        }
+      }
+
       const ingested = result.total_records_ingested;
       const overwritten = result.total_records_overwritten;
       const skipped = result.total_records_skipped;

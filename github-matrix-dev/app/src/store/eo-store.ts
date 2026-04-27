@@ -163,6 +163,7 @@ interface EoDbState {
   getStateByPrefix: (prefix: string) => Promise<EoState[]>;
   getStateByPrefixPage: (prefix: string, limit: number, afterTarget?: string) => Promise<StatePage>;
   manualSnapshot: () => Promise<{ seq: number }>;
+  flushToOpfs: () => Promise<void>;
   teardown: () => void;
 
   onDispatch: ((event: EoEventInput) => void) | null;
@@ -585,6 +586,19 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     }
 
     return { seq: lastSeq };
+  },
+
+  async flushToOpfs() {
+    const { store, workerClient, recentEvents } = get();
+    if (!store) throw new Error('Store not initialized');
+    const lastSeq = await store.getCurrentSeq();
+    const memStore = store as MemoryStore;
+    if (workerClient && typeof memStore.getKvEntries === 'function') {
+      await saveKvSnapshot(workerClient, memStore.getKvEntries(), recentEvents, lastSeq);
+      saveInitCache(workerClient).catch((e) =>
+        console.warn('[EO-DB] flushToOpfs: init-cache save failed:', e),
+      );
+    }
   },
 
   teardown() {
