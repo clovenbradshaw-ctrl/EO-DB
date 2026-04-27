@@ -5,6 +5,7 @@
  */
 
 import { create } from 'zustand';
+import { pressureMonitor } from '../perf/pressure-monitor';
 
 export interface PeerInfo {
   userId: string;
@@ -184,12 +185,21 @@ export const useSyncStore = create<SyncStoreState>((set, get) => ({
       const idx = s.syncPairs.findIndex(
         (sp) => sp.sourceId === pair.sourceId && sp.targetId === pair.targetId,
       );
+      let syncPairs: SyncPair[];
       if (idx >= 0) {
-        const syncPairs = [...s.syncPairs];
+        syncPairs = [...s.syncPairs];
         syncPairs[idx] = pair;
-        return { syncPairs };
+      } else {
+        syncPairs = [...s.syncPairs, pair];
       }
-      return { syncPairs: [...s.syncPairs, pair] };
+      // Feed |lag| to PressureMonitor (Phase 1 observe-only).
+      let maxLag = 0;
+      for (const sp of syncPairs) {
+        const mag = Math.abs(sp.lag);
+        if (mag > maxLag) maxLag = mag;
+      }
+      pressureMonitor.reportSyncLag(maxLag);
+      return { syncPairs };
     });
   },
 

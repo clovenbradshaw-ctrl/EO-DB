@@ -23,10 +23,11 @@ import {
 } from '../db/lazy-fold';
 import type { EoEvent, EoEventInput, EoState, HorizonResponse } from '../db/types';
 import type { SyncManager } from '../matrix/sync-manager';
-import type { GDriveSyncService } from '../google-drive/gdrive-sync';
+import type { EodbBlobWriter } from '../storage/eodb-blob-writer';
 import type { ResolvedPermissions } from '../permissions/types';
-import type { ManifestState as UserManifest } from '../google-drive/space-permissions';
+import type { ManifestState as UserManifest } from '../permissions/space-manifest';
 import { eventHash } from '../db/hash';
+import { pressureMonitor } from '../perf/pressure-monitor';
 
 // ─── Shard worker pool (Phase G/H wiring) ──────────────────────────────────
 //
@@ -111,8 +112,8 @@ interface EoDbState {
   workerClient: FoldWorkerClient | null;
   /** The sync manager for sending events to Matrix */
   syncManager: SyncManager | null;
-  /** The Google Drive sync service for backup */
-  gdriveSync: GDriveSyncService | null;
+  /** Proactive encrypted-blob writer for the n8n eo-blob webhook */
+  eodbBlobWriter: EodbBlobWriter | null;
   /** Recent events processed through the fold */
   recentEvents: EoEvent[];
   /** Current sequence number */
@@ -121,7 +122,7 @@ interface EoDbState {
   ready: boolean;
   /** Resolved permissions for the current user in the current space */
   resolvedPermissions: ResolvedPermissions | null;
-  /** Drive-backed permission manifest for the current user (null if not loaded) */
+  /** Permission manifest for the current user (null if not loaded) */
   userManifest: UserManifest | null;
   /** Currently active user type (selected via header switcher) */
   activeUserType: string | null;
@@ -145,7 +146,7 @@ interface EoDbState {
   initLocal: (dbName?: string) => Promise<void>;
 
   setSyncManager: (syncManager: SyncManager) => void;
-  setGDriveSync: (gdriveSync: GDriveSyncService) => void;
+  setEodbBlobWriter: (writer: EodbBlobWriter | null) => void;
   setPermissions: (permissions: ResolvedPermissions | null) => void;
   setUserManifest: (manifest: UserManifest | null) => void;
   /**
@@ -161,14 +162,8 @@ interface EoDbState {
   getState: (target: string) => Promise<EoState | null>;
   getStateByPrefix: (prefix: string) => Promise<EoState[]>;
   getStateByPrefixPage: (prefix: string, limit: number, afterTarget?: string) => Promise<StatePage>;
-  manualSnapshot: () => Promise<{ mxc: string; seq: number }>;
+  manualSnapshot: () => Promise<{ seq: number }>;
   flushToOpfs: () => Promise<void>;
-  /**
-   * Manually save current data to the Matrix media store and record the
-   * resulting mxc URI in room state (EO_SNAPSHOT_STATE_TYPE) so any device
-   * joining the space can hydrate from it via findLatestSnapshot().
-   */
-  manualMatrixMediaSnapshot: () => Promise<{ mxc: string; seq: number }>;
   teardown: () => void;
 
   onDispatch: ((event: EoEventInput) => void) | null;
@@ -179,7 +174,7 @@ export const useEoStore = create<EoDbState>((set, get) => ({
   store: null,
   workerClient: null,
   syncManager: null,
-  gdriveSync: null,
+  eodbBlobWriter: null,
   recentEvents: [],
   lastSeq: 0,
   ready: false,
@@ -236,15 +231,18 @@ export const useEoStore = create<EoDbState>((set, get) => ({
       workerHeadSeq !== undefined &&
       workerHeadSeq === snapshotSeq;
 
+    let replayedEvents: EoEvent[] = [];
+    let replayFailed = false;
     if (!nothingNew) {
       // Replay only events that arrived after the snapshot was written.
       try {
-        const events = await scanLog(workerClient, snapshotSeq);
-        if (events.length > 0) {
-          await replayFromLog(memStore, events);
+        replayedEvents = await scanLog(workerClient, snapshotSeq);
+        if (replayedEvents.length > 0) {
+          await replayFromLog(memStore, replayedEvents);
         }
       } catch (e) {
         console.warn('[EO-DB] OPFS log replay failed:', e);
+        replayFailed = true;
       }
     }
 
@@ -266,7 +264,21 @@ export const useEoStore = create<EoDbState>((set, get) => ({
       // persisted alongside it — use it directly and skip the O(n) scan of
       // the memory store's log: entries.
       hydrated = cachedTail;
+    } else if (!replayFailed && (snapshotHit || replayedEvents.length > 0)) {
+      // We already have every event needed: cachedTail covers everything up to
+      // snapshotSeq, replayedEvents covers the rest. Concatenating is
+      // equivalent to readLogSince(memStore, lastSeq - LIMIT) but skips an
+      // O(n) scan of the memory store's log: entries — the dominant cost on
+      // the refresh path for spaces with large event histories.
+      const combined = cachedTail.length > 0
+        ? [...cachedTail, ...replayedEvents]
+        : replayedEvents;
+      hydrated = combined.length > RECENT_EVENT_LIMIT
+        ? combined.slice(-RECENT_EVENT_LIMIT)
+        : combined;
     } else {
+      // Fallback: snapshot miss with replay failure, or truly brand-new store.
+      // Scan the memStore for whatever's there.
       try {
         const fromSeq = Math.max(0, lastSeq - RECENT_EVENT_LIMIT);
         hydrated = await readLogSince(memStore, fromSeq);
@@ -295,6 +307,10 @@ export const useEoStore = create<EoDbState>((set, get) => ({
 
   async initLocal(dbName = 'local') {
     const workerClient = createFoldWorkerClient();
+    // Feed fold-cost telemetry to the PressureMonitor (Phase 1 observe-only).
+    workerClient.onTelemetry = ({ avgMicrosPerEvent }) => {
+      pressureMonitor.reportFoldMicros(avgMicrosPerEvent);
+    };
     const { headSeq } = await initFoldWorker(workerClient, dbName);
     await get().init(workerClient, headSeq);
   },
@@ -307,8 +323,12 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     set({ syncManager });
   },
 
-  setGDriveSync(gdriveSync: GDriveSyncService) {
-    set({ gdriveSync });
+  setEodbBlobWriter(writer: EodbBlobWriter | null) {
+    const existing = get().eodbBlobWriter;
+    if (existing && existing !== writer) {
+      existing.stop();
+    }
+    set({ eodbBlobWriter: writer });
   },
 
   setPermissions(permissions: ResolvedPermissions | null) {
@@ -363,15 +383,13 @@ export const useEoStore = create<EoDbState>((set, get) => ({
         recentEvents: [...state.recentEvents, fullEvent],
         lastSeq: fullEvent.seq,
       }));
-      // Broadcast to peers first (encrypted, via Matrix to-device)
+      // Broadcast to peers (encrypted, via Matrix to-device)
       const sm = get().syncManager;
       if (sm && 'broadcastLocalEvent' in sm) {
         (sm as any).broadcastLocalEvent(fullEvent).catch((e: unknown) =>
           console.warn('[EO-DB] broadcastLocalEvent failed:', e)
         );
       }
-      // Then persist to Google Drive
-      get().gdriveSync?.saveOp(fullEvent).catch(e => console.warn('[EO-DB] saveOp failed:', e));
     });
 
     get().onDispatch?.(populatedEvent);
@@ -400,8 +418,8 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     //      peak memory is O(chunk) not O(total).
     //
     //   2. We don't accumulate folded events. Previously `imported` grew
-    //      to a 1M-entry array just so we could gate a fullPushToGDrive on
-    //      whether anything was imported. Replaced with a boolean.
+    //      to a 1M-entry array just so we could gate a full post-import push
+    //      on whether anything was imported. Replaced with a boolean.
     //
     //   3. We throttle progress and recent-events updates. React doesn't
     //      need 20,000 re-renders to show a progress bar — ~30/second is
@@ -520,16 +538,6 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     if (anyImported) emitStoreUpdate(Math.max(lastSeq, maxFoldedSeq));
     onProgress?.(totalEvents, totalEvents);
 
-    const { gdriveSync } = get();
-    if (gdriveSync && anyImported) {
-      // Write the full log immediately so the log file is up-to-date on Drive
-      // (not just the recent buffer). This ensures a reload from a cleared OPFS
-      // always finds the imported data in the log file.
-      gdriveSync.fullPushToGDrive().catch((e) =>
-        console.warn('[EO-DB] Google Drive full push after import failed:', e),
-      );
-    }
-
     return lastSeq;
   },
 
@@ -558,15 +566,10 @@ export const useEoStore = create<EoDbState>((set, get) => ({
   },
 
   async manualSnapshot() {
-    const { store, workerClient, recentEvents, gdriveSync } = get();
+    const { store, workerClient, recentEvents } = get();
     if (!store) throw new Error('Store not initialized');
 
-    // Persist the current in-memory KV state to OPFS first. Without this, a
-    // page refresh after a bulk import + "Take Snapshot" would load the last
-    // *init-time* snapshot (which predates the import) and — depending on
-    // whether the stale fold-position checkpoint matches that snapshot — could
-    // short-circuit the scanLog/replayFromLog recovery path entirely. Saving
-    // the kv-snapshot here makes the Snapshot button actually durable locally.
+    // Persist the current in-memory KV state to OPFS.
     const lastSeq = await store.getCurrentSeq();
     const memStore = store as MemoryStore;
     if (workerClient && typeof memStore.getKvEntries === 'function') {
@@ -582,10 +585,7 @@ export const useEoStore = create<EoDbState>((set, get) => ({
       );
     }
 
-    if (gdriveSync) {
-      await gdriveSync.forceSave();
-    }
-    return { mxc: 'gdrive', seq: lastSeq };
+    return { seq: lastSeq };
   },
 
   async flushToOpfs() {
@@ -601,15 +601,9 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     }
   },
 
-  async manualMatrixMediaSnapshot() {
-    const { store, syncManager } = get();
-    if (!store) throw new Error('Store not initialized');
-    if (!syncManager) throw new Error('Matrix sync manager not initialized — connect to a space first');
-    return syncManager.manualSnapshot();
-  },
-
   teardown() {
-    const { store, workerClient } = get();
+    const { store, workerClient, eodbBlobWriter } = get();
+    if (eodbBlobWriter) eodbBlobWriter.stop();
     if (store) store.close();
     if (workerClient) workerClient.worker.terminate();
     // Drop the shard-worker pool alongside the fold worker so teardown is
@@ -619,7 +613,7 @@ export const useEoStore = create<EoDbState>((set, get) => ({
       store: null,
       workerClient: null,
       syncManager: null,
-      gdriveSync: null,
+      eodbBlobWriter: null,
       ready: false,
       recentEvents: [],
       lastSeq: 0,

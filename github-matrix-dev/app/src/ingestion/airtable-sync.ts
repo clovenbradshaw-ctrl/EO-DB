@@ -15,15 +15,20 @@
 import type { EoStore } from '../db/encrypted-store';
 import { processEvent } from '../db/fold';
 import { getState } from '../db/state';
-import type { Resolution } from '../db/types';
+import { readLogForPrefix } from '../db/log';
+import { markDeleted } from '../db/tombstone';
+import type { EoEvent, Resolution } from '../db/types';
 import {
   AirtableClient,
+  AirtableApiError,
+  ScopeMissingError,
+  WebhookGoneError,
   type AirtableBase,
   type AirtableTable,
   type AirtableRecord,
 } from './airtable-client';
 import { classifyFieldType, type FieldClassification } from './field-rules';
-import { mapAirtableType } from './airtable-type-map';
+import { mapAirtableTypeOrNull } from './airtable-type-map';
 import { extractValue, valuesEqual, stableStringify } from './value-extract';
 import { isExcluded, EMPTY_EXCLUSIONS, type SyncExclusions } from './exclusions';
 
@@ -50,6 +55,12 @@ export interface SyncResult {
   table_name: string;
   records_fetched: number;
   records_ingested: number;
+  /**
+   * Subset of `records_ingested` where the record already existed in EO-DB
+   * and at least one previously non-null field value was replaced. Lets the
+   * UI surface "12 new / 3 overwritten" instead of a flat "15 ingested".
+   */
+  records_overwritten: number;
   records_skipped_no_change: number;
   records_skipped_duplicate: number;
   cursor_before: string | null;
@@ -60,6 +71,8 @@ export interface HydrationResult {
   manifest: HydrationManifest;
   sync_results: SyncResult[];
   total_records_ingested: number;
+  /** Sum of `records_overwritten` across sync_results. */
+  total_records_overwritten: number;
   total_records_skipped: number;
   duration_ms: number;
 }
@@ -67,15 +80,53 @@ export interface HydrationResult {
 export interface UpdateSyncResult {
   sync_results: SyncResult[];
   total_records_ingested: number;
+  /** Sum of `records_overwritten` across sync_results. */
+  total_records_overwritten: number;
   total_records_skipped: number;
   duration_ms: number;
 }
 
+/**
+ * Runtime strategy label for a sync run — drives UI pills / toasts.
+ *   - 'hydration'    — full pull (collectAirtableBundle + processHydrationBundle)
+ *   - 'webhook'      — incremental via Airtable Webhooks payloads API
+ *                      (POST /v0/bases/{baseId}/webhooks + poll payloads).
+ *                      This is the authoritative change feed — no table scan,
+ *                      no dependence on a LAST_MODIFIED_TIME() formula field.
+ *   - 'lastModified' — fallback: filterByFormula(IS_AFTER(LAST_MODIFIED_TIME(), ...))
+ *                      used only when a webhook can't be created (e.g. the
+ *                      Airtable token lacks webhook:manage scope) or when a
+ *                      previously-registered webhook has expired and the
+ *                      cursor is unrecoverable.
+ *   - 'fullDiff'     — full re-hydration used as a full field-diff sweep
+ */
+export type SyncStrategy = 'hydration' | 'webhook' | 'lastModified' | 'fullDiff';
+
 export interface SyncProgress {
-  phase: 'discovering' | 'collecting' | 'syncing';
+  phase: 'discovering' | 'collecting' | 'syncing' | 'fetching' | 'folding' | 'table_done';
   base?: string;
+  /** Human-readable base name — mirrors `base` but surfaced explicitly for the UI. */
+  baseName?: string;
+  baseId?: string;
   table?: string;
+  tableId?: string;
   records_so_far?: number;
+  /**
+   * The actual Airtable API URL being queried for the current phase, e.g.
+   * `https://api.airtable.com/v0/appXYZ/tblABC?filterByFormula=...`.
+   * Only populated for phases that hit the network.
+   */
+  endpoint?: string;
+  /** ISO timestamp of the LAST_MODIFIED_TIME cursor used for this table. */
+  cursor?: string;
+  /** Which strategy drove this run — for UI labelling. */
+  strategy?: SyncStrategy;
+  /** Whether this run preserves existing EO-DB field values. */
+  preserveExisting?: boolean;
+  /** Per-table counters emitted with `table_done`. */
+  ingested?: number;
+  overwritten?: number;
+  skipped?: number;
 }
 
 /**
@@ -178,6 +229,17 @@ export interface SyncCustomization {
   defaultResolution?: Resolution;
 }
 
+// ─── Polling pacing ───────────────────────────────────────────────────────
+//
+// Sequential single-flight polling enforces a 10-second wall-clock gap
+// between consecutive table polls within an updateSync cycle. Combined with
+// the per-base AirtableClient TokenBucket (4 req/sec) and the leader-election
+// lease (only one device polls at a time), this caps the steady-state load
+// well under Airtable's 5 req/sec limit even on installations with many
+// tables.
+
+const INTER_TABLE_POLL_GAP_MS = 10_000;
+
 // ─── Cursor management (IndexedDB meta store) ─────────────────────────────
 
 function cursorKey(baseId: string, tableId: string): string {
@@ -190,6 +252,105 @@ async function getCursor(store: EoStore, baseId: string, tableId: string): Promi
 
 async function setCursor(store: EoStore, baseId: string, tableId: string, cursor: string): Promise<void> {
   await store.put(cursorKey(baseId, tableId), cursor);
+}
+
+/**
+ * Seed local IndexedDB cursors from a `${baseId}/${tableId} -> ISO` map
+ * sourced from Matrix room state. Takes the max of (room, local) per key so
+ * a leader handoff can never regress a cursor — if local just advanced past
+ * the room state value (because we wrote local first and the state event
+ * hasn't propagated), local wins; if room state is fresher (a different
+ * device was the previous leader), room wins.
+ */
+export async function seedCursorsFromMap(
+  store: EoStore,
+  cursors: Map<string, string>,
+): Promise<void> {
+  for (const [stateKey, remoteCursor] of cursors) {
+    const slash = stateKey.indexOf('/');
+    if (slash < 0) continue;
+    const baseId = stateKey.slice(0, slash);
+    const tableId = stateKey.slice(slash + 1);
+    if (!baseId || !tableId) continue;
+    const local = await getCursor(store, baseId, tableId);
+    const winner = !local || remoteCursor > local ? remoteCursor : local;
+    if (winner !== local) {
+      await setCursor(store, baseId, tableId, winner);
+    }
+  }
+}
+
+// ─── NUL preservation index ───────────────────────────────────────────────
+//
+// A user can explicitly clear a cell, which logs a NUL event with
+// `operand.fieldKey` (see components/cell-events.ts). Without filtering,
+// the next Airtable poll would re-import the previously-cleared value and
+// silently undo the user's NUL transformation.
+//
+// `buildNulledFieldsForTable` scans the log once per table sync to build a
+// `recordTarget -> Set<fieldKey>` index of every field a user has cleared.
+// `ingestRecord` then drops those keys from the diff before emitting DEF
+// when the existing local value is still null (i.e. the clearing DEF that
+// accompanies the NUL is still the most recent state — the user hasn't
+// re-set the value locally).
+
+async function buildNulledFieldsForTable(
+  store: EoStore,
+  baseId: string,
+  tableId: string,
+): Promise<Map<string, Set<string>>> {
+  const prefix = `${tableTarget(baseId, tableId)}.`;
+  const events = await readLogForPrefix(store, prefix);
+  const map = new Map<string, Set<string>>();
+  for (const event of events as EoEvent[]) {
+    if (event.op !== 'NUL') continue;
+    const fieldKey = (event.operand as { fieldKey?: unknown } | undefined)?.fieldKey;
+    if (typeof fieldKey !== 'string' || !fieldKey) continue;
+    let set = map.get(event.target);
+    if (!set) {
+      set = new Set<string>();
+      map.set(event.target, set);
+    }
+    set.add(fieldKey);
+  }
+  return map;
+}
+
+// ─── Webhook state (IndexedDB meta store) ─────────────────────────────────
+//
+// One webhook per Airtable base subscribes to `tableData` changes for all
+// tables. The payload stream is consumed via a monotonically-increasing
+// integer cursor; we persist `{ webhookId, cursor }` so subsequent polls
+// pick up exactly where the last one left off — no overlap windows, no
+// table scans, no dependence on LAST_MODIFIED_TIME() formula semantics.
+
+interface WebhookState {
+  webhookId: string;
+  /** Cursor to pass on the NEXT listWebhookPayloads call. */
+  cursor: number;
+  /** Wall-clock ISO timestamp the webhook was (re)created. */
+  createdAt: string;
+}
+
+function webhookKey(baseId: string): string {
+  return `meta:at_webhook:${baseId}`;
+}
+
+async function getWebhookState(store: EoStore, baseId: string): Promise<WebhookState | null> {
+  const raw = await store.get(webhookKey(baseId));
+  if (!raw) return null;
+  if (typeof raw === 'string') {
+    try { return JSON.parse(raw) as WebhookState; } catch { return null; }
+  }
+  return raw as WebhookState;
+}
+
+async function setWebhookState(store: EoStore, baseId: string, state: WebhookState): Promise<void> {
+  await store.put(webhookKey(baseId), state);
+}
+
+async function clearWebhookState(store: EoStore, baseId: string): Promise<void> {
+  await store.del(webhookKey(baseId));
 }
 
 /**
@@ -237,6 +398,28 @@ interface FieldMeta {
   classification: FieldClassification;
   options?: Record<string, any>;
 }
+
+/**
+ * Per-record diff observation reported by `ingestRecord` whenever a fold
+ * actually changes a record's stored fields. Surfaced to the UI's "Recent
+ * changes" panel so users can confirm "I edited Status from Active →
+ * Inactive and the sync caught it." Skip-no-change records do NOT emit a
+ * change report.
+ */
+export interface RecordChangeReport {
+  baseId: string;
+  tableId: string;
+  tableName?: string;
+  recordId: string;
+  /** Best-effort label (display field value), falls back to recordId. */
+  recordLabel?: string;
+  /** Field-level diffs. Field name comes from `FieldMeta` when available, else the raw id. */
+  diffs: Array<{ field: string; before: unknown; after: unknown }>;
+  /** Was this an INS (new record) vs an edit? Useful so the UI can group "added" vs "changed". */
+  kind: 'created' | 'updated';
+}
+
+export type RecordChangeListener = (report: RecordChangeReport) => void;
 
 function buildFieldMetaMap(
   fields: Array<{ id: string; name: string; type: string; options?: Record<string, any> }> | undefined,
@@ -412,7 +595,10 @@ async function ingestRecord(
   onEvent?: (event: any) => void,
   displayField?: string,
   defaultResolution?: Resolution,
-): Promise<'ingested' | 'skipped_no_change' | 'skipped_duplicate'> {
+  onChange?: RecordChangeListener,
+  tableName?: string,
+  nulledFields?: Map<string, Set<string>>,
+): Promise<'ingested' | 'overwritten' | 'skipped_no_change' | 'skipped_duplicate'> {
   const target = recordTarget(baseId, tableId, record.id);
 
   // 1. Extract only storable fields (skip computed/metadata, normalize values)
@@ -424,6 +610,37 @@ async function ingestRecord(
 
   // 3. Compute field-level diff — only fields that actually changed
   let diffFields = computeFieldDiff(storableFields, existingFields);
+
+  // 3a. NUL preservation — drop any field the user has explicitly cleared
+  //     where the local state still reflects the cleared value. If the user
+  //     has since re-set the field locally, `existingFields[key]` will be
+  //     non-null and the diff is allowed to proceed normally.
+  const nulled = nulledFields?.get(target);
+  if (nulled && nulled.size > 0) {
+    const filtered: Record<string, any> = {};
+    for (const [key, val] of Object.entries(diffFields)) {
+      if (nulled.has(key) && (existingFields == null || existingFields[key] == null)) {
+        continue;
+      }
+      filtered[key] = val;
+    }
+    diffFields = filtered;
+  }
+
+  // 3a. Detect overwrite: record already existed AND at least one diff field
+  //     was replacing a previously non-null value. This is the count surfaced
+  //     in the "N overwritten" UI pill so users can tell destructive changes
+  //     apart from first-time ingests.
+  let isOverwrite = false;
+  if (existing && existingFields) {
+    for (const key of Object.keys(diffFields)) {
+      const prev = existingFields[key];
+      if (prev !== undefined && prev !== null) {
+        isOverwrite = true;
+        break;
+      }
+    }
+  }
 
   // 4. If preserveExisting, further filter to only fields where existing is null/undefined
   if (preserveExisting && existingFields) {
@@ -495,13 +712,15 @@ async function ingestRecord(
     }, onEvent);
 
     // 9. Set display name as a separate DEF — ontologically distinct from the data import.
+    let recordLabel: string | undefined;
     if (displayField) {
       const nameVal = diffFields[displayField] ?? record.fields[displayField];
       if (nameVal != null) {
+        recordLabel = String(nameVal);
         await processEvent(store, {
           op: 'DEF',
           target,
-          operand: { name: String(nameVal) },
+          operand: { name: recordLabel },
           agent: `${agent}:display`,
           ts: new Date().toISOString(),
           acquired_ts: new Date().toISOString(),
@@ -509,7 +728,36 @@ async function ingestRecord(
         }, onEvent);
       }
     }
-    return 'ingested';
+
+    // 10. Report the diff for the "Recent changes" UI panel. Resolves field
+    //     ids → human-readable names where the schema is available; falls back
+    //     to the raw id so we never drop information when fieldMeta is empty.
+    if (onChange) {
+      try {
+        const diffs: Array<{ field: string; before: unknown; after: unknown }> = [];
+        for (const [key, after] of Object.entries(diffFields)) {
+          const meta = fieldMeta.get(key);
+          diffs.push({
+            field: meta?.name ?? key,
+            before: existingFields ? existingFields[key] : undefined,
+            after,
+          });
+        }
+        if (diffs.length > 0) {
+          onChange({
+            baseId,
+            tableId,
+            tableName,
+            recordId: record.id,
+            recordLabel: recordLabel ?? record.id,
+            diffs,
+            kind: existing ? 'updated' : 'created',
+          });
+        }
+      } catch { /* observer must never break the fold */ }
+    }
+
+    return isOverwrite ? 'overwritten' : 'ingested';
   } catch (e: any) {
     if (e.message?.includes('already')) return 'skipped_duplicate';
     throw e;
@@ -552,6 +800,7 @@ async function syncTable(
   store: EoStore,
   client: AirtableClient,
   baseId: string,
+  baseName: string | undefined,
   tableId: string,
   tableName: string,
   agent: string,
@@ -562,9 +811,12 @@ async function syncTable(
   onProgress?: (progress: SyncProgress) => void,
   recordLimit?: number,
   defaultResolution?: Resolution,
+  strategy: SyncStrategy = 'lastModified',
+  onChange?: RecordChangeListener,
 ): Promise<SyncResult> {
   let fetched = 0;
   let ingested = 0;
+  let overwritten = 0;
   let skippedNoChange = 0;
   let skippedDuplicate = 0;
   const now = new Date().toISOString();
@@ -575,6 +827,13 @@ async function syncTable(
   // Retrieve display field so records get a `name` property
   const tableState = await getState(store, tableTarget(baseId, tableId));
   const displayField: string | undefined = tableState?.value?._displayField;
+
+  // Build the per-table NUL preservation index once. Skipped for hydration —
+  // an empty/fresh store has no NULs to preserve, and avoiding the log scan
+  // keeps initial pulls fast.
+  const nulledFields = strategy === 'hydration'
+    ? undefined
+    : await buildNulledFieldsForTable(store, baseId, tableId);
 
   // Subtract a 60-second overlap window from the cursor to catch records
   // modified during clock skew or at the tail of the previous sync.
@@ -589,6 +848,28 @@ async function syncTable(
 
   const useFieldIds = fieldMeta.size > 0;
 
+  // Build the human-facing endpoint URL so the UI can display exactly which
+  // Airtable API request is running right now. This is the same URL Airtable
+  // sees — we stringify it here instead of in the client so the progress
+  // stream doesn't need to know about the network layer.
+  const endpoint = buildAirtableEndpoint(baseId, tableId, { filterByFormula, returnFieldsByFieldId: useFieldIds });
+
+  // Emit a "fetching" progress event with the full request context so the
+  // status card can say: "GET <url> — checking changes since <cursor>".
+  onProgress?.({
+    phase: 'fetching',
+    table: tableName,
+    tableId,
+    base: baseName,
+    baseName,
+    baseId,
+    records_so_far: 0,
+    endpoint,
+    cursor: filterCursor,
+    strategy,
+    preserveExisting,
+  });
+
   let limitReached = false;
   for await (const page of client.paginateRecords(baseId, tableId, {
     filterByFormula,
@@ -597,18 +878,48 @@ async function syncTable(
     for (const record of page) {
       if (fetched >= limit) { limitReached = true; break; }
       fetched++;
-      const result = await ingestRecord(store, baseId, tableId, record, agent, fieldMeta, exclusions, preserveExisting, onEvent, displayField, defaultResolution);
+      const result = await ingestRecord(store, baseId, tableId, record, agent, fieldMeta, exclusions, preserveExisting, onEvent, displayField, defaultResolution, onChange, tableName, nulledFields);
       switch (result) {
         case 'ingested': ingested++; break;
+        case 'overwritten': ingested++; overwritten++; break;
         case 'skipped_no_change': skippedNoChange++; break;
         case 'skipped_duplicate': skippedDuplicate++; break;
       }
     }
     if (limitReached) break;
-    onProgress?.({ phase: 'syncing', table: tableName, records_so_far: fetched });
+    onProgress?.({
+      phase: 'syncing',
+      table: tableName,
+      tableId,
+      base: baseName,
+      baseName,
+      baseId,
+      records_so_far: fetched,
+      endpoint,
+      cursor: filterCursor,
+      strategy,
+      preserveExisting,
+    });
   }
 
   await setCursor(store, baseId, tableId, now);
+
+  onProgress?.({
+    phase: 'table_done',
+    table: tableName,
+    tableId,
+    base: baseName,
+    baseName,
+    baseId,
+    records_so_far: fetched,
+    endpoint,
+    cursor: filterCursor,
+    strategy,
+    preserveExisting,
+    ingested,
+    overwritten,
+    skipped: skippedNoChange + skippedDuplicate,
+  });
 
   return {
     base_id: baseId,
@@ -616,11 +927,459 @@ async function syncTable(
     table_name: tableName,
     records_fetched: fetched,
     records_ingested: ingested,
+    records_overwritten: overwritten,
     records_skipped_no_change: skippedNoChange,
     records_skipped_duplicate: skippedDuplicate,
     cursor_before: cursorSince,
     cursor_after: now,
   };
+}
+
+/**
+ * Build the same URL the AirtableClient will eventually hit — exposed here
+ * so progress events can surface "which API are we actually calling" in the
+ * UI without having to sniff network requests.
+ */
+function buildAirtableEndpoint(
+  baseId: string,
+  tableId: string,
+  opts: { filterByFormula?: string; returnFieldsByFieldId?: boolean },
+): string {
+  const params = new URLSearchParams();
+  if (opts.filterByFormula) params.set('filterByFormula', opts.filterByFormula);
+  if (opts.returnFieldsByFieldId) params.set('returnFieldsByFieldId', 'true');
+  const qs = params.toString();
+  const base = `https://api.airtable.com/v0/${baseId}/${tableId}`;
+  return qs ? `${base}?${qs}` : base;
+}
+
+// ─── Webhook-based incremental sync ────────────────────────────────────────
+//
+// The Airtable Webhooks Payloads API
+// (https://airtable.com/developers/web/api/model/webhooks-payload) is the
+// authoritative "what changed" feed for a base. Compared to the legacy
+// filterByFormula approach it:
+//
+//   - Is server-indexed — no full-table scan per poll.
+//   - Reports deletes (destroyedRecordIds) — filterByFormula cannot.
+//   - Catches edits to computed/linked fields that LAST_MODIFIED_TIME()
+//     silently misses.
+//   - Uses an integer cursor with exactly-once semantics — no 60-second
+//     overlap window hack, no clock-skew foot-guns.
+//
+// Lifecycle: on first use per base we POST /webhooks to register, persist
+// { webhookId, cursor } in the meta store, then GET /payloads?cursor=N on
+// every update sync, draining until mightHaveMore=false and advancing the
+// cursor. Webhooks expire after 7 days of inactivity; if a poll returns 404
+// we wipe the state and trigger a full re-hydration (caller's responsibility).
+
+/**
+ * Session-scoped memo of bases we've already failed to register a webhook
+ * for with a permanent error (403 / missing scope). Keyed by baseId → Error
+ * so subsequent ticks can short-circuit to the LAST_MODIFIED_TIME fallback
+ * without hammering the same endpoint every poll — Airtable returns the
+ * same 403 every time and it wastes rate budget + churns the Health panel.
+ *
+ * Scoped to the module so it survives a full page reload only if the tab
+ * is kept open — i.e. the user fixing their token and reconnecting (which
+ * calls `resetWebhookPermissionCache`) re-enables the webhook path without
+ * needing a hard refresh.
+ */
+const webhookPermissionFailures = new Map<string, AirtableApiError>();
+
+/**
+ * Clear the session-scoped 403 cache. Called when credentials change so a
+ * user that updates their PAT scopes doesn't have to reload the tab.
+ */
+export function resetWebhookPermissionCache(): void {
+  webhookPermissionFailures.clear();
+}
+
+/**
+ * Either a ScopeMissingError (403 INVALID_PERMISSIONS — the PAT lacks a
+ * scope) or a plain AirtableApiError carrying 403 +
+ * INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND against the create endpoint
+ * (base isn't on the token's allowlist). Both are permanent for the life
+ * of the token; retrying on every tick just wastes an API call.
+ */
+function isPermanentWebhookPermissionError(err: unknown): err is AirtableApiError {
+  if (err instanceof ScopeMissingError) return true;
+  return (
+    err instanceof AirtableApiError
+    && err.status === 403
+    && err.airtableErrorType === 'INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND'
+  );
+}
+
+/**
+ * Register a webhook for this base that watches tableData changes across
+ * all tables. Returns the starting cursor the next poll should use.
+ */
+async function ensureWebhook(
+  store: EoStore,
+  client: AirtableClient,
+  baseId: string,
+): Promise<WebhookState> {
+  const priorFailure = webhookPermissionFailures.get(baseId);
+  if (priorFailure) {
+    throw priorFailure;
+  }
+  const existing = await getWebhookState(store, baseId);
+  if (existing) {
+    // Verify the webhook still exists upstream; Airtable GCs webhooks after
+    // 7 days of inactivity even if we have local state for them.
+    try {
+      const upstream = await client.listWebhooks(baseId);
+      if (upstream.some(w => w.id === existing.webhookId)) return existing;
+    } catch {
+      // If the listWebhooks call fails (e.g. no webhook:manage scope), fall
+      // through and try to create a fresh one — createWebhook will produce
+      // a clearer error message in that case.
+    }
+    // Local state is stale — drop it before re-registering.
+    await clearWebhookState(store, baseId);
+  }
+
+  let created;
+  try {
+    created = await client.createWebhook(baseId, {
+      options: {
+        filters: {
+          // tableData covers record-level changes (create, update, delete).
+          // tableFields/tableMetadata are deliberately omitted — schema
+          // changes are handled by the separate discover + schema-DEF path
+          // in updateSync(), so we don't need them duplicated in payloads.
+          dataTypes: ['tableData'],
+        },
+        includes: {
+          // We refetch the full record for edits anyway, so don't pay the
+          // payload-size cost of including previous values we'll never read.
+          includePreviousCellValues: false,
+        },
+      },
+    });
+  } catch (e: unknown) {
+    if (isPermanentWebhookPermissionError(e)) {
+      webhookPermissionFailures.set(baseId, e);
+    }
+    throw e;
+  }
+  const state: WebhookState = {
+    webhookId: created.id,
+    // Airtable may or may not return a cursor on create. When absent the
+    // documented starting cursor is 1 — the first payload ever produced.
+    cursor: created.cursorForNextPayload ?? 1,
+    createdAt: new Date().toISOString(),
+  };
+  await setWebhookState(store, baseId, state);
+  return state;
+}
+
+/** Coerce an Airtable webhook cell-values map into the shape ingestRecord expects. */
+function cellValuesToRecord(
+  recordId: string,
+  createdTime: string | undefined,
+  cellValuesByFieldId: Record<string, unknown> | undefined,
+): AirtableRecord {
+  return {
+    id: recordId,
+    createdTime: createdTime ?? new Date().toISOString(),
+    fields: (cellValuesByFieldId ?? {}) as Record<string, any>,
+  };
+}
+
+/**
+ * Drain the webhook payload queue for one base and fold every record change
+ * into the EO-DB store. Returns a per-table SyncResult list so the existing
+ * UI reporting surface keeps working unchanged.
+ *
+ * `selectedTableIds` (if provided) filters which tables we fold — changes
+ * for other tables are silently skipped. The cursor still advances past them
+ * so we don't re-read the same payloads on every poll.
+ */
+async function webhookIncrementalSyncBase(
+  store: EoStore,
+  client: AirtableClient,
+  baseId: string,
+  baseName: string,
+  tables: AirtableTable[],
+  agent: string,
+  selectedTableIds: Set<string> | null,
+  preserveExisting: boolean,
+  fieldExclusions: Record<string, SyncExclusions> | undefined,
+  displayFields: Record<string, string> | undefined,
+  defaultResolution: Resolution | undefined,
+  onEvent?: (event: any) => void,
+  onProgress?: (progress: SyncProgress) => void,
+  onChange?: RecordChangeListener,
+): Promise<SyncResult[]> {
+  const state = await ensureWebhook(store, client, baseId);
+  const tableById = new Map(tables.map(t => [t.id, t]));
+
+  // Per-table running counters — we emit one SyncResult per touched table
+  // at the end so the existing UI reducers keep working.
+  const counters = new Map<string, {
+    fetched: number;
+    ingested: number;
+    overwritten: number;
+    skippedNoChange: number;
+    skippedDuplicate: number;
+    cursorBefore: number;
+  }>();
+
+  const bumpCounter = (tableId: string) => {
+    let c = counters.get(tableId);
+    if (!c) {
+      c = { fetched: 0, ingested: 0, overwritten: 0, skippedNoChange: 0, skippedDuplicate: 0, cursorBefore: state.cursor };
+      counters.set(tableId, c);
+    }
+    return c;
+  };
+
+  let cursor = state.cursor;
+  let mightHaveMore = true;
+  let totalPayloads = 0;
+
+  const endpointFor = (c: number) =>
+    `https://api.airtable.com/v0/bases/${baseId}/webhooks/${state.webhookId}/payloads?cursor=${c}`;
+
+  onProgress?.({
+    phase: 'fetching',
+    base: baseName,
+    baseName,
+    baseId,
+    strategy: 'webhook',
+    preserveExisting,
+    endpoint: endpointFor(cursor),
+    cursor: String(cursor),
+    records_so_far: 0,
+  });
+
+  while (mightHaveMore) {
+    let page: Awaited<ReturnType<typeof client.listWebhookPayloads>>;
+    try {
+      page = await client.listWebhookPayloads(baseId, state.webhookId, { cursor });
+    } catch (e: unknown) {
+      // 404 means the webhook was GC'd or the cursor is older than the
+      // 7-day payload retention window. Either way local state is dead —
+      // wipe it so the caller can trigger a full re-hydration.
+      if (e instanceof WebhookGoneError) {
+        await clearWebhookState(store, baseId);
+      }
+      throw e;
+    }
+
+    for (const payload of page.payloads) {
+      totalPayloads++;
+      if (!payload.changedTablesById) continue;
+      for (const [tableId, change] of Object.entries(payload.changedTablesById)) {
+        if (selectedTableIds && !selectedTableIds.has(tableId)) continue;
+        const table = tableById.get(tableId);
+        if (!table) continue; // Table unknown in this session — skip.
+
+        const counter = bumpCounter(tableId);
+        const fieldMeta = buildFieldMetaMap(table.fields);
+        const exclusions = fieldExclusions?.[tableId] ?? EMPTY_EXCLUSIONS;
+        const displayField = displayFields?.[tableId] ?? table.primaryFieldId;
+
+        // Newly-created records — payload contains every cell value, so we
+        // can ingest straight from the payload with no extra API call.
+        for (const [recordId, created] of Object.entries(change.createdRecordsById ?? {})) {
+          counter.fetched++;
+          const rec = cellValuesToRecord(recordId, created.createdTime, created.cellValuesByFieldId);
+          const result = await ingestRecord(
+            store, baseId, tableId, rec, agent, fieldMeta, exclusions,
+            preserveExisting, onEvent, displayField, defaultResolution,
+            onChange, table.name,
+          );
+          switch (result) {
+            case 'ingested': counter.ingested++; break;
+            case 'overwritten': counter.ingested++; counter.overwritten++; break;
+            case 'skipped_no_change': counter.skippedNoChange++; break;
+            case 'skipped_duplicate': counter.skippedDuplicate++; break;
+          }
+        }
+
+        // Edited records — the payload only carries the changed fields, so
+        // refetch the full record to ensure ingestRecord sees a complete
+        // snapshot (otherwise unchanged fields would look like deletions
+        // relative to the existing state when computeFieldDiff runs).
+        for (const recordId of Object.keys(change.changedRecordsById ?? {})) {
+          counter.fetched++;
+          let rec: AirtableRecord;
+          try {
+            rec = await client.getRecord(baseId, tableId, recordId, { returnFieldsByFieldId: true });
+          } catch (e: unknown) {
+            // Record was deleted between the payload being queued and our
+            // fetch — treat as destroyed, don't fail the whole sync.
+            if (e instanceof AirtableApiError && e.status === 404) continue;
+            throw e;
+          }
+          const result = await ingestRecord(
+            store, baseId, tableId, rec, agent, fieldMeta, exclusions,
+            preserveExisting, onEvent, displayField, defaultResolution,
+            onChange, table.name,
+          );
+          switch (result) {
+            case 'ingested': counter.ingested++; break;
+            case 'overwritten': counter.ingested++; counter.overwritten++; break;
+            case 'skipped_no_change': counter.skippedNoChange++; break;
+            case 'skipped_duplicate': counter.skippedDuplicate++; break;
+          }
+        }
+
+        // Deletes: emit a tombstone marker for every destroyed record id.
+        // We use DEF under the hood (see db/tombstone.ts for rationale) so
+        // this propagates over Matrix like any other mutation and survives
+        // replay via a stable client_event_id. Counted as both fetched
+        // (we processed it) and overwritten (we mutated existing state).
+        for (const recordId of change.destroyedRecordIds ?? []) {
+          counter.fetched++;
+          const target = recordTarget(baseId, tableId, recordId);
+          const existing = await getState(store, target);
+          // Skip targets we never had — destroyed ids for records that
+          // never reached this device are a normal consequence of
+          // incremental webhook delivery; no need to write a stub.
+          if (!existing) continue;
+          await markDeleted(store, target, agent, {
+            clientEventId: `at-del:${baseId}:${tableId}:${recordId}`,
+            source: 'airtable-webhook',
+            onEvent,
+          });
+          counter.ingested++;
+          counter.overwritten++;
+        }
+      }
+    }
+
+    cursor = page.cursor;
+    mightHaveMore = !!page.mightHaveMore;
+
+    // Persist the advanced cursor after every page so a crash mid-drain
+    // doesn't replay payloads we've already folded. Folds are idempotent
+    // so a replay is safe, but skipping the work is cheaper.
+    await setWebhookState(store, baseId, { ...state, cursor });
+
+    onProgress?.({
+      phase: 'syncing',
+      base: baseName,
+      baseName,
+      baseId,
+      strategy: 'webhook',
+      preserveExisting,
+      endpoint: endpointFor(cursor),
+      cursor: String(cursor),
+      records_so_far: totalPayloads,
+    });
+  }
+
+  const now = new Date().toISOString();
+  const results: SyncResult[] = [];
+  for (const [tableId, counter] of counters.entries()) {
+    const table = tableById.get(tableId);
+    const tableName = table?.name ?? tableId;
+    // Keep the legacy per-table timestamp cursor fresh so a subsequent
+    // fallback to filterByFormula (or a re-hydration) knows how recent
+    // the store already is.
+    await setCursor(store, baseId, tableId, now);
+    onProgress?.({
+      phase: 'table_done',
+      base: baseName,
+      baseName,
+      baseId,
+      table: tableName,
+      tableId,
+      strategy: 'webhook',
+      preserveExisting,
+      endpoint: endpointFor(cursor),
+      cursor: String(cursor),
+      records_so_far: counter.fetched,
+      ingested: counter.ingested,
+      overwritten: counter.overwritten,
+      skipped: counter.skippedNoChange + counter.skippedDuplicate,
+    });
+    results.push({
+      base_id: baseId,
+      table_id: tableId,
+      table_name: tableName,
+      records_fetched: counter.fetched,
+      records_ingested: counter.ingested,
+      records_overwritten: counter.overwritten,
+      records_skipped_no_change: counter.skippedNoChange,
+      records_skipped_duplicate: counter.skippedDuplicate,
+      cursor_before: String(counter.cursorBefore),
+      cursor_after: String(cursor),
+    });
+  }
+  return results;
+}
+
+/**
+ * Best-effort refresh of every known webhook to reset the 7-day expiration
+ * timer. Called at the top of updateSync so long-lived installations that
+ * only ever poll (never re-register) don't lose their subscription.
+ */
+async function refreshKnownWebhooks(
+  store: EoStore,
+  client: AirtableClient,
+  baseIds: string[],
+): Promise<void> {
+  for (const baseId of baseIds) {
+    const state = await getWebhookState(store, baseId);
+    if (!state) continue;
+    try {
+      await client.refreshWebhook(baseId, state.webhookId);
+    } catch (e: unknown) {
+      // 404 → webhook is gone; clear so ensureWebhook re-creates it.
+      if (e instanceof WebhookGoneError) await clearWebhookState(store, baseId);
+      // Other errors (network blip, rate limit) — ignore; the next poll
+      // will surface them if they're persistent.
+    }
+  }
+}
+
+export interface WebhookRegistrationResult {
+  baseId: string;
+  webhookId?: string;
+  cursor?: number;
+  /** Error status code / message when registration failed for this base. */
+  error?: string;
+}
+
+/**
+ * Register (or re-use) the Airtable webhook for each base so post-hydration
+ * edits are queued as payloads immediately — not on the user's next Update
+ * Sync click. Without this, any change made in Airtable between the full
+ * pull and the first Update Sync is invisible: Airtable only queues payloads
+ * that happen AFTER the webhook exists.
+ *
+ * Best-effort: a failure on one base (e.g. token lacks `webhooks:manage`)
+ * does not stop the others, and never throws. Callers surface the returned
+ * error strings in the UI and fall back to the LAST_MODIFIED_TIME path.
+ */
+export async function registerWebhooksForBases(
+  store: EoStore,
+  client: AirtableClient,
+  baseIds: string[],
+): Promise<WebhookRegistrationResult[]> {
+  const results: WebhookRegistrationResult[] = [];
+  const seen = new Set<string>();
+  for (const baseId of baseIds) {
+    if (seen.has(baseId)) continue;
+    seen.add(baseId);
+    try {
+      const state = await ensureWebhook(store, client, baseId);
+      results.push({ baseId, webhookId: state.webhookId, cursor: state.cursor });
+    } catch (e: unknown) {
+      const status = e instanceof AirtableApiError ? e.status : undefined;
+      const message = e instanceof Error ? e.message : String(e);
+      results.push({
+        baseId,
+        error: `${status ?? '?'}: ${message}`,
+      });
+    }
+  }
+  return results;
 }
 
 // ─── Hydration sync ────────────────────────────────────────────────────────
@@ -899,8 +1658,10 @@ export async function processHydrationBundle(
       // Emit .type DEF with mapped EO-DB column type.
       // For multipleRecordLinks, also store the linked table's EO target so
       // consumers can resolve the relationship without Airtable API access.
-      const eoType = mapAirtableType(field.type);
+      const mapped = mapAirtableTypeOrNull(field.type);
+      const eoType = mapped ?? 'text';
       const typeOperand: Record<string, unknown> = { type: eoType };
+      if (mapped === null) typeOperand.unknownAirtableType = field.type;
       if (field.type === 'multipleRecordLinks' && field.options?.linkedTableId) {
         typeOperand.linkedTable = tableTarget(base.id, field.options.linkedTableId as string);
       }
@@ -920,7 +1681,16 @@ export async function processHydrationBundle(
       await emitFieldConstraints(store, fieldTarget, field, agent, base.id, table.id, opts?.onEvent);
     }
 
-    opts?.onProgress?.({ phase: 'syncing', base: base.name, table: table.name });
+    opts?.onProgress?.({
+      phase: 'folding',
+      base: base.name,
+      baseName: base.name,
+      baseId: base.id,
+      table: table.name,
+      tableId: table.id,
+      strategy: 'hydration',
+      preserveExisting,
+    });
 
     const exclusions = fieldExclusions?.[table.id] ?? EMPTY_EXCLUSIONS;
     const now = new Date().toISOString();
@@ -933,6 +1703,7 @@ export async function processHydrationBundle(
     const displayField: string | undefined = tableState?.value?._displayField;
 
     let ingested = 0;
+    let overwritten = 0;
     let skippedNoChange = 0;
     let skippedDuplicate = 0;
     for (let i = 0; i < tableBundle.records.length; i++) {
@@ -944,17 +1715,41 @@ export async function processHydrationBundle(
       );
       switch (r) {
         case 'ingested': ingested++; break;
+        case 'overwritten': ingested++; overwritten++; break;
         case 'skipped_no_change': skippedNoChange++; break;
         case 'skipped_duplicate': skippedDuplicate++; break;
       }
       if ((i + 1) % 50 === 0 || i === tableBundle.records.length - 1) {
         opts?.onProgress?.({
-          phase: 'syncing', base: base.name, table: table.name, records_so_far: i + 1,
+          phase: 'syncing',
+          base: base.name,
+          baseName: base.name,
+          baseId: base.id,
+          table: table.name,
+          tableId: table.id,
+          records_so_far: i + 1,
+          strategy: 'hydration',
+          preserveExisting,
         });
       }
     }
 
     await setCursor(store, base.id, table.id, now);
+
+    opts?.onProgress?.({
+      phase: 'table_done',
+      base: base.name,
+      baseName: base.name,
+      baseId: base.id,
+      table: table.name,
+      tableId: table.id,
+      records_so_far: tableBundle.records.length,
+      strategy: 'hydration',
+      preserveExisting,
+      ingested,
+      overwritten,
+      skipped: skippedNoChange + skippedDuplicate,
+    });
 
     const result: SyncResult = {
       base_id: base.id,
@@ -962,6 +1757,7 @@ export async function processHydrationBundle(
       table_name: table.name,
       records_fetched: tableBundle.records.length,
       records_ingested: ingested,
+      records_overwritten: overwritten,
       records_skipped_no_change: skippedNoChange,
       records_skipped_duplicate: skippedDuplicate,
       cursor_before: null,
@@ -972,6 +1768,7 @@ export async function processHydrationBundle(
   }
 
   const totalIngested = syncResults.reduce((s, r) => s + r.records_ingested, 0);
+  const totalOverwritten = syncResults.reduce((s, r) => s + r.records_overwritten, 0);
   const totalSkipped = syncResults.reduce(
     (s, r) => s + r.records_skipped_no_change + r.records_skipped_duplicate, 0,
   );
@@ -980,9 +1777,33 @@ export async function processHydrationBundle(
     manifest: bundle.manifest,
     sync_results: syncResults,
     total_records_ingested: totalIngested,
+    total_records_overwritten: totalOverwritten,
     total_records_skipped: totalSkipped,
     duration_ms: Date.now() - start,
   };
+}
+
+/**
+ * Payload handed to {@link hydrationSync} callers via `onSnapshotReady`.
+ * Contains everything needed to persist a one-shot hydration as an `.eodb`
+ * snapshot that future devices can replay instead of re-pulling the full
+ * base from Airtable.
+ *
+ * Events are the ordered stream that `processHydrationBundle()` folded into
+ * the store — replaying them on a fresh device reproduces the same state.
+ * Cursors reflect the per-table lastModified watermarks captured at the end
+ * of the run; seeding them on the replaying device means the first live
+ * `updateSync()` only pulls post-snapshot deltas.
+ */
+export interface HydrationSnapshotPayload {
+  /** Every event emitted by the fold, in order. */
+  events: any[];
+  /** `{ [baseId]: { [tableId]: { lastModified } } }` — safe to embed in the snapshot header. */
+  cursors: Record<string, Record<string, { lastModified: string }>>;
+  /** Bases touched by this hydration — used to derive per-base snapshot filenames. */
+  baseIds: string[];
+  /** Mirrors the top-level HydrationResult so callers can correlate snapshot metadata with sync stats. */
+  result: HydrationResult;
 }
 
 /**
@@ -991,6 +1812,14 @@ export async function processHydrationBundle(
  *
  * Throwing from onRawImport aborts the sync before ANY store mutations —
  * ideal for enforcing "don't process until Drive upload confirms".
+ *
+ * When `onSnapshotReady` is supplied, hydrationSync captures every emitted
+ * event and the final per-table cursors, then invokes the callback after
+ * the fold completes. The caller is expected to serialise the payload via
+ * `encodeAirtableSnapshot()` and persist the result (typically to Drive).
+ * The callback fires AFTER the store write, so a failing upload doesn't
+ * roll back the local hydration — snapshot publishing is an optimisation,
+ * not a correctness requirement.
  */
 export async function hydrationSync(
   store: EoStore,
@@ -1007,6 +1836,12 @@ export async function hydrationSync(
      * record in the event log. Throw to abort the hydration.
      */
     onRawImport?: (bundle: RawImportBundle) => Promise<ProvenanceResult | void>;
+    /**
+     * Fires AFTER the full hydration completes successfully. Receives the
+     * captured event stream + cursor map — the caller bakes these into an
+     * `.eodb` snapshot and publishes it (e.g. to Google Drive).
+     */
+    onSnapshotReady?: (payload: HydrationSnapshotPayload) => Promise<void> | void;
   },
 ): Promise<HydrationResult> {
   const bundle = await collectAirtableBundle(client, {
@@ -1020,13 +1855,78 @@ export async function hydrationSync(
     if (result) provenance = result;
   }
 
-  return processHydrationBundle(store, bundle, agent, {
+  // Tee onEvent so we can both forward to the caller AND collect the full
+  // stream for snapshot publishing. Zero allocation when onSnapshotReady
+  // is unset — we keep the original callback reference.
+  const collected: any[] = [];
+  const wantSnapshot = !!opts?.onSnapshotReady;
+  const teeEvent = wantSnapshot
+    ? (ev: any) => {
+        collected.push(ev);
+        opts?.onEvent?.(ev);
+      }
+    : opts?.onEvent;
+
+  const result = await processHydrationBundle(store, bundle, agent, {
     onProgress: opts?.onProgress,
-    onEvent: opts?.onEvent,
+    onEvent: teeEvent,
     onTableComplete: opts?.onTableComplete,
     customization: opts?.customization,
     provenance,
   });
+
+  // Register the Airtable webhook for every hydrated base now, not on the
+  // first updateSync. Without this, any edit the user makes in Airtable
+  // between hydration and their first Update Sync click is silently dropped:
+  // Airtable only queues payloads generated after the webhook exists.
+  //
+  // Best-effort — a token without `webhooks:manage` scope will fall back to
+  // the LAST_MODIFIED_TIME path on the next updateSync, exactly as before.
+  const hydratedBaseIds = Array.from(
+    new Set(result.sync_results.map(r => r.base_id)),
+  );
+  if (hydratedBaseIds.length) {
+    const webhookResults = await registerWebhooksForBases(store, client, hydratedBaseIds);
+    for (const r of webhookResults) {
+      if (r.error) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[airtable-sync] could not register webhook for base ${r.baseId} at hydration: ${r.error}. ` +
+          `Update sync will fall back to LAST_MODIFIED_TIME until this is resolved.`,
+        );
+      }
+    }
+  }
+
+  if (wantSnapshot) {
+    // Build the cursor map by reading back the per-table cursors we just
+    // wrote during fold. Using the store (not the result) guarantees we
+    // capture the exact ISO string that the next updateSync() will compare
+    // against — no drift from recomputing `now` at publish time.
+    const cursors: Record<string, Record<string, { lastModified: string }>> = {};
+    const baseIds = new Set<string>();
+    for (const r of result.sync_results) {
+      baseIds.add(r.base_id);
+      const stored = await getCursor(store, r.base_id, r.table_id);
+      if (stored) {
+        (cursors[r.base_id] ??= {})[r.table_id] = { lastModified: stored };
+      }
+    }
+    try {
+      await opts!.onSnapshotReady!({
+        events: collected,
+        cursors,
+        baseIds: Array.from(baseIds),
+        result,
+      });
+    } catch (e) {
+      // Snapshot publish is best-effort. Log and continue — the hydration
+      // itself succeeded and the next run will retry.
+      console.warn('[EO-DB] onSnapshotReady failed (hydration unaffected):', e);
+    }
+  }
+
+  return result;
 }
 
 // ─── Update sync ───────────────────────────────────────────────────────────
@@ -1040,6 +1940,19 @@ export async function updateSync(
     onEvent?: (event: any) => void;
     onTableComplete?: (result: SyncResult) => void;
     customization?: SyncCustomization;
+    /**
+     * Fires every time `ingestRecord` actually changes a record's stored
+     * fields (skip-no-change records do NOT fire). Surfaced to the UI's
+     * "Recent changes" panel.
+     */
+    onChange?: RecordChangeListener;
+    /**
+     * Fires after each successful per-table poll with the new cursor value
+     * (the same value `setCursor` just wrote to IndexedDB). Used by the
+     * service to mirror cursors into Matrix room state so a leader handoff
+     * to a different device picks up where the previous leader left off.
+     */
+    onCursorAdvance?: (baseId: string, tableId: string, cursor: string) => Promise<void>;
   },
 ): Promise<UpdateSyncResult> {
   const start = Date.now();
@@ -1048,6 +1961,7 @@ export async function updateSync(
   const fieldExclusions = opts?.customization?.fieldExclusions;
   const recordLimit = opts?.customization?.recordLimit;
   const defaultResolution = opts?.customization?.defaultResolution;
+  const displayFields = opts?.customization?.displayFields;
   const syncResults: SyncResult[] = [];
 
   opts?.onProgress?.({ phase: 'discovering' });
@@ -1153,12 +2067,15 @@ export async function updateSync(
         } catch { /* idempotent */ }
 
         // Emit .type DEF with mapped EO-DB column type
-        const eoType = mapAirtableType(field.type);
+        const mapped = mapAirtableTypeOrNull(field.type);
+        const eoType = mapped ?? 'text';
+        const updTypeOperand: Record<string, unknown> = { type: eoType };
+        if (mapped === null) updTypeOperand.unknownAirtableType = field.type;
         try {
           await processEvent(store, {
             op: 'DEF',
             target: `${fieldTarget}.type`,
-            operand: { type: eoType },
+            operand: updTypeOperand,
             agent,
             ts: new Date().toISOString(),
             acquired_ts: new Date().toISOString(),
@@ -1170,22 +2087,112 @@ export async function updateSync(
         await emitFieldConstraints(store, fieldTarget, field, agent, base.id, table.id, opts?.onEvent);
       }
 
-      opts?.onProgress?.({ phase: 'syncing', base: base.name, table: table.name });
+      // Schema-only iteration body ends here. Record ingestion for this
+      // base is driven below by the webhook-payloads path (with
+      // filterByFormula as a documented fallback), not by a per-table
+      // loop. Table-local variables only used by the removed syncTable
+      // call are intentionally scoped inside this `for (const table)`
+      // block so they don't bleed into the base-wide sync step.
+      void cursor;
+    }
 
-      const exclusions = fieldExclusions?.[table.id] ?? EMPTY_EXCLUSIONS;
+    // ── Record ingestion for this base ──────────────────────────────────
+    //
+    // Preferred path: drain the Airtable Webhooks payload queue. This is
+    // the authoritative "what changed" feed — no LAST_MODIFIED_TIME()
+    // table scan, no clock-skew overlap window, catches computed-field
+    // edits and deletes too.
+    //
+    // Fallback path: if the webhook can't be created (e.g. the access
+    // token lacks `webhooks:manage`) we fall back to the legacy
+    // per-table filterByFormula(IS_AFTER(LAST_MODIFIED_TIME(), ...))
+    // sync so the app still works on read-only tokens.
+    //
+    // Only tables with an existing cursor are eligible — if a table was
+    // never hydrated we must not fold sparse change events into a store
+    // that has no baseline. The initial hydrationSync path handles those.
+    const hydratedTableIds = new Set<string>();
+    for (const table of tables) {
+      if (baseTables && !baseTables.includes(table.id)) continue;
+      const c = await getCursor(store, base.id, table.id);
+      if (c) hydratedTableIds.add(table.id);
+    }
+    if (!hydratedTableIds.size) continue;
+    {
+      // Polling-only sync. The webhook subscription path was removed in
+      // favour of a strict per-table LAST_MODIFIED_TIME filter — see
+      // commit message for the rationale (one-leader, sequential, 10s gap,
+      // diff-before-emit with NUL preservation).
+      //
+      // Build the eligible-table list up front so the inter-table sleep only
+      // runs between tables we'll actually poll (skipped tables don't burn
+      // 10s of wall clock).
+      const tablesToSync = tables.filter((t) => {
+        if (baseTables && !baseTables.includes(t.id)) return false;
+        return hydratedTableIds.has(t.id);
+      });
+      for (let i = 0; i < tablesToSync.length; i++) {
+        const table = tablesToSync[i];
+        const cursor = await getCursor(store, base.id, table.id);
+        if (!cursor) continue;
+        const exclusions = fieldExclusions?.[table.id] ?? EMPTY_EXCLUSIONS;
+        opts?.onProgress?.({
+          phase: 'syncing',
+          base: base.name,
+          baseName: base.name,
+          baseId: base.id,
+          table: table.name,
+          tableId: table.id,
+          strategy: 'lastModified',
+          preserveExisting,
+          cursor,
+        });
+        const result = await syncTable(
+          store, client, base.id, base.name, table.id, table.name, agent, cursor,
+          exclusions, preserveExisting,
+          opts?.onEvent, opts?.onProgress, recordLimit,
+          defaultResolution,
+          'lastModified',
+          opts?.onChange,
+        );
+        syncResults.push(result);
+        opts?.onTableComplete?.(result);
 
-      const result = await syncTable(
-        store, client, base.id, table.id, table.name, agent, cursor,
-        exclusions, preserveExisting,
-        opts?.onEvent, opts?.onProgress, recordLimit,
-        defaultResolution,
-      );
-      syncResults.push(result);
-      opts?.onTableComplete?.(result);
+        // Mirror the freshly-advanced cursor to Matrix room state so a
+        // leader handoff doesn't restart from a stale position. Read-back
+        // (vs reusing `cursor` above — which is the PRE-poll value) lets us
+        // emit whatever syncTable actually wrote, including any internal
+        // bumping of the value beyond `now`.
+        if (opts?.onCursorAdvance) {
+          const advanced = await getCursor(store, base.id, table.id);
+          if (advanced) {
+            try {
+              await opts.onCursorAdvance(base.id, table.id, advanced);
+            } catch (e) {
+              // Best-effort: a state-event write failure shouldn't abort the
+              // whole sync cycle. The next leader will re-derive from
+              // IndexedDB until the next successful mirror.
+              console.warn(
+                `[airtable-sync] cursor mirror failed for ${base.id}/${table.id}:`,
+                e,
+              );
+            }
+          }
+        }
+
+        // Strict sequential polling: 10s gap between tables (not after the
+        // last one) so a leader doing the rounds across a base doesn't burst
+        // through the rate limiter and so a non-trivial number of tables
+        // doesn't monopolize the bucket.
+        if (i < tablesToSync.length - 1) {
+          await new Promise((resolve) => setTimeout(resolve, INTER_TABLE_POLL_GAP_MS));
+        }
+      }
     }
   }
 
   const totalIngested = syncResults.reduce((s, r) => s + r.records_ingested, 0);
+  const totalOverwritten = syncResults.reduce((s, r) => s + r.records_overwritten, 0);
   const totalSkipped = syncResults.reduce(
     (s, r) => s + r.records_skipped_no_change + r.records_skipped_duplicate, 0,
   );
@@ -1193,6 +2200,7 @@ export async function updateSync(
   return {
     sync_results: syncResults,
     total_records_ingested: totalIngested,
+    total_records_overwritten: totalOverwritten,
     total_records_skipped: totalSkipped,
     duration_ms: Date.now() - start,
   };

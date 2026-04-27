@@ -16,6 +16,8 @@ import { defaultColumnWidth, MIN_COLUMN_WIDTH } from './slice-types';
 import { formatName } from './scope-picker-utils';
 import { useIdResolver, isEntityId, isEntityIdArray, type IdResolver } from '../hooks/useIdResolver';
 import { groupSchemaStates, extractColumnTypeOverrides, schemaTypeTarget, schemaConstraintTarget, schemaResolveTarget, type FieldSchema } from '../db/schema-rules';
+import { isDeleted } from '../db/tombstone';
+import { safeUrl } from '../lib/safe-url';
 import { ColumnTypeSelector, COLUMN_TYPE_ICON_MAP } from './ColumnTypeSelector';
 import { ResolutionPolicyComposer, summarizePolicy, normalizeResolvePolicy, type ResolvePolicy } from './ResolutionPolicyComposer';
 import { buildNulClearingEvent, buildMakingDefEvent } from './cell-events';
@@ -25,6 +27,7 @@ import { ColumnManagerPanel } from './ColumnManagerPanel';
 import { AddColumnDialog } from './AddColumnDialog';
 import { SchemaFieldPanel, type FieldValueStats } from './SchemaFieldPanel';
 import { WatchedFieldsPicker } from './WatchedFieldsPicker';
+import { LinkFieldPicker } from './LinkFieldPicker';
 import {
   DndContext,
   DragOverlay,
@@ -317,15 +320,21 @@ function renderCell(value: any, key: string, onNavigate: (t: string) => void, t:
     return <span style={{ fontVariantNumeric: 'tabular-nums' }}>{parts.join(' ')}</span>;
   }
   if (colType === 'url' && typeof value === 'string') {
+    const href = safeUrl(value, ['http:', 'https:']);
     let display: string;
     try { display = new URL(value).hostname; } catch { display = value.slice(0, 40); }
-    return <a href={value} target="_blank" rel="noopener noreferrer" style={{ color: t.accent }} onClick={(e) => e.stopPropagation()}>{display}</a>;
+    if (!href) return <span style={{ color: t.textMuted }}>{display}</span>;
+    return <a href={href} target="_blank" rel="noopener noreferrer" style={{ color: t.accent }} onClick={(e) => e.stopPropagation()}>{display}</a>;
   }
   if (colType === 'email' && typeof value === 'string') {
-    return <a href={`mailto:${value}`} style={{ color: t.accent }} onClick={(e) => e.stopPropagation()}>{value}</a>;
+    const href = safeUrl(`mailto:${value}`, ['mailto:']);
+    if (!href) return <span>{value}</span>;
+    return <a href={href} style={{ color: t.accent }} onClick={(e) => e.stopPropagation()}>{value}</a>;
   }
   if (colType === 'phone' && typeof value === 'string') {
-    return <a href={`tel:${value}`} style={{ color: t.accent }} onClick={(e) => e.stopPropagation()}>{value}</a>;
+    const href = safeUrl(`tel:${value}`, ['tel:']);
+    if (!href) return <span>{value}</span>;
+    return <a href={href} style={{ color: t.accent }} onClick={(e) => e.stopPropagation()}>{value}</a>;
   }
   if (colType === 'autoNumber' && (typeof value === 'number' || typeof value === 'string')) {
     return <span style={{ fontVariantNumeric: 'tabular-nums', color: t.textMuted }}>#{value}</span>;
@@ -369,7 +378,7 @@ function renderCell(value: any, key: string, onNavigate: (t: string) => void, t:
     if (ids.length === 0) return <AbsentCell t={t} />;
 
     return (
-      <span style={{ display: 'inline-flex', flexWrap: 'wrap', gap: 4, alignItems: 'center' }}>
+      <span style={{ display: 'inline-flex', flexWrap: 'wrap', gap: 4, alignItems: 'center', maxWidth: '100%' }}>
         {ids.map((id) => {
           const shortId = id.includes('.') ? (id.split('.').pop() || id) : id;
           const resolved = id.includes('.')
@@ -381,22 +390,38 @@ function renderCell(value: any, key: string, onNavigate: (t: string) => void, t:
             <span
               key={id}
               onClick={(e) => { e.stopPropagation(); onNavigate(navTarget); }}
+              onMouseEnter={(e) => {
+                const el = e.currentTarget as HTMLElement;
+                el.style.background = t.purple;
+                el.style.color = '#fff';
+                el.style.borderColor = t.purple;
+              }}
+              onMouseLeave={(e) => {
+                const el = e.currentTarget as HTMLElement;
+                el.style.background = t.purpleBg;
+                el.style.color = t.purple;
+                el.style.borderColor = t.purpleBorder;
+              }}
               style={{
                 display: 'inline-flex',
                 alignItems: 'center',
                 gap: 3,
-                padding: '1px 7px',
-                borderRadius: 4,
+                padding: '2px 9px',
+                borderRadius: 999,
                 fontSize: 11,
-                background: `${t.purpleBg}`,
+                fontWeight: 500,
+                lineHeight: 1.4,
+                background: t.purpleBg,
                 border: `1px solid ${t.purpleBorder}`,
                 color: t.purple,
                 cursor: 'pointer',
                 whiteSpace: 'nowrap',
-                maxWidth: 180,
+                maxWidth: 240,
                 overflow: 'hidden',
                 textOverflow: 'ellipsis',
+                transition: 'background 0.12s, color 0.12s, border-color 0.12s',
               }}
+              title={displayName ? `${displayName} (${shortId})` : shortId}
             >
               {displayName || shortId}
             </span>
@@ -554,6 +579,12 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
 
   const [records, setRecords] = useState<EoState[]>([]);
   const [recordsLoaded, setRecordsLoaded] = useState(false);
+  // True after the sync stream has gone quiet for a short grace period. Used to
+  // suppress the "No records in this scope" message while events are still
+  // streaming in from Matrix on a cold load — otherwise the grid paints the
+  // empty state prematurely before the fold has produced the records that are
+  // already on their way. Resets on scope change and on every lastSeq tick.
+  const [emptyStateSettled, setEmptyStateSettled] = useState(false);
   // --- Update indicator state ---
   // isUpdating: true briefly while a sync-triggered re-fetch is in flight.
   // lastUpdate: summary of the most recent non-empty diff (added/modified/removed
@@ -588,17 +619,34 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   const [fieldSchemas, setFieldSchemas] = useState<Map<string, FieldSchema>>(new Map());
   const [columnTypeOverrides, setColumnTypeOverrides] = useState<Map<string, any>>(new Map());
   const [columnTypeSelector, setColumnTypeSelector] = useState<{ x: number; y: number; key: string } | null>(null);
-  const [linkedRecordPicker, setLinkedRecordPicker] = useState<{ x: number; y: number; key: string; tables: { scope: string; name: string }[]; mode: 'linkedRecord' | 'link' | 'relationship' } | null>(null);
+  const [linkedRecordPicker, setLinkedRecordPicker] = useState<{ x: number; y: number; key: string; tables: { scope: string; name: string }[]; mode: 'linkedRecord' | 'link' | 'relationship'; selected: string[] } | null>(null);
   const [resolutionComposer, setResolutionComposer] = useState<{ x: number; y: number; key: string } | null>(null);
   const [constraintComposer, setConstraintComposer] = useState<{ x: number; y: number; key: string } | null>(null);
   // Full-field editor side panel — opened by double-clicking a column header.
   const [fieldPanelKey, setFieldPanelKey] = useState<string | null>(null);
   const [editingCell, setEditingCell] = useState<{ target: string; fieldKey: string; value: string } | null>(null);
+  const [editingLinkCell, setEditingLinkCell] = useState<{ target: string; fieldKey: string; linkedTables: string[] } | null>(null);
+  // Tracks the most recent editable cell a user clicked. A second click on the
+  // same cell (while its record is active in the side drawer) enters inline
+  // edit mode; this implements the "click once opens drawer, click again edits"
+  // interaction.
+  const [lastClickedCell, setLastClickedCell] = useState<{ target: string; fieldKey: string } | null>(null);
   const editDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const prevRecordsKeyRef = useRef<string>('');
   const prevSchemaKeyRef = useRef<string>('');
   const prevScopeNameRef = useRef<string | null>(null);
   const fetchGenRef = useRef(0);
+  // Counts consecutive sync re-fetches that returned zero records while the
+  // previous snapshot was non-empty. The store can transiently report an empty
+  // scope during SYN merges and in-flight fold operations (see comment at
+  // `hasCheckedEmptyScopeRef` below); applying those as-is causes the grid to
+  // flicker between "loaded" and "No records in this scope" on every sync.
+  // Require two consecutive empties before accepting an empty set as truth.
+  const emptySyncCountRef = useRef(0);
+  // Mirrors `recordsLoaded` for reads inside the paginated initial-load
+  // promise chain; state closures go stale across awaits, and we need to
+  // know whether the UI has already been unblocked before flipping again.
+  const recordsLoadedRef = useRef(false);
   const { theme } = useTheme();
   const s = makeStyles(theme);
 
@@ -641,6 +689,18 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   const [resizing, setResizing] = useState<{ key: string; startX: number; startWidth: number } | null>(null);
   const tableRef = useRef<HTMLTableElement>(null);
   const [activeDragId, setActiveDragId] = useState<string | null>(null);
+
+  // --- Row selection state ---
+  const [selectedRows, setSelectedRows] = useState<Set<string>>(new Set());
+  const toggleRowSelection = useCallback((target: string) => {
+    setSelectedRows((prev) => {
+      const next = new Set(prev);
+      if (next.has(target)) next.delete(target);
+      else next.add(target);
+      return next;
+    });
+  }, []);
+  const deselectAllRows = useCallback(() => setSelectedRows(new Set()), []);
 
   // --- DnD sensors (delay-based to prevent accidental drags while resizing) ---
   const sensors = useSensors(
@@ -697,13 +757,21 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     if (!ready) return;
     const gen = ++fetchGenRef.current;
 
-    // Helper to filter raw states down to visible direct-child records
+    // Helper to filter raw states down to visible direct-child records.
+    // Excludes:
+    //   - rows at the wrong depth (sub-targets like `.fields.name`)
+    //   - SYN-merged aliases (folded into another record)
+    //   - underscore-prefixed system rows (_schema, _slices, ...)
+    //   - tombstoned records — soft-deleted via db/tombstone.ts so deletes
+    //     from the source-of-truth (e.g. Airtable webhook payloads) take
+    //     effect in the grid without hard-removing the event-log history.
     function filterDirect(states: EoState[]): EoState[] {
       return states.filter((st) => {
         const parts = st.target.split('.');
         if (parts.length !== scopeDepth + 1 || st.value?._alias) return false;
         const segment = parts[parts.length - 1];
         if (segment.startsWith('_')) return false;
+        if (isDeleted(st)) return false;
         return true;
       });
     }
@@ -722,7 +790,18 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
         const direct = filterDirect(rows);
         prevRecordsKeyRef.current = 'loading'; // mark as started
         setRecords(direct);
-        setRecordsLoaded(true);
+        // IDB keys sort lexicographically; `_schema.*` / `_slices.*` sort
+        // before regular record ids. A table with a rich schema can fill the
+        // entire first page with non-record rows that filterDirect() rejects.
+        // `direct.length === 0` is NOT authoritative until `nextCursor` is
+        // null — flipping recordsLoaded too early paints a transient "No
+        // records in this scope" until the streaming batches hydrate.
+        if (direct.length > 0 || nextCursor === null) {
+          setRecordsLoaded(true);
+        }
+        if (import.meta.env.DEV && rows.length > 0 && direct.length === 0 && nextCursor !== null) {
+          console.debug('[TableView] initial page yielded 0 visible records of', rows.length, 'for', scope);
+        }
 
         // Phase 2: stream remaining records in background batches
         let cursor = nextCursor;
@@ -734,8 +813,15 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
           const moreDirect = filterDirect(more);
           accumulated = [...accumulated, ...moreDirect];
           setRecords(accumulated);
+          // Unblock the UI the moment the first non-empty batch arrives.
+          if (!recordsLoadedRef.current && accumulated.length > 0) {
+            setRecordsLoaded(true);
+          }
           cursor = next;
         }
+        // Streaming finished — authoritative empty is safe to surface now.
+        if (!recordsLoadedRef.current) setRecordsLoaded(true);
+        emptySyncCountRef.current = 0;
         // Final fingerprint for future sync-triggered re-fetches
         prevRecordsKeyRef.current = accumulated.map(r => r.target + ':' + r.last_seq).join('|');
         // Seed the target→last_seq map so the first sync re-fetch after initial
@@ -750,6 +836,19 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
       getStateByPrefix(scope + '.').then((states) => {
         if (gen !== fetchGenRef.current) return;
         const direct = filterDirect(states);
+        // Guard against transient empty results: the store can momentarily
+        // return zero matches during SYN merges, fold operations, or other
+        // in-flight mutations. If the previous snapshot had records, skip the
+        // first such empty and wait for the next sync to confirm it. This
+        // prevents the grid from flickering to "No records in this scope"
+        // on every lastSeq bump.
+        if (direct.length === 0 && prevRecordsMapRef.current.size > 0 && emptySyncCountRef.current < 1) {
+          emptySyncCountRef.current += 1;
+          setIsUpdating(false);
+          setRecordsLoaded(true);
+          return;
+        }
+        emptySyncCountRef.current = 0;
         const key = direct.map(r => r.target + ':' + r.last_seq).join('|');
         if (key !== prevRecordsKeyRef.current) {
           // Compute the diff against the previously-observed record set so the
@@ -837,6 +936,10 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     // Don't navigate away while seq is 0 — the store is still receiving sync
     // and an empty result is transient, not authoritative.
     if (lastSeq === 0) return;
+    // Also defer the check while the sync stream is still active, otherwise
+    // a cold load that hasn't yet ingested this scope's records would bounce
+    // the user to the parent before the records arrive.
+    if (!emptyStateSettled) return;
     hasCheckedEmptyScopeRef.current = true;
     if (records.length === 0 && onEmptyScope) {
       // Don't navigate away if the scope itself has state — it's a leaf record
@@ -849,7 +952,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
         }
       });
     }
-  }, [records, recordsLoaded, lastSeq, scope, onEmptyScope, getState]);
+  }, [records, recordsLoaded, lastSeq, scope, onEmptyScope, getState, emptyStateSettled]);
 
   // Reset filter and loaded state when scope changes.
   // NOTE: records are NOT cleared here — the stale-fetch guard (fetchGenRef)
@@ -866,10 +969,32 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     // Clear update indicator state so switching tables doesn't carry over a
     // stale "updated" badge from the previous scope.
     prevRecordsMapRef.current = new Map();
+    emptySyncCountRef.current = 0;
+    recordsLoadedRef.current = false;
     setIsUpdating(false);
     setLastUpdate(null);
     setShowUpdateDetail(false);
   }, [scope]);
+
+  // Keep the recordsLoaded ref in sync with state so the async paginator
+  // inside the initial-load effect can read it without a stale closure.
+  useEffect(() => { recordsLoadedRef.current = recordsLoaded; }, [recordsLoaded]);
+
+  // Delay the "No records in this scope" message until the event stream has
+  // been quiet for EMPTY_STATE_SETTLE_MS. Each scope change AND each lastSeq
+  // tick resets the timer, so:
+  //   - On cold load, while Matrix sync is still ingesting events (lastSeq
+  //     ticks frequently), the empty message stays hidden — we render a
+  //     neutral "Loading records…" instead of misleadingly claiming the scope
+  //     is empty.
+  //   - Once the stream settles and records is genuinely empty, the message
+  //     surfaces as expected.
+  const EMPTY_STATE_SETTLE_MS = 1500;
+  useEffect(() => {
+    setEmptyStateSettled(false);
+    const id = setTimeout(() => setEmptyStateSettled(true), EMPTY_STATE_SETTLE_MS);
+    return () => clearTimeout(id);
+  }, [scope, lastSeq]);
 
   // Debounce filterText so that keystroke latency is bounded by a short
   // timer rather than the cost of re-filtering the full record set.
@@ -1030,6 +1155,19 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   useEffect(() => {
     onVisibleRecordTargets?.(filtered.map((r) => r.target));
   }, [filtered, onVisibleRecordTargets]);
+
+  // --- Row selection helpers derived from `filtered` ---
+  const selectAllVisible = useCallback(() => {
+    setSelectedRows(new Set(filtered.map((r) => r.target)));
+  }, [filtered]);
+  const visibleSelectedCount = useMemo(() => {
+    if (selectedRows.size === 0) return 0;
+    let n = 0;
+    for (const r of filtered) if (selectedRows.has(r.target)) n++;
+    return n;
+  }, [filtered, selectedRows]);
+  const allVisibleSelected = filtered.length > 0 && visibleSelectedCount === filtered.length;
+  const someVisibleSelected = visibleSelectedCount > 0 && !allVisibleSelected;
 
   // --- Virtual scroll window ---
   const rowPx = ROW_HEIGHT_PX[rowHeight] ?? 44;
@@ -1210,15 +1348,22 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     setRenameCol(null);
   }
 
-  async function handleSetColumnType(fieldKey: string, type: string, linkedTable?: string, keepOpen = false) {
-    const operand: Record<string, string> = { type };
+  async function handleSetColumnType(fieldKey: string, type: string, linkedTable?: string | string[], keepOpen = false) {
+    const operand: Record<string, unknown> = { type };
     if (linkedTable) {
-      // 'link' and 'relationship' store the EO scope path under 'linkedTable'
-      // 'linkedRecord' (legacy Airtable) stores under 'linkedTableId'
-      if (type === 'link' || type === 'relationship') {
-        operand.linkedTable = linkedTable;
-      } else {
-        operand.linkedTableId = linkedTable;
+      const arr = Array.isArray(linkedTable) ? linkedTable : [linkedTable];
+      const unique = [...new Set(arr.filter(s => typeof s === 'string' && s.length > 0))];
+      if (unique.length > 0) {
+        // 'link' and 'relationship' store EO scope paths under 'linkedTable' /
+        // 'linkedTables'. 'linkedRecord' (legacy Airtable) stores under
+        // 'linkedTableId'. Multiple source tables are stored as 'linkedTables'.
+        if (type === 'link' || type === 'relationship') {
+          operand.linkedTable = unique[0];
+          if (unique.length > 1) operand.linkedTables = unique;
+        } else {
+          operand.linkedTableId = unique[0];
+          if (unique.length > 1) operand.linkedTables = unique;
+        }
       }
     }
     try {
@@ -1394,7 +1539,45 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
 
   const canEdit = sliceReadOnly ? false : (permissions ? (permissions.can_edit_any_record || permissions.can_edit_own_records) : true);
 
-  function handleCellDoubleClick(rec: EoState, colKey: string) {
+  function extractLinkIds(value: unknown): string[] {
+    if (value == null) return [];
+    if (typeof value === 'string') {
+      if (value.startsWith('[') && value.endsWith(']')) {
+        try {
+          const p = JSON.parse(value);
+          if (Array.isArray(p)) return p.filter((v): v is string => typeof v === 'string');
+        } catch { /* fall through */ }
+      }
+      return value ? [value] : [];
+    }
+    if (Array.isArray(value)) return value.filter((v): v is string => typeof v === 'string');
+    if (typeof value === 'object') {
+      const linked = (value as { linked?: unknown }).linked;
+      if (Array.isArray(linked)) return linked.filter((v): v is string => typeof v === 'string');
+    }
+    return [];
+  }
+
+  function resolveLinkedTables(fieldKey: string, currentIds: string[]): string[] {
+    const override = columnTypeOverrides.get(fieldKey);
+    const out = new Set<string>();
+    const linkedTables = override?.linkedTables;
+    if (Array.isArray(linkedTables)) {
+      for (const t of linkedTables) if (typeof t === 'string' && t) out.add(t);
+    }
+    if (typeof override?.linkedTable === 'string' && override.linkedTable) out.add(override.linkedTable);
+    if (typeof override?.linkedTableId === 'string' && override.linkedTableId) out.add(override.linkedTableId);
+    // Fall back: infer from existing linked IDs via the resolver.
+    if (out.size === 0) {
+      for (const id of currentIds) {
+        const resolved = idResolver?.resolve(id);
+        if (resolved) out.add(resolved.target.split('.').slice(0, -1).join('.'));
+      }
+    }
+    return [...out];
+  }
+
+  function handleCellDoubleClick(rec: EoState, colKey: string, colType?: string) {
     if (!canEdit) return;
     if (colKey === '_record' || colKey === '_last_updated') return;
     if (permissions?.locked_fields?.includes(colKey)) return;
@@ -1402,10 +1585,50 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     if (permissions?.type_hidden_fields?.includes(colKey)) return;
 
     const raw = getFieldValue(rec, colKey, useFieldsSub);
+
+    // Link fields get the Airtable-style picker, never a raw JSON text input.
+    if (colType === 'link' || colType === 'linkedRecord' || colType === 'relationship') {
+      const currentIds = extractLinkIds(raw);
+      const linkedTables = resolveLinkedTables(colKey, currentIds);
+      if (linkedTables.length === 0) return;
+      setEditingLinkCell({ target: rec.target, fieldKey: colKey, linkedTables });
+      return;
+    }
+
     const strVal = raw != null && typeof raw === 'object'
       ? JSON.stringify(raw, null, 2)
       : String(raw ?? '');
     setEditingCell({ target: rec.target, fieldKey: colKey, value: strVal });
+  }
+
+  async function handleLinkCellSave(target: string, fieldKey: string, ids: string[]) {
+    const rec = records.find((r) => r.target === target);
+    const prior = rec ? getFieldValue(rec, fieldKey, useFieldsSub) : undefined;
+    const isFirstFill =
+      prior === undefined ||
+      prior === null ||
+      prior === '' ||
+      (Array.isArray(prior) && prior.length === 0);
+    try {
+      if (isFirstFill) {
+        await dispatch(
+          buildMakingDefEvent(target, fieldKey, ids, `user:${session.userId}`, useFieldsSub),
+        );
+      } else {
+        const operand = useFieldsSub
+          ? { fields: { [fieldKey]: ids } }
+          : { [fieldKey]: ids };
+        await dispatch({
+          op: 'DEF',
+          target,
+          operand,
+          agent: `user:${session.userId}`,
+          ts: new Date().toISOString(),
+          acquired_ts: new Date().toISOString(),
+        });
+      }
+      syncEditToAirtable({ target, fieldKey, value: ids, getStateByPrefix }).catch(console.warn);
+    } catch { /* ignore */ }
   }
 
   async function handleCellSave(target: string, fieldKey: string, rawValue: string) {
@@ -1822,11 +2045,33 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
       {/* Toolbar */}
       <div style={{
         ...s.toolbar,
-        ...(isMobile ? { flexWrap: 'wrap' as const, gap: 8, padding: '8px 12px' } : {}),
+        ...(isMobile ? { padding: '8px 12px' } : {}),
       }}>
         <div style={s.toolbarLeft}>
           <div style={s.scopeName}>{scopeName || formatScopeName(scope)}</div>
           <span style={s.recordCount}>{filtered.length}</span>
+          {selectedRows.size > 0 && (
+            <span style={{
+              display: 'inline-flex', alignItems: 'center', gap: 6,
+              padding: '2px 8px', borderRadius: 10,
+              background: theme.accentBg, color: theme.accent,
+              border: `1px solid ${theme.accentBorder}`,
+              fontSize: 11, fontWeight: 600,
+            }}>
+              {selectedRows.size} selected
+              <button
+                onClick={deselectAllRows}
+                title="Clear selection"
+                aria-label="Clear selection"
+                style={{
+                  background: 'none', border: 'none', color: theme.accent,
+                  cursor: 'pointer', padding: 0, fontSize: 12, lineHeight: 1,
+                }}
+              >
+                {'\u2715'}
+              </button>
+            </span>
+          )}
           <TableUpdateIndicator
             isUpdating={isUpdating}
             lastUpdate={lastUpdate}
@@ -1851,16 +2096,13 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
           {(permissions?.can_add_records !== false) && (
             <button onClick={handleAddRecord} style={{
               ...s.addRecordBtn,
-              ...(isMobile ? { padding: '6px 10px', fontSize: 11 } : {}),
+              ...(isMobile ? { padding: '0 10px', fontSize: 11 } : {}),
             }}>
               + New
             </button>
           )}
         </div>
-        <div style={{
-          ...s.toolbarRight,
-          ...(isMobile ? { flexWrap: 'wrap' as const, gap: 6 } : {}),
-        }}>
+        <div style={s.toolbarRight}>
           <FilterBar
             columns={entityColumns}
             filters={advancedFilters}
@@ -1881,9 +2123,34 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
             placeholder="Search…"
             style={{
               ...s.filterInput,
-              ...(isMobile ? { width: 100, flex: '1 1 100px', minWidth: 80 } : {}),
+              ...(isMobile
+                ? { width: 'auto', flex: '1 1 100px', minWidth: 80 }
+                : { width: 'auto', flex: '0 1 180px', minWidth: 120 }),
             }}
           />
+
+          {/* Select all / deselect all toggle */}
+          <button
+            onClick={allVisibleSelected ? deselectAllRows : selectAllVisible}
+            disabled={filtered.length === 0}
+            title={allVisibleSelected ? 'Deselect all visible rows' : 'Select all visible rows'}
+            aria-label={allVisibleSelected ? 'Deselect all visible rows' : 'Select all visible rows'}
+            aria-pressed={allVisibleSelected}
+            style={{
+              ...s.toggleBtn,
+              padding: '0 8px',
+              minWidth: 28,
+              fontWeight: allVisibleSelected || someVisibleSelected ? 600 : 400,
+              background: allVisibleSelected || someVisibleSelected ? theme.accentBg : 'transparent',
+              color: allVisibleSelected || someVisibleSelected ? theme.accent : theme.textMuted,
+              border: `1px solid ${allVisibleSelected || someVisibleSelected ? theme.accentBorder : theme.border}`,
+              borderRadius: 4,
+              cursor: filtered.length === 0 ? 'not-allowed' : 'pointer',
+              opacity: filtered.length === 0 ? 0.5 : 1,
+            }}
+          >
+            {allVisibleSelected ? 'Deselect all' : someVisibleSelected ? `Select all (${visibleSelectedCount}/${filtered.length})` : 'Select all'}
+          </button>
 
           {/* Row height toggle — hidden on mobile */}
           {!isMobile && (
@@ -1947,30 +2214,6 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
               );
             })}
           </div>
-          )}
-
-          {/* Field ID toggle — hidden on mobile */}
-          {!isMobile && (
-          <button
-            onClick={() => sliceStore.setShowFieldIds(scope, !showFieldIds)}
-            title={showFieldIds ? 'Showing raw field IDs — click for display names' : 'Showing display names — click for raw field IDs'}
-            aria-label="Toggle field ID display"
-            aria-pressed={showFieldIds}
-            style={{
-              ...s.toggleBtn,
-              padding: '0 8px',
-              minWidth: 28,
-              fontWeight: showFieldIds ? 600 : 400,
-              background: showFieldIds ? theme.accentBg : 'transparent',
-              color: showFieldIds ? theme.accent : theme.textMuted,
-              border: `1px solid ${showFieldIds ? theme.accentBorder : theme.border}`,
-              borderRadius: 4,
-              fontFamily: "'JetBrains Mono', monospace",
-              fontSize: 10,
-            }}
-          >
-            ID
-          </button>
           )}
 
           {/* Column manager (Fields) */}
@@ -2100,7 +2343,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
         <DndContext sensors={sensors} collisionDetection={closestCenter} onDragStart={handleColumnDragStart} onDragEnd={handleColumnDragEnd} onDragCancel={() => setActiveDragId(null)}>
           <table ref={tableRef} style={{ ...s.table, tableLayout: 'fixed', contain: 'layout style' as React.CSSProperties['contain'] }}>
             <colgroup>
-              <col style={{ width: 40 }} />
+              <col style={{ width: 56 }} />
               {orderedColumns.map((col) => (
                 <col key={col.key} style={{ width: columnWidths[col.key] || defaultColumnWidth(col.type) }} />
               ))}
@@ -2108,7 +2351,23 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
             <thead>
               <SortableContext items={orderedColumns.map((c) => c.key)} strategy={horizontalListSortingStrategy}>
                 <tr>
-                  <th style={{ ...s.th, width: 40, textAlign: 'center', padding: '0 4px', userSelect: 'none', color: theme.textMuted, fontSize: 11 }}>#</th>
+                  <th
+                    style={{ ...s.th, width: 56, textAlign: 'center', padding: '0 4px', userSelect: 'none', color: theme.textMuted, fontSize: 11 }}
+                    title={allVisibleSelected ? 'Deselect all visible rows' : 'Select all visible rows'}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={allVisibleSelected}
+                      ref={(el) => { if (el) el.indeterminate = someVisibleSelected; }}
+                      onChange={() => {
+                        if (allVisibleSelected) deselectAllRows();
+                        else selectAllVisible();
+                      }}
+                      disabled={filtered.length === 0}
+                      aria-label={allVisibleSelected ? 'Deselect all visible rows' : 'Select all visible rows'}
+                      style={{ cursor: filtered.length === 0 ? 'not-allowed' : 'pointer', margin: 0 }}
+                    />
+                  </th>
                   {orderedColumns.map((col) => (
                     <SortableColumnHeader
                       key={col.key}
@@ -2161,7 +2420,9 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
               {filtered.length === 0 && recordsLoaded && (
                 <tr>
                   <td colSpan={orderedColumns.length + 1} style={s.emptyRow}>
-                    {records.length === 0 ? 'No records in this scope' : 'No records match the current filter'}
+                    {records.length === 0
+                      ? (emptyStateSettled ? 'No records in this scope' : 'Loading records…')
+                      : 'No records match the current filter'}
                   </td>
                 </tr>
               )}
@@ -2170,22 +2431,27 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
               )}
               {virtualRows.map((rec, rowIndex) => {
                 const isActive = rec.target === activeRecord;
+                const isSelected = selectedRows.has(rec.target);
+                const rowBg = isSelected
+                  ? theme.accentBg
+                  : isActive ? theme.accentBg : theme.bgCard;
                 return (
                   <tr
                     key={rec.target}
-                    style={{ background: isActive ? theme.accentBg : theme.bgCard }}
+                    style={{ background: rowBg }}
                     onClick={() => onSelectRecord(rec.target)}
                     onContextMenu={(e) => handleContextMenu(e, rec.target)}
                     onMouseEnter={(e) => {
-                      if (!isActive) (e.currentTarget as HTMLElement).style.background = theme.bgHover;
+                      if (!isActive && !isSelected) (e.currentTarget as HTMLElement).style.background = theme.bgHover;
                     }}
                     onMouseLeave={(e) => {
-                      if (!isActive) (e.currentTarget as HTMLElement).style.background = theme.bgCard;
+                      if (!isActive && !isSelected) (e.currentTarget as HTMLElement).style.background = theme.bgCard;
+                      else if (isSelected && !isActive) (e.currentTarget as HTMLElement).style.background = theme.accentBg;
                     }}
                   >
                     <td style={{
                       ...s.td,
-                      width: 40,
+                      width: 56,
                       textAlign: 'center',
                       padding: `${rowHeight === 'compact' ? 4 : rowHeight === 'tall' ? 18 : 10}px 4px`,
                       fontFamily: "'JetBrains Mono', monospace",
@@ -2193,7 +2459,19 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                       color: theme.textMuted,
                       userSelect: 'none',
                       background: 'inherit',
-                    }}>{virtualStart + rowIndex + 1}</td>
+                    }}>
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, justifyContent: 'center' }}>
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onClick={(e) => e.stopPropagation()}
+                          onChange={() => toggleRowSelection(rec.target)}
+                          aria-label={isSelected ? `Deselect row ${virtualStart + rowIndex + 1}` : `Select row ${virtualStart + rowIndex + 1}`}
+                          style={{ cursor: 'pointer', margin: 0 }}
+                        />
+                        <span>{virtualStart + rowIndex + 1}</span>
+                      </span>
+                    </td>
                     {orderedColumns.map((col, colIndex) => {
                       const isRedacted = permissions?.redacted_fields?.includes(col.key);
                       const isLocked = permissions?.locked_fields?.includes(col.key);
@@ -2205,7 +2483,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                           key={col.key}
                           style={{
                             ...tdStyle,
-                            padding: `${rowHeight === 'compact' ? 4 : rowHeight === 'tall' ? 18 : 10}px 8px ${rowHeight === 'compact' ? 4 : rowHeight === 'tall' ? 18 : 10}px 20px`,
+                            padding: `${rowHeight === 'compact' ? 4 : rowHeight === 'tall' ? 18 : 10}px 10px`,
                             ...(cellOverflow === 'clip'
                               ? { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', wordBreak: 'normal' as const }
                               : { whiteSpace: 'normal', wordBreak: 'break-word' as const }),
@@ -2342,12 +2620,25 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                                   cursor: 'text',
                                   transition: 'border-bottom-color 0.12s',
                                   boxSizing: 'border-box' as const,
+                                  position: 'relative' as const,
                                 }}
-                                title="Double-click to edit · right-click for options"
-                                onClick={(e) => e.stopPropagation()}
+                                title="Click to view · click again to edit · right-click for options"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  const isActiveRecord = rec.target === activeRecord;
+                                  const isSameCell = lastClickedCell?.target === rec.target && lastClickedCell?.fieldKey === col.key;
+                                  if (isActiveRecord && isSameCell) {
+                                    handleCellDoubleClick(rec, col.key, col.type);
+                                    setLastClickedCell(null);
+                                  } else {
+                                    onSelectRecord(rec.target);
+                                    setLastClickedCell({ target: rec.target, fieldKey: col.key });
+                                  }
+                                }}
                                 onDoubleClick={(e) => {
                                   e.stopPropagation();
-                                  handleCellDoubleClick(rec, col.key);
+                                  handleCellDoubleClick(rec, col.key, col.type);
+                                  setLastClickedCell(null);
                                 }}
                                 onMouseEnter={(e) => {
                                   (e.currentTarget as HTMLElement).style.borderBottomColor = theme.borderLight;
@@ -2355,7 +2646,9 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                                 onMouseLeave={(e) => {
                                   (e.currentTarget as HTMLElement).style.borderBottomColor = 'transparent';
                                 }}
-                              >{renderCell(getFieldValue(rec, col.key, useFieldsSub), col.key, onSelectRecord, theme, idResolver, col.type)}</span>
+                              >
+                                {renderCell(getFieldValue(rec, col.key, useFieldsSub), col.key, onSelectRecord, theme, idResolver, col.type)}
+                              </span>
                             : renderCell(getFieldValue(rec, col.key, useFieldsSub), col.key, onSelectRecord, theme, idResolver, col.type)
                           }
                         </td>
@@ -2429,6 +2722,19 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
       )}
 
       {/* Type selector popover */}
+      {editingLinkCell && (() => {
+        const rec = records.find(r => r.target === editingLinkCell.target);
+        const currentIds = rec ? extractLinkIds(getFieldValue(rec, editingLinkCell.fieldKey, useFieldsSub)) : [];
+        return (
+          <LinkFieldPicker
+            fieldKey={editingLinkCell.fieldKey}
+            linkedTables={editingLinkCell.linkedTables}
+            currentIds={currentIds}
+            onClose={() => setEditingLinkCell(null)}
+            onChange={(ids) => handleLinkCellSave(editingLinkCell.target, editingLinkCell.fieldKey, ids)}
+          />
+        );
+      })()}
       {typeSelector && (
         <>
           <div
@@ -2503,7 +2809,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
                     })
                     .map(tableScope => ({ scope: tableScope, name: formatScopeName(tableScope) }));
                   setColumnTypeSelector(null);
-                  setLinkedRecordPicker({ x: columnTypeSelector.x, y: columnTypeSelector.y, key: columnTypeSelector.key, tables, mode: type as 'linkedRecord' | 'link' | 'relationship' });
+                  setLinkedRecordPicker({ x: columnTypeSelector.x, y: columnTypeSelector.y, key: columnTypeSelector.key, tables, mode: type as 'linkedRecord' | 'link' | 'relationship', selected: [] });
                 } else if (type === 'select' || type === 'multiSelect') {
                   const key = columnTypeSelector.key;
                   const hasEnumConstraint = !!fieldSchemas.get(key)?.constraints.find(c => c.name === 'enum');
@@ -2541,23 +2847,98 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
             maxWidth: 320,
             padding: '8px 0',
           }}>
-            <div style={{ padding: '6px 12px 8px', fontSize: 11, fontWeight: 600, color: theme.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-              Link to table
+            <div style={{ padding: '6px 12px 4px', fontSize: 11, fontWeight: 600, color: theme.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+              Link to table{linkedRecordPicker.tables.length > 1 ? 's' : ''}
+            </div>
+            <div style={{ padding: '0 12px 6px', fontSize: 10, color: theme.textMuted }}>
+              Select one or more source tables
             </div>
             {linkedRecordPicker.tables.length === 0 ? (
               <div style={{ padding: '6px 12px', fontSize: 13, color: theme.textMuted }}>No other tables found</div>
             ) : (
-              linkedRecordPicker.tables.map(t => (
-                <div
-                  key={t.scope}
-                  style={{ padding: '7px 12px', fontSize: 13, cursor: 'pointer', color: theme.text }}
-                  onMouseEnter={e => (e.currentTarget.style.background = theme.bgHover ?? theme.bgMuted)}
-                  onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                  onClick={() => handleSetColumnType(linkedRecordPicker.key, linkedRecordPicker.mode, t.scope)}
-                >
-                  {t.name}
+              <>
+                {linkedRecordPicker.tables.map(tbl => {
+                  const isSelected = linkedRecordPicker.selected.includes(tbl.scope);
+                  return (
+                    <div
+                      key={tbl.scope}
+                      style={{
+                        padding: '7px 12px',
+                        fontSize: 13,
+                        cursor: 'pointer',
+                        color: theme.text,
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 8,
+                        background: isSelected ? `${theme.purple}14` : 'transparent',
+                      }}
+                      onMouseEnter={e => { if (!isSelected) (e.currentTarget as HTMLElement).style.background = theme.bgHover ?? theme.bgMuted; }}
+                      onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = isSelected ? `${theme.purple}14` : 'transparent'; }}
+                      onClick={() => setLinkedRecordPicker(prev => {
+                        if (!prev) return prev;
+                        const next = prev.selected.includes(tbl.scope)
+                          ? prev.selected.filter(s => s !== tbl.scope)
+                          : [...prev.selected, tbl.scope];
+                        return { ...prev, selected: next };
+                      })}
+                    >
+                      <span style={{
+                        width: 14,
+                        height: 14,
+                        borderRadius: 3,
+                        border: `1.5px solid ${isSelected ? theme.purple : theme.border}`,
+                        background: isSelected ? theme.purple : 'transparent',
+                        flexShrink: 0,
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        color: '#fff',
+                        fontSize: 9,
+                        lineHeight: 1,
+                        fontWeight: 700,
+                      }}>{isSelected ? '✓' : ''}</span>
+                      <span>{tbl.name}</span>
+                    </div>
+                  );
+                })}
+                <div style={{
+                  padding: '8px 12px',
+                  borderTop: `1px solid ${theme.borderLight}`,
+                  display: 'flex',
+                  justifyContent: 'flex-end',
+                  gap: 6,
+                  marginTop: 4,
+                }}>
+                  <button
+                    onClick={() => setLinkedRecordPicker(null)}
+                    style={{
+                      background: 'transparent',
+                      border: `1px solid ${theme.border}`,
+                      borderRadius: 6,
+                      padding: '4px 10px',
+                      fontSize: 12,
+                      color: theme.textMuted,
+                      cursor: 'pointer',
+                      fontFamily: 'inherit',
+                    }}
+                  >Cancel</button>
+                  <button
+                    disabled={linkedRecordPicker.selected.length === 0}
+                    onClick={() => handleSetColumnType(linkedRecordPicker.key, linkedRecordPicker.mode, linkedRecordPicker.selected)}
+                    style={{
+                      background: linkedRecordPicker.selected.length === 0 ? theme.bgMuted : theme.purple,
+                      border: `1px solid ${linkedRecordPicker.selected.length === 0 ? theme.border : theme.purple}`,
+                      borderRadius: 6,
+                      padding: '4px 10px',
+                      fontSize: 12,
+                      color: linkedRecordPicker.selected.length === 0 ? theme.textMuted : '#fff',
+                      cursor: linkedRecordPicker.selected.length === 0 ? 'not-allowed' : 'pointer',
+                      fontFamily: 'inherit',
+                      fontWeight: 500,
+                    }}
+                  >Link</button>
                 </div>
-              ))
+              </>
             )}
           </div>
         </>
@@ -3304,20 +3685,32 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'space-between',
-      padding: '12px 20px',
+      flexWrap: 'wrap' as const,
+      columnGap: 12,
+      rowGap: 8,
+      padding: '10px 20px',
       borderBottom: `0.5px solid ${t.border}`,
       background: t.bgCard,
       flexShrink: 0,
+      minWidth: 0,
     },
     toolbarLeft: {
       display: 'flex',
       alignItems: 'center',
-      gap: 8,
+      flexWrap: 'wrap' as const,
+      columnGap: 8,
+      rowGap: 8,
+      minWidth: 0,
     },
     toolbarRight: {
       display: 'flex',
       alignItems: 'center',
-      gap: 8,
+      flexWrap: 'wrap' as const,
+      justifyContent: 'flex-end' as const,
+      columnGap: 8,
+      rowGap: 8,
+      minWidth: 0,
+      flex: '1 1 auto',
     },
     scopeName: {
       fontSize: 14,
@@ -3347,10 +3740,11 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       letterSpacing: '0.02em',
     },
     addRecordBtn: {
-      display: 'flex',
+      display: 'inline-flex',
       alignItems: 'center',
       gap: 4,
-      padding: '5px 12px',
+      height: 28,
+      padding: '0 12px',
       fontSize: 12,
       fontWeight: 600,
       border: `1px solid ${t.accent}`,
@@ -3359,6 +3753,7 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       color: '#fff',
       cursor: 'pointer',
       whiteSpace: 'nowrap' as const,
+      boxSizing: 'border-box' as const,
     },
     toggleBtn: {
       height: 28,

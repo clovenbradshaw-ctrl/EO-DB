@@ -5,7 +5,7 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 import { restoreSession, type MatrixSession } from './matrix/client';
 import { useEoStore } from './store/eo-store';
 import { ThemeProvider, useTheme } from './theme';
-import { initGoogleOAuth, handleOAuthCallback } from './google-drive/gdrive-oauth';
+import { initGoogleOAuth, handleOAuthCallback } from './google-oauth/google-oauth';
 import { startWriteBackListener } from './google-calendar/gcalendar-sync';
 
 /** Synthetic session used for local-only mode (no Matrix server). */
@@ -39,9 +39,13 @@ function AppMain() {
 
   useEffect(() => {
     // Initialise Google OAuth module
-    const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID || '871214509438-ei206mo0835gr0n47d2lg4ujv7hnn2in.apps.googleusercontent.com';
+    const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID;
     const redirectUri = window.location.origin + window.location.pathname;
-    initGoogleOAuth(clientId, redirectUri);
+    if (clientId) {
+      initGoogleOAuth(clientId, redirectUri);
+    } else {
+      console.warn('[EO-DB] VITE_GOOGLE_CLIENT_ID not configured — Google integration disabled.');
+    }
 
     // Handle OAuth2 PKCE callback — exchanges ?code= for tokens
     if (window.location.search.includes('code=')) {
@@ -76,9 +80,12 @@ function AppMain() {
     setSession(s);
     localStorage.removeItem('eo-local-mode');
     setLocalMode(false);
-    // Restore the deep-link the user originally landed on
-    if (pendingRedirect.current && pendingRedirect.current !== '#/') {
-      window.location.hash = pendingRedirect.current;
+    // Restore the deep-link the user originally landed on — but only if it
+    // looks like a genuine in-app hash route, to avoid open-redirect or
+    // javascript:-scheme attacks via the URL fragment.
+    const pending = pendingRedirect.current;
+    if (pending && pending !== '#/' && /^#\/[A-Za-z0-9/_\-.?=&]*$/.test(pending)) {
+      window.location.hash = pending;
     }
   }
 
@@ -99,8 +106,6 @@ function AppMain() {
 
   // Guard: if this is the OAuth popup callback, show a minimal placeholder
   // until handleOAuthCallback() (running in useEffect) closes the popup.
-  // Without this guard the popup renders the full app, including another
-  // "Connect Google Drive" button, which re-triggers the OAuth flow (loop).
   //
   // Under Chrome's COOP enforcement, `window.close()` in the popup can
   // silently fail after the round-trip through accounts.google.com. When
@@ -149,7 +154,35 @@ function AppMain() {
   }
 
   if (loading) {
-    return <div style={{ padding: 40, textAlign: 'center', color: theme.textSecondary }}>Loading...</div>;
+    return (
+      <div
+        role="status"
+        aria-live="polite"
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          minHeight: '100vh',
+          gap: 12,
+          color: theme.textSecondary,
+          fontFamily: "'JetBrains Mono', monospace",
+        }}
+      >
+        <span
+          style={{
+            width: 24,
+            height: 24,
+            border: `2px solid ${theme.border}`,
+            borderTopColor: theme.accent,
+            borderRadius: '50%',
+            animation: 'spin 0.8s linear infinite',
+            display: 'inline-block',
+          }}
+        />
+        <div style={{ fontSize: 13 }}>Loading data…</div>
+      </div>
+    );
   }
 
   if (!session) {

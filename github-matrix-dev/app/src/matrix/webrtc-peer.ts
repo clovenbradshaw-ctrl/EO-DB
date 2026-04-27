@@ -41,6 +41,17 @@ const RTC_ANSWER = _rtcTypes.answer;
 const RTC_ICE = _rtcTypes.ice;
 const RTC_HANGUP = _rtcTypes.hangup;
 
+/**
+ * Split a `${userId}:${deviceId}` peer key back into its components.
+ * The userId may itself contain colons (Matrix user IDs are
+ * `@name:server.tld`), so we split on the last colon.
+ */
+function splitPeerKey(peerKey: string): [string, string] {
+  const idx = peerKey.lastIndexOf(':');
+  if (idx <= 0) return [peerKey, ''];
+  return [peerKey.slice(0, idx), peerKey.slice(idx + 1)];
+}
+
 /** Build the Map<userId, Map<deviceId, content>> structure for sendToDevice. */
 export function toDeviceContent(userId: string, deviceId: string, content: Record<string, any>) {
   const inner = new Map<string, Record<string, any>>();
@@ -93,13 +104,38 @@ interface ResumeRequestMessage {
   received_chunks: number[];
 }
 
+/**
+ * Sync-layer v2 bulk frames (sync.md §4.3). These are single-DC-message
+ * self-contained blobs — the receiver hash-verifies `content_hash`
+ * against the canonical msgpack encoding before handing off to the fold.
+ */
+interface PieceBytesMessage {
+  type: 'piece_bytes';
+  req_id: string;
+  piece_site: string;
+  content_hash: string;
+  events_msgpack: Uint8Array;
+}
+
+interface TailBytesMessage {
+  type: 'tail_bytes';
+  req_id: string;
+  tail_site: string;
+  from_seq: number;
+  events_msgpack: Uint8Array;
+}
+
+export type SwarmV2BulkFrame = PieceBytesMessage | TailBytesMessage;
+
 type DCMessage =
   | SyncStartMessage
   | ChunkMessage
   | SyncCompleteMessage
   | PingMessage
   | PongMessage
-  | ResumeRequestMessage;
+  | ResumeRequestMessage
+  | PieceBytesMessage
+  | TailBytesMessage;
 
 // ──────────────────────────────────────────────────────────────
 // ICE server configuration
@@ -174,6 +210,16 @@ export class WebRTCPeer {
   private pendingCandidates = new Map<string, RTCIceCandidateInit[]>();
   /** Matrix to-device event handler. */
   private toDeviceHandler?: (event: MatrixEvent) => void;
+  /**
+   * Callback invoked when a sync-layer v2 bulk frame arrives over a DC.
+   * Wired up by the `network-sync-bridge` when the operator-native sync
+   * mode is active. Left unset in the legacy peer-sync path.
+   */
+  private bulkFrameHandler?: (
+    msg: SwarmV2BulkFrame,
+    peerUserId: string,
+    peerDeviceId: string,
+  ) => void;
   /** Whether this peer has been destroyed. */
   private destroyed = false;
 
@@ -229,6 +275,35 @@ export class WebRTCPeer {
     const key = `${userId}:${deviceId}`;
     const dc = this.channels.get(key);
     return dc?.readyState === 'open';
+  }
+
+  /**
+   * Register a handler for incoming sync-layer v2 bulk frames. The bridge
+   * uses this to receive `piece_bytes` / `tail_bytes` messages.
+   */
+  setBulkFrameHandler(
+    handler: (msg: SwarmV2BulkFrame, peerUserId: string, peerDeviceId: string) => void,
+  ): void {
+    this.bulkFrameHandler = handler;
+  }
+
+  /**
+   * Send a sync-layer v2 bulk frame over an open DataChannel.
+   *
+   * Returns `false` if no DC is currently open — callers (bridge) fall
+   * back to Matrix to-device in that case. Throws only on unexpected
+   * send failures.
+   */
+  async sendBulkFrame(
+    peerUserId: string,
+    peerDeviceId: string,
+    msg: SwarmV2BulkFrame,
+  ): Promise<boolean> {
+    const peerKey = `${peerUserId}:${peerDeviceId}`;
+    const dc = this.channels.get(peerKey);
+    if (!dc || dc.readyState !== 'open') return false;
+    dc.send(new Uint8Array(pack(msg)));
+    return true;
   }
 
   // ────────────────────────────────────────────────────────────
@@ -575,6 +650,13 @@ export class WebRTCPeer {
         break;
       case 'resume':
         // Peer is requesting we re-send missing chunks (future enhancement)
+        break;
+      case 'piece_bytes':
+      case 'tail_bytes':
+        if (this.bulkFrameHandler) {
+          const [userId, deviceId] = splitPeerKey(peerKey);
+          this.bulkFrameHandler(msg, userId, deviceId);
+        }
         break;
     }
   }

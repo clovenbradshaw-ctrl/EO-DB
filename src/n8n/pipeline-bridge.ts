@@ -30,7 +30,7 @@ import {
   storeBinaryViaN8n,
   retrieveViaN8n,
   retrieveBinaryViaN8n,
-  listViaN8n,
+  versionsViaN8n,
 } from './webhook-client.js';
 import {
   publishManifest,
@@ -62,6 +62,7 @@ export class N8nPipelineBridge {
     label?: string,
   ): Promise<ManifestEntry> {
     const { manifest } = await storeBinaryViaN8n(binary, this.keyring, {
+      roomId: this.roomId,
       target: this.targetRoot,
       dataType: 'snapshot',
       label: label ?? `snapshot seq ${seqRange.from}–${seqRange.to}`,
@@ -102,6 +103,7 @@ export class N8nPipelineBridge {
     matrixToken: string,
   ): Promise<ManifestEntry> {
     const { manifest } = await storeViaN8n(events, this.keyring, {
+      roomId: this.roomId,
       target: this.targetRoot,
       dataType: 'event-batch',
       label: `events seq ${seqRange.from}–${seqRange.to}`,
@@ -136,6 +138,7 @@ export class N8nPipelineBridge {
     label?: string,
   ): Promise<ManifestEntry> {
     const { manifest } = await storeViaN8n(data, this.keyring, {
+      roomId: this.roomId,
       target: this.targetRoot,
       dataType: 'import-archive',
       label: label ?? 'import archive',
@@ -159,6 +162,7 @@ export class N8nPipelineBridge {
     label?: string,
   ): Promise<ManifestEntry> {
     const { manifest } = await storeBinaryViaN8n(binary, this.keyring, {
+      roomId: this.roomId,
       target: this.targetRoot,
       dataType: 'attachment',
       agent,
@@ -208,14 +212,17 @@ export class N8nPipelineBridge {
     await tombstoneManifest(this.client, this.roomId, dataId, reason);
   }
 
-  // ─── Remote listing (queries n8n / Google Drive directly) ──────────────
+  // ─── Remote listing (queries the n8n workflow directly) ────────────────
 
   /**
-   * List blobs stored in n8n's Google Drive backend.
-   * Useful for reconciliation against the Matrix manifest.
+   * List server-retained versions of a single data_id.
+   * The workflow keeps a 5-version rolling history per blob.
+   *
+   * Cross-blob listing is not a server op — read Matrix room state via
+   * `listStored()` for that.
    */
-  async listRemote(matrixToken: string, filterType?: ManifestDataType) {
-    return listViaN8n(matrixToken, filterType);
+  async getVersions(dataId: string, matrixToken: string) {
+    return versionsViaN8n(this.roomId, dataId, matrixToken);
   }
 
 }

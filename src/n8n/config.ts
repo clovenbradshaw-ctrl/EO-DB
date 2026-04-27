@@ -16,7 +16,7 @@ import type { N8nWebhookConfig } from './types.js';
 
 // ─── Defaults ──────────────────────────────────────────────────────────────
 
-const DEFAULT_WEBHOOK_PATH = '/webhook/eo-store';
+const DEFAULT_WEBHOOK_PATH = '/webhook/eo-blob';
 const DEFAULT_MAX_PAYLOAD = 5 * 1024 * 1024; // 5 MB
 const DEFAULT_TIMEOUT = 30_000;
 

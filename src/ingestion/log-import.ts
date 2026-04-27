@@ -26,6 +26,9 @@ import {
 
 const EXTERNAL_OPS: Set<string> = new Set(['INS', 'DEF', 'CON', 'SEG', 'SYN', 'EVA']);
 
+/** Cap JSON cells parsed out of CSV imports to limit memory/DoS risk. */
+const MAX_JSON_CELL_BYTES = 64 * 1024;
+
 export interface ImportResult {
   total: number;
   processed: number;
@@ -274,8 +277,12 @@ export function parseCsvImport(csvText: string, options?: { delimiter?: string; 
       };
 
       if (operandIdx !== -1 && cols[operandIdx]?.trim()) {
+        const raw = cols[operandIdx].trim();
+        if (raw.length > MAX_JSON_CELL_BYTES) {
+          throw new Error(`Import: "operand" cell at row ${i + 1} exceeds ${MAX_JSON_CELL_BYTES} bytes`);
+        }
         try {
-          row.operand = JSON.parse(cols[operandIdx].trim());
+          row.operand = JSON.parse(raw);
         } catch {
           throw new Error(`Import: invalid JSON in "operand" column at row ${i + 1}`);
         }
@@ -283,8 +290,12 @@ export function parseCsvImport(csvText: string, options?: { delimiter?: string; 
       if (tsIdx !== -1 && cols[tsIdx]?.trim()) row.ts = cols[tsIdx].trim();
       if (clientEventIdIdx !== -1 && cols[clientEventIdIdx]?.trim()) row.client_event_id = cols[clientEventIdIdx].trim();
       if (metaIdx !== -1 && cols[metaIdx]?.trim()) {
+        const raw = cols[metaIdx].trim();
+        if (raw.length > MAX_JSON_CELL_BYTES) {
+          throw new Error(`Import: "meta" cell at row ${i + 1} exceeds ${MAX_JSON_CELL_BYTES} bytes`);
+        }
         try {
-          row.meta = JSON.parse(cols[metaIdx].trim());
+          row.meta = JSON.parse(raw);
         } catch {
           throw new Error(`Import: invalid JSON in "meta" column at row ${i + 1}`);
         }

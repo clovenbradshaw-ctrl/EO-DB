@@ -176,19 +176,58 @@ function formulaReferencesExternal(formula: unknown): boolean {
 }
 
 /**
- * Safely evaluate a formula expression with given inputs.
- * Uses Function constructor — safe here since formulas originate from the
- * same-origin OPFS log (not from untrusted external input).
+ * Math.* methods and constants that formulas are allowed to reference.
+ * Anything outside this set (globalThis, window, document, etc.) is rejected
+ * before evaluation so formulas synced in from other peers can't exfiltrate
+ * data or poison worker state.
+ */
+const FORMULA_MATH_ALLOWLIST = new Set([
+  'abs', 'acos', 'acosh', 'asin', 'asinh', 'atan', 'atan2', 'atanh',
+  'cbrt', 'ceil', 'clz32', 'cos', 'cosh', 'exp', 'expm1', 'floor',
+  'fround', 'hypot', 'imul', 'log', 'log10', 'log1p', 'log2', 'max',
+  'min', 'pow', 'round', 'sign', 'sin', 'sinh', 'sqrt', 'tan', 'tanh',
+  'trunc',
+  'E', 'LN2', 'LN10', 'LOG2E', 'LOG10E', 'PI', 'SQRT1_2', 'SQRT2',
+]);
+const FORMULA_KEYWORD_ALLOWLIST = new Set(['true', 'false', 'null', 'undefined']);
+const FORMULA_FORBIDDEN = /(?:\b(?:new|function|class|var|let|const|do|while|for|delete|void|typeof|instanceof|in|of|yield|async|await|throw|try|catch|finally|return|import|export|this|globalThis|window|self|document|eval|Function|constructor|prototype|__proto__)\b|=>|`|\$\{|;|\[|\]|\?\.)/;
+
+function isSafeFormulaExpression(expr: string, paramAllowlist: Set<string>): boolean {
+  if (expr.length > 2048) return false;
+  if (FORMULA_FORBIDDEN.test(expr)) return false;
+  const identRe = /[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)?/g;
+  let m: RegExpExecArray | null;
+  while ((m = identRe.exec(expr)) !== null) {
+    const ident = m[0];
+    if (paramAllowlist.has(ident)) continue;
+    if (FORMULA_KEYWORD_ALLOWLIST.has(ident)) continue;
+    if (ident === 'Math') continue;
+    if (ident.startsWith('Math.')) {
+      const member = ident.slice('Math.'.length);
+      if (FORMULA_MATH_ALLOWLIST.has(member)) continue;
+    }
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Evaluate a formula expression with given inputs. Formulas reach this worker
+ * via Matrix-synced events, so the expression is treated as untrusted: it's
+ * restricted to arithmetic, comparisons, and a small Math.* allowlist before
+ * being handed to Function().
  */
 function executeFormulaFunction(formula: unknown, inputs: Record<string, unknown>): unknown {
   if (!formula || typeof formula !== 'object') return null;
   const f = formula as { expr?: string };
   if (!f.expr) return null;
+  const paramNames = Object.keys(inputs);
+  const paramAllowlist = new Set(paramNames);
+  if (!isSafeFormulaExpression(f.expr, paramAllowlist)) return null;
   try {
-    const paramNames = Object.keys(inputs);
     const paramValues = Object.values(inputs);
     // eslint-disable-next-line @typescript-eslint/no-implied-eval
-    const fn = new Function(...paramNames, `return (${f.expr})`);
+    const fn = new Function(...paramNames, `"use strict"; return (${f.expr})`);
     return fn(...paramValues) as unknown;
   } catch {
     return null;
@@ -502,6 +541,11 @@ function scheduleCheckpoint(): void {
 function checkAdaptiveCheckpoint(): void {
   if (bulkImportInProgress || checkpointInProgress) return;
   eventsSinceCheckpoint++;
+  // Occasionally republish the current fold cost to the main thread so the
+  // PressureMonitor can track fold-cost drift between init boundaries.
+  if (eventsSinceCheckpoint % 256 === 0) {
+    post({ id: -1, type: 'telemetry', avgMicrosPerEvent: avgProcessMicrosPerEvent });
+  }
   const estimatedReplayMs = (eventsSinceCheckpoint * avgProcessMicrosPerEvent) / 1000;
   if (estimatedReplayMs > TARGET_STARTUP_MS) {
     scheduleCheckpoint();
@@ -759,6 +803,11 @@ function buildFoldEntry(target: string): FoldEntry {
             `[EO-DB] fold checkpoint stale (checkpoint seq=${position.seq}, log head=${logHeadSeq}) — reporting log head as ready headSeq`,
           );
           nextSeq = Math.max(nextSeq, logHeadSeq);
+          // Advance the bare counter so the scanLog fast-path stops short-
+          // circuiting `req.since >= position.seq` and actually returns the log
+          // entries past the stale checkpoint. Structural fields on position
+          // are still stale; the main thread rebuilds them via replayFromLog.
+          position.seq = logHeadSeq;
         }
 
         const elapsed = performance.now() - t0;
@@ -780,6 +829,7 @@ function buildFoldEntry(target: string): FoldEntry {
             if (reg.mode === 'fold') evaluateFormula(reg);
           }
         }
+        post({ id: -1, type: 'telemetry', avgMicrosPerEvent: avgProcessMicrosPerEvent });
         post({ id: -1, type: 'ready', headSeq: logHeadSeq, fastPath });
         break;
       }
@@ -883,6 +933,7 @@ function buildFoldEntry(target: string): FoldEntry {
         updateIndex(index, event, byteOffset);
         applyEvent(position, event);
         if (event.op === 'EVA') registerEvaFormula(event);
+        checkAdaptiveCheckpoint();
         post({ id: req.id, type: 'result', value: null });
         break;
       }

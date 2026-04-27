@@ -200,6 +200,10 @@ export function SchemaView({ scope }: SchemaViewProps) {
   const [loading, setLoading] = useState(true);
   const [expandedField, setExpandedField] = useState<string | null>(null);
   const [selectedFieldKey, setSelectedFieldKey] = useState<string | null>(null);
+  // Pulse token sent to the panel to force-open Layer 3 when the user clicks
+  // the Resolution column cell. A monotonically increasing counter lets the
+  // panel's effect re-fire even when the same section is requested twice.
+  const [focusRequest, setFocusRequest] = useState<{ section: 'advanced'; token: number } | null>(null);
   const [editingLabel, setEditingLabel] = useState<{ fieldKey: string; value: string } | null>(null);
   const [sortKey, setSortKey] = useState<SortKey>('fieldKey');
   const [sortDir, setSortDir] = useState<SortDir>('asc');
@@ -740,7 +744,17 @@ export function SchemaView({ scope }: SchemaViewProps) {
                       <div style={s.cell}>
                         <span style={s.cellText}>{constraintDisplay}</span>
                       </div>
-                      <div style={s.cell}>
+                      <div
+                        style={s.resolveCell}
+                        title={resolvePolicy ? 'Edit resolution policy' : 'Set resolution policy'}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setSelectedFieldKey(fs.fieldKey);
+                          setFocusRequest({ section: 'advanced', token: Date.now() });
+                        }}
+                        onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = theme.bgHover; }}
+                        onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
+                      >
                         <span style={s.cellText}>{resolveDisplay}</span>
                       </div>
                     </div>
@@ -769,7 +783,8 @@ export function SchemaView({ scope }: SchemaViewProps) {
         <SchemaFieldPanel
           fieldKey={selectedFieldKey}
           fieldSchema={fieldSchemas.get(selectedFieldKey)}
-          onClose={() => setSelectedFieldKey(null)}
+          focusRequest={focusRequest}
+          onClose={() => { setSelectedFieldKey(null); setFocusRequest(null); }}
           onSaveLabel={(label) => handleLabelSave(selectedFieldKey, label)}
           onAddConstraint={(name, value) => handleAddConstraint(selectedFieldKey, name, value)}
           onRemoveConstraint={(name) => handleRemoveConstraint(selectedFieldKey, name)}
@@ -903,6 +918,16 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       alignItems: 'center',
       gap: 6,
       minWidth: 0,
+    },
+    resolveCell: {
+      padding: '10px 16px',
+      fontSize: 12,
+      display: 'flex',
+      alignItems: 'center',
+      gap: 6,
+      minWidth: 0,
+      cursor: 'pointer',
+      transition: 'background 0.1s',
     },
     cellText: {
       color: t.text,

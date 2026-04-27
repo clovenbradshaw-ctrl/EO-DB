@@ -17,7 +17,6 @@ import { pack } from 'msgpackr';
 import type { MatrixClient } from 'matrix-js-sdk';
 import { useEoStore, createImportProgressListener } from '../store/eo-store';
 import type { MatrixSession } from '../matrix/client';
-import { AirtableClient } from '../ingestion/airtable-client';
 import {
   discoverSchema,
   getSyncedTableIds,
@@ -25,13 +24,34 @@ import {
   updateSync,
   type HydrationManifest,
   type SyncCustomization,
-  type RawImportBundle,
-  type ProvenanceResult,
 } from '../ingestion/airtable-sync';
+import {
+  encodeAirtableSnapshot,
+  decodeAirtableSnapshot,
+  replayAirtableSnapshot,
+  airtableSnapshotFilename,
+} from '../ingestion/airtable-snapshot';
+import { createMemoryStore } from '../db/memory-store';
+import { AirtableSyncTransparency } from './AirtableSyncTransparency';
 import type { Resolution } from '../db/types';
-import type { GDriveSyncService } from '../google-drive/gdrive-sync';
-import { useAirtableStore, DEFAULT_SYNC_SETTINGS, type SyncLogEntry } from '../ingestion/airtable-store';
+import { useAirtableStore, createAirtableClient, webhookHealthPatch, DEFAULT_SYNC_SETTINGS, type SyncLogEntry, type CurrentSyncSnapshot } from '../ingestion/airtable-store';
 import { AirtableSyncService } from '../ingestion/airtable-sync-service';
+import {
+  loadSyncLog,
+  saveSyncLog,
+  loadCurrentSync,
+  saveCurrentSync,
+  loadContinuousEnabled,
+  isOrphanSnapshot,
+} from '../ingestion/airtable-persistence';
+import {
+  loadCheckpoint as loadHydrationCheckpoint,
+  clearCheckpoint as clearHydrationCheckpoint,
+  summarizeCheckpoint,
+  type HydrationCheckpoint,
+} from '../ingestion/airtable-hydration-checkpoint';
+import { resumableHydrationSync } from '../ingestion/airtable-resumable-hydration';
+import { hydrationBundleFilename } from '../ingestion/airtable-hydration-bundle';
 import { useTheme, type Theme } from '../theme';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -77,28 +97,30 @@ function guessNameField(fields: Array<{ id: string; name: string; type: string }
 }
 
 /**
- * Pack a RawImportBundle as msgpack and upload it to Drive for provenance.
- *
- * Returns undefined when gdriveSync isn't available yet (the hydration will
- * still run, but without a linked import record — same behaviour as before
- * this feature was added). Throws if the upload itself fails so the caller's
- * hydration aborts before any records are folded.
+ * Trigger a regular browser file download for an in-memory byte array.
+ * Used by the manual "Download from Airtable" snapshot flow so the user
+ * ends up with a `.eodb` on disk that can be re-imported (or shared)
+ * without re-hitting Airtable.
  */
-async function uploadBulkImportProvenance(
-  bundle: RawImportBundle,
-  gdriveSync: GDriveSyncService | null,
-): Promise<ProvenanceResult | void> {
-  if (!gdriveSync) return;
-  const packed = pack(bundle) as Uint8Array;
-  const rawBytes = new Uint8Array(
-    packed.buffer.slice(packed.byteOffset, packed.byteOffset + packed.byteLength),
-  );
-  return gdriveSync.uploadProvenance(rawBytes, {
-    source: 'airtable',
-    importId: bundle.importId,
-    contentType: 'application/vnd.eo-db.airtable-import.msgpack',
-    label: `airtable-${bundle.importId}`,
+function triggerBrowserDownload(fileName: string, bytes: Uint8Array): void {
+  // Wrap in Blob — Uint8Array is not assignable to BodyInit/BlobPart
+  // directly under our strict TS config.
+  const blob = new Blob([bytes as unknown as BlobPart], {
+    type: 'application/octet-stream',
   });
+  const url = URL.createObjectURL(blob);
+  try {
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileName;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  } finally {
+    // Revoke on the next tick — some browsers race the click handler.
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
 }
 
 // ─── Component ──────────────────────────────────────────────────────────────
@@ -117,7 +139,6 @@ export function AirtableSettingsSection({
   roomId?: string | null;
 }) {
   const store = useEoStore((s) => s.store);
-  const gdriveSync = useEoStore((s) => s.gdriveSync);
   const { theme } = useTheme();
   const s = makeStyles(theme);
 
@@ -133,6 +154,16 @@ export function AirtableSettingsSection({
   const syncSettings = useAirtableStore((st) => st.syncSettings);
   const manifest = useAirtableStore((st) => st.manifest);
   const syncLog = useAirtableStore((st) => st.syncLog);
+  const currentSync = useAirtableStore((st) => st.currentSync);
+  const nextTickAt = useAirtableStore((st) => st.nextTickAt);
+
+  // ── Live 1s ticker so relative timestamps / countdowns update even when
+  //    no sync events are firing. Cheap: one setState per second.
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
 
   // ── Sync state ──
   const [syncStatus, setSyncStatus] = useState<Record<string, SyncStatus>>({});
@@ -162,6 +193,11 @@ export function AirtableSettingsSection({
   // ── Expanded tables (for field preview): Set of tableId ──
   const [expandedTables, setExpandedTables] = useState<Set<string>>(new Set());
 
+  // ── Manual PAT entry (paste/re-enter) ──
+  const [pastingPat, setPastingPat] = useState(false);
+  const [patInput, setPatInput] = useState('');
+  const [patSaving, setPatSaving] = useState(false);
+
   // ── Sync service ref ──
   const syncServiceRef = useRef<AirtableSyncService | null>(null);
 
@@ -178,6 +214,115 @@ export function AirtableSettingsSection({
     getSyncedTableIds(store).then(setSyncedTableIds);
   }, [store]);
 
+  // ── Orphan-run banner: set by the persistence hydrate effect when the
+  //    previous session had a currentSync snapshot older than the orphan
+  //    threshold. Cleared once the next successful sync completes.
+  const [orphanSnapshot, setOrphanSnapshot] = useState<
+    { phase: string; table?: string; strategy: string; startedAt: number } | null
+  >(null);
+
+  // ── Resumable hydration (save-first) state ──
+  //
+  // Holds whatever is known about the current or most-recent run of the
+  // "Airtable → Drive NDJSON bundle → fold" pipeline. The checkpoint is
+  // the source of truth for phase / per-table progress and is persisted to
+  // IndexedDB so a reload resumes cleanly. `bundleBlob` is the tee'd local
+  // copy of the bundle bytes — populated as the fetch progresses so the
+  // "Download" button can serve without a Drive round-trip.
+  const [hydrationCheckpoint, setHydrationCheckpoint] = useState<HydrationCheckpoint | null>(null);
+  const bundleBlobRef = useRef<Blob | null>(null);
+  const [bundleBlobSize, setBundleBlobSize] = useState<number>(0);
+
+  // Load any persisted checkpoint on mount so the "Resume" CTA appears
+  // immediately after a reload without waiting for the user to click anything.
+  useEffect(() => {
+    if (!store) return;
+    let cancelled = false;
+    (async () => {
+      const cp = await loadHydrationCheckpoint(store);
+      if (!cancelled) setHydrationCheckpoint(cp);
+    })();
+    return () => { cancelled = true; };
+  }, [store]);
+
+  // ── Rehydrate persisted sync state on mount ──
+  //   1. Synclog → Zustand so the Activity Log panel has context immediately.
+  //   2. currentSync → if recent, restore as live; if older than the orphan
+  //      threshold, surface as a "previous session may have been interrupted"
+  //      banner instead of pretending the sync is still in flight.
+  //   3. continuous-enabled flag → auto-restart the AirtableSyncService so the
+  //      background loop resumes after a refresh without the user having to
+  //      toggle the checkbox manually.
+  useEffect(() => {
+    if (!store) return;
+    let cancelled = false;
+    (async () => {
+      const [logEntries, current, enabled] = await Promise.all([
+        loadSyncLog(store),
+        loadCurrentSync(store),
+        loadContinuousEnabled(store),
+      ]);
+      if (cancelled) return;
+
+      if (logEntries.length > 0) {
+        useAirtableStore.getState().hydrateSyncLog(logEntries);
+      }
+
+      if (current) {
+        if (isOrphanSnapshot(current)) {
+          setOrphanSnapshot({
+            phase: current.phase,
+            table: current.table,
+            strategy: current.strategy,
+            startedAt: current.startedAt,
+          });
+          // Stale — drop it so it doesn't keep showing as live.
+          await saveCurrentSync(store, null);
+        } else {
+          useAirtableStore.getState().setCurrentSync(current);
+        }
+      }
+
+      // Auto-resume continuous sync if the user had it on pre-refresh.
+      if (enabled && useAirtableStore.getState().apiKey && matrixClient && roomId) {
+        if (!syncServiceRef.current) {
+          const service = new AirtableSyncService(
+            matrixClient,
+            roomId,
+            store,
+            session.userId,
+            () => useAirtableStore.getState().apiKey,
+            buildCustomization(),
+          );
+          syncServiceRef.current = service;
+          useAirtableStore.getState().setContinuousSync(true);
+          service.start();
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+    // Only re-run when the underlying identity pieces change — we don't want
+    // to re-hydrate every time a log entry is added.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [store, matrixClient, roomId, session.userId]);
+
+  // ── Persist sync log to IndexedDB (debounced) whenever it changes ──
+  useEffect(() => {
+    if (!store) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    // Subscribe directly to avoid taking a dependency on `syncLog` in
+    // useEffect, which would allocate a new timer per log append.
+    const unsub = useAirtableStore.subscribe((state, prev) => {
+      if (state.syncLog === prev.syncLog) return;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => saveSyncLog(store, state.syncLog), 500);
+    });
+    return () => {
+      unsub();
+      if (timer) clearTimeout(timer);
+    };
+  }, [store]);
+
   // ── Connect via webhook ──
   async function handleConnect() {
     try {
@@ -192,6 +337,72 @@ export function AirtableSettingsSection({
     syncServiceRef.current?.stop();
     syncServiceRef.current = null;
     useAirtableStore.getState().disconnect();
+  }
+
+  // ── Save manually-pasted PAT ──
+  async function handleSavePat() {
+    const key = patInput.trim();
+    if (!key) return;
+    setPatSaving(true);
+    try {
+      await useAirtableStore.getState().connectWithKey(key);
+      setPatInput('');
+      setPastingPat(false);
+    } catch {
+      // Error is set in the store; keep the input open so the user can retry.
+    } finally {
+      setPatSaving(false);
+    }
+  }
+
+  function renderPatEntry() {
+    return (
+      <div style={{ marginTop: 10, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+        <input
+          type="password"
+          value={patInput}
+          onChange={(e) => setPatInput(e.target.value)}
+          placeholder="patXXXXXXXXXXXXXX..."
+          autoFocus
+          disabled={patSaving}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') handleSavePat();
+            else if (e.key === 'Escape') { setPastingPat(false); setPatInput(''); }
+          }}
+          style={{
+            flex: 1,
+            minWidth: 220,
+            padding: '6px 10px',
+            fontSize: 12,
+            border: `1px solid ${theme.border}`,
+            borderRadius: 5,
+            background: theme.bgCard,
+            color: theme.text,
+            fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+          }}
+        />
+        <button
+          onClick={handleSavePat}
+          disabled={patSaving || !patInput.trim()}
+          style={{
+            ...s.actionBtn,
+            background: '#2563eb',
+            color: '#fff',
+            borderColor: '#2563eb',
+            opacity: (patSaving || !patInput.trim()) ? 0.5 : 1,
+          }}
+        >
+          {patSaving ? 'Verifying…' : 'Save'}
+        </button>
+        <button
+          onClick={() => { setPastingPat(false); setPatInput(''); }}
+          disabled={patSaving}
+          style={s.actionBtn}
+        >
+          Cancel
+        </button>
+      </div>
+    );
   }
 
   // ── Resolve which display field to use for a table ──
@@ -273,7 +484,7 @@ export function AirtableSettingsSection({
     setSyncStatus((prev) => ({ ...prev, discover: { state: 'discovering', message: 'Discovering bases & tables...' } }));
 
     try {
-      const client = new AirtableClient(apiKey);
+      const client = createAirtableClient();
       const disc = await discoverSchema(client);
 
       useAirtableStore.getState().setManifest(disc);
@@ -315,16 +526,99 @@ export function AirtableSettingsSection({
 
     const statusKey = mode;
     const modeLabel = mode === 'hydrate' ? 'Full Sync' : 'Update Sync';
+    const strategy: 'hydration' | 'lastModified' | 'fullDiff' =
+      mode === 'hydrate' ? 'hydration' : (syncSettings.syncStrategy as 'lastModified' | 'fullDiff');
+    const tickStart = Date.now();
     setSyncStatus((prev) => ({ ...prev, [statusKey]: { state: 'syncing', message: `Starting ${modeLabel}...` } }));
 
     try {
-      const client = new AirtableClient(apiKey);
+      // Mirror the response observer the continuous-sync service installs,
+      // so the manual "Run test sync" / "Run Update Sync" path also feeds
+      // the Webhook Health panel. Mirror all webhook-endpoint calls (not
+      // just /payloads) so setup failures like 403 INVALID_PERMISSIONS
+      // appear immediately; mirror non-webhook failures only.
+      const client = createAirtableClient({
+        onResponse: (info) => {
+          if (info.url.includes('/webhooks')) {
+            useAirtableStore.getState().setWebhookHealth(webhookHealthPatch(info));
+          } else if (!info.ok) {
+            useAirtableStore.getState().setWebhookHealth(webhookHealthPatch(info));
+          }
+        },
+      });
+      // Manual sync clicks also count toward the session cycle counter.
+      useAirtableStore.getState().incCycle();
       const customization = buildCustomization();
-      const onProgress = (p: { phase: string; table?: string; records_so_far?: number }) => {
+
+      // Seed the live snapshot so the status card / global badge / toast
+      // can show "preparing" immediately, before any network I/O starts.
+      useAirtableStore.getState().setCurrentSync({
+        startedAt: tickStart,
+        phase: 'preparing',
+        strategy,
+        preserveExisting,
+        recordsSoFar: 0,
+        perTable: [],
+      });
+      saveCurrentSync(store, useAirtableStore.getState().currentSync);
+
+      const onProgress = (p: any /* SyncProgress */) => {
+        // Drive the local status strip …
         const msg = p.table
           ? `Syncing ${p.table}${p.records_so_far ? ` (${p.records_so_far} records)` : ''}...`
-          : 'Discovering schema...';
+          : p.phase === 'discovering' ? 'Discovering schema...'
+          : p.phase === 'collecting'  ? 'Collecting records...'
+          : p.phase === 'folding'     ? 'Folding into local store...'
+          : p.phase === 'fetching'    ? 'Fetching from Airtable...'
+          : 'Working...';
         setSyncStatus((prev) => ({ ...prev, [statusKey]: { state: 'syncing', message: msg } }));
+
+        // … and the global live snapshot so the header badge + status card
+        // see the same information as the continuous service.
+        const prev = useAirtableStore.getState().currentSync;
+        if (!prev) return;
+        const nextPerTable = [...prev.perTable];
+        if (p.table) {
+          const key = p.tableId ?? p.table;
+          const idx = nextPerTable.findIndex((t) => (t.tableId ?? t.table) === key);
+          const base = idx >= 0 ? nextPerTable[idx] : {
+            table: p.table,
+            tableId: p.tableId,
+            ingested: 0,
+            overwritten: 0,
+            skipped: 0,
+          };
+          const patched = {
+            ...base,
+            table: p.table,
+            tableId: p.tableId ?? base.tableId,
+            ingested: p.ingested ?? base.ingested,
+            overwritten: p.overwritten ?? base.overwritten,
+            skipped: p.skipped ?? base.skipped,
+          };
+          if (idx >= 0) nextPerTable[idx] = patched;
+          else nextPerTable.push(patched);
+        }
+        useAirtableStore.getState().setCurrentSync({
+          ...prev,
+          phase: p.phase === 'discovering' ? 'discovering'
+            : p.phase === 'collecting' ? 'collecting'
+            : p.phase === 'fetching' ? 'fetching'
+            : p.phase === 'folding' ? 'folding'
+            : p.phase === 'syncing' ? 'syncing'
+            : p.phase === 'table_done' ? 'table_done'
+            : prev.phase,
+          strategy: p.strategy ?? prev.strategy,
+          preserveExisting: p.preserveExisting ?? prev.preserveExisting,
+          baseId: p.baseId ?? prev.baseId,
+          baseName: p.baseName ?? p.base ?? prev.baseName,
+          table: p.table ?? prev.table,
+          tableId: p.tableId ?? prev.tableId,
+          recordsSoFar: p.records_so_far ?? prev.recordsSoFar,
+          endpoint: p.endpoint ?? prev.endpoint,
+          cursorUsed: p.cursor ?? prev.cursorUsed,
+          perTable: nextPerTable,
+        });
       };
 
       useAirtableStore.getState().addSyncLogEntry({
@@ -333,6 +627,8 @@ export function AirtableSettingsSection({
         source: 'local',
         syncer: session.userId,
         detail: modeLabel,
+        strategy,
+        preserveExisting,
       });
 
       // Bridge per-event fold output into Zustand so subscribers like
@@ -348,30 +644,43 @@ export function AirtableSettingsSection({
               onProgress,
               onEvent: progressListener.onEvent,
               customization,
-              // Provenance-first bulk import: upload the raw bundle to Drive
-              // BEFORE anything gets folded, then emit an import record that
-              // links to the blob. If gdriveSync isn't hooked up yet, the hook
-              // is a no-op and the old behaviour is preserved.
-              onRawImport: (bundle) => uploadBulkImportProvenance(bundle, gdriveSync),
             })
           : await updateSync(store, client, session.userId, {
               onProgress,
               onEvent: progressListener.onEvent,
               customization,
+              // Surface per-record diffs to the "Recent changes" panel —
+              // mirrors the wiring in AirtableSyncService so manually-
+              // triggered "Run test sync" lights up the same UI as the
+              // continuous loop.
+              onChange: (report) => {
+                useAirtableStore.getState().addRecentChange({
+                  ts: Date.now(),
+                  baseId: report.baseId,
+                  tableId: report.tableId,
+                  tableName: report.tableName ?? report.tableId,
+                  recordId: report.recordId,
+                  recordLabel: report.recordLabel,
+                  diffs: report.diffs,
+                });
+                useAirtableStore.getState().addSyncLogEntry({
+                  ts: Date.now(),
+                  type: 'change_detected',
+                  source: 'local',
+                  syncer: session.userId,
+                  detail: `${report.diffs.length} field${report.diffs.length === 1 ? '' : 's'}: ${report.diffs.map((d) => d.field).join(', ')}`,
+                  baseId: report.baseId,
+                  tableName: report.tableName,
+                  recordId: report.recordId,
+                  diffs: report.diffs,
+                  recordsChanged: 1,
+                });
+              },
             });
       } finally {
         // Flush any pending throttled update so the UI sees the final
         // lastSeq even if the sync ended on an in-flight timer.
         progressListener.finalize();
-      }
-
-      // After a successful hydration, rewrite the on-Drive .eodb log file so
-      // the cumulative log reflects the freshly-folded state (step (3) of the
-      // provenance-first bulk import flow).
-      if (mode === 'hydrate' && gdriveSync && result.total_records_ingested > 0) {
-        gdriveSync.fullPushToGDrive().catch((e) =>
-          console.warn('[EO-DB] post-hydration fullPushToGDrive failed:', e),
-        );
       }
 
       if (result.total_records_ingested > 0) {
@@ -383,25 +692,188 @@ export function AirtableSettingsSection({
       }
 
       const ingested = result.total_records_ingested;
+      const overwritten = result.total_records_overwritten;
       const skipped = result.total_records_skipped;
       const duration = `${(result.duration_ms / 1000).toFixed(1)}s`;
 
       useAirtableStore.getState().setLastSyncResult(result);
       useAirtableStore.getState().setLastSyncAt(new Date().toISOString());
+      const snap = useAirtableStore.getState().currentSync;
+      const perTable = result.sync_results.map((r) => ({
+        table: r.table_name,
+        ingested: r.records_ingested,
+        overwritten: r.records_overwritten,
+        skipped: r.records_skipped_no_change + r.records_skipped_duplicate,
+      }));
       useAirtableStore.getState().addSyncLogEntry({
         ts: Date.now(),
         type: mode === 'hydrate' ? 'hydration_complete' : 'sync_complete',
         source: 'local',
         syncer: session.userId,
-        detail: `${ingested} ingested, ${skipped} unchanged, ${duration}`,
+        detail: overwritten > 0
+          ? `${ingested} ingested, ${overwritten} overwritten, ${skipped} unchanged, ${duration}`
+          : `${ingested} ingested, ${skipped} unchanged, ${duration}`,
+        strategy,
+        preserveExisting,
+        perTable,
+        durationMs: result.duration_ms,
+        endpoint: snap?.endpoint,
+        cursorUsed: snap?.cursorUsed,
+        baseId: snap?.baseId,
+        baseName: snap?.baseName,
       });
+      // Clear the live snapshot — the run is over.
+      useAirtableStore.getState().setCurrentSync(null);
+      saveCurrentSync(store, null);
+      // Once a successful sync completes, any stale "orphan run" banner is
+      // obsolete — clear it.
+      setOrphanSnapshot(null);
 
       setSyncStatus((prev) => ({
         ...prev,
         [statusKey]: {
           state: 'done',
           message: `${ingested} records synced`,
-          detail: `${skipped} unchanged, ${duration}`,
+          detail: overwritten > 0
+            ? `${overwritten} overwritten, ${skipped} unchanged, ${duration}`
+            : `${skipped} unchanged, ${duration}`,
+        },
+      }));
+    } catch (e: any) {
+      const snap = useAirtableStore.getState().currentSync;
+      useAirtableStore.getState().addSyncLogEntry({
+        ts: Date.now(),
+        type: 'sync_error',
+        source: 'local',
+        syncer: session.userId,
+        detail: e.message || 'Sync failed',
+        strategy,
+        preserveExisting,
+        baseId: snap?.baseId,
+        baseName: snap?.baseName,
+        endpoint: snap?.endpoint,
+        cursorUsed: snap?.cursorUsed,
+        durationMs: Date.now() - tickStart,
+      });
+      useAirtableStore.getState().setCurrentSync(null);
+      saveCurrentSync(store, null);
+      setSyncStatus((prev) => ({
+        ...prev,
+        [statusKey]: { state: 'error', message: e.message || 'Sync failed' },
+      }));
+    }
+  }
+
+  // ── Initial hydration: download .eodb to disk (no fold into local DB) ──
+  //
+  // Runs the full Airtable pull against an in-memory scratch store so the
+  // local DB stays untouched until the user explicitly imports the file.
+  // The captured event stream + cursor map are encoded as a v2 .eodb
+  // snapshot and triggered as a browser download.
+  //
+  // Why two manual steps? It isolates the Airtable network failure mode
+  // from the local fold step: if the pull fails you get a clear error
+  // here; if it succeeds you have a reusable artifact you can re-import
+  // any number of times (or copy to another device) without re-hitting
+  // Airtable.
+  async function handleDownloadAirtableSnapshot() {
+    if (!apiKey) return;
+    setSyncStatus((prev) => ({
+      ...prev,
+      snapshotDownload: { state: 'syncing', message: 'Pulling from Airtable…' },
+    }));
+    const startedAt = Date.now();
+    try {
+      // Scratch in-memory EoStore — events fold into it, but it gets
+      // garbage-collected the moment this handler returns. Nothing
+      // touches the user's real local DB.
+      const scratch = createMemoryStore();
+      // Wire the same response-info hook used by continuous sync so the
+      // Webhook Health panel reflects this manual pull too.
+      const client = createAirtableClient({
+        onResponse: (info) => {
+          // Mirror failures into the panel even for non-/payloads URLs so
+          // the user sees "401 on listBases" instead of a silent spinner.
+          if (info.ok) return;
+          useAirtableStore.getState().setWebhookHealth(webhookHealthPatch(info));
+        },
+      });
+
+      const customization = buildCustomization();
+
+      let downloadedBytes = 0;
+      let baseCount = 0;
+      let eventCount = 0;
+
+      const result = await hydrationSync(scratch, client, session.userId, {
+        customization,
+        onProgress: (p: any) => {
+          const msg = p.table
+            ? `Pulling ${p.table}${p.records_so_far ? ` (${p.records_so_far} records)` : ''}…`
+            : p.phase === 'discovering' ? 'Discovering schema…'
+            : p.phase === 'collecting'  ? 'Collecting records…'
+            : 'Working…';
+          setSyncStatus((prev) => ({
+            ...prev,
+            snapshotDownload: { state: 'syncing', message: msg },
+          }));
+        },
+        // After the scratch fold completes, encode + trigger one download
+        // per base. We fan out per-base so a multi-base account still
+        // produces self-contained files that can be imported individually.
+        onSnapshotReady: async (payload) => {
+          baseCount = payload.baseIds.length;
+          eventCount = payload.events.length;
+
+          for (const baseId of payload.baseIds) {
+            const events = payload.events.filter((ev: any) => {
+              const ref = ev?.operand?._airtable?.base_id;
+              if (!ref) return true; // shared records (import bundle) → replicate per base
+              return ref === baseId;
+            });
+            const cursors = payload.cursors[baseId]
+              ? { [baseId]: payload.cursors[baseId] }
+              : {};
+            const fileName = airtableSnapshotFilename(baseId);
+            const bytes = await encodeAirtableSnapshot(events, cursors, {
+              collectionId: `airtable-hydration-${baseId}`,
+              name: `Airtable hydration snapshot for ${baseId}`,
+              // Surface encoding progress so the button doesn't look frozen
+              // while msgpack packs large event arrays. Throttled implicitly
+              // by the chunk size in encodeAirtableSnapshot.
+              onProgress: (encoded, total) => {
+                setSyncStatus((prev) => ({
+                  ...prev,
+                  snapshotDownload: {
+                    state: 'syncing',
+                    message: `Encoding ${baseId} snapshot… ${encoded}/${total} events`,
+                  },
+                }));
+              },
+            });
+            downloadedBytes += bytes.byteLength;
+            triggerBrowserDownload(fileName, bytes);
+          }
+        },
+      });
+
+      const ingested = result.total_records_ingested;
+      const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
+      useAirtableStore.getState().addSyncLogEntry({
+        ts: Date.now(),
+        type: 'snapshot_downloaded',
+        source: 'local',
+        syncer: session.userId,
+        detail: `${ingested} records → ${baseCount} file(s), ${eventCount} events, ${downloadedBytes} B, ${seconds}s`,
+        durationMs: Date.now() - startedAt,
+        recordsScanned: ingested,
+      });
+      setSyncStatus((prev) => ({
+        ...prev,
+        snapshotDownload: {
+          state: 'done',
+          message: `Saved ${baseCount} snapshot file${baseCount === 1 ? '' : 's'} (${ingested} records, ${seconds}s)`,
+          detail: 'Use "Import snapshot file" to fold into the local DB.',
         },
       }));
     } catch (e: any) {
@@ -410,13 +882,295 @@ export function AirtableSettingsSection({
         type: 'sync_error',
         source: 'local',
         syncer: session.userId,
-        detail: e.message || 'Sync failed',
+        detail: `Snapshot download failed: ${e.message || e}`,
+        durationMs: Date.now() - startedAt,
       });
       setSyncStatus((prev) => ({
         ...prev,
-        [statusKey]: { state: 'error', message: e.message || 'Sync failed' },
+        snapshotDownload: { state: 'error', message: e.message || 'Snapshot download failed' },
       }));
     }
+  }
+
+  // ── Initial hydration step 2: import an .eodb file into the local DB ──
+  //
+  // Reads the file the user picks, validates it's a v2 .eodb, and replays
+  // every event through `processEvent` so the local store ends up in the
+  // same state as if it had run the full hydration itself. Cursors get
+  // seeded so the next continuous sync only pulls deltas after the
+  // snapshot was captured.
+  async function handleImportSnapshotFile(file: File) {
+    if (!store) return;
+    setSyncStatus((prev) => ({
+      ...prev,
+      snapshotImport: { state: 'syncing', message: `Reading ${file.name}…` },
+    }));
+    const startedAt = Date.now();
+    try {
+      const buffer = await file.arrayBuffer();
+      const bytes = new Uint8Array(buffer);
+
+      setSyncStatus((prev) => ({
+        ...prev,
+        snapshotImport: { state: 'syncing', message: 'Decoding snapshot…' },
+      }));
+      const snapshot = await decodeAirtableSnapshot(bytes);
+
+      setSyncStatus((prev) => ({
+        ...prev,
+        snapshotImport: {
+          state: 'syncing',
+          message: `Replaying ${snapshot.events.length} events…`,
+        },
+      }));
+      const progressListener = createImportProgressListener();
+      let replay;
+      try {
+        replay = await replayAirtableSnapshot(store, snapshot, progressListener.onEvent);
+      } finally {
+        progressListener.finalize();
+      }
+
+      // (Airtable webhook subscription removed — sync is polling-only via
+      // the per-table LAST_MODIFIED_TIME filter. The next continuous tick
+      // picks up any edits the user made in Airtable between import and now.)
+
+      // Bake the replayed state into the local KV snapshot so a refresh lands
+      // on the post-import snapshot instead of the stale pre-import one.
+      setSyncStatus((prev) => ({
+        ...prev,
+        snapshotImport: {
+          state: 'syncing',
+          message: `Baking local snapshot of ${replay.eventsReplayed} events…`,
+        },
+      }));
+      try {
+        await useEoStore.getState().manualSnapshot();
+      } catch (e: any) {
+        console.warn('[EO-DB] snapshot import: local bake failed:', e);
+      }
+
+      const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
+      const skippedSuffix = replay.insSkippedExisting > 0
+        ? `, ${replay.insSkippedExisting} existing target(s) skipped`
+        : '';
+      useAirtableStore.getState().addSyncLogEntry({
+        ts: Date.now(),
+        type: 'snapshot_imported',
+        source: 'local',
+        syncer: session.userId,
+        detail: `${file.name}: replayed ${replay.eventsReplayed} events${skippedSuffix}, seeded ${replay.tablesSeeded} table cursor(s), ${seconds}s`,
+        durationMs: Date.now() - startedAt,
+        recordsScanned: replay.eventsReplayed,
+      });
+      // Refresh the synced index so the table picker reflects what just landed.
+      getSyncedTableIds(store).then(setSyncedTableIds);
+      setSyncStatus((prev) => ({
+        ...prev,
+        snapshotImport: {
+          state: 'done',
+          message: `Imported ${replay.eventsReplayed} events from ${file.name}`,
+          detail: replay.insSkippedExisting > 0
+            ? `${replay.tablesSeeded} table cursor(s) seeded; ${replay.insSkippedExisting} target(s) already existed locally (new content folded in).`
+            : `${replay.tablesSeeded} table cursor(s) seeded — Update Sync will pull post-snapshot deltas.`,
+        },
+      }));
+    } catch (e: any) {
+      useAirtableStore.getState().addSyncLogEntry({
+        ts: Date.now(),
+        type: 'sync_error',
+        source: 'local',
+        syncer: session.userId,
+        detail: `Snapshot import failed: ${e.message || e}`,
+        durationMs: Date.now() - startedAt,
+      });
+      setSyncStatus((prev) => ({
+        ...prev,
+        snapshotImport: { state: 'error', message: e.message || 'Snapshot import failed' },
+      }));
+    }
+  }
+
+  // ── Resumable hydration (save-first via Drive, then fold) ──
+  //
+  // Three-way entry:
+  //   - No checkpoint → start a fresh run.
+  //   - Incomplete checkpoint matching current customization → resume where
+  //     we left off (skip fully-fetched and fully-folded tables).
+  //   - `restart` flag → wipe the checkpoint and start over from scratch.
+  //
+  // The Drive bundle is the durable artifact — once a table's pages are
+  // appended and uploaded, a reload can re-download and resume without
+  // re-hitting Airtable. The in-memory `bundleBlobRef` is a fast path for
+  // the "Download" button that avoids the Drive round-trip when the user
+  // is still on the same session.
+  async function handleResumableHydrate(restart: boolean): Promise<void> {
+    if (!apiKey || !store) return;
+    setSyncStatus((prev) => ({
+      ...prev,
+      resumableHydrate: {
+        state: 'syncing',
+        message: restart ? 'Starting fresh hydration…' : 'Resuming hydration…',
+      },
+    }));
+    const startedAt = Date.now();
+
+    const client = createAirtableClient({
+      onResponse: (info) => {
+        if (info.ok) return;
+        useAirtableStore.getState().setWebhookHealth(webhookHealthPatch(info));
+      },
+    });
+
+    const customization = buildCustomization();
+    useAirtableStore.getState().addSyncLogEntry({
+      ts: Date.now(),
+      type: 'sync_start',
+      source: 'local',
+      syncer: session.userId,
+      detail: restart ? 'Resumable hydration (fresh)' : 'Resumable hydration (resume)',
+    });
+
+    try {
+      const result = await resumableHydrationSync(store, client, session.userId, null, {
+        customization,
+        forceRestart: restart,
+        onCheckpoint: (cp) => {
+          // Fresh object so React's referential equality notices.
+          setHydrationCheckpoint({ ...cp });
+        },
+        onBundleTee: (blob, size) => {
+          bundleBlobRef.current = blob;
+          setBundleBlobSize(size);
+        },
+        onProgress: (p) => {
+          const parts: string[] = [];
+          if (p.checkpointPhase === 'fetching') parts.push('Fetching');
+          else if (p.checkpointPhase === 'uploading') parts.push('Saving to Drive');
+          else if (p.checkpointPhase === 'folding') parts.push('Ingesting');
+          if (p.table) parts.push(p.table);
+          if (p.records_so_far) parts.push(`${p.records_so_far} records`);
+          if (p.totalTables && p.tableIndex != null) {
+            parts.push(`[${p.tableIndex + 1}/${p.totalTables}]`);
+          }
+          setSyncStatus((prev) => ({
+            ...prev,
+            resumableHydrate: {
+              state: 'syncing',
+              message: parts.join(' · ') || 'Working…',
+            },
+          }));
+        },
+      });
+
+      const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
+      const ingested = result.fold?.total_records_ingested ?? 0;
+      useAirtableStore.getState().addSyncLogEntry({
+        ts: Date.now(),
+        type: 'hydration_complete',
+        source: 'local',
+        syncer: session.userId,
+        detail: `${ingested} records via Drive bundle, ${seconds}s`,
+        durationMs: Date.now() - startedAt,
+        recordsScanned: ingested,
+      });
+      setSyncStatus((prev) => ({
+        ...prev,
+        resumableHydrate: {
+          state: 'done',
+          message: `${ingested} records ingested via bundle`,
+          detail: `Bundle ${(result.bundleBytes.byteLength / 1024).toFixed(1)} KB · ${seconds}s`,
+        },
+      }));
+      // Keep the checkpoint visible in 'complete' state so the user has a
+      // record of the last successful run (and can download its bundle).
+      setHydrationCheckpoint({ ...result.checkpoint });
+    } catch (e: any) {
+      useAirtableStore.getState().addSyncLogEntry({
+        ts: Date.now(),
+        type: 'sync_error',
+        source: 'local',
+        syncer: session.userId,
+        detail: `Resumable hydration failed: ${e.message || e}`,
+        durationMs: Date.now() - startedAt,
+      });
+      setSyncStatus((prev) => ({
+        ...prev,
+        resumableHydrate: {
+          state: 'error',
+          message: e.message || 'Resumable hydration failed',
+          detail: 'Checkpoint preserved — click "Resume" to continue.',
+        },
+      }));
+      // Refresh checkpoint so the UI reflects whatever progress was saved
+      // before the failure.
+      const cp = await loadHydrationCheckpoint(store);
+      setHydrationCheckpoint(cp);
+    }
+  }
+
+  // Download the hydration bundle from the in-memory tee of the active (or
+  // just-completed) run. Without a durable backend the bundle does not
+  // survive a page reload.
+  async function handleDownloadHydrationBundle(): Promise<void> {
+    const fileName = hydrationCheckpoint?.bundle?.fileName
+      ?? (hydrationCheckpoint
+        ? hydrationBundleFilename(hydrationCheckpoint.importId)
+        : 'airtable-hydration.ndjson');
+    setSyncStatus((prev) => ({
+      ...prev,
+      resumableBundleDownload: { state: 'syncing', message: 'Preparing download…' },
+    }));
+    try {
+      const blob = bundleBlobRef.current;
+      if (!blob) {
+        throw new Error('No bundle available — start a hydration to produce one.');
+      }
+      const url = URL.createObjectURL(blob);
+      try {
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = fileName;
+        a.style.display = 'none';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+      } finally {
+        setTimeout(() => URL.revokeObjectURL(url), 0);
+      }
+      setSyncStatus((prev) => ({
+        ...prev,
+        resumableBundleDownload: {
+          state: 'done',
+          message: `Saved ${fileName}`,
+          detail: `${(blob.size / 1024).toFixed(1)} KB`,
+        },
+      }));
+    } catch (e: any) {
+      setSyncStatus((prev) => ({
+        ...prev,
+        resumableBundleDownload: {
+          state: 'error',
+          message: e.message || 'Download failed',
+        },
+      }));
+    }
+  }
+
+  // Wipe the checkpoint so the next hydration starts fresh. Does NOT delete
+  // the Drive file — the user can always re-download the bundle separately
+  // if they want the raw bytes. Idempotent on repeated clicks.
+  async function handleClearHydrationCheckpoint(): Promise<void> {
+    if (!store) return;
+    await clearHydrationCheckpoint(store);
+    setHydrationCheckpoint(null);
+    bundleBlobRef.current = null;
+    setBundleBlobSize(0);
+    setSyncStatus((prev) => ({
+      ...prev,
+      resumableHydrate: { state: 'idle', message: '' },
+      resumableBundleDownload: { state: 'idle', message: '' },
+    }));
   }
 
   // ── Toggle continuous sync ──
@@ -435,10 +1189,6 @@ export function AirtableSettingsSection({
         session.userId,
         () => useAirtableStore.getState().apiKey,
         buildCustomization(),
-        // Pass gdriveSync so the service can upload provenance blobs and
-        // rewrite the .eodb log after bulk hydrations. Undefined means the
-        // Drive features degrade gracefully to no-ops.
-        gdriveSync ?? undefined,
       );
       syncServiceRef.current = service;
       useAirtableStore.getState().setContinuousSync(true);
@@ -459,26 +1209,96 @@ export function AirtableSettingsSection({
               fetched securely and held in memory only — it is never stored.
             </div>
             {storeError && <div style={s.error}>{storeError}</div>}
-            <button
-              onClick={handleConnect}
-              disabled={connecting}
-              style={{ ...s.connectBtn, opacity: connecting ? 0.5 : 1 }}
-            >
-              {connecting ? 'Connecting...' : 'Connect to Airtable'}
-            </button>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <button
+                onClick={handleConnect}
+                disabled={connecting || patSaving}
+                style={{ ...s.connectBtn, opacity: connecting ? 0.5 : 1 }}
+              >
+                {connecting ? 'Connecting...' : 'Connect to Airtable'}
+              </button>
+              {!pastingPat && (
+                <button
+                  onClick={() => { setPatInput(''); setPastingPat(true); }}
+                  disabled={connecting || patSaving}
+                  style={s.actionBtn}
+                >
+                  Paste PAT
+                </button>
+              )}
+            </div>
+            {pastingPat && renderPatEntry()}
           </div>
         ) : (
           <div>
             <div style={s.connectedRow}>
               <div style={s.connectedDot} />
               <span style={{ fontSize: 12, color: theme.successText }}>Connected</span>
-              <button onClick={handleDisconnect} style={s.disconnectBtn}>Disconnect</button>
+              <button
+                onClick={() => { setPatInput(''); setPastingPat((v) => !v); }}
+                style={{ ...s.disconnectBtn, marginLeft: 'auto', color: theme.text, borderColor: theme.border }}
+              >
+                {pastingPat ? 'Cancel' : 'Re-enter PAT'}
+              </button>
+              <button onClick={handleDisconnect} style={{ ...s.disconnectBtn, marginLeft: 0 }}>Disconnect</button>
             </div>
+            {pastingPat && renderPatEntry()}
 
             {lastSyncAt && (
               <div style={{ fontSize: 11, color: theme.textMuted, marginTop: 4 }}>
                 Last sync: {new Date(lastSyncAt).toLocaleString()}
                 {isPrimarySyncer && <span style={{ marginLeft: 8, color: theme.accent }}>(this device is syncing)</span>}
+              </div>
+            )}
+
+            {/* ── Orphan-run banner — previous session crashed mid-sync ── */}
+            {orphanSnapshot && (
+              <div style={{
+                marginTop: 8,
+                padding: '8px 10px',
+                borderRadius: 6,
+                background: theme.warningBg,
+                border: `1px solid ${theme.warningBorder}`,
+                color: theme.warningText ?? theme.warning,
+                fontSize: 11,
+              }}>
+                Previous session may have been interrupted — it was{' '}
+                <strong>{orphanSnapshot.phase}</strong>
+                {orphanSnapshot.table ? ` ${orphanSnapshot.table}` : ''}
+                {' '}(strategy: {orphanSnapshot.strategy}, started{' '}
+                {relativeTime(orphanSnapshot.startedAt, nowMs)}). The next
+                successful sync will clear this notice.
+                <button
+                  onClick={() => setOrphanSnapshot(null)}
+                  style={{
+                    marginLeft: 8,
+                    padding: '1px 6px',
+                    fontSize: 10,
+                    border: `1px solid ${theme.warningBorder}`,
+                    background: 'transparent',
+                    color: 'inherit',
+                    borderRadius: 4,
+                    cursor: 'pointer',
+                  }}
+                >dismiss</button>
+              </div>
+            )}
+
+            {/* ── Live sync status card — what is this tick actually doing? ── */}
+            {currentSync && (
+              <LiveSyncCard
+                snap={currentSync}
+                startedAgo={Math.max(0, Math.round((nowMs - currentSync.startedAt) / 1000))}
+                theme={theme}
+              />
+            )}
+
+            {/* ── Idle countdown — only when continuous sync is on ── */}
+            {!currentSync && continuousSyncEnabled && nextTickAt && (
+              <div style={{ fontSize: 11, color: theme.textMuted, marginTop: 6 }}>
+                Next automatic check in{' '}
+                <strong>{Math.max(0, Math.round((nextTickAt - nowMs) / 1000))}s</strong>
+                {' '}(every {syncSettings.syncIntervalSec}s)
               </div>
             )}
 
@@ -739,23 +1559,226 @@ export function AirtableSettingsSection({
                   </span>
                 </div>
 
+                {/* Sync transparency panel — header strip, webhook health,
+                    recent diffs, and rolling sync log. Sourced entirely from
+                    the airtable Zustand store, so it stays accurate even when
+                    the sync is being driven by the continuous-sync service
+                    rather than a manual click. */}
+                <AirtableSyncTransparency
+                  theme={theme}
+                  nowMs={nowMs}
+                  onRunTestSync={() => handleSync('sync')}
+                  onTogglePause={handleToggleContinuousSync}
+                  canToggleContinuous={!!matrixClient && !!roomId}
+                />
+
                 {/* Sync mode buttons */}
                 <div style={s.syncModes}>
                   <div style={s.syncModeCard}>
-                    <div style={s.syncModeTitle}>Full Sync</div>
-                    <div style={s.syncModeDesc}>
-                      Pull all records from selected tables. Skips records that already exist
-                      {preserveExisting ? ' and never overwrites existing data' : ''}.
+                    <div style={s.syncModeTitle}>
+                      Initial hydration
+                      <span style={{
+                        fontSize: 9,
+                        fontWeight: 600,
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.05em',
+                        color: theme.textMuted,
+                        background: theme.bgMuted,
+                        border: `1px solid ${theme.borderLight}`,
+                        padding: '2px 6px',
+                        borderRadius: 4,
+                        marginLeft: 6,
+                      }}>2 STEPS</span>
                     </div>
+                    <div style={s.syncModeDesc}>
+                      One-time bootstrap. <strong>Step 1</strong> pulls every record from
+                      the selected tables and saves a binary <code style={{ fontSize: 10 }}>.eodb</code>{' '}
+                      snapshot to your machine. <strong>Step 2</strong> imports that file
+                      into the local DB. Splitting the steps isolates the Airtable
+                      pull (visible failure if it fails) from the local fold.
+                    </div>
+
+                    {/* Step 1 — pull from Airtable to disk */}
                     <button
-                      onClick={() => handleSync('hydrate')}
-                      disabled={syncStatus.hydrate?.state === 'syncing'}
+                      onClick={handleDownloadAirtableSnapshot}
+                      disabled={syncStatus.snapshotDownload?.state === 'syncing'}
                       style={s.syncModeBtn}
                     >
-                      {syncStatus.hydrate?.state === 'syncing' ? 'Syncing...' : 'Run Full Sync'}
+                      {syncStatus.snapshotDownload?.state === 'syncing'
+                        ? 'Downloading…'
+                        : '1. Download from Airtable (.eodb)'}
                     </button>
                     {(() => {
-                      const status = syncStatus.hydrate;
+                      const status = syncStatus.snapshotDownload;
+                      if (!status || status.state === 'idle') return null;
+                      return (
+                        <div style={{
+                          ...s.statusMsg,
+                          color: status.state === 'error' ? theme.dangerText : status.state === 'done' ? theme.successText : theme.textSecondary,
+                        }}>
+                          {status.state === 'syncing' && <span style={s.spinner} />}
+                          {status.message}
+                          {status.detail && <span style={s.statusDetail}> {status.detail}</span>}
+                        </div>
+                      );
+                    })()}
+
+                    {/* Step 2 — import the file into the local DB */}
+                    <label style={{ ...s.syncModeBtn, marginTop: 6, display: 'inline-block', textAlign: 'center', cursor: 'pointer' }}>
+                      {syncStatus.snapshotImport?.state === 'syncing'
+                        ? 'Importing…'
+                        : '2. Import snapshot file…'}
+                      <input
+                        type="file"
+                        accept=".eodb,application/octet-stream"
+                        style={{ display: 'none' }}
+                        disabled={syncStatus.snapshotImport?.state === 'syncing'}
+                        onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          if (file) handleImportSnapshotFile(file);
+                          // Reset the input so re-picking the same file fires onChange.
+                          e.target.value = '';
+                        }}
+                      />
+                    </label>
+                    {(() => {
+                      const status = syncStatus.snapshotImport;
+                      if (!status || status.state === 'idle') return null;
+                      return (
+                        <div style={{
+                          ...s.statusMsg,
+                          color: status.state === 'error' ? theme.dangerText : status.state === 'done' ? theme.successText : theme.textSecondary,
+                        }}>
+                          {status.state === 'syncing' && <span style={s.spinner} />}
+                          {status.message}
+                          {status.detail && <span style={s.statusDetail}> {status.detail}</span>}
+                        </div>
+                      );
+                    })()}
+                  </div>
+
+                  {/* Resumable hydration — save Airtable data to Drive as an
+                      NDJSON bundle, then fold from the saved copy. Per-table
+                      checkpoints mean a crashed fetch/fold resumes without
+                      re-hitting Airtable. */}
+                  <div style={s.syncModeCard}>
+                    <div style={s.syncModeTitle}>
+                      Hydrate via Drive
+                      <span style={{
+                        fontSize: 9,
+                        fontWeight: 600,
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.05em',
+                        color: theme.textMuted,
+                        background: theme.bgMuted,
+                        border: `1px solid ${theme.borderLight}`,
+                        padding: '2px 6px',
+                        borderRadius: 4,
+                        marginLeft: 6,
+                      }}>RESUMABLE</span>
+                    </div>
+                    <div style={s.syncModeDesc}>
+                      Airtable → Google Drive NDJSON bundle → local DB. Per-table
+                      checkpoints survive reloads so an interrupted run resumes
+                      without re-fetching. The same bundle backs the{' '}
+                      <strong>Download</strong> button, so you always have a
+                      portable copy of what was ingested.
+                    </div>
+
+                    {hydrationCheckpoint && hydrationCheckpoint.phase !== 'complete' && (() => {
+                      const sum = summarizeCheckpoint(hydrationCheckpoint);
+                      return (
+                        <div style={{
+                          fontSize: 11,
+                          color: theme.textSecondary,
+                          background: theme.bgMuted,
+                          border: `1px solid ${theme.borderLight}`,
+                          borderRadius: 4,
+                          padding: '6px 8px',
+                          margin: '6px 0',
+                        }}>
+                          <strong>Checkpoint:</strong> phase {hydrationCheckpoint.phase} ·{' '}
+                          fetched {sum.tablesFetched}/{sum.tables} tables ({sum.recordsFetched} records) ·{' '}
+                          folded {sum.tablesFolded}/{sum.tables} tables
+                          {hydrationCheckpoint.error && (
+                            <div style={{ color: theme.dangerText, marginTop: 4 }}>
+                              Last error: {hydrationCheckpoint.error}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
+
+                    {/* Primary action: resume if a matching checkpoint exists
+                        and is unfinished, otherwise start fresh. */}
+                    <button
+                      onClick={() => handleResumableHydrate(false)}
+                      disabled={syncStatus.resumableHydrate?.state === 'syncing' || !apiKey}
+                      style={s.syncModeBtn}
+                    >
+                      {syncStatus.resumableHydrate?.state === 'syncing'
+                        ? 'Working…'
+                        : hydrationCheckpoint && hydrationCheckpoint.phase !== 'complete'
+                          ? 'Resume hydration'
+                          : 'Start hydration'}
+                    </button>
+
+                    {/* Secondary controls: force-restart and clear checkpoint.
+                        Only shown when there's a checkpoint to act on. */}
+                    {hydrationCheckpoint && (
+                      <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+                        <button
+                          onClick={() => handleResumableHydrate(true)}
+                          disabled={syncStatus.resumableHydrate?.state === 'syncing'}
+                          style={{ ...s.syncModeBtn, flex: 1 }}
+                          title="Discard checkpoint and re-fetch everything from Airtable"
+                        >
+                          Restart
+                        </button>
+                        <button
+                          onClick={handleClearHydrationCheckpoint}
+                          disabled={syncStatus.resumableHydrate?.state === 'syncing'}
+                          style={{ ...s.syncModeBtn, flex: 1 }}
+                          title="Clear local checkpoint (leaves the Drive file in place)"
+                        >
+                          Clear checkpoint
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Download the current bundle — tee'd from memory when
+                        available, otherwise fetched from Drive. */}
+                    <button
+                      onClick={handleDownloadHydrationBundle}
+                      disabled={syncStatus.resumableBundleDownload?.state === 'syncing' || (!bundleBlobRef.current && !hydrationCheckpoint?.bundle?.fileName)}
+                      style={{ ...s.syncModeBtn, marginTop: 6 }}
+                      title={bundleBlobRef.current
+                        ? 'Download the in-memory copy (no Drive round-trip)'
+                        : 'Download the bundle from Drive'}
+                    >
+                      {syncStatus.resumableBundleDownload?.state === 'syncing'
+                        ? 'Downloading…'
+                        : bundleBlobSize > 0
+                          ? `Download bundle (${(bundleBlobSize / 1024).toFixed(1)} KB)`
+                          : 'Download bundle'}
+                    </button>
+
+                    {(() => {
+                      const status = syncStatus.resumableHydrate;
+                      if (!status || status.state === 'idle') return null;
+                      return (
+                        <div style={{
+                          ...s.statusMsg,
+                          color: status.state === 'error' ? theme.dangerText : status.state === 'done' ? theme.successText : theme.textSecondary,
+                        }}>
+                          {status.state === 'syncing' && <span style={s.spinner} />}
+                          {status.message}
+                          {status.detail && <span style={s.statusDetail}> {status.detail}</span>}
+                        </div>
+                      );
+                    })()}
+                    {(() => {
+                      const status = syncStatus.resumableBundleDownload;
                       if (!status || status.state === 'idle') return null;
                       return (
                         <div style={{
@@ -771,9 +1794,15 @@ export function AirtableSettingsSection({
                   </div>
 
                   <div style={s.syncModeCard}>
-                    <div style={s.syncModeTitle}>Update Sync</div>
+                    <div style={s.syncModeTitle}>
+                      Update Sync
+                      <OverwritePill preserveExisting={preserveExisting} theme={theme} />
+                    </div>
                     <div style={s.syncModeDesc}>
-                      Pull only records modified since last sync. Requires a prior Full Sync
+                      Pull only records that changed since last sync via the{' '}
+                      <code style={{ fontSize: 10 }}>/bases/&#123;id&#125;/webhooks/&#123;id&#125;/payloads</code>{' '}
+                      endpoint on <code style={{ fontSize: 10 }}>api.airtable.com</code> — Airtable's
+                      authoritative change feed. Requires a prior Full Sync
                       {preserveExisting ? '. Never overwrites existing data' : ''}.
                     </div>
                     <button
@@ -877,12 +1906,12 @@ export function AirtableSettingsSection({
                         }}
                         style={s.settingSelect}
                       >
-                        <option value="lastModified">Last modified time (incremental)</option>
+                        <option value="lastModified">Webhook payloads (incremental)</option>
                         <option value="fullDiff">Full field diff (thorough)</option>
                       </select>
                       <span style={s.settingHint}>
                         {syncSettings.syncStrategy === 'lastModified'
-                          ? 'Uses Airtable\'s LAST_MODIFIED_TIME to fetch only records changed since last sync. Fast and lightweight.'
+                          ? 'Drains Airtable\'s webhooks-payloads API — the authoritative change feed. Registers one webhook per base on first use and advances an integer cursor on every poll. Falls back to a LAST_MODIFIED_TIME filter if the token lacks webhooks:manage.'
                           : 'Re-fetches all records and compares field-by-field against EO-DB state. Catches changes that timestamps might miss, but heavier on API quota.'}
                       </span>
                     </div>
@@ -906,13 +1935,38 @@ export function AirtableSettingsSection({
                 {syncLog.length > 0 && (
                   <div style={s.syncLogSection}>
                     <div style={s.syncLogHeader}>
-                      <span style={s.syncLogTitle}>Sync Activity</span>
-                      <button
-                        style={s.syncLogClear}
-                        onClick={() => useAirtableStore.getState().clearSyncLog()}
-                      >
-                        Clear
-                      </button>
+                      <span style={s.syncLogTitle}>
+                        Sync Activity
+                        <span style={{ marginLeft: 6, color: theme.textMuted, fontWeight: 400 }}>
+                          (persisted — survives refresh)
+                        </span>
+                      </span>
+                      <div style={{ display: 'flex', gap: 6 }}>
+                        <button
+                          style={s.syncLogClear}
+                          onClick={() => {
+                            const json = JSON.stringify(syncLog, null, 2);
+                            const blob = new Blob([json], { type: 'application/json' });
+                            const url = URL.createObjectURL(blob);
+                            const a = document.createElement('a');
+                            a.href = url;
+                            a.download = `airtable-sync-log-${new Date().toISOString().slice(0,10)}.json`;
+                            a.click();
+                            setTimeout(() => URL.revokeObjectURL(url), 1000);
+                          }}
+                        >
+                          Export
+                        </button>
+                        <button
+                          style={s.syncLogClear}
+                          onClick={() => {
+                            useAirtableStore.getState().clearSyncLog();
+                            if (store) saveSyncLog(store, []);
+                          }}
+                        >
+                          Clear
+                        </button>
+                      </div>
                     </div>
                     <div style={s.syncLogList}>
                       {syncLog.map((entry, i) => (
@@ -947,6 +2001,10 @@ function SyncLogRow({ entry, userId }: { entry: SyncLogEntry; userId: string }) 
     sync_error:         '✗',
     sync_start:         '▶',
     provenance_uploaded:'↑',
+    webhook_poll:       '↻',
+    change_detected:    '✎',
+    snapshot_downloaded:'⬇',
+    snapshot_imported:  '⬆',
   };
 
   const label: Record<SyncLogEntry['type'], string> = {
@@ -957,6 +2015,10 @@ function SyncLogRow({ entry, userId }: { entry: SyncLogEntry; userId: string }) 
     sync_error:         'sync error',
     sync_start:         'started sync',
     provenance_uploaded:'uploaded provenance',
+    webhook_poll:       'webhook poll',
+    change_detected:    'change detected',
+    snapshot_downloaded:'snapshot downloaded',
+    snapshot_imported:  'snapshot imported',
   };
 
   const color: Partial<Record<SyncLogEntry['type'], string>> = {
@@ -969,23 +2031,321 @@ function SyncLogRow({ entry, userId }: { entry: SyncLogEntry; userId: string }) 
   const ago = Math.round((Date.now() - entry.ts) / 1000);
   const agoStr = ago < 60 ? `${ago}s ago` : ago < 3600 ? `${Math.round(ago / 60)}m ago` : `${Math.round(ago / 3600)}h ago`;
 
+  // Rich context appears inline under the header row for completion/start
+  // entries — gives the user the "what API, what cursor, what mode?" answer
+  // without having to open the dev tools or pull up the settings panel.
+  const showsContext = entry.strategy || entry.endpoint || entry.cursorUsed || entry.preserveExisting !== undefined;
+  const showsPerTable = !!entry.perTable && entry.perTable.length > 0;
+
   return (
-    <div style={s.syncLogRow}>
-      <span style={{ ...s.syncLogIcon, color: color[entry.type] ?? theme.textSecondary }}>
-        {icon[entry.type]}
-      </span>
-      <span style={s.syncLogBody}>
-        <span style={{ ...s.syncLogSyncer, fontWeight: isLocal ? 600 : 400 }}>
-          {isLocal ? (isMe ? 'this device' : `local`) : shortId}
+    <div style={{ ...s.syncLogRow, flexDirection: 'column', alignItems: 'stretch' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <span style={{ ...s.syncLogIcon, color: color[entry.type] ?? theme.textSecondary }}>
+          {icon[entry.type]}
         </span>
-        {' '}
-        <span style={{ color: color[entry.type] ?? theme.text }}>{label[entry.type]}</span>
-        {entry.detail && (
-          <span style={s.syncLogDetail}> — {entry.detail}</span>
-        )}
-      </span>
-      <span style={s.syncLogAgo}>{agoStr}</span>
+        <span style={s.syncLogBody}>
+          <span style={{ ...s.syncLogSyncer, fontWeight: isLocal ? 600 : 400 }}>
+            {isLocal ? (isMe ? 'this device' : `local`) : shortId}
+          </span>
+          {' '}
+          <span style={{ color: color[entry.type] ?? theme.text }}>{label[entry.type]}</span>
+          {entry.detail && (
+            <span style={s.syncLogDetail}> — {entry.detail}</span>
+          )}
+        </span>
+        <span style={s.syncLogAgo}>{agoStr}</span>
+      </div>
+
+      {showsContext && (
+        <div style={{
+          marginLeft: 22,
+          marginTop: 2,
+          fontSize: 10,
+          color: theme.textMuted,
+          display: 'flex',
+          flexWrap: 'wrap',
+          gap: 8,
+        }}>
+          {entry.strategy && (
+            <span title="Sync strategy">
+              <strong style={{ color: theme.textSecondary }}>strategy:</strong> {entry.strategy}
+            </span>
+          )}
+          {entry.preserveExisting !== undefined && (
+            <span
+              title={entry.preserveExisting ? 'Existing EO-DB values were preserved' : 'Existing EO-DB values may have been overwritten'}
+              style={{
+                color: entry.preserveExisting ? theme.successText : theme.warningText ?? theme.warning,
+              }}
+            >
+              {entry.preserveExisting ? 'preserve' : 'overwrite'}
+            </span>
+          )}
+          {entry.baseName && (
+            <span><strong style={{ color: theme.textSecondary }}>base:</strong> {entry.baseName}</span>
+          )}
+          {entry.cursorUsed && (
+            <span title={`LAST_MODIFIED_TIME cursor used for this run`}>
+              <strong style={{ color: theme.textSecondary }}>since:</strong> {new Date(entry.cursorUsed).toLocaleTimeString()}
+            </span>
+          )}
+          {entry.endpoint && (
+            <span title={entry.endpoint} style={{
+              maxWidth: 260,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap' as const,
+              fontFamily: "'JetBrains Mono', monospace",
+            }}>
+              <strong style={{ color: theme.textSecondary }}>GET</strong> {hostOnly(entry.endpoint)}
+            </span>
+          )}
+        </div>
+      )}
+
+      {showsPerTable && (
+        <div style={{
+          marginLeft: 22,
+          marginTop: 4,
+          fontSize: 10,
+          color: theme.text,
+          border: `1px solid ${theme.borderLight ?? theme.border}`,
+          borderRadius: 4,
+          overflow: 'hidden',
+        }}>
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: '1fr 60px 60px 60px',
+            background: theme.bgMuted ?? 'transparent',
+            padding: '2px 6px',
+            color: theme.textMuted,
+            fontSize: 9,
+          }}>
+            <span>table</span>
+            <span style={{ textAlign: 'right' }}>ingest</span>
+            <span style={{ textAlign: 'right' }}>overwrite</span>
+            <span style={{ textAlign: 'right' }}>unchanged</span>
+          </div>
+          {entry.perTable!.map((pt) => (
+            <div
+              key={pt.table}
+              style={{
+                display: 'grid',
+                gridTemplateColumns: '1fr 60px 60px 60px',
+                padding: '1px 6px',
+                borderTop: `1px solid ${theme.borderLight ?? theme.border}`,
+              }}
+            >
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>
+                {pt.table}
+              </span>
+              <span style={{ textAlign: 'right' }}>{pt.ingested}</span>
+              <span style={{
+                textAlign: 'right',
+                color: pt.overwritten > 0 ? (theme.warningText ?? theme.warning) : undefined,
+              }}>
+                {pt.overwritten}
+              </span>
+              <span style={{ textAlign: 'right', color: theme.textMuted }}>{pt.skipped}</span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
+  );
+}
+
+/** Extract just the host+path (no query string) for compact endpoint display. */
+function hostOnly(endpoint: string): string {
+  try {
+    const u = new URL(endpoint);
+    return `${u.host}${u.pathname}`;
+  } catch {
+    return endpoint;
+  }
+}
+
+/** Rough relative-time formatter — avoids pulling in date-fns for one string. */
+function relativeTime(then: number, now: number): string {
+  const delta = Math.max(0, Math.round((now - then) / 1000));
+  if (delta < 60) return `${delta}s ago`;
+  if (delta < 3600) return `${Math.round(delta / 60)}m ago`;
+  if (delta < 86400) return `${Math.round(delta / 3600)}h ago`;
+  return `${Math.round(delta / 86400)}d ago`;
+}
+
+// ─── Overwrite pill ────────────────────────────────────────────────────────
+
+function OverwritePill({ preserveExisting, theme }: { preserveExisting: boolean; theme: Theme }) {
+  const bg = preserveExisting ? (theme.successBg ?? 'rgba(42,170,120,0.15)') : (theme.warningBg ?? 'rgba(210,140,20,0.18)');
+  const border = preserveExisting ? (theme.successBorder ?? theme.success ?? '#2a7') : (theme.warningBorder ?? theme.warning ?? '#c80');
+  const color = preserveExisting ? (theme.successText ?? theme.success ?? '#2a7') : (theme.warningText ?? theme.warning ?? '#a80');
+  return (
+    <span
+      title={
+        preserveExisting
+          ? 'Existing EO-DB field values will NOT be overwritten — only missing fields get filled in.'
+          : 'This run may overwrite existing EO-DB field values with Airtable values.'
+      }
+      style={{
+        marginLeft: 8,
+        padding: '1px 6px',
+        fontSize: 9,
+        fontWeight: 600,
+        textTransform: 'uppercase',
+        letterSpacing: '0.04em',
+        borderRadius: 10,
+        background: bg,
+        border: `1px solid ${border}`,
+        color,
+      }}
+    >
+      {preserveExisting ? 'Preserve' : 'May overwrite'}
+    </span>
+  );
+}
+
+// ─── Live sync status card ────────────────────────────────────────────────
+
+function LiveSyncCard({
+  snap,
+  startedAgo,
+  theme,
+}: {
+  snap: CurrentSyncSnapshot;
+  startedAgo: number;
+  theme: Theme;
+}) {
+  const phaseLabel =
+    snap.phase === 'preparing'    ? 'Preparing'
+    : snap.phase === 'discovering'  ? 'Discovering schema'
+    : snap.phase === 'collecting'   ? 'Collecting records'
+    : snap.phase === 'fetching'     ? 'Fetching from Airtable'
+    : snap.phase === 'folding'      ? 'Folding into local store'
+    : snap.phase === 'syncing'      ? 'Syncing'
+    : snap.phase === 'table_done'   ? 'Finishing table'
+    : String(snap.phase);
+
+  const strategyLabel =
+    snap.strategy === 'hydration'    ? 'Full hydration (no cursor)'
+    : snap.strategy === 'lastModified' ? 'Incremental (LAST_MODIFIED_TIME)'
+    : snap.strategy === 'fullDiff'     ? 'Full field diff'
+    : snap.strategy;
+
+  return (
+    <div style={{
+      marginTop: 10,
+      padding: 10,
+      borderRadius: 8,
+      border: `1px solid ${theme.borderLight ?? theme.border}`,
+      background: theme.bgMuted ?? 'transparent',
+      fontSize: 11,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <span
+          aria-hidden
+          style={{
+            width: 8, height: 8, borderRadius: '50%',
+            background: theme.successText ?? theme.success ?? '#2a7',
+            animation: 'eo-at-livecard-pulse 1.2s infinite',
+          }}
+        />
+        <strong style={{ fontSize: 12 }}>{phaseLabel}</strong>
+        {snap.table && <span style={{ color: theme.textSecondary }}>— {snap.table}</span>}
+        <span style={{ marginLeft: 'auto', color: theme.textMuted, fontSize: 10 }}>
+          started {startedAgo}s ago
+        </span>
+      </div>
+
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
+        <StrategyPill strategyLabel={strategyLabel} theme={theme} />
+        <OverwritePill preserveExisting={snap.preserveExisting} theme={theme} />
+        {snap.recordsSoFar > 0 && (
+          <span style={{
+            padding: '1px 6px',
+            fontSize: 9,
+            fontWeight: 600,
+            textTransform: 'uppercase',
+            letterSpacing: '0.04em',
+            borderRadius: 10,
+            background: theme.bgCard,
+            border: `1px solid ${theme.borderLight ?? theme.border}`,
+            color: theme.text,
+          }}>
+            {snap.recordsSoFar} records
+          </span>
+        )}
+      </div>
+
+      {/* Endpoint — collapsed single line with hover reveal via title. */}
+      {snap.endpoint && (
+        <div style={{
+          marginTop: 8,
+          fontFamily: "'JetBrains Mono', monospace",
+          fontSize: 10,
+          color: theme.textSecondary,
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap' as const,
+        }} title={snap.endpoint}>
+          <strong style={{ color: theme.textMuted }}>GET</strong> {snap.endpoint}
+        </div>
+      )}
+
+      {/* Cursor / rehydrate note. */}
+      <div style={{ marginTop: 4, fontSize: 10, color: theme.textMuted }}>
+        {snap.cursorUsed
+          ? <>Checking changes since <strong>{new Date(snap.cursorUsed).toLocaleString()}</strong></>
+          : <>Full rehydrate — no cursor (every record compared)</>}
+      </div>
+
+      {/* Live per-table progress — only rows that have been touched. */}
+      {snap.perTable.length > 0 && (
+        <div style={{ marginTop: 6, fontSize: 10 }}>
+          {snap.perTable.map((pt) => (
+            <div key={pt.tableId ?? pt.table} style={{ display: 'flex', gap: 8 }}>
+              <span style={{ flex: 1 }}>{pt.table}</span>
+              <span style={{ color: theme.textSecondary }}>{pt.ingested} ingested</span>
+              {pt.overwritten > 0 && (
+                <span style={{ color: theme.warningText ?? theme.warning }}>
+                  {pt.overwritten} overwritten
+                </span>
+              )}
+              <span style={{ color: theme.textMuted }}>{pt.skipped} unchanged</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <style>{`
+        @keyframes eo-at-livecard-pulse {
+          0%   { box-shadow: 0 0 0 0 rgba(42, 170, 120, 0.5); }
+          70%  { box-shadow: 0 0 0 6px rgba(42, 170, 120, 0);   }
+          100% { box-shadow: 0 0 0 0 rgba(42, 170, 120, 0);     }
+        }
+      `}</style>
+    </div>
+  );
+}
+
+function StrategyPill({ strategyLabel, theme }: { strategyLabel: string; theme: Theme }) {
+  return (
+    <span
+      title="Sync strategy used for this run"
+      style={{
+        padding: '1px 6px',
+        fontSize: 9,
+        fontWeight: 600,
+        textTransform: 'uppercase',
+        letterSpacing: '0.04em',
+        borderRadius: 10,
+        background: theme.bgCard,
+        border: `1px solid ${theme.borderLight ?? theme.border}`,
+        color: theme.textSecondary,
+      }}
+    >
+      {strategyLabel}
+    </span>
   );
 }
 

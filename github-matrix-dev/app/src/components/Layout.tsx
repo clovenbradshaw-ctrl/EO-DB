@@ -8,14 +8,33 @@ import { createFoldWorkerClient, initFoldWorker, type FoldWorkerClient } from '.
 import { SyncManager } from '../matrix/sync-manager';
 import { PeerSync } from '../matrix/peer-sync';
 import { WebRTCPeer } from '../matrix/webrtc-peer';
+import {
+  startNetworkSyncSystem,
+  isOperatorSyncEnabled,
+  type NetworkSyncSystem,
+} from '../sync/network-sync-system';
 import { Presence, type PresenceUser } from '../matrix/presence';
 import { usePresencePrefs } from '../lib/presence-prefs';
 import { OnlineUsers } from './OnlineUsers';
-import { GDriveSyncService } from '../google-drive/gdrive-sync';
-import { useGDriveStore } from '../google-drive/gdrive-store';
+import { EodbBlobWriter } from '../storage/eodb-blob-writer';
+import { eodbBlobDataIdForRoom, probeBlobExists } from '../storage/eodb-blob-endpoint';
+import {
+  loadSpaceKeyring,
+  generateSpaceKey,
+  importDeliveredKey,
+  exportKeyMaterial,
+} from '../crypto/keyring-store';
+import {
+  KEY_DELIVER_TYPE,
+  KEY_HEAL_REQUEST_TYPE,
+  KEY_HEAL_RESPONSE_TYPE,
+  type KeyDeliverPayload,
+  type KeyHealRequest,
+  type KeyHealResponse,
+} from '../crypto/key-delivery';
 import { useAirtableStore } from '../ingestion/airtable-store';
 import { resolveDataRoom } from '../matrix/event-bridge';
-import { configureMatrixDomain } from '../lib/matrix-domain';
+import { configureMatrixDomain, isAminoHomeserver } from '../lib/matrix-domain';
 import { HolonNav } from './HolonNav';
 import { TableView } from './TableView';
 import { SliceTabs } from './SliceTabs';
@@ -26,7 +45,9 @@ import { useIsMobile, useIsTablet, useIsNarrow } from '../hooks/useIsMobile';
 import { formatName } from './scope-picker-utils';
 import { ConnectionStatus, useConnectionState, type ConnectionState } from './ConnectionStatus';
 import { SyncToast, useSyncToast } from './SyncToast';
+import { AirtableSyncBadge } from './AirtableSyncBadge';
 import { ErrorBoundary } from './ErrorBoundary';
+import { PressureBadge } from './PressureBadge';
 import { SyncProgress } from './SyncProgress';
 // Lazily-loaded views — split into separate chunks so the initial bundle
 // does not include code that users may never visit.
@@ -74,6 +95,7 @@ const MessagesView = lazyWithRetry(() => import('./MessagesView').then(m => ({ d
 const PeopleView = lazyWithRetry(() => import('./PeopleView').then(m => ({ default: m.PeopleView })));
 const RecordPageView = lazyWithRetry(() => import('./builder/RecordPageView').then(m => ({ default: m.RecordPageView })));
 const BranchExplorerPanel = lazyWithRetry(() => import('./branch/BranchExplorerPanel').then(m => ({ default: m.BranchExplorerPanel })));
+const NaturalLanguageView = lazyWithRetry(() => import('./NaturalLanguageView').then(m => ({ default: m.NaturalLanguageView })));
 import { PermissionBadge } from './PermissionBadge';
 import { ViewOnlyBanner } from './ViewOnlyBanner';
 import { HeadlineMetrics } from './HeadlineMetrics';
@@ -90,7 +112,9 @@ import { SpaceBrowser } from './SpaceBrowser';
 import { Horizon } from './Horizon';
 import { type TimeScrubberFilter, type DateColumnOption, DEFAULT_FILTER, detectDateColumns, computeDateRange, buildAdaptiveFormatter } from './time-scrubber-utils';
 import { hasFieldsSubObject, buildFieldNameMap } from './filter-types';
-import { useHashRoute, type View } from '../lib/router';
+import { useHashRoute, type View, type AppRoute } from '../lib/router';
+import { TabBar } from './TabBar';
+import { useTabsStore, routeFromTab, defaultTitleFor, defaultIconFor } from '../store/tabs-store';
 import { type AccessRole, type UserTypeDefinition, type SpaceConfig, type TerminologyKey, powerLevelToRole, legacyAccessToRole, resolveTerminology } from '../permissions/types';
 import { DEFAULT_LAW_FIRM_PERSONAS } from '../permissions/default-personas';
 import { UserTypeSwitcher } from './UserTypeSwitcher';
@@ -103,7 +127,6 @@ import { EO_POWER_LEVEL_CONTENT } from '../permissions/types';
 import { listAllHomeserverUsers } from '../matrix/user-discovery';
 import { withRetry } from '../matrix/connection-resilience';
 import { invalidateStatsCache } from '../db/space-statistics';
-import { clearFolderIdCache, setActiveSpaceRoomId } from '../google-drive/gdrive-api';
 import { useApiConnectionStore } from '../store/api-connection-store';
 
 /** Set to false to disable all Matrix activity (sync, room creation, discovery). */
@@ -473,21 +496,10 @@ interface CachedSpace {
   syncManager: SyncManager | null;
   peerSync: PeerSync | null;
   webrtcPeer: WebRTCPeer | null;
-  gdriveSync: GDriveSyncService | null;
   mainRoomId: string | null;
   presence: Presence | null;
   /** Full room topology from SpaceConfig (when available) */
   spaceRooms?: { main: string; restricted?: string; governance?: string } | null;
-}
-
-/** Stable per-tab session ID — used by GDriveSyncService for bake intent files. */
-function getSessionId(): string {
-  let id = sessionStorage.getItem('eo-gdrive-session');
-  if (!id) {
-    id = Math.random().toString(36).slice(2, 10);
-    sessionStorage.setItem('eo-gdrive-session', id);
-  }
-  return id;
 }
 
 export function Layout({ session, onLogout, localMode }: LayoutProps) {
@@ -496,10 +508,62 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   const ready = useEoStore((s) => s.ready);
   const lastSeq = useEoStore((s) => s.lastSeq);
   const recentEvents = useEoStore((s) => s.recentEvents);
+  // Airtable integration relies on shared n8n proxy credentials scoped to the
+  // hosted Amino deployment. Gate UI on the homeserver so users on foreign
+  // Matrix servers never see the endpoints.
+  const isAmino = isAminoHomeserver(session.homeserver);
   const { route, navigate } = useHashRoute();
   const activeView = route.view;
   const selectedScope = route.scope;
   const selectedRecord = route.record;
+
+  // ─── Browser-style tabs ────────────────────────────────────────────────
+  // The tabs store owns the list of open tabs; the active tab's route stays
+  // mirrored with the URL hash. `openRouteAsTab` creates a new tab (or
+  // focuses an existing one with matching identity) and navigates to it.
+  // TabBar subscribes to the store directly, so Layout only subscribes to
+  // the active-tab id (needed by the route-sync effect below).
+  const activeTabId = useTabsStore((s) => s.activeTabId);
+  const hydrateTabs = useTabsStore((s) => s.hydrate);
+  const openTabAction = useTabsStore((s) => s.openTab);
+  const updateActiveTabRoute = useTabsStore((s) => s.updateActiveTab);
+
+  // Seed the tabs store from the URL on first mount.
+  useEffect(() => {
+    if (useTabsStore.getState().tabs.length === 0) {
+      const initial = {
+        id: crypto.randomUUID ? crypto.randomUUID() : `tab_${Date.now().toString(36)}`,
+        view: route.view,
+        space: route.space,
+        scope: route.scope,
+        record: route.record,
+        builderViewId: route.builderViewId,
+        customPageId: route.customPageId,
+        query: route.query,
+        title: defaultTitleFor(route),
+        icon: defaultIconFor(route),
+      };
+      hydrateTabs([initial], initial.id);
+    }
+    // Run once on mount — subsequent route sync is handled below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Keep the active tab's route in sync with the URL (covers back/forward
+  // navigation and navigate() calls alike).
+  useEffect(() => {
+    if (!activeTabId) return;
+    updateActiveTabRoute(route);
+  }, [route, activeTabId, updateActiveTabRoute]);
+
+  /** Open a new tab for the given route partial, focus it, and update the URL. */
+  const openRouteAsTab = useCallback(
+    (partial: Partial<AppRoute> & { title?: string; icon?: string }, opts?: { reuseByView?: boolean }) => {
+      openTabAction(partial, { reuseByView: opts?.reuseByView });
+      navigate(partial);
+    },
+    [openTabAction, navigate],
+  );
   const [selectedSpace, setSelectedSpace] = useState<string | null>(() => {
     // Prefer space from URL hash (enables direct links)
     if (route.space) {
@@ -537,6 +601,19 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   const allStatesFetchGenRef = useRef(0);
   const [timeScrubberFilter, setTimeScrubberFilter] = useState<TimeScrubberFilter>(DEFAULT_FILTER);
   const [tableRecordTargets, setTableRecordTargets] = useState<string[]>([]);
+
+  // Details panel collapse — hides the right-side record drawer without
+  // clearing the selected record. Persists across reloads. When collapsed,
+  // clicking a table row still selects the record (so navigation, highlight,
+  // and keyboard shortcuts work) but the drawer stays hidden until the user
+  // clicks the expand rail on the right edge.
+  const [detailsPanelCollapsed, setDetailsPanelCollapsedState] = useState<boolean>(() => {
+    try { return localStorage.getItem('eo:detailsPanelCollapsed') === '1'; } catch { return false; }
+  });
+  const setDetailsPanelCollapsed = useCallback((v: boolean) => {
+    setDetailsPanelCollapsedState(v);
+    try { localStorage.setItem('eo:detailsPanelCollapsed', v ? '1' : '0'); } catch {}
+  }, []);
   const [scopedRecords, setScopedRecords] = useState<EoState[]>([]);
   const prevScopedRecordsKeyRef = useRef<string>('');
   const scopedRecordsFetchGenRef = useRef(0);
@@ -653,7 +730,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     const canonical = normalizeSpaceTarget(target);
     // Hardwall: purge all caches not scoped to a space before loading new space data.
     invalidateStatsCache();
-    clearFolderIdCache();
     useApiConnectionStore.getState().reset();
     setSelectedSpace(canonical);
     localStorage.setItem('eo-selected-space', canonical);
@@ -681,7 +757,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     const cached = spaceCacheRef.current.get(target);
     if (!cached) return;
     try { cached.workerClient.worker.terminate(); } catch { /* best effort */ }
-    try { cached.gdriveSync?.stop(); } catch { /* best effort */ }
     try { cached.peerSync?.destroy(); } catch { /* best effort */ }
     try { cached.webrtcPeer?.stop(); } catch { /* best effort */ }
     try { cached.syncManager?.destroy(); } catch { /* best effort */ }
@@ -1310,13 +1385,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         oldSyncManager.destroy();
       }
 
-      if (prevSpaceRef.current) {
-        const oldCached = spaceCacheRef.current.get(prevSpaceRef.current);
-        if (oldCached?.gdriveSync) {
-          oldCached.gdriveSync.stop();
-        }
-      }
-
       prevSpaceRef.current = selectedSpace;
       // Clear Layout-level state so old space data doesn't flash
       setAllStates([]);
@@ -1378,6 +1446,255 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     let mounted = true;
     const isStale = () => !mounted || setupGenRef.current !== generation;
     const cleanupFns: (() => void)[] = [];
+
+    const startEodbBlobWriter = (roomId: string): (() => void) => {
+      const client = matrixClientRef.current;
+      const store = useEoStore.getState().store;
+      if (!client || !store || !roomId) return () => {};
+
+      // Load the persisted keyring synchronously into a reference the writer
+      // will share. The writer reads `keyring.keys` every tick, so later
+      // mutations (key generation, delivery, heal) become visible without
+      // needing any explicit setKeyring() call.
+      let cancelled = false;
+      let writer: EodbBlobWriter | null = null;
+      let unsub: (() => void) | null = null;
+      let toDeviceHandler: ((event: any) => void) | null = null;
+      let healFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+
+      (async () => {
+        const keyring = await loadSpaceKeyring(roomId);
+        if (cancelled) return;
+
+        // If we don't have a key yet, mint one when it's safe — either the
+        // remote is known to be empty, or we're the only joined member of the
+        // room (so no peer could have written ciphertext under a key we don't
+        // hold, and no peer could deliver a key to us). Otherwise wait for key
+        // delivery from a peer.
+        if (keyring.keys.size === 0) {
+          const dataId = await eodbBlobDataIdForRoom(roomId);
+          const probe = await probeBlobExists(session.accessToken, roomId, dataId);
+          if (cancelled) return;
+
+          const room = client.getRoom(roomId);
+          const myUserId = client.getUserId();
+          const myDevice = client.getDeviceId() ?? '';
+          const otherMembers = room && myUserId
+            ? room.getJoinedMembers().filter((m: any) => m.userId !== myUserId)
+            : [];
+          const isAlone = otherMembers.length === 0;
+
+          // Safe to mint:
+          //  - probe === 'missing': remote has nothing, fresh start.
+          //  - isAlone && probe !== 'exists': no peer could have written
+          //    ciphertext under a foreign key, and none could heal us. Even
+          //    when the probe is inconclusive, staying idle here strands the
+          //    writer forever with no way out — so mint locally.
+          const canMint =
+            probe === 'missing' || (isAlone && probe !== 'exists');
+
+          if (canMint) {
+            await generateSpaceKey(roomId, keyring, `${roomId}.blob`);
+            console.log(
+              '[EO-DB blob-writer] Minted fresh space key for',
+              roomId,
+              `(probe=${probe}, alone=${isAlone})`,
+            );
+          } else {
+            console.warn(
+              '[EO-DB blob-writer] No local key and remote blob probe returned',
+              probe,
+              `(other members=${otherMembers.length}) — awaiting key delivery. Sending heal request.`,
+            );
+            // Best-effort heal: ask all other joined members for the key.
+            // Whoever has it will respond via KEY_HEAL_RESPONSE and our
+            // handler below will import it.
+            try {
+              const req: KeyHealRequest = {
+                space_id: roomId,
+                known_key_ids: [],
+                from_device: myDevice,
+              };
+              for (const m of otherMembers) {
+                const inner = new Map<string, object>();
+                inner.set('*', req);
+                const outer = new Map<string, Map<string, object>>();
+                outer.set(m.userId, inner);
+                await (client as any).sendToDevice(KEY_HEAL_REQUEST_TYPE, outer);
+              }
+            } catch (e) {
+              console.warn('[EO-DB blob-writer] Heal request failed:', e);
+            }
+
+            // Fallback: if no peer delivers a key within HEAL_TIMEOUT_MS,
+            // mint locally so the writer isn't stranded forever. Any
+            // existing remote ciphertext is cryptographically unreadable
+            // to us without the missing key, so overwriting it is strictly
+            // better than accumulating pending saves that never flush.
+            const HEAL_TIMEOUT_MS = 30_000;
+            healFallbackTimer = setTimeout(() => {
+              healFallbackTimer = null;
+              if (cancelled) return;
+              if (keyring.keys.size > 0) return;
+              void (async () => {
+                try {
+                  await generateSpaceKey(roomId, keyring, `${roomId}.blob`);
+                  console.warn(
+                    '[EO-DB blob-writer] Heal timed out after',
+                    HEAL_TIMEOUT_MS / 1000,
+                    `s (probe=${probe}, other members=${otherMembers.length}) — minted fresh key as fallback.`,
+                  );
+                  writer?.flushNow().catch(() => {});
+                } catch (err) {
+                  console.warn('[EO-DB blob-writer] Fallback key mint failed:', err);
+                }
+              })();
+            }, HEAL_TIMEOUT_MS);
+          }
+        }
+        if (cancelled) return;
+
+        writer = new EodbBlobWriter({
+          client,
+          roomId,
+          matrixToken: session.accessToken,
+          keyring,
+          store,
+          userId: session.userId,
+          deviceId: client.getDeviceId() ?? '',
+        });
+        writer.start();
+        useEoStore.getState().setEodbBlobWriter(writer);
+        unsub = useEoStore.subscribe((state, prev) => {
+          if (state.lastSeq > prev.lastSeq) writer!.notifyDirty(state.lastSeq);
+        });
+
+        // To-device handler: accept delivered keys and answer heal requests.
+        // Scoped to this room — the handler ignores events for other spaces.
+        toDeviceHandler = (event: any) => {
+          void (async () => {
+            try {
+              const type = event.getType();
+              const content = event.getContent();
+              const sender: string | undefined = event.getSender?.();
+              const senderDevice: string | undefined = content?.from_device;
+
+              if (type === KEY_DELIVER_TYPE) {
+                const payload = content as KeyDeliverPayload;
+                if (!payload || payload.space_id !== roomId) return;
+                let imported = 0;
+                for (const [keyId, rawB64] of Object.entries(payload.keys ?? {})) {
+                  if (typeof rawB64 !== 'string') continue;
+                  const ok = await importDeliveredKey(
+                    roomId,
+                    keyring,
+                    keyId,
+                    rawB64,
+                    `${roomId}.blob`,
+                  );
+                  if (ok) imported += 1;
+                }
+                if (imported > 0) {
+                  console.log('[EO-DB blob-writer] Imported', imported, 'delivered key(s) for', roomId);
+                  if (healFallbackTimer) {
+                    clearTimeout(healFallbackTimer);
+                    healFallbackTimer = null;
+                  }
+                  writer?.flushNow().catch(() => {});
+                }
+                return;
+              }
+
+              if (type === KEY_HEAL_RESPONSE_TYPE) {
+                const payload = content as KeyHealResponse;
+                if (!payload || payload.space_id !== roomId) return;
+                let imported = 0;
+                for (const [keyId, rawB64] of Object.entries(payload.keys ?? {})) {
+                  if (typeof rawB64 !== 'string') continue;
+                  const ok = await importDeliveredKey(
+                    roomId,
+                    keyring,
+                    keyId,
+                    rawB64,
+                    `${roomId}.blob`,
+                  );
+                  if (ok) imported += 1;
+                }
+                if (imported > 0) {
+                  console.log('[EO-DB blob-writer] Imported', imported, 'healed key(s) for', roomId);
+                  if (healFallbackTimer) {
+                    clearTimeout(healFallbackTimer);
+                    healFallbackTimer = null;
+                  }
+                  writer?.flushNow().catch(() => {});
+                }
+                return;
+              }
+
+              if (type === KEY_HEAL_REQUEST_TYPE) {
+                const req = content as KeyHealRequest;
+                if (!req || req.space_id !== roomId) return;
+                if (!sender || !senderDevice) return;
+                // Only respond to joined members of the room — the Matrix
+                // homeserver prevents non-members from being in the room's
+                // member list, so this is a cheap gate.
+                const room = client.getRoom(roomId);
+                const isMember = room
+                  ?.getJoinedMembers()
+                  .some((m: any) => m.userId === sender) ?? false;
+                if (!isMember) return;
+
+                const known = new Set(req.known_key_ids ?? []);
+                const out: Record<string, string> = {};
+                for (const [keyId] of keyring.keys) {
+                  if (known.has(keyId)) continue;
+                  const raw = await exportKeyMaterial(keyring, keyId);
+                  if (raw) out[keyId] = raw;
+                }
+                if (Object.keys(out).length === 0) return;
+                const resp: KeyHealResponse = { space_id: roomId, keys: out };
+                const inner = new Map<string, object>();
+                inner.set(senderDevice, resp);
+                const outer = new Map<string, Map<string, object>>();
+                outer.set(sender, inner);
+                await (client as any).sendToDevice(KEY_HEAL_RESPONSE_TYPE, outer);
+                console.log(
+                  '[EO-DB blob-writer] Sent',
+                  Object.keys(out).length,
+                  'key(s) to',
+                  sender,
+                  'in response to heal request',
+                );
+              }
+            } catch (e) {
+              console.warn('[EO-DB blob-writer] to-device handler error:', e);
+            }
+          })();
+        };
+        (client as any).on('toDeviceEvent', toDeviceHandler);
+      })().catch((e) => {
+        console.warn('[EO-DB blob-writer] init failed:', e);
+      });
+
+      return () => {
+        cancelled = true;
+        if (healFallbackTimer) {
+          clearTimeout(healFallbackTimer);
+          healFallbackTimer = null;
+        }
+        if (toDeviceHandler) {
+          try { (client as any).removeListener('toDeviceEvent', toDeviceHandler); } catch { /* noop */ }
+          toDeviceHandler = null;
+        }
+        if (unsub) { unsub(); unsub = null; }
+        if (writer) {
+          writer.stop();
+          if (useEoStore.getState().eodbBlobWriter === writer) {
+            useEoStore.getState().setEodbBlobWriter(null);
+          }
+        }
+      };
+    };
 
     // Holds the room topology discovered during resolution (used to populate cache).
     let resolvedSpaceRooms: SpaceConfig['rooms'] | null = null;
@@ -1586,13 +1903,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         recentEvents: [...st.recentEvents.slice(-99), event],
         lastSeq: event.seq,
       }));
-      // NOTE: do NOT call gdriveSync.saveOp() here.
-      // This callback fires for ALL folded events: Drive pulls, peer events,
-      // server events, and local dispatches.  Calling saveOp() here would
-      // cross-contaminate spaces — when Space A's background timer pulls new
-      // events, this callback runs while Zustand may already point at Space B,
-      // so saveOp() would write Space A events into Space B's Drive folder.
-      // Local dispatches are saved by dispatch()/batchImport() in eo-store.ts.
     };
 
     async function setupSpaceStore() {
@@ -1639,6 +1949,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               existing.webrtcPeer = wrtc;
               useEoStore.getState().setSyncManager(ps as any);
               cleanupFns.push(() => { ps.stop(); wrtc.stop(); });
+              cleanupFns.push(startEodbBlobWriter(spaceRoomId));
             } else {
               ps.stop(); wrtc.stop();
             }
@@ -1650,54 +1961,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           existing.peerSync.start().catch(() => {});
           useEoStore.getState().setSyncManager(existing.peerSync as any);
           cleanupFns.push(() => {});
-        }
-
-        // Restart Google Drive sync for cached space
-        if (existing.gdriveSync) {
-          // Refresh the room ID in case it was resolved after initial construction.
-          if (spaceRoomId) existing.gdriveSync.setSpaceRoomId(spaceRoomId);
-          // setGDriveSync BEFORE start() so dispatches during hydration are saved
-          useEoStore.getState().setGDriveSync(existing.gdriveSync);
-          existing.gdriveSync.start().catch(e =>
-            console.warn('[EO-DB] Google Drive sync restart failed for cached space', selectedSpace, e),
-          );
-        } else if (selectedSpace && session.accessToken && matrixClientRef.current) {
-          // GDrive wasn't started on the first run (Matrix wasn't ready yet). Try now.
-          const gdriveState = useGDriveStore.getState();
-          if (!gdriveState.connected && gdriveState.syncMode === 'n8n') {
-            const capturedSpaceRoomId = spaceRoomId;
-            const capturedEntry = existing;
-            const spaceEntry = mergedEntries.find(e => e.spaceTarget === selectedSpace);
-            const spaceName = spaceEntry?.displayName ?? selectedSpace!;
-            gdriveState.connect(matrixClientRef.current, capturedSpaceRoomId ?? '', session.accessToken)
-              .then(() => {
-                if (isStale()) return;
-                const stateAfter = useGDriveStore.getState();
-                const effectiveToken = stateAfter.matrixAccessToken;
-                if (!effectiveToken) return;
-                useGDriveStore.getState().setCurrentSpace(selectedSpace!, spaceName, capturedSpaceRoomId ?? undefined);
-                const gs = new GDriveSyncService({
-                  store: useEoStore.getState().store!,
-                  spaceId: selectedSpace!,
-                  spaceName,
-                  userId: session.userId,
-                  sessionId: getSessionId(),
-                  accessToken: effectiveToken,
-                  spaceRoomId: capturedSpaceRoomId ?? undefined,
-                  onEvent: onFoldEvent,
-                  onHydrated: () => { init(capturedEntry.workerClient); },
-                });
-                capturedEntry.gdriveSync = gs;
-                useEoStore.getState().setGDriveSync(gs);
-                if (capturedEntry.peerSync) {
-                  const ps = capturedEntry.peerSync;
-                  gs.onOpSaved = (seq: number) => { ps.broadcastGDriveUpdate(seq).catch(() => {}); };
-                  ps.onGDriveUpdate = () => { gs.triggerImmediateCheck(); };
-                }
-                return gs.start();
-              })
-              .catch(e => console.warn('[EO-DB] GDrive lazy start failed for cached space', selectedSpace, e));
-          }
         }
 
         // Start a fresh presence instance for the cached space.
@@ -1724,7 +1987,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       const eager = eagerWorkerRef.current;
       const usingEager = eager !== null && eager.spaceId === selectedSpace!;
       const workerClient = usingEager ? eager.client : createFoldWorkerClient();
-      cache.set(selectedSpace!, { workerClient, syncManager: null, peerSync: null, webrtcPeer: null, gdriveSync: null, mainRoomId: null, presence: null, spaceRooms: null });
+      cache.set(selectedSpace!, { workerClient, syncManager: null, peerSync: null, webrtcPeer: null, mainRoomId: null, presence: null, spaceRooms: null });
 
       let initError: unknown;
       // Captured from the ready message so eo-store.init can compare it
@@ -1787,97 +2050,51 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
 
       let peerSync: PeerSync | null = null;
       let webrtcPeer: WebRTCPeer | null = null;
+      let operatorSync: NetworkSyncSystem | null = null;
+
+      const useOperatorSync = isOperatorSyncEnabled(
+        (import.meta as unknown as { env?: Record<string, string | undefined> }).env?.VITE_NETWORK_SYNC_WORKER,
+      );
 
       if (MATRIX_ENABLED && spaceRoomId && matrixClientRef.current) {
         try {
           webrtcPeer = new WebRTCPeer(matrixClientRef.current, spaceRoomId, useEoStore.getState().store!, onFoldEvent);
           webrtcPeer.start();
-          peerSync = new PeerSync(matrixClientRef.current, spaceRoomId, useEoStore.getState().store!, onFoldEvent);
-          peerSync.setWebRTCPeer(webrtcPeer);
-          await peerSync.start();
-          if (isStale()) { peerSync.stop(); webrtcPeer.stop(); return; }
-          useEoStore.getState().setSyncManager(peerSync as any);
-          cleanupFns.push(() => { peerSync!.stop(); webrtcPeer!.stop(); });
+          if (useOperatorSync) {
+            operatorSync = await startNetworkSyncSystem({
+              matrix: matrixClientRef.current,
+              roomId: spaceRoomId,
+              store: useEoStore.getState().store!,
+              webrtcPeer,
+              userId: session.userId,
+              deviceId: matrixClientRef.current.getDeviceId() ?? '',
+              onFoldEvent,
+              createWorker: () =>
+                new Worker(new URL('../workers/network-sync.worker.ts', import.meta.url), {
+                  type: 'module',
+                  name: 'eo-network-sync',
+                }),
+            });
+            if (isStale()) { await operatorSync.stop(); webrtcPeer.stop(); return; }
+            cleanupFns.push(() => {
+              void operatorSync!.stop();
+              webrtcPeer!.stop();
+            });
+            console.log('[EO-DB] Operator-native sync active for', spaceRoomId);
+          } else {
+            peerSync = new PeerSync(matrixClientRef.current, spaceRoomId, useEoStore.getState().store!, onFoldEvent);
+            peerSync.setWebRTCPeer(webrtcPeer);
+            await peerSync.start();
+            if (isStale()) { peerSync.stop(); webrtcPeer.stop(); return; }
+            useEoStore.getState().setSyncManager(peerSync as any);
+            cleanupFns.push(() => { peerSync!.stop(); webrtcPeer!.stop(); });
+            cleanupFns.push(startEodbBlobWriter(spaceRoomId));
+          }
         } catch (e) {
-          console.warn('[EO-DB] PeerSync init failed for', selectedSpace, e);
+          console.warn('[EO-DB] Sync init failed for', selectedSpace, e);
           peerSync = null;
           webrtcPeer = null;
-        }
-      }
-
-      // Start Google Drive sync (n8n proxy by default; direct OAuth2 if mode=oauth)
-      let gdriveSync: GDriveSyncService | null = null;
-
-      if (selectedSpace && session.accessToken && matrixClientRef.current) {
-        try {
-          // Connect to Google Drive — mode dispatched inside connect()
-          const gdriveState = useGDriveStore.getState();
-          if (!gdriveState.connected) {
-            if (gdriveState.syncMode === 'n8n') {
-              await gdriveState.connect(matrixClientRef.current, spaceRoomId ?? '', session.accessToken);
-              console.log('[EO-DB] Google Drive auto-connected via n8n proxy');
-            }
-            // oauth mode: never auto-connect — user must trigger from Settings
-          }
-
-          // Resolve the effective token depending on active sync mode
-          const gdriveStateAfter = useGDriveStore.getState();
-          const effectiveToken = gdriveStateAfter.syncMode === 'n8n'
-            ? gdriveStateAfter.matrixAccessToken
-            : gdriveStateAfter.googleAccessToken;
-          if (!effectiveToken) throw new Error('Google Drive token unavailable after connect');
-
-          // Find the space display name for Drive folder labelling
-          const gdriveSpaceEntry = mergedEntriesRef.current.find(e => e.spaceTarget === selectedSpace);
-          const gdriveSpaceName = gdriveSpaceEntry?.displayName ?? selectedSpace!;
-
-          // Activate the space room for n8n proxy auth BEFORE setting currentSpace,
-          // so the widget's immediate loadFiles() call includes the correct space_room_id.
-          setActiveSpaceRoomId(spaceRoomId ?? undefined);
-
-          // Set current space in GDrive store (pass room ID so folder lookup uses it)
-          useGDriveStore.getState().setCurrentSpace(selectedSpace, gdriveSpaceName, spaceRoomId ?? undefined);
-
-          // GDriveSyncService.start() handles initial hydration immediately.
-          // setGDriveSync BEFORE start() so dispatches during hydration are saved.
-          gdriveSync = new GDriveSyncService({
-            store: useEoStore.getState().store!,
-            spaceId: selectedSpace,
-            spaceName: gdriveSpaceName,
-            userId: session.userId,
-            sessionId: getSessionId(),
-            accessToken: effectiveToken,
-            spaceRoomId: spaceRoomId ?? undefined,
-            onEvent: onFoldEvent,
-            onHydrated: () => { init(workerClient); },
-          });
-          useEoStore.getState().setGDriveSync(gdriveSync);
-
-          // Wire GDrive ↔ PeerSync notifications:
-          // After a GDrive write confirms, broadcast to peers so they pull immediately
-          // instead of waiting up to 15s. Peers respond by calling triggerImmediateCheck().
-          if (peerSync) {
-            const ps = peerSync;
-            const gs = gdriveSync;
-            gs.onOpSaved = (seq: number) => {
-              ps.broadcastGDriveUpdate(seq).catch(() => {});
-            };
-            ps.onGDriveUpdate = () => {
-              gs.triggerImmediateCheck();
-            };
-          }
-
-          // Don't await — let GDrive hydration race in the background with
-          // peer-sync timeline events. Whichever source produces events first
-          // appends them; fold dedup by client_event_id keeps the result
-          // identical regardless of arrival order. Awaiting here would gate
-          // setup completion on a single source coming online first.
-          gdriveSync.start().catch(e =>
-            console.warn('[EO-DB] Google Drive sync start failed for space', selectedSpace, e),
-          );
-        } catch (e) {
-          console.warn('[EO-DB] Google Drive sync start failed for space', selectedSpace, e);
-          gdriveSync = null;
+          operatorSync = null;
         }
       }
 
@@ -1918,7 +2135,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
 
       // Update the cached entry with sync services (worker was cached earlier
       // to prevent race conditions; now enrich with fully-initialized services).
-      cache.set(selectedSpace!, { workerClient, syncManager: null, peerSync, webrtcPeer, gdriveSync, mainRoomId: spaceRoomId, presence: presenceInstance, spaceRooms: resolvedSpaceRooms });
+      cache.set(selectedSpace!, { workerClient, syncManager: null, peerSync, webrtcPeer, mainRoomId: spaceRoomId, presence: presenceInstance, spaceRooms: resolvedSpaceRooms });
     }
 
     setupSpaceStore();
@@ -1938,23 +2155,17 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   async function handleLogout() {
     // Save snapshots for ALL cached spaces before clearing state
     const cache = spaceCacheRef.current;
-    const savePromises: Promise<void>[] = [];
+    const savePromises: Promise<unknown>[] = [];
     for (const [, cached] of cache) {
       if (cached.syncManager) {
         savePromises.push(cached.syncManager.saveSnapshot().catch((err) => {
               console.warn('[EO-DB] Snapshot save failed:', err);
             }));
       }
-      if (cached.gdriveSync) {
-        savePromises.push(cached.gdriveSync.forceSave().catch((err) => {
-              console.warn('[EO-DB] Google Drive save failed:', err);
-            }));
-      }
     }
     await Promise.all(savePromises);
 
     for (const [, cached] of cache) {
-      if (cached.gdriveSync) cached.gdriveSync.stop();
       cached.workerClient.worker.terminate();
     }
     cache.clear();
@@ -1983,20 +2194,13 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
 
   // Handle tab visibility changes.
   //
-  // On `hidden`: do NOT run the heavy gdriveSync.forceSave() (fullPushToGDrive) —
-  //   every dispatched event is already flushed to Drive in saveOp() via
-  //   flushBuffer(), so ops are durable without a full rewrite. The legacy
-  //   SyncManager path still saves its snapshot (cheap; only fires for older
-  //   spaces that don't use PeerSync).
+  // On `hidden`: save SyncManager snapshot (cheap; only fires for older spaces
+  //   that don't use PeerSync).
   //
-  // On `visible`: proactively re-sync so the user doesn't wait for
-  //   browser-throttled timers to catch up. Background tabs throttle
-  //   setInterval to ~1 min, so GDrive's 15 s cycle and PeerSync's 30 s
-  //   heartbeat effectively pause. Without an explicit kick here, the user
-  //   sees stale data for 30-60+ s after tabbing back in.
+  // On `visible`: re-announce PeerSync presence so peers push us anything we
+  //   missed while the tab was backgrounded.
   //
-  // On `beforeunload`: run the full forceSave for durability before the tab
-  //   is closed. This is the only path where a full rewrite is warranted.
+  // On `beforeunload`: save snapshots for durability before the tab closes.
   useEffect(() => {
     let fullSaveInFlight = false;
 
@@ -2004,16 +2208,11 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       if (fullSaveInFlight) return;
       fullSaveInFlight = true;
       try {
-        const promises: Promise<void>[] = [];
+        const promises: Promise<unknown>[] = [];
         for (const [, cached] of spaceCacheRef.current) {
           if (cached.syncManager) {
             promises.push(cached.syncManager.saveSnapshot().catch((err) => {
               console.warn('[EO-DB] Snapshot save failed:', err);
-            }));
-          }
-          if (cached.gdriveSync) {
-            promises.push(cached.gdriveSync.forceSave().catch((err) => {
-              console.warn('[EO-DB] Google Drive save failed:', err);
             }));
           }
         }
@@ -2024,10 +2223,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     };
 
     const lightSaveOnHide = () => {
-      // Legacy SyncManager snapshot only (cheap). Skip gdriveSync.forceSave —
-      // ops are already flushed to Drive in saveOp() so there's nothing
-      // unsaved, and fullPushToGDrive is expensive enough that running it on
-      // every tab-out causes the slow-load-on-return the user sees.
       for (const [, cached] of spaceCacheRef.current) {
         if (cached.syncManager) {
           cached.syncManager.saveSnapshot().catch((err) => {
@@ -2038,21 +2233,8 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     };
 
     const refreshOnVisible = () => {
-      // Kick browser-throttled timers back into action:
-      //   1. Pull any new events from Drive immediately (instead of waiting
-      //      up to 15 s for the next setInterval tick).
-      //   2. Re-announce PeerSync presence so peers push us anything we
-      //      missed while the tab was backgrounded.
       for (const [, cached] of spaceCacheRef.current) {
-        if (cached.gdriveSync) {
-          try {
-            cached.gdriveSync.triggerImmediateCheck();
-          } catch (err) {
-            console.warn('[EO-DB] GDrive immediate check failed:', err);
-          }
-        }
         if (cached.peerSync) {
-          // Re-run start() — it cancels the old heartbeat and re-announces.
           cached.peerSync.start().catch((err) => {
             console.warn('[EO-DB] PeerSync re-announce failed:', err);
           });
@@ -2068,9 +2250,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       }
     };
 
-    // beforeunload can't await — fire-and-forget is the best we can do there.
-    // This is the ONE place we still run the heavy fullPushToGDrive, because
-    // the tab is about to close and we need full durability.
     const handleBeforeUnload = () => { fullSaveAll(); };
 
     document.addEventListener('visibilitychange', handleVisibilityChange);
@@ -2100,6 +2279,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     members: '\u2736', // star/members icon
     multiuser: '\u2194', // left-right arrow
     branch: '\u22EE',   // vertical ellipsis (branch fork)
+    nl: '\u2766',       // floral heart — natural-language / documents
   };
 
   // --- Permission resolution ---
@@ -2237,6 +2417,8 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       background: roleTint ? roleTint.bg : themedBg.bg,
       transition: 'background 0.5s cubic-bezier(.4,0,.2,1)',
     }}>
+      {/* Dev-gated PressureMonitor badge (?pressure=1 or localStorage flag). */}
+      <PressureBadge />
       {/* Persona strip — always visible at the very top when a persona is
           active so the user has a persistent at-a-glance indicator of the
           persona they're currently in (works on mobile and desktop). */}
@@ -2386,7 +2568,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                   syncManager: null,
                   peerSync: null,
                   webrtcPeer: null,
-                  gdriveSync: null,
                   mainRoomId,
                   presence: null,
                   spaceRooms,
@@ -2467,10 +2648,15 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             />
           )}
 
-          {/* Members button — hidden on mobile */}
+          {/* Members button — hidden on mobile. Opens (or focuses) a
+              dedicated "Share / Members" tab instead of replacing the
+              current view. */}
           {selectedSpace && !isMobile && (
             <button
-              onClick={() => navigate({ view: 'members' })}
+              onClick={() => openRouteAsTab(
+                { view: 'members', space: selectedSpace },
+                { reuseByView: true },
+              )}
               style={{
                 ...s.headerButton,
                 ...(activeView === 'members' ? { background: theme.accent, color: '#fff' } : {}),
@@ -2499,7 +2685,43 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             errorMessage={connectionMessage}
             retryLabel={connectionError?.phase === 'auth' ? 'Re-login' : undefined}
           />
+          {showStoreLoading && (
+            <div
+              role="status"
+              aria-live="polite"
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 6,
+                background: theme.bgMuted,
+                color: theme.textSecondary,
+                border: `1px solid ${theme.border}`,
+                borderRadius: 20,
+                padding: '4px 10px',
+                fontSize: 11,
+                fontWeight: 500,
+                fontFamily: "'JetBrains Mono', monospace",
+                whiteSpace: 'nowrap' as const,
+                flexShrink: 0,
+              }}
+              title="Local data is still loading"
+            >
+              <span
+                style={{
+                  width: 10,
+                  height: 10,
+                  border: `1.5px solid ${theme.border}`,
+                  borderTopColor: theme.accent,
+                  borderRadius: '50%',
+                  animation: 'spin 0.8s linear infinite',
+                  display: 'inline-block',
+                }}
+              />
+              Loading data{lastSeq > 0 ? ` (${lastSeq})` : ''}…
+            </div>
+          )}
           {!isMobile && <SyncToast status={syncToastStatus} seq={syncToastSeq} />}
+          {!isMobile && isAmino && <AirtableSyncBadge />}
           {selectedSpace && !isMobile && (
             <PermissionBadge role={currentRole} displayName={displayName} />
           )}
@@ -2556,6 +2778,19 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           </div>
         )}
       </header>
+
+      {/* Chrome-style tab strip — sits below the header, above every view */}
+      <TabBar
+        onActivate={(tab) => {
+          navigate(routeFromTab(tab));
+        }}
+        onNewTab={() => {
+          openRouteAsTab(
+            { view: 'records', space: selectedSpace, scope: null, record: null },
+            { reuseByView: false },
+          );
+        }}
+      />
 
       {/* Role banner — appears when an active user type (role) is selected */}
       {activeTypeDef && roleAccentColor && (
@@ -2705,7 +2940,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             {(['compose', 'import'] as View[]).map((view) => isNavViewVisible(view) && (
               <button
                 key={view}
-                onClick={() => { navigate({ view }); }}
+                onClick={() => openRouteAsTab({ view, space: selectedSpace }, { reuseByView: true })}
                 style={navItemStyle(view)}
               >
                 <span style={s.navIcon}>{NAV_ICONS[view]}</span>
@@ -2714,7 +2949,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             ))}
             {isNavViewVisible('api') && (
               <button
-                onClick={() => { navigate({ view: 'api' }); }}
+                onClick={() => openRouteAsTab({ view: 'api', space: selectedSpace }, { reuseByView: true })}
                 style={navItemStyle('api')}
               >
                 <span style={s.navIcon}>{NAV_ICONS.api}</span>
@@ -2724,7 +2959,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             <div style={s.navGroupLabel}>Collaborate</div>
             {isNavViewVisible('people') && (
               <button
-                onClick={() => navigate({ view: 'people' })}
+                onClick={() => openRouteAsTab({ view: 'people', space: selectedSpace }, { reuseByView: true })}
                 style={navItemStyle('people')}
               >
                 <span style={s.navIcon}>{NAV_ICONS.people}</span>
@@ -2733,7 +2968,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             )}
             {isNavViewVisible('messages') && (
               <button
-                onClick={() => navigate({ view: 'messages' })}
+                onClick={() => openRouteAsTab({ view: 'messages', space: selectedSpace }, { reuseByView: true })}
                 style={navItemStyle('messages')}
               >
                 <span style={s.navIcon}>{NAV_ICONS.messages}</span>
@@ -2742,7 +2977,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             )}
             {isNavViewVisible('members') && (
               <button
-                onClick={() => navigate({ view: 'members' })}
+                onClick={() => openRouteAsTab({ view: 'members', space: selectedSpace }, { reuseByView: true })}
                 style={navItemStyle('members')}
               >
                 <span style={s.navIcon}>{NAV_ICONS.members}</span>
@@ -2752,7 +2987,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             <div style={s.navGroupLabel}>System</div>
             {isNavViewVisible('log') && (
               <button
-                onClick={() => { navigate({ view: 'log' }); }}
+                onClick={() => openRouteAsTab({ view: 'log', space: selectedSpace }, { reuseByView: true })}
                 style={navItemStyle('log')}
               >
                 <span style={s.navIcon}>{NAV_ICONS.log}</span>
@@ -2761,7 +2996,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             )}
             {currentPermissions?.can_build_slices !== false && isNavViewVisible('builder') && (
               <button
-                onClick={() => { navigate({ view: 'builder', builderViewId: null, customPageId: null }); }}
+                onClick={() => openRouteAsTab({ view: 'builder', space: selectedSpace, builderViewId: null, customPageId: null }, { reuseByView: true })}
                 style={navItemStyle('builder')}
               >
                 <span style={s.navIcon}>{NAV_ICONS.builder}</span>
@@ -2770,7 +3005,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             )}
             {currentPermissions?.can_set_governance !== false && isNavViewVisible('settings') && (
               <button
-                onClick={() => { navigate({ view: 'settings' }); }}
+                onClick={() => openRouteAsTab({ view: 'settings', space: selectedSpace }, { reuseByView: true })}
                 style={navItemStyle('settings')}
               >
                 <span style={s.navIcon}>{NAV_ICONS.settings}</span>
@@ -2778,15 +3013,24 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               </button>
             )}
             <button
-              onClick={() => { navigate({ view: 'branch' }); }}
+              onClick={() => openRouteAsTab({ view: 'branch', space: selectedSpace }, { reuseByView: true })}
               style={navItemStyle('branch')}
             >
               <span style={s.navIcon}>{NAV_ICONS.branch}</span>
               Branches
             </button>
+            <a
+              href={`${import.meta.env.BASE_URL}nl/natural_language.html`}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{ ...navItemStyle('nl'), textDecoration: 'none' }}
+            >
+              <span style={s.navIcon}>{NAV_ICONS.nl}</span>
+              Natural Language
+            </a>
             <div style={s.navGroupLabel}>Testing</div>
             <button
-              onClick={() => { navigate({ view: 'multiuser' }); }}
+              onClick={() => openRouteAsTab({ view: 'multiuser', space: selectedSpace }, { reuseByView: true })}
               style={navItemStyle('multiuser')}
             >
               <span style={s.navIcon}>{NAV_ICONS.multiuser}</span>
@@ -3013,14 +3257,32 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               )
             ) : activeView === 'members' ? (
               selectedSpace ? (
-                <div style={{ padding: '20px 28px', maxWidth: 560 }}>
-                  <SpaceMembers
-                    spaceTarget={selectedSpace}
-                    currentUserId={session.userId}
-                    onClose={() => navigate({ view: 'records' })}
-                    matrixClient={matrixClientRef.current}
-                    mainRoomId={spaceRoomId}
-                  />
+                <div style={{
+                  flex: 1, minHeight: 0, minWidth: 0, overflow: 'auto',
+                  padding: isMobile ? '12px' : '24px 32px',
+                }}>
+                  <div style={{ maxWidth: 720, margin: '0 auto' }}>
+                    <SpaceMembers
+                      spaceTarget={selectedSpace}
+                      currentUserId={session.userId}
+                      onClose={() => {
+                        // Close the Members tab if one is open; otherwise
+                        // fall back to navigating away to the records view.
+                        const st = useTabsStore.getState();
+                        const memberTab = st.tabs.find((t) => t.view === 'members');
+                        if (memberTab && st.tabs.length > 1) {
+                          st.closeTab(memberTab.id);
+                          const nextId = useTabsStore.getState().activeTabId;
+                          const next = useTabsStore.getState().tabs.find((t) => t.id === nextId);
+                          if (next) navigate(routeFromTab(next));
+                        } else {
+                          navigate({ view: 'records' });
+                        }
+                      }}
+                      matrixClient={matrixClientRef.current}
+                      mainRoomId={spaceRoomId}
+                    />
+                  </div>
                 </div>
               ) : (
                 <div style={s.empty}>
@@ -3037,22 +3299,64 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               <ApiConnectionsView />
             ) : activeView === 'branch' ? (
               <BranchExplorerPanel />
+            ) : activeView === 'nl' ? (
+              <NaturalLanguageView userId={session.userId} />
             ) : null}
             </Suspense>
           </ErrorBoundary>}
         </main>
 
-        {selectedRecord && activeView === 'records' && (
+        {selectedRecord && activeView === 'records' && !(detailsPanelCollapsed && !isMobile) && (
           <RecordPageOrDrawer
             recordTarget={selectedRecord}
             allStates={allStates}
             onClose={() => { navigate({ record: null }); }}
             onNavigate={(t) => { navigate({ record: t }); }}
+            onCollapse={!isMobile ? () => setDetailsPanelCollapsed(true) : undefined}
             profileFields={selectedScope ? sliceStore.getConfig(selectedScope).profileFields : undefined}
             isMobile={isMobile}
             tableRecordTargets={tableRecordTargets}
             userId={session.userId}
           />
+        )}
+
+        {activeView === 'records' && detailsPanelCollapsed && !isMobile && (
+          <aside
+            style={{
+              width: 28,
+              flexShrink: 0,
+              borderLeft: `1px solid ${theme.border}`,
+              background: theme.bgCard,
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              paddingTop: 12,
+            }}
+            aria-label="Details panel (collapsed)"
+          >
+            <button
+              onClick={() => setDetailsPanelCollapsed(false)}
+              title="Expand details panel"
+              aria-label="Expand details panel"
+              style={{
+                background: 'none',
+                border: `1px solid ${theme.border}`,
+                borderRadius: 4,
+                width: 22,
+                height: 48,
+                color: theme.textSecondary,
+                cursor: 'pointer',
+                fontSize: 14,
+                lineHeight: 1,
+                padding: 0,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+              }}
+            >
+              {'\u2039'}
+            </button>
+          </aside>
         )}
       </div>
 
@@ -3109,11 +3413,12 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
  * record page view for the record's collection. If yes, render RecordPageView
  * in a drawer. If no, fall back to the default RecordDetailDrawer.
  */
-function RecordPageOrDrawer({ recordTarget, allStates, onClose, onNavigate, profileFields, isMobile, tableRecordTargets, userId }: {
+function RecordPageOrDrawer({ recordTarget, allStates, onClose, onNavigate, onCollapse, profileFields, isMobile, tableRecordTargets, userId }: {
   recordTarget: string;
   allStates: EoState[];
   onClose: () => void;
   onNavigate: (target: string) => void;
+  onCollapse?: () => void;
   profileFields?: string[];
   isMobile?: boolean;
   tableRecordTargets?: string[];
@@ -3214,8 +3519,36 @@ function RecordPageOrDrawer({ recordTarget, allStates, onClose, onNavigate, prof
         width: isMobile ? '100vw' : 720, maxWidth: isMobile ? '100vw' : '55vw', height: '100%',
         flexShrink: 0, borderLeft: isMobile ? 'none' : '1px solid var(--border, #e0e0e0)',
         background: 'var(--bg, #fff)', display: 'flex', flexDirection: 'column',
+        position: 'relative' as const,
         ...(isMobile ? { position: 'fixed' as const, inset: 0, zIndex: 1000 } : {}),
       }}>
+        {onCollapse && !isMobile && (
+          <button
+            onClick={onCollapse}
+            title="Collapse panel (keeps record selected)"
+            aria-label="Collapse panel"
+            style={{
+              position: 'absolute',
+              top: 8,
+              right: 8,
+              zIndex: 2,
+              background: 'var(--bg-card, #fff)',
+              border: '1px solid var(--border, #e0e0e0)',
+              borderRadius: 4,
+              width: 24,
+              height: 24,
+              padding: 0,
+              fontSize: 14,
+              lineHeight: 1,
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+          >
+            {'\u00BB'}
+          </button>
+        )}
         <Suspense fallback={null}>
           <RecordPageView
             recordTarget={recordTarget}
@@ -3233,6 +3566,7 @@ function RecordPageOrDrawer({ recordTarget, allStates, onClose, onNavigate, prof
       target={recordTarget}
       onClose={onClose}
       onNavigate={onNavigate}
+      onCollapse={onCollapse}
       profileFields={profileFields}
       isMobile={isMobile}
       layoutType={layoutType}

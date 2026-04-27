@@ -42,8 +42,6 @@ export function peerSyncEventTypes(prefix?: string) {
     offer: `${p}.sync.offer`,
     request: `${p}.sync.request`,
     events: `${p}.sync.events`,
-    /** Notification that new ops were written to GDrive — triggers immediate pull. */
-    gdrive: `${p}.sync.gdrive`,
   } as const;
 }
 
@@ -126,6 +124,30 @@ export const PERMISSIONS_KEY_DELIVER = `${DEFAULT_EVENT_PREFIX}.key.grant`;
 /** Room signal broadcast when a user's permissions have changed. */
 export const PERMISSIONS_UPDATED = `${DEFAULT_EVENT_PREFIX}.permissions.updated`;
 
+/**
+ * EO-native swarm sync (operator-native, replaces peer-sync v2).
+ *
+ * Three to-device event types form the wire protocol defined in
+ * sync.md §4:
+ *   - `swarm.v2.control` — ephemeral control queries
+ *     (request_piece_bytes, request_tail_events, cancel).
+ *   - `swarm.v2.bulk`    — bulk frames over Matrix to-device when
+ *     WebRTC is unavailable (fallback).
+ *   - `swarm.v2.hello`   — lightweight presence announcement so a
+ *     joining device knows who else is currently live.
+ *
+ * Control and bulk messages do NOT enter the EO log. Only the INS /
+ * EVA / REC events the worker emits from verified bytes do.
+ */
+export function swarmV2EventTypes(prefix?: string) {
+  const p = prefix ?? _eventPrefix;
+  return {
+    control: `${p}.swarm.v2.control`,
+    bulk: `${p}.swarm.v2.bulk`,
+    hello: `${p}.swarm.v2.hello`,
+  } as const;
+}
+
 /** Airtable sync coordination event types (to-device, ephemeral). */
 export function airtableSyncEventTypes(prefix?: string) {
   const p = prefix ?? _eventPrefix;
@@ -145,4 +167,21 @@ export interface MatrixDomainConfig {
 export function configureMatrixDomain(cfg: MatrixDomainConfig): void {
   if (cfg.eventPrefix !== undefined) _eventPrefix = cfg.eventPrefix;
   if (cfg.dataRoomAlias !== undefined) _dataRoomAlias = cfg.dataRoomAlias;
+}
+
+/**
+ * Whether the given homeserver URL belongs to the hosted Amino deployment.
+ *
+ * Drive + Airtable integrations are tied to shared n8n proxy credentials
+ * scoped to `app.aminoimmigration.com` — their UI and network calls are
+ * gated on this check so foreign homeservers never see the endpoints.
+ */
+export function isAminoHomeserver(homeserver: string | undefined | null): boolean {
+  if (!homeserver) return false;
+  try {
+    const host = new URL(homeserver).hostname.toLowerCase();
+    return host === 'app.aminoimmigration.com';
+  } catch {
+    return false;
+  }
 }

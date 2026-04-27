@@ -74,10 +74,6 @@ export interface SpaceConfig {
   /** @deprecated Use manifest.eodb fieldRestrictions instead. */
   field_assignments?: FieldAssignment[];
   space_settings: SpaceSettings;
-  /** Cloud storage paths provisioned when the space was created. */
-  storage?: {
-    gdrive?: { folderId: string; path: string };
-  };
   /** Canonical Matrix room alias for deterministic room lookup.
    *  e.g. "#eo-db_drive_test_2:app.aminoimmigration.com" */
   canonical_alias?: string;

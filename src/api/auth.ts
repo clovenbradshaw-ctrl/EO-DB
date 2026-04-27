@@ -10,6 +10,45 @@ import {
 import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 
+// Sliding-window login rate limiter keyed by IP + username. Caps brute-force
+// attempts against the offline auth cache without adding a runtime dependency.
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const LOGIN_MAX_ATTEMPTS = 5;
+const LOGIN_ATTEMPTS_CAP = 10_000;
+const loginAttempts = new Map<string, number[]>();
+
+function loginRateLimitKey(request: FastifyRequest, user: string): string {
+  return `${request.ip || 'unknown'}|${user.toLowerCase()}`;
+}
+
+function checkLoginRateLimit(key: string): { allowed: boolean; retryAfter: number } {
+  const now = Date.now();
+  const cutoff = now - LOGIN_WINDOW_MS;
+  const history = (loginAttempts.get(key) ?? []).filter((t) => t > cutoff);
+  if (history.length >= LOGIN_MAX_ATTEMPTS) {
+    loginAttempts.set(key, history);
+    const oldest = history[0] ?? now;
+    return { allowed: false, retryAfter: Math.ceil((oldest + LOGIN_WINDOW_MS - now) / 1000) };
+  }
+  history.push(now);
+  loginAttempts.set(key, history);
+  if (loginAttempts.size > LOGIN_ATTEMPTS_CAP) {
+    // Evict the oldest entry to cap memory usage under abusive traffic.
+    const firstKey = loginAttempts.keys().next().value;
+    if (firstKey) loginAttempts.delete(firstKey);
+  }
+  return { allowed: true, retryAfter: 0 };
+}
+
+function clearLoginRateLimit(key: string): void {
+  loginAttempts.delete(key);
+}
+
+/** Reset the login rate limiter (for tests). */
+export function resetLoginRateLimit(): void {
+  loginAttempts.clear();
+}
+
 /**
  * Auth proxy routes — unauthenticated endpoints that proxy Matrix login,
  * whoami, and profile lookups so the admin UI doesn't need to know the
@@ -44,6 +83,13 @@ export function registerAuthRoutes(
       return reply.code(400).send({ error: 'Fields "user" and "password" are required' });
     }
 
+    const rateKey = loginRateLimitKey(request, user);
+    const limit = checkLoginRateLimit(rateKey);
+    if (!limit.allowed) {
+      reply.header('Retry-After', String(limit.retryAfter));
+      return reply.code(429).send({ error: 'Too many login attempts. Try again later.' });
+    }
+
     const targetHomeserver = (clientHomeserver || homeserver).replace(/\/+$/, '');
 
     try {
@@ -58,11 +104,12 @@ export function registerAuthRoutes(
           await rm(encryptedDbPath, { force: true });
           await hooks?.onLogin?.(password); // signal DB reopen
         } catch (decryptErr: any) {
-          app.log.error(`Failed to decrypt database on login: ${decryptErr.message}`);
+          app.log.debug({ err: decryptErr }, 'Failed to decrypt database on login');
           // Don't fail login — the session is valid, DB just needs manual recovery
         }
       }
 
+      clearLoginRateLimit(rateKey);
       return reply.send({
         access_token: result.access_token,
         user_id: result.user_id,
@@ -75,10 +122,11 @@ export function registerAuthRoutes(
     } catch (e: any) {
       // If online login returned a definitive auth error, return 401
       if (e.message?.includes('login failed') || e.message?.includes('Invalid')) {
-        return reply.code(401).send({ error: e.message });
+        return reply.code(401).send({ error: 'Invalid credentials' });
       }
       // Homeserver unreachable and no offline cache
-      return reply.code(503).send({ error: e.message });
+      app.log.debug({ err: e }, 'Login failed');
+      return reply.code(503).send({ error: 'Authentication service unavailable' });
     }
   });
 
@@ -103,8 +151,8 @@ export function registerAuthRoutes(
       app.log.info('Local data encrypted on logout');
       return reply.send({ ok: true, encrypted: true });
     } catch (e: any) {
-      app.log.error(`Failed to encrypt database on logout: ${e.message}`);
-      return reply.code(500).send({ error: `Encryption failed: ${e.message}` });
+      app.log.debug({ err: e }, 'Failed to encrypt database on logout');
+      return reply.code(500).send({ error: 'Encryption failed' });
     }
   });
 

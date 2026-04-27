@@ -22,21 +22,30 @@
  */
 
 import type { MatrixClient, MatrixEvent } from 'matrix-js-sdk';
-import { pack } from 'msgpackr';
 import type { EoStore } from '../db/encrypted-store';
-import { AirtableClient } from './airtable-client';
 import {
   hydrationSync,
+  seedCursorsFromMap,
   updateSync,
   type SyncCustomization,
+  type SyncProgress,
   type HydrationResult,
   type UpdateSyncResult,
-  type RawImportBundle,
-  type ProvenanceResult,
 } from './airtable-sync';
-import { useAirtableStore, DEFAULT_SYNC_SETTINGS, type AirtableSyncSettings, type SyncLogEntry } from './airtable-store';
+import {
+  useAirtableStore,
+  createAirtableClient,
+  webhookHealthPatch,
+  DEFAULT_SYNC_SETTINGS,
+  type AirtableSyncSettings,
+  type SyncLogEntry,
+  type CurrentSyncSnapshot,
+} from './airtable-store';
+import {
+  saveContinuousEnabled,
+  saveCurrentSync,
+} from './airtable-persistence';
 import { airtableSyncEventTypes } from '../lib/matrix-domain';
-import type { GDriveSyncService } from '../google-drive/gdrive-sync';
 import { createImportProgressListener, useEoStore } from '../store/eo-store';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
@@ -44,10 +53,19 @@ import { createImportProgressListener, useEoStore } from '../store/eo-store';
 const MIN_SYNC_INTERVAL_SEC = 15;
 const MAX_SYNC_INTERVAL_SEC = 600;
 const STALE_THRESHOLD_MS = 2 * 60_000;   // 2 minutes — claim is stale after this
-const FIRST_SYNC_DELAY_MS = 3_000;       // 3 seconds — let connections settle
+// Fire the first sync tick on the next macrotask after start() — the leader
+// election + initial poll should happen on app-load, not after a polite delay.
+// Kept as a queued setTimeout(..., 0) (rather than a direct call) so we don't
+// inline the network round-trip in start() and so the existing nextTickAt UI
+// indicator still gets a non-null timestamp before the tick begins.
+const FIRST_SYNC_DELAY_MS = 0;
 
 const EO_AIRTABLE_HEAD = 'eo.airtable.head';
 const EO_AIRTABLE_CONFIG = 'eo.airtable.config';
+// Per-table cursor mirror. Each (baseId, tableId) pair gets its own state
+// event with state_key = "${baseId}/${tableId}", so writes are independent
+// and a leader handoff can read the entire set in one room-state scan.
+const EO_AIRTABLE_CURSOR = 'eo.airtable.cursor';
 
 const SIGNAL_TYPE = airtableSyncEventTypes().signal;
 const LOCK_TYPE = airtableSyncEventTypes().lock;
@@ -82,13 +100,6 @@ export class AirtableSyncService {
     private agent: string,
     private getApiKey: () => string | null,
     private customization?: SyncCustomization,
-    /**
-     * Optional Google Drive sync reference. When supplied, bulk hydrations
-     * upload the raw Airtable payload to Drive for provenance BEFORE any
-     * records are folded, and then rewrite the on-Drive .eodb log with the
-     * processed events when the sync finishes.
-     */
-    private gdriveSync?: GDriveSyncService,
   ) {
     this.deviceId = this.matrixClient.getDeviceId() ?? `browser-${Date.now()}`;
   }
@@ -108,8 +119,16 @@ export class AirtableSyncService {
     // Load sync settings from room state (shared config)
     this.loadSyncSettingsFromRoom();
 
+    // Persist the enabled flag so a refresh can auto-resume. Fire-and-forget:
+    // if the write fails we just lose the auto-resume once, nothing more.
+    saveContinuousEnabled(this.store, true);
+
     // Listen for to-device sync signals from other clients
     this.matrixClient.on('toDeviceEvent' as any, this.handleToDeviceEvent);
+
+    // Show the user "next check in Ns" immediately so they know we're
+    // scheduled, even before the first tick fires.
+    useAirtableStore.getState().setNextTickAt(Date.now() + FIRST_SYNC_DELAY_MS);
 
     // Initial claim attempt after a short delay
     setTimeout(async () => {
@@ -125,7 +144,9 @@ export class AirtableSyncService {
   private restartTimer(): void {
     if (this.timer) clearInterval(this.timer);
     if (!this.running) return;
-    this.timer = setInterval(() => this.tick(), this.getSyncIntervalMs());
+    const intervalMs = this.getSyncIntervalMs();
+    this.timer = setInterval(() => this.tick(), intervalMs);
+    useAirtableStore.getState().setNextTickAt(Date.now() + intervalMs);
   }
 
   /** Stop the sync loop and release the primary syncer claim. */
@@ -142,6 +163,10 @@ export class AirtableSyncService {
     await this.releasePrimarySyncer();
     useAirtableStore.getState().setPrimarySyncer(false);
     useAirtableStore.getState().setContinuousSync(false);
+    useAirtableStore.getState().setNextTickAt(null);
+    // Clear the persisted flag so the next mount doesn't auto-resume against
+    // the user's explicit "off" action.
+    saveContinuousEnabled(this.store, false);
   }
 
   /** Update the customization options for future syncs. */
@@ -273,6 +298,45 @@ export class AirtableSyncService {
     }
   }
 
+  // ─── Per-table cursor mirror (Matrix room state) ─────────────────────────
+  //
+  // IndexedDB cursors don't survive a leader handoff to a different device.
+  // We mirror each per-table cursor to a `eo.airtable.cursor` state event
+  // (state_key = `${baseId}/${tableId}`) so the next leader can pick up
+  // where the previous one left off. seedCursorsFromMap() takes the max of
+  // (room, local) so a regression is impossible.
+
+  private readAllCursorsFromRoom(): Map<string, string> {
+    const out = new Map<string, string>();
+    try {
+      const room = this.matrixClient.getRoom(this.roomId);
+      if (!room) return out;
+      const events = room.currentState.getStateEvents(EO_AIRTABLE_CURSOR);
+      const list = Array.isArray(events) ? events : (events ? [events] : []);
+      for (const ev of list) {
+        const stateKey = (ev as any).getStateKey?.() ?? '';
+        const content = (ev as any).getContent?.() ?? ev;
+        const cursor = content?.lastModifiedSeen;
+        if (typeof stateKey === 'string' && stateKey && typeof cursor === 'string' && cursor) {
+          out.set(stateKey, cursor);
+        }
+      }
+    } catch {
+      // Fall through with whatever we collected — best-effort read.
+    }
+    return out;
+  }
+
+  private async writeCursorToRoom(baseId: string, tableId: string, cursor: string): Promise<void> {
+    const stateKey = `${baseId}/${tableId}`;
+    await this.matrixClient.sendStateEvent(this.roomId, EO_AIRTABLE_CURSOR as any, {
+      lastModifiedSeen: cursor,
+      updatedBy: this.agent,
+      device: this.deviceId,
+      updatedAt: new Date().toISOString(),
+    }, stateKey);
+  }
+
   // ─── Primary syncer election ──────────────────────────────────────────────
 
   private readHead(): AirtableHeadContent | null {
@@ -391,6 +455,16 @@ export class AirtableSyncService {
     const isPrimary = await this.claimPrimarySyncer();
     if (!isPrimary) return;
 
+    // Seed local cursors from room state BEFORE marking syncing — picks up
+    // any advances written by a previous leader on a different device. The
+    // max-merge in seedCursorsFromMap guarantees a stale state event can't
+    // regress a cursor we already advanced locally.
+    try {
+      await seedCursorsFromMap(this.store, this.readAllCursorsFromRoom());
+    } catch (e) {
+      console.warn('[EO-DB] cursor seed from room state failed:', e);
+    }
+
     this.syncing = true;
     useAirtableStore.getState().setSyncing(true);
 
@@ -421,8 +495,23 @@ export class AirtableSyncService {
       } catch { /* best-effort */ }
     }
 
+    const tickStart = Date.now();
     try {
-      const client = new AirtableClient(apiKey);
+      // Wire response observation into the store so the Webhook Health panel
+      // surfaces the last webhook call's HTTP status + cursor in real time.
+      // We mirror every /webhooks endpoint (list, create, refresh, /payloads)
+      // so setup failures like 403 INVALID_PERMISSIONS surface immediately,
+      // not only when /payloads finally runs.
+      const client = createAirtableClient({
+        onResponse: (info) => {
+          if (!info.url.includes('/webhooks')) return;
+          useAirtableStore.getState().setWebhookHealth(webhookHealthPatch(info));
+        },
+      });
+      // Every tick that gets past the lock counts as a cycle for the header
+      // strip's "N cycles this session" indicator. Errors below still count
+      // — a failed cycle is still a cycle the user wants to see.
+      useAirtableStore.getState().incCycle();
       const isHydrated = headBefore?.hydrated ?? false;
 
       // Merge sync settings into customization
@@ -432,6 +521,45 @@ export class AirtableSyncService {
         preserveExisting: syncSettings.preserveExisting,
         recordLimit: syncSettings.recordLimit > 0 ? syncSettings.recordLimit : undefined,
       };
+
+      const plannedStrategy: 'hydration' | 'lastModified' | 'fullDiff' =
+        !isHydrated ? 'hydration'
+        : syncSettings.syncStrategy === 'fullDiff' ? 'fullDiff'
+        : 'lastModified';
+
+      // Initial snapshot — the UI flips from "idle — next in Ns" to "preparing"
+      // the moment the tick claims the lock, so the user sees something even
+      // before the first network round-trip.
+      const initialSnapshot: CurrentSyncSnapshot = {
+        startedAt: tickStart,
+        phase: 'preparing',
+        strategy: plannedStrategy,
+        preserveExisting: !!effectiveCustomization.preserveExisting,
+        recordsSoFar: 0,
+        perTable: [],
+      };
+      useAirtableStore.getState().setCurrentSync(initialSnapshot);
+      saveCurrentSync(this.store, initialSnapshot);
+
+      useAirtableStore.getState().addSyncLogEntry({
+        ts: Date.now(),
+        type: 'sync_start',
+        source: 'local',
+        syncer: this.agent,
+        device: this.deviceId,
+        detail: plannedStrategy === 'hydration'
+          ? 'Continuous tick — initial hydration'
+          : plannedStrategy === 'fullDiff'
+          ? 'Continuous tick — full field diff'
+          : 'Continuous tick — LAST_MODIFIED_TIME',
+        strategy: plannedStrategy,
+        preserveExisting: !!effectiveCustomization.preserveExisting,
+      });
+
+      // SyncProgress → currentSync bridge. Accumulates per-table counters so
+      // the UI can show a running tally and the completion banner can summarise
+      // what happened without recomputing from sync_results.
+      const onProgress = (p: SyncProgress) => this.applyProgress(p);
 
       let result: HydrationResult | UpdateSyncResult;
       let ranHydration = false;
@@ -443,10 +571,12 @@ export class AirtableSyncService {
       const progressListener = createImportProgressListener();
       try {
         if (!isHydrated) {
+          // TODO: reinstate snapshot bootstrap via n8n blob store so fresh
+          // devices can skip a 20k+ record Airtable scan.
           result = await hydrationSync(this.store, client, this.agent, {
             customization: effectiveCustomization,
             onEvent: progressListener.onEvent,
-            onRawImport: (bundle) => this.persistBulkImportProvenance(bundle),
+            onProgress,
           });
           ranHydration = true;
         } else {
@@ -457,13 +587,43 @@ export class AirtableSyncService {
             result = await hydrationSync(this.store, client, this.agent, {
               customization: { ...effectiveCustomization, preserveExisting: false },
               onEvent: progressListener.onEvent,
-              onRawImport: (bundle) => this.persistBulkImportProvenance(bundle),
+              onProgress,
             });
             ranHydration = true;
           } else {
             result = await updateSync(this.store, client, this.agent, {
               customization: effectiveCustomization,
               onEvent: progressListener.onEvent,
+              onProgress,
+              onCursorAdvance: (baseId, tableId, cursor) =>
+                this.writeCursorToRoom(baseId, tableId, cursor),
+              // Surface per-record diffs to the "Recent changes" UI panel.
+              // ingestRecord only fires this for actual mutations (not
+              // skip-no-change), so the buffer reflects real edits.
+              onChange: (report) => {
+                useAirtableStore.getState().addRecentChange({
+                  ts: Date.now(),
+                  baseId: report.baseId,
+                  tableId: report.tableId,
+                  tableName: report.tableName ?? report.tableId,
+                  recordId: report.recordId,
+                  recordLabel: report.recordLabel,
+                  diffs: report.diffs,
+                });
+                useAirtableStore.getState().addSyncLogEntry({
+                  ts: Date.now(),
+                  type: 'change_detected',
+                  source: 'local',
+                  syncer: this.agent,
+                  device: this.deviceId,
+                  detail: `${report.diffs.length} field${report.diffs.length === 1 ? '' : 's'}: ${report.diffs.map((d) => d.field).join(', ')}`,
+                  baseId: report.baseId,
+                  tableName: report.tableName,
+                  recordId: report.recordId,
+                  diffs: report.diffs,
+                  recordsChanged: 1,
+                });
+              },
             });
           }
         }
@@ -471,17 +631,6 @@ export class AirtableSyncService {
         // Flush any pending throttled Zustand update so the UI sees the
         // final lastSeq even if the sync ended on an in-flight timer.
         progressListener.finalize();
-      }
-
-      // After a bulk hydration completes, rewrite the .eodb log file on
-      // Drive so the cumulative log matches the freshly-folded state. This
-      // is the "upload the content to google drive by rewriting the .eodb"
-      // step of the provenance-first bulk import flow. Fire-and-forget: if
-      // Drive is flaky, the normal rolling buffer + next bake will catch up.
-      if (ranHydration && this.gdriveSync && result.total_records_ingested > 0) {
-        this.gdriveSync.fullPushToGDrive().catch((e) =>
-          console.warn('[EO-DB] post-hydration fullPushToGDrive failed:', e),
-        );
       }
 
       useAirtableStore.getState().setLastSyncResult(result);
@@ -494,9 +643,10 @@ export class AirtableSyncService {
         }
       }
 
-      await this.signalCompletion(result, !isHydrated);
+      await this.signalCompletion(result, !isHydrated, plannedStrategy);
     } catch (e: any) {
       console.error('[EO-DB] Airtable sync failed:', e);
+      const snap = useAirtableStore.getState().currentSync;
       useAirtableStore.getState().setError(e.message);
       useAirtableStore.getState().addSyncLogEntry({
         ts: Date.now(),
@@ -505,6 +655,13 @@ export class AirtableSyncService {
         syncer: this.agent,
         device: this.deviceId,
         detail: e.message,
+        strategy: snap?.strategy,
+        preserveExisting: snap?.preserveExisting,
+        baseId: snap?.baseId,
+        baseName: snap?.baseName,
+        endpoint: snap?.endpoint,
+        cursorUsed: snap?.cursorUsed,
+        durationMs: Date.now() - tickStart,
       });
 
       // Update head to reflect sync failure (not syncing anymore)
@@ -520,6 +677,15 @@ export class AirtableSyncService {
     } finally {
       this.syncing = false;
       useAirtableStore.getState().setSyncing(false);
+      // Clear the live snapshot — the run is either finished or errored; the
+      // persistent sync log captures what happened from here on.
+      useAirtableStore.getState().setCurrentSync(null);
+      saveCurrentSync(this.store, null);
+      // Schedule the next tick marker so the idle countdown reappears
+      // immediately instead of waiting for restartTimer's next setInterval.
+      if (this.running) {
+        useAirtableStore.getState().setNextTickAt(Date.now() + this.getSyncIntervalMs());
+      }
 
       // Broadcast lock released
       await this.broadcastToMembers(LOCK_TYPE, {
@@ -540,66 +706,109 @@ export class AirtableSyncService {
   }
 
   /**
-   * Provenance step (1) of the bulk import flow — pack the raw bundle into a
-   * binary blob and upload it to Drive BEFORE the fold runs. The returned
-   * ProvenanceResult is handed back to processHydrationBundle which emits an
-   * `import.airtable.<importId>` record linking to the Drive file, so future
-   * UI can list imports and offer a one-click re-download.
-   *
-   * Throws if upload fails, which aborts the hydration (we only fold after
-   * provenance is durably stored).
+   * Translate a SyncProgress event into a Zustand `currentSync` update and
+   * accumulate per-table counters. Persists to IndexedDB at phase boundaries
+   * so a mid-tick refresh can restore the snapshot.
    */
-  private async persistBulkImportProvenance(
-    bundle: RawImportBundle,
-  ): Promise<ProvenanceResult | void> {
-    if (!this.gdriveSync) return;
+  private applyProgress(p: SyncProgress): void {
+    const state = useAirtableStore.getState();
+    const prev = state.currentSync;
+    if (!prev) return;
 
-    // Serialize the bundle exactly as collected — no field normalization,
-    // no renaming, no flattening. Msgpack gives us a compact, deterministic
-    // binary that round-trips through unpack() for later re-imports.
-    const packed = pack(bundle) as Uint8Array;
-    const rawBytes = new Uint8Array(
-      packed.buffer.slice(packed.byteOffset, packed.byteOffset + packed.byteLength),
-    );
+    // Merge per-table roll-up — grow the array when we see a new table,
+    // patch the existing entry on each update. Keep tableId as the match key
+    // when available; fall back to table-name.
+    const nextPerTable = [...prev.perTable];
+    if (p.table) {
+      const key = p.tableId ?? p.table;
+      const idx = nextPerTable.findIndex((t) => (t.tableId ?? t.table) === key);
+      const base = idx >= 0 ? nextPerTable[idx] : {
+        table: p.table,
+        tableId: p.tableId,
+        ingested: 0,
+        overwritten: 0,
+        skipped: 0,
+      };
+      const patched = {
+        ...base,
+        table: p.table,
+        tableId: p.tableId ?? base.tableId,
+        ingested: p.ingested ?? base.ingested,
+        overwritten: p.overwritten ?? base.overwritten,
+        skipped: p.skipped ?? base.skipped,
+      };
+      if (idx >= 0) nextPerTable[idx] = patched;
+      else nextPerTable.push(patched);
+    }
 
-    const totalRecords = bundle.tables.reduce((s, t) => s + t.records.length, 0);
-    console.log(
-      `[EO-DB] Airtable bulk import: uploading provenance (${totalRecords} records, ${rawBytes.byteLength} bytes)…`,
-    );
+    const phase: CurrentSyncSnapshot['phase'] =
+      p.phase === 'discovering' ? 'discovering'
+      : p.phase === 'collecting' ? 'collecting'
+      : p.phase === 'fetching' ? 'fetching'
+      : p.phase === 'folding' ? 'folding'
+      : p.phase === 'syncing' ? 'syncing'
+      : p.phase === 'table_done' ? 'table_done'
+      : prev.phase;
 
-    const result = await this.gdriveSync.uploadProvenance(rawBytes, {
-      source: 'airtable',
-      importId: bundle.importId,
-      contentType: 'application/vnd.eo-db.airtable-import.msgpack',
-      label: `airtable-${bundle.importId}`,
-    });
+    const next: CurrentSyncSnapshot = {
+      ...prev,
+      phase,
+      strategy: p.strategy ?? prev.strategy,
+      preserveExisting: p.preserveExisting ?? prev.preserveExisting,
+      baseId: p.baseId ?? prev.baseId,
+      baseName: p.baseName ?? p.base ?? prev.baseName,
+      table: p.table ?? prev.table,
+      tableId: p.tableId ?? prev.tableId,
+      recordsSoFar: p.records_so_far ?? prev.recordsSoFar,
+      endpoint: p.endpoint ?? prev.endpoint,
+      cursorUsed: p.cursor ?? prev.cursorUsed,
+      perTable: nextPerTable,
+    };
 
-    useAirtableStore.getState().addSyncLogEntry({
-      ts: Date.now(),
-      type: 'provenance_uploaded',
-      source: 'local',
-      syncer: this.agent,
-      device: this.deviceId,
-      detail: `${totalRecords} records → ${result.fileName} (${rawBytes.byteLength} B)`,
-    });
-
-    return result;
+    useAirtableStore.getState().setCurrentSync(next);
+    // Only persist on phase boundaries / table completion — not on every
+    // pagination progress event — so we don't hammer the store.
+    if (phase === 'table_done' || phase !== prev.phase) {
+      saveCurrentSync(this.store, next);
+    }
   }
 
   private async signalCompletion(
     result: HydrationResult | UpdateSyncResult,
     wasHydration: boolean,
+    strategy: 'hydration' | 'lastModified' | 'fullDiff',
   ): Promise<void> {
     const now = new Date().toISOString();
+    const snap = useAirtableStore.getState().currentSync;
 
     useAirtableStore.getState().setLastSyncAt(now);
+    // Roll up per-table counts directly from sync_results — authoritative,
+    // unlike the running perTable on the snapshot which may have been patched
+    // mid-stream.
+    const perTable = result.sync_results.map((r) => ({
+      table: r.table_name,
+      ingested: r.records_ingested,
+      overwritten: r.records_overwritten,
+      skipped: r.records_skipped_no_change + r.records_skipped_duplicate,
+    }));
+    const overwrittenStr = result.total_records_overwritten > 0
+      ? `, ${result.total_records_overwritten} overwritten`
+      : '';
     useAirtableStore.getState().addSyncLogEntry({
       ts: Date.now(),
       type: wasHydration ? 'hydration_complete' : 'sync_complete',
       source: 'local',
       syncer: this.agent,
       device: this.deviceId,
-      detail: `${result.total_records_ingested} ingested, ${result.total_records_skipped} unchanged`,
+      detail: `${result.total_records_ingested} ingested${overwrittenStr}, ${result.total_records_skipped} unchanged`,
+      strategy,
+      preserveExisting: snap?.preserveExisting,
+      perTable,
+      durationMs: result.duration_ms,
+      endpoint: snap?.endpoint,
+      cursorUsed: snap?.cursorUsed,
+      baseId: snap?.baseId,
+      baseName: snap?.baseName,
     });
 
     // Update head state event (deduplicated, not spam)

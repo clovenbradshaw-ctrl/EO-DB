@@ -3,3 +3,8 @@ dist/
 /data/
 /docs/
 *.tsbuildinfo
+.env
+.env.local
+.env.*.local
+*.pem
+*.key

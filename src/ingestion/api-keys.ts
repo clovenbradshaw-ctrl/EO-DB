@@ -6,13 +6,14 @@
  * instance (same EO-DB server) share the stored keys, so any device can
  * leverage them for sync without each user needing their own key.
  *
- * Keys are encrypted at rest using a simple XOR with a server-held secret.
- * This isn't military-grade — it prevents casual reads of the LevelDB files.
- * Real encryption will land when Matrix E2EE integration is enabled.
+ * Keys are encrypted at rest using AES-256-GCM with a key derived from the
+ * server-held EO_INGESTION_SECRET. Startup fails if the secret is unset or
+ * shorter than 32 characters.
  */
 
 import type { EoDb } from '../db/level.js';
 import { encode, decode } from '../db/level.js';
+import { encryptWithPassword, decryptWithPassword } from '../crypto/encrypted-local-store.js';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -35,26 +36,34 @@ export interface StoredApiKey {
 
 const KEY_PREFIX = 'ingestion:airtable:key:';
 
-// ─── Obfuscation ────────────────────────────────────────────────────────────
+// ─── Encryption ─────────────────────────────────────────────────────────────
 
-const OBFUSCATION_SECRET = process.env.EO_INGESTION_SECRET || 'eo-db-default-ingestion-key';
+const ENCRYPTED_PREFIX = 'v2:';
+const MIN_SECRET_LEN = 32;
+
+function requireSecret(): string {
+  const secret = process.env.EO_INGESTION_SECRET;
+  if (!secret || secret.length < MIN_SECRET_LEN) {
+    throw new Error(
+      `EO_INGESTION_SECRET must be set to at least ${MIN_SECRET_LEN} characters before storing or reading ingestion API keys.`,
+    );
+  }
+  return secret;
+}
 
 function obfuscate(plain: string): string {
-  const secret = OBFUSCATION_SECRET;
-  const buf = Buffer.from(plain, 'utf8');
-  for (let i = 0; i < buf.length; i++) {
-    buf[i] = buf[i]! ^ secret.charCodeAt(i % secret.length);
-  }
-  return buf.toString('base64');
+  const secret = requireSecret();
+  const ciphertext = encryptWithPassword(Buffer.from(plain, 'utf8'), secret);
+  return ENCRYPTED_PREFIX + ciphertext.toString('base64');
 }
 
 function deobfuscate(encoded: string): string {
-  const secret = OBFUSCATION_SECRET;
-  const buf = Buffer.from(encoded, 'base64');
-  for (let i = 0; i < buf.length; i++) {
-    buf[i] = buf[i]! ^ secret.charCodeAt(i % secret.length);
+  if (!encoded.startsWith(ENCRYPTED_PREFIX)) {
+    throw new Error('Stored API key uses legacy XOR obfuscation and must be re-added.');
   }
-  return buf.toString('utf8');
+  const secret = requireSecret();
+  const blob = Buffer.from(encoded.slice(ENCRYPTED_PREFIX.length), 'base64');
+  return decryptWithPassword(blob, secret).toString('utf8');
 }
 
 // ─── CRUD ───────────────────────────────────────────────────────────────────

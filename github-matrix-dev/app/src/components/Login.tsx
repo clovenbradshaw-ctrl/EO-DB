@@ -1,8 +1,6 @@
 import { useState, useEffect, type FormEvent } from 'react';
 import { login, normalizeHomeserver, toMatrixUserId, type MatrixSession } from '../matrix/client';
 import { saveOfflineCredentials, verifyOfflineCredentials, listOfflineAccounts } from '../lib/offline-auth';
-import { startOAuthFlow } from '../google-drive/gdrive-oauth';
-import { useGDriveStore } from '../google-drive/gdrive-store';
 import { useTheme, type Theme } from '../theme';
 
 interface LoginProps {
@@ -18,10 +16,6 @@ export function Login({ onLogin, onLocalMode }: LoginProps) {
   const [loading, setLoading] = useState(false);
   const [isOffline, setIsOffline] = useState(!navigator.onLine);
   const [hasOfflineAccounts, setHasOfflineAccounts] = useState(false);
-  // Two-step flow: 'credentials' -> matrix login, 'gdrive' -> ask about Google Drive
-  const [step, setStep] = useState<'credentials' | 'gdrive'>('credentials');
-  const [pendingSession, setPendingSession] = useState<MatrixSession | null>(null);
-  const [gdriveLoading, setGdriveLoading] = useState(false);
   const { theme } = useTheme();
   const s = makeStyles(theme);
 
@@ -42,13 +36,18 @@ export function Login({ onLogin, onLocalMode }: LoginProps) {
     });
   }, []);
 
+  const parsed = parseUserInput(username);
+  const usernameHasServer = parsed.server !== null;
+  const effectiveHomeserver = usernameHasServer ? parsed.server! : homeserver;
+  const loginUsername = usernameHasServer ? `@${parsed.user}:${parsed.server}` : username;
+
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     setError('');
     setLoading(true);
 
-    const baseUrl = normalizeHomeserver(homeserver);
-    const userId = toMatrixUserId(username, homeserver);
+    const baseUrl = normalizeHomeserver(effectiveHomeserver);
+    const userId = toMatrixUserId(loginUsername, effectiveHomeserver);
 
     try {
       let session: MatrixSession | null = null;
@@ -62,7 +61,7 @@ export function Login({ onLogin, onLocalMode }: LoginProps) {
         }
       } else {
         try {
-          session = await login(homeserver, username, password);
+          session = await login(effectiveHomeserver, loginUsername, password);
           await saveOfflineCredentials(session, password);
         } catch (err: any) {
           if (isNetworkError(err)) {
@@ -81,75 +80,12 @@ export function Login({ onLogin, onLocalMode }: LoginProps) {
         }
       }
 
-      // In n8n mode no Google account is needed — skip the OAuth step.
-      // In oauth mode, always show the GDrive step so the user explicitly connects.
-      const syncMode = useGDriveStore.getState().syncMode;
-      if (syncMode === 'n8n') {
-        onLogin(session);
-        return;
-      }
-      setPendingSession(session);
-      setStep('gdrive');
+      onLogin(session);
     } catch (err: any) {
       setError(err.message || 'Login failed');
     } finally {
       setLoading(false);
     }
-  }
-
-  async function handleConnectGDrive() {
-    if (!pendingSession) return;
-    setGdriveLoading(true);
-    setError('');
-    try {
-      await startOAuthFlow();
-      onLogin(pendingSession);
-    } catch (err: any) {
-      setError(err.message || 'Google Drive sign-in failed');
-      setGdriveLoading(false);
-    }
-  }
-
-  function handleSkipGDrive() {
-    if (pendingSession) onLogin(pendingSession);
-  }
-
-  if (step === 'gdrive') {
-    return (
-      <div style={s.container}>
-        <div style={s.card}>
-          <h1 style={s.title}>EO///DB</h1>
-          <p style={s.subtitle}>Sync with Google Drive?</p>
-          <p style={{ ...s.hint, marginBottom: 24 }}>
-            Connect your Google account to sync encrypted backups across devices.
-            You can switch to the n8n proxy mode (no Google account needed) in Settings → Drive Sync Mode.
-          </p>
-          {error && <div style={s.error} role="alert">{error}</div>}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            <button
-              type="button"
-              onClick={handleConnectGDrive}
-              disabled={gdriveLoading}
-              style={{
-                ...s.button,
-                ...(gdriveLoading ? { opacity: 0.5, cursor: 'not-allowed' } : {}),
-              }}
-            >
-              {gdriveLoading ? 'Connecting...' : 'Connect Google Drive'}
-            </button>
-            <button
-              type="button"
-              onClick={handleSkipGDrive}
-              disabled={gdriveLoading}
-              style={s.localButton}
-            >
-              Continue without Drive
-            </button>
-          </div>
-          <p style={s.server}>Data stays local until Google Drive is connected</p>
-        </div>
-      </div>
-    );
   }
 
   return (
@@ -161,15 +97,6 @@ export function Login({ onLogin, onLocalMode }: LoginProps) {
           <div style={s.offlineBadge}>Offline Mode</div>
         )}
         <form onSubmit={handleSubmit} style={s.form}>
-          <input
-            type="text"
-            placeholder="Homeserver (e.g. matrix.org)"
-            aria-label="Homeserver"
-            value={homeserver}
-            onChange={(e) => setHomeserver(e.target.value)}
-            disabled={loading}
-            style={{ ...s.input, fontSize: 13, color: theme.loginTextDim }}
-          />
           <input
             type="text"
             placeholder="Matrix username"
@@ -190,13 +117,24 @@ export function Login({ onLogin, onLocalMode }: LoginProps) {
             style={s.input}
             autoComplete="current-password"
           />
+          {!usernameHasServer && (
+            <input
+              type="text"
+              placeholder="Homeserver (e.g. matrix.org)"
+              aria-label="Homeserver"
+              value={homeserver}
+              onChange={(e) => setHomeserver(e.target.value)}
+              disabled={loading}
+              style={{ ...s.input, fontSize: 13, color: theme.loginTextDim }}
+            />
+          )}
           {error && <div style={s.error} role="alert">{error}</div>}
           <button
             type="submit"
-            disabled={loading || !homeserver || !username || !password}
+            disabled={loading || !effectiveHomeserver || !username || !password}
             style={{
               ...s.button,
-              ...((loading || !homeserver || !username || !password) ? { opacity: 0.5, cursor: 'not-allowed' } : {}),
+              ...((loading || !effectiveHomeserver || !username || !password) ? { opacity: 0.5, cursor: 'not-allowed' } : {}),
             }}
           >
             {loading ? 'Signing in...' : isOffline ? 'Sign in offline' : 'Sign in'}
@@ -217,6 +155,16 @@ export function Login({ onLogin, onLocalMode }: LoginProps) {
       </div>
     </div>
   );
+}
+
+function parseUserInput(username: string): { user: string; server: string | null } {
+  const trimmed = username.trim();
+  const bare = trimmed.startsWith('@') ? trimmed.slice(1) : trimmed;
+  const colonIdx = bare.indexOf(':');
+  if (colonIdx === -1) return { user: bare, server: null };
+  const user = bare.slice(0, colonIdx);
+  const server = bare.slice(colonIdx + 1);
+  return { user, server: server || null };
 }
 
 function isNetworkError(err: any): boolean {

@@ -16,6 +16,7 @@ import { RelationshipFieldPanel } from './RelationshipFieldPanel';
 interface FieldTypeSchema {
   type?: string;
   linkedTable?: string;
+  linkedTables?: string[];
   edgeAttrDefs?: EdgeAttrDef[];
 }
 
@@ -146,6 +147,7 @@ export function FigureFields({ figure, onNavigate, profileFields, recordTs, allE
         typeMap.set(key, {
           type: typeDef.type,
           linkedTable: typeDef.linkedTable,
+          linkedTables: Array.isArray(typeDef.linkedTables) ? typeDef.linkedTables as string[] : undefined,
           edgeAttrDefs: typeDef.type === 'relationship' ? extractEdgeAttrDefs(fs) : [],
         });
       }
@@ -317,13 +319,22 @@ export function FigureFields({ figure, onNavigate, profileFields, recordTs, allE
         const valIsIdArray = isEntityIdArray(parsedVal);
         const isLinkField = fts?.type === 'link' || fts?.type === 'linkedRecord' || valIsIdArray;
 
-        // Infer linked table from resolver when no explicit schema definition exists
-        const effectiveLinkedTable = fts?.linkedTable ?? (() => {
-          if (!valIsIdArray || !Array.isArray(parsedVal) || parsedVal.length === 0) return undefined;
-          const resolved = resolver.resolve(parsedVal[0]);
-          if (!resolved) return undefined;
-          return resolved.target.split('.').slice(0, -1).join('.');
+        // Infer linked table(s) from resolver when no explicit schema definition exists.
+        // A link field may now reference multiple source tables.
+        const effectiveLinkedTables: string[] = (() => {
+          const out = new Set<string>();
+          if (Array.isArray(fts?.linkedTables)) for (const t of fts.linkedTables) if (t) out.add(t);
+          if (fts?.linkedTable) out.add(fts.linkedTable);
+          if (out.size === 0 && valIsIdArray && Array.isArray(parsedVal)) {
+            for (const id of parsedVal) {
+              if (typeof id !== 'string') continue;
+              const resolved = resolver.resolve(id);
+              if (resolved) out.add(resolved.target.split('.').slice(0, -1).join('.'));
+            }
+          }
+          return [...out];
         })();
+        const effectiveLinkedTable = effectiveLinkedTables[0];
 
         // Time-travel: was this field's value different from current?
         const isHistoric = !!recordTs;
@@ -508,26 +519,23 @@ export function FigureFields({ figure, onNavigate, profileFields, recordTs, allE
                       )}
                     </div>
                   )}
-                  {openLinkPicker === key && effectiveLinkedTable && (
-                    <>
-                      <div style={{ position: 'fixed' as const, inset: 0, zIndex: 199 }} onClick={() => setOpenLinkPicker(null)} />
-                      <LinkFieldPicker
-                        fieldKey={key}
-                        linkedTable={effectiveLinkedTable}
-                        currentIds={Array.isArray(parsedVal) ? parsedVal as string[] : []}
-                        onClose={() => setOpenLinkPicker(null)}
-                        onChange={async (updatedIds) => {
-                          await dispatch({
-                            op: 'DEF',
-                            target: figure.target,
-                            operand: { [key]: updatedIds },
-                            agent: 'user',
-                            ts: new Date().toISOString(),
-                            acquired_ts: new Date().toISOString(),
-                          });
-                        }}
-                      />
-                    </>
+                  {openLinkPicker === key && effectiveLinkedTables.length > 0 && (
+                    <LinkFieldPicker
+                      fieldKey={key}
+                      linkedTables={effectiveLinkedTables}
+                      currentIds={Array.isArray(parsedVal) ? parsedVal as string[] : []}
+                      onClose={() => setOpenLinkPicker(null)}
+                      onChange={async (updatedIds) => {
+                        await dispatch({
+                          op: 'DEF',
+                          target: figure.target,
+                          operand: { [key]: updatedIds },
+                          agent: 'user',
+                          ts: new Date().toISOString(),
+                          acquired_ts: new Date().toISOString(),
+                        });
+                      }}
+                    />
                   )}
                 </div>
               ) : (

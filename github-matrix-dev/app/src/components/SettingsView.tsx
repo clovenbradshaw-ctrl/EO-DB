@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import type { MatrixClient } from 'matrix-js-sdk';
 import { useEoStore } from '../store/eo-store';
 import { useTheme, type Theme } from '../theme';
@@ -6,14 +6,48 @@ import type { MatrixSession } from '../matrix/client';
 import { RoomDataViewer } from './RoomDataViewer';
 import { MatrixRoomsViewer } from './MatrixRoomsViewer';
 import { UserRoomsBySpaces } from './UserRoomsBySpaces';
-import { GDriveStorageWidget } from './GDriveStorageWidget';
+import { BlobStoreViewer } from './BlobStoreViewer';
 import { OP_COLORS, TRIAD_LABELS } from './LogView';
 import { ArchivedSpacesSection } from './ArchivedSpaces';
 import { AirtableSettingsSection } from './AirtableSettings';
 import { GCalendarSettingsSection } from './GCalendarSettings';
-import { useGDriveStore } from '../google-drive/gdrive-store';
-import { clearTokens, startOAuthFlow, getAccessToken } from '../google-drive/gdrive-oauth';
+import { isAminoHomeserver } from '../lib/matrix-domain';
 import { usePresencePrefs } from '../lib/presence-prefs';
+import { useNLPrefs } from '../lib/nl-prefs';
+import {
+  getClassifierStatus,
+  initClassifier,
+  subscribeClassifierStatus,
+  type ClassifierStatus,
+} from '../nl/eo-classifier';
+import {
+  downloadBundle,
+  downloadClassifiedClauses,
+  downloadUserCorrections,
+} from '../nl/nl-export';
+import { EO_STORE_WEBHOOK, pingDriveProxy } from '../storage/eodb-blob-endpoint';
+import type { BlobWriterStatus } from '../storage/eodb-blob-writer';
+import { buildSettingChangeEvent } from '../lib/settings-events';
+import { SettingsActivity } from './SettingsActivity';
+
+function classifyNetworkError(err: unknown): string {
+  if (err && typeof err === 'object') {
+    const e = err as { name?: string; message?: string };
+    if (e.name === 'TimeoutError') return 'Timed out';
+    if (e.name === 'AbortError') return 'Aborted';
+    if (e.name === 'TypeError') return `Network/CORS error: ${e.message ?? 'Failed to fetch'}`;
+    if (typeof e.message === 'string' && e.message.length > 0) return e.message;
+  }
+  return String(err);
+}
+
+function formatRelativeTime(epochMs: number | null | undefined): string {
+  if (!epochMs) return 'never';
+  const deltaSec = Math.max(0, Math.round((Date.now() - epochMs) / 1000));
+  if (deltaSec < 60) return `${deltaSec}s ago`;
+  if (deltaSec < 3600) return `${Math.round(deltaSec / 60)}m ago`;
+  return `${Math.round(deltaSec / 3600)}h ago`;
+}
 
 interface SettingsViewProps {
   session: MatrixSession;
@@ -36,20 +70,37 @@ interface SettingsViewProps {
 
 export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnarchive, connectionState, connectionError, matrixReady, onRetry, onLogout }: SettingsViewProps) {
   const { theme } = useTheme();
+  // Calendar / Airtable are tied to shared n8n proxy credentials on the
+  // hosted Amino deployment. Only surface those sections for users logged
+  // into app.aminoimmigration.com.
+  const isAmino = isAminoHomeserver(session.homeserver);
   const lastSeq = useEoStore((s) => s.lastSeq);
   const recentEvents = useEoStore((s) => s.recentEvents);
   const store = useEoStore((s) => s.store);
   const syncManager = useEoStore((s) => s.syncManager);
-  const gdriveSync = useEoStore((s) => s.gdriveSync);
-  const gdriveConnected = useGDriveStore((s) => s.connected);
-  const gdriveCurrentSpaceId = useGDriveStore((s) => s.currentSpaceId);
-  const gdriveSpaceFileGuids = useGDriveStore((s) => s.spaceFileGuids);
-  const currentFileGuids = gdriveCurrentSpaceId ? (gdriveSpaceFileGuids[gdriveCurrentSpaceId] ?? null) : null;
   const manualSnapshot = useEoStore((s) => s.manualSnapshot);
-  const manualMatrixMediaSnapshot = useEoStore((s) => s.manualMatrixMediaSnapshot);
+  const dispatch = useEoStore((s) => s.dispatch);
+
+  const recordSettingChange = useCallback(
+    (setting: string, label: string, oldValue: unknown, newValue: unknown) => {
+      if (oldValue === newValue) return;
+      const event = buildSettingChangeEvent({
+        setting,
+        label,
+        oldValue,
+        newValue,
+        agent: session.userId,
+      });
+      dispatch(event).catch((err) => {
+        console.warn('[SettingsView] failed to record setting change', err);
+      });
+    },
+    [dispatch, session.userId],
+  );
   const [showRoomData, setShowRoomData] = useState(false);
   const [showAllRooms, setShowAllRooms] = useState(false);
   const [showRoomsBySpaces, setShowRoomsBySpaces] = useState(false);
+  const [showBlobStore, setShowBlobStore] = useState(false);
   const [presencePrefs, setPresencePrefs] = usePresencePrefs();
   const s = styles(theme);
 
@@ -59,76 +110,64 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
   const [deleteError, setDeleteError] = useState('');
   const [showEraseConfirm, setShowEraseConfirm] = useState(false);
 
-  const gdriveToken = useGDriveStore((s) => s.googleAccessToken);
-  const gdriveOffline = useGDriveStore((s) => s.gdriveOffline);
-  const gdriveSyncMode = useGDriveStore((s) => s.syncMode);
-  const setGdriveSyncMode = useGDriveStore((s) => s.setSyncMode);
-  const [gdriveTestStatus, setGdriveTestStatus] = useState<string | null>(null);
-  const [gdriveTestLoading, setGdriveTestLoading] = useState(false);
-  const [oauthLoading, setOauthLoading] = useState(false);
+  const [blobTestStatus, setBlobTestStatus] = useState<string | null>(null);
+  const [blobTestLoading, setBlobTestLoading] = useState(false);
 
-  const matrixAccessToken = useGDriveStore((s) => s.matrixAccessToken);
-
-  const handleTestGDrive = useCallback(async () => {
-    setGdriveTestLoading(true);
-    setGdriveTestStatus(null);
+  const handleTestBlob = useCallback(async () => {
+    setBlobTestLoading(true);
+    setBlobTestStatus(null);
     try {
-      if (gdriveSyncMode === 'oauth') {
-        const token = gdriveToken;
-        if (!token) { setGdriveTestStatus('✗ Not connected (no OAuth token)'); return; }
-        const res = await fetch('https://www.googleapis.com/drive/v3/about?fields=user', {
-          headers: { Authorization: `Bearer ${token}` },
+      const token = session.accessToken;
+      if (!token) { setBlobTestStatus('✗ No Matrix token'); return; }
+      if (!roomId) { setBlobTestStatus('✗ No room connected'); return; }
+
+      // Preflight probe: surface CORS / proxy problems before the POST would
+      // hang at preflight. OPTIONS should succeed regardless of n8n workflow
+      // state because n8n core handles it when allowedOrigins is set.
+      try {
+        const pre = await fetch(EO_STORE_WEBHOOK, {
+          method: 'OPTIONS',
+          headers: {
+            'Access-Control-Request-Method': 'POST',
+            'Access-Control-Request-Headers': 'content-type',
+          },
+          signal: AbortSignal.timeout(8_000),
         });
-        if (res.ok) {
-          const data = await res.json();
-          const email = data?.user?.emailAddress ?? 'unknown';
-          setGdriveTestStatus(`✓ Connected as ${email}`);
-        } else {
-          const text = await res.text().catch(() => String(res.status));
-          setGdriveTestStatus(`✗ Failed: ${text.slice(0, 120)}`);
+        if (!pre.ok && pre.status !== 204) {
+          setBlobTestStatus(`✗ Preflight failed — OPTIONS returned ${pre.status}. Check reverse proxy / CORS on n8n.`);
+          return;
         }
-      } else {
-        // n8n mode — ping the proxy endpoint with the Matrix token
-        const token = matrixAccessToken ?? session.accessToken;
-        if (!token) { setGdriveTestStatus('✗ Not connected (no Matrix token)'); return; }
-        const res = await fetch('https://n8n.intelechia.com/webhook/eo-store', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            matrix_token: token,
-            drive_url: 'https://www.googleapis.com/drive/v3/about?fields=user',
-            drive_method: 'GET',
-          }),
-        });
-        if (res.ok) {
-          const data = await res.json().catch(() => ({}));
-          const email = data?.user?.emailAddress ?? 'proxy';
-          setGdriveTestStatus(`✓ n8n proxy connected (${email})`);
-        } else {
-          setGdriveTestStatus(`✗ n8n proxy error: ${res.status}`);
-        }
+      } catch (preErr: unknown) {
+        const reason = classifyNetworkError(preErr);
+        setBlobTestStatus(`✗ Preflight unreachable — ${reason}. DNS, TLS, or blocklist?`);
+        return;
       }
-    } catch (e: any) {
-      setGdriveTestStatus(`✗ Failed: ${e.message}`);
+
+      const ping = await pingDriveProxy(token, roomId);
+      if (ping.ok) {
+        setBlobTestStatus('✓ Reachable — Drive proxy authenticated');
+      } else if (ping.status === 401) {
+        setBlobTestStatus('✗ Unauthorized — Matrix token invalid');
+      } else if (ping.status === 403) {
+        setBlobTestStatus('✗ Forbidden — not a member of this space');
+      } else if (ping.status === 0) {
+        setBlobTestStatus(`✗ ${ping.detail ?? 'Network error'}`);
+      } else {
+        setBlobTestStatus(`✗ HTTP ${ping.status}: ${ping.detail ?? ''}`);
+      }
+    } catch (e: unknown) {
+      setBlobTestStatus(`✗ ${classifyNetworkError(e)}`);
     } finally {
-      setGdriveTestLoading(false);
+      setBlobTestLoading(false);
     }
-  }, [gdriveToken, matrixAccessToken, gdriveSyncMode, session.accessToken]);
+  }, [session.accessToken, roomId]);
 
-
-
-  const handleSignInWithGoogle = useCallback(async () => {
-    setOauthLoading(true);
-    try {
-      await startOAuthFlow();
-      const token = await getAccessToken();
-      useGDriveStore.setState({ googleAccessToken: token, connected: true });
-    } catch {
-      // flow was cancelled or failed — leave user to retry
-    } finally {
-      setOauthLoading(false);
-    }
-  }, []);
+  const eodbBlobWriter = useEoStore((s) => s.eodbBlobWriter);
+  const [blobWriterStatus, setBlobWriterStatus] = useState<BlobWriterStatus | null>(null);
+  useEffect(() => {
+    if (!eodbBlobWriter) { setBlobWriterStatus(null); return; }
+    return eodbBlobWriter.subscribe(setBlobWriterStatus);
+  }, [eodbBlobWriter]);
 
   useEffect(() => {
     setEventCount(recentEvents.length);
@@ -139,16 +178,6 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
     try {
       const result = await manualSnapshot();
       setSnapshotStatus(`Snapshot saved — seq ${result.seq}`);
-    } catch (e: any) {
-      setSnapshotStatus(`Error: ${e.message}`);
-    }
-  }
-
-  async function handleMatrixMediaSnapshot() {
-    setSnapshotStatus('Uploading to Matrix media...');
-    try {
-      const result = await manualMatrixMediaSnapshot();
-      setSnapshotStatus(`Matrix media saved — seq ${result.seq} (${result.mxc})`);
     } catch (e: any) {
       setSnapshotStatus(`Error: ${e.message}`);
     }
@@ -194,6 +223,17 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
 
   if (showRoomData) {
     return <RoomDataViewer onBack={() => setShowRoomData(false)} matrixClient={matrixClient} roomId={roomId} />;
+  }
+
+  if (showBlobStore) {
+    return (
+      <BlobStoreViewer
+        onBack={() => setShowBlobStore(false)}
+        endpoint={EO_STORE_WEBHOOK}
+        roomId={roomId ?? null}
+        matrixToken={session.accessToken ?? null}
+      />
+    );
   }
 
   return (
@@ -288,13 +328,15 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
                 : 'Not started'
               }
             />
-            {/* Google Drive */}
-            <StatusRow
-              theme={theme}
-              label="Google Drive"
-              status={gdriveSync ? 'ok' : gdriveConnected ? 'pending' : 'off'}
-              detail={gdriveSync ? 'Backup sync active' : gdriveConnected ? 'Initializing...' : 'Not connected'}
-            />
+            {/* Encrypted Drive Store — amino-hosted n8n webhook */}
+            {isAmino && (
+              <StatusRow
+                theme={theme}
+                label="Drive"
+                status={roomId && session.accessToken ? 'ok' : 'off'}
+                detail={!roomId ? 'Waiting for room' : EO_STORE_WEBHOOK}
+              />
+            )}
 
             {/* Error banner with action */}
             {connectionError && (
@@ -355,16 +397,27 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
               label="Show other users"
               detail="Display who else is online and which tables they're viewing. When off, peer avatars and activity dots are hidden."
               checked={presencePrefs.showPeers}
-              onChange={(v) => setPresencePrefs({ showPeers: v })}
+              onChange={(v) => {
+                recordSettingChange('presence.showPeers', 'Show other users', presencePrefs.showPeers, v);
+                setPresencePrefs({ showPeers: v });
+              }}
             />
             <ToggleRow
               theme={theme}
               label="Share my activity"
               detail="Broadcast which view and table you're looking at. When off, you stay online to peers but move discretely — nobody sees where you are."
               checked={presencePrefs.shareLocation}
-              onChange={(v) => setPresencePrefs({ shareLocation: v })}
+              onChange={(v) => {
+                recordSettingChange('presence.shareLocation', 'Share my activity', presencePrefs.shareLocation, v);
+                setPresencePrefs({ shareLocation: v });
+              }}
             />
           </div>
+        </Section>
+
+        {/* Settings Activity — audit timeline of toggles in this panel */}
+        <Section title="Settings Activity" theme={theme}>
+          <SettingsActivity events={recentEvents} theme={theme} />
         </Section>
 
         {/* Snapshots & Tools */}
@@ -372,16 +425,6 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' as const }}>
             <button style={s.actionBtn} onClick={handleSnapshot}>
               Take Snapshot
-            </button>
-            <button
-              style={s.actionBtn}
-              onClick={handleMatrixMediaSnapshot}
-              disabled={!syncManager}
-              title={syncManager
-                ? 'Upload the current data to Matrix media and save the mxc URI in room state for hydration'
-                : 'Connect to a Matrix space to enable'}
-            >
-              Save to Matrix Media
             </button>
             <button
               style={{ ...s.actionBtn, background: 'transparent', color: theme.accent, border: `1px solid ${theme.accent}` }}
@@ -418,137 +461,108 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
           </Section>
         )}
 
-        {/* Google Drive Cloud Storage */}
-        <Section title="Google Drive Storage" theme={theme}>
-          <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 10 }}>
-            {/* Drive Sync Mode selector */}
-            <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 6 }}>
-              <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, fontWeight: 700, textTransform: 'uppercase' as const, letterSpacing: '0.06em', color: theme.textMuted }}>
-                Drive Sync Mode
-              </span>
-              <div style={{ display: 'flex', gap: 6 }}>
-                {(['n8n', 'oauth'] as const).map((mode) => (
-                  <button
-                    key={mode}
-                    style={{
-                      ...s.actionBtn,
-                      background: gdriveSyncMode === mode ? theme.accent : 'transparent',
-                      color: gdriveSyncMode === mode ? '#fff' : theme.textMuted,
-                      borderColor: gdriveSyncMode === mode ? theme.accent : theme.border,
-                    }}
-                    onClick={() => {
-                      if (mode === 'oauth') clearTokens();
-                      setGdriveSyncMode(mode);
-                    }}
-                  >
-                    {mode === 'n8n' ? 'n8n Proxy' : 'Google OAuth'}
-                  </button>
-                ))}
-              </div>
+        {/* Encrypted Drive Store — amino deployment only */}
+        {isAmino && (
+          <Section title="Encrypted Drive Store" theme={theme}>
+            <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 10 }}>
+              <Field label="Endpoint" value={EO_STORE_WEBHOOK} theme={theme} />
               <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, color: theme.textMuted }}>
-                {gdriveSyncMode === 'n8n'
-                  ? 'Drive requests are proxied through n8n using its own Google credentials — no Google account needed.'
-                  : 'Each user authenticates with their own Google account via OAuth2 (PKCE). Requires VITE_GOOGLE_CLIENT_ID.'}
+                Encrypted data is stored as Google Drive files via the
+                <code>/webhook/eo-store</code> proxy. Each room maps to a single file
+                <code>{'{dataId}'}.json</code> whose body is the AES-GCM envelope; writes
+                find-or-create the file and PATCH the media. Auto-save runs whenever the
+                local log advances (10s debounce + 5min heartbeat); devices raise hands via
+                the Matrix snapshot-claim state event so only one writes at a time. Click
+                Test Connection to round-trip the proxy with a no-op Drive list query and
+                verify Matrix auth + Drive credentials are live.
               </span>
-            </div>
-            {gdriveSyncMode === 'oauth' && !gdriveToken && (
-              <button
-                onClick={handleSignInWithGoogle}
-                disabled={oauthLoading}
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: 10,
-                  padding: '8px 14px',
-                  background: '#fff',
-                  color: '#3c4043',
-                  border: '1px solid #dadce0',
-                  borderRadius: 4,
-                  fontFamily: "'JetBrains Mono', monospace",
-                  fontSize: 11,
-                  fontWeight: 500,
-                  cursor: oauthLoading ? 'not-allowed' : 'pointer',
-                  opacity: oauthLoading ? 0.6 : 1,
-                  boxShadow: '0 1px 2px rgba(0,0,0,0.08)',
-                  letterSpacing: '0.01em',
-                  alignSelf: 'flex-start',
-                }}
-              >
-                <svg width="16" height="16" viewBox="0 0 48 48" aria-hidden="true">
-                  <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
-                  <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
-                  <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
-                  <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
-                </svg>
-                {oauthLoading ? 'Signing in…' : 'Sign in with Google'}
-              </button>
-            )}
-            {gdriveOffline && (
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' as const }}>
+                <button
+                  style={s.actionBtn}
+                  onClick={handleTestBlob}
+                  disabled={blobTestLoading || !roomId || !session.accessToken}
+                  title={!roomId ? 'Connect to a space first' : 'Probe the proxy with OPTIONS + a Drive list query'}
+                >
+                  {blobTestLoading ? 'Testing…' : 'Test Connection'}
+                </button>
+                <button
+                  style={{ ...s.actionBtn, background: 'transparent', color: theme.accent, border: `1px solid ${theme.accent}` }}
+                  onClick={() => setShowBlobStore(true)}
+                  disabled={!roomId || !session.accessToken}
+                  title={!roomId ? 'Connect to a space first' : 'Fetch files by data_id from the Drive proxy'}
+                >
+                  Open Drive Store
+                </button>
+                <button
+                  style={{ ...s.actionBtn, background: 'transparent', color: theme.accent, border: `1px solid ${theme.accent}` }}
+                  onClick={() => { eodbBlobWriter?.flushNow().catch(() => {}); }}
+                  disabled={!eodbBlobWriter}
+                  title={!eodbBlobWriter ? 'Auto-save not initialized yet' : 'Force an immediate save attempt'}
+                >
+                  Flush Now
+                </button>
+                {blobTestStatus && (
+                  <span style={{
+                    fontFamily: "'JetBrains Mono', monospace",
+                    fontSize: 10,
+                    color: blobTestStatus.startsWith('✓') ? theme.success : theme.danger,
+                  }}>
+                    {blobTestStatus}
+                  </span>
+                )}
+              </div>
               <div style={{
-                padding: '6px 10px',
-                background: `${theme.warning || '#f59e0b'}15`,
-                border: `1px solid ${theme.warning || '#f59e0b'}40`,
-                borderRadius: 4,
                 fontFamily: "'JetBrains Mono', monospace",
                 fontSize: 10,
-                color: theme.warning || '#f59e0b',
+                color: theme.textMuted,
+                display: 'flex',
+                flexDirection: 'column' as const,
+                gap: 2,
               }}>
-                GDrive offline — working locally
-              </div>
-            )}
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-              <button
-                style={{ ...s.actionBtn }}
-                onClick={handleTestGDrive}
-                disabled={gdriveTestLoading}
-              >
-                {gdriveTestLoading ? 'Testing…' : 'Test Connection'}
-              </button>
-              {gdriveTestStatus && (
-                <span style={{
-                  fontFamily: "'JetBrains Mono', monospace",
-                  fontSize: 10,
-                  color: gdriveTestStatus.startsWith('✓') ? theme.success : theme.danger,
-                }}>
-                  {gdriveTestStatus}
+                <span>
+                  Auto-save:{' '}
+                  {blobWriterStatus
+                    ? (blobWriterStatus.enabled
+                        ? (blobWriterStatus.inFlight
+                            ? 'writing…'
+                            : (blobWriterStatus.backoffUntil && blobWriterStatus.backoffUntil > Date.now()
+                                ? `backing off ${Math.ceil((blobWriterStatus.backoffUntil - Date.now())/1000)}s`
+                                : 'idle'))
+                        : 'stopped')
+                    : 'not started (connect to a space)'}
+                  {blobWriterStatus && (
+                    <> · pending {blobWriterStatus.pendingCount} · last save {formatRelativeTime(blobWriterStatus.lastSaveAt)}
+                    {blobWriterStatus.lastSavedSeq !== null && <> (seq {blobWriterStatus.lastSavedSeq})</>}</>
+                  )}
                 </span>
-              )}
-            </div>
-            {currentFileGuids && (
-              <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 2 }}>
-                <div style={{
-                  fontFamily: "'JetBrains Mono', monospace",
-                  fontSize: 9,
-                  fontWeight: 700,
-                  textTransform: 'uppercase' as const,
-                  letterSpacing: '0.06em',
-                  color: theme.textMuted,
-                  marginBottom: 4,
-                }}>
-                  Drive File IDs
-                </div>
-                <Field label="Log" value={`${currentFileGuids.log}.eodb`} theme={theme} />
-                <Field label="Recent" value={`${currentFileGuids.recent}.eodb`} theme={theme} />
-                <Field label="Manifest" value={`${currentFileGuids.manifest}.json`} theme={theme} />
+                {blobWriterStatus?.lastError && (
+                  <span style={{ color: theme.danger }}>✗ {blobWriterStatus.lastError}</span>
+                )}
+                {blobWriterStatus?.lastDiagnostic && !blobWriterStatus.lastError && (
+                  <span style={{ color: theme.textMuted }}>{blobWriterStatus.lastDiagnostic}</span>
+                )}
               </div>
-            )}
-            {(gdriveSync || gdriveConnected) && <GDriveStorageWidget />}
-          </div>
-        </Section>
+            </div>
+          </Section>
+        )}
 
-        {/* Google Calendar */}
-        <Section title="Google Calendar" theme={theme}>
-          <GCalendarSettingsSection />
-        </Section>
+        {/* Google Calendar — amino deployment only */}
+        {isAmino && (
+          <Section title="Google Calendar" theme={theme}>
+            <GCalendarSettingsSection />
+          </Section>
+        )}
 
-        {/* Airtable Importer */}
-        <Section title="Airtable Importer" theme={theme}>
-          <AirtableSettingsSection
-            session={session}
-            matrixClient={matrixClient}
-            roomId={roomId}
-          />
-        </Section>
+        {/* Airtable Importer — amino deployment only */}
+        {isAmino && (
+          <Section title="Airtable Importer" theme={theme}>
+            <AirtableSettingsSection
+              session={session}
+              matrixClient={matrixClient}
+              roomId={roomId}
+            />
+          </Section>
+        )}
 
         {/* EO Operator Reference */}
         <Section title="EO Operator Reference" theme={theme}>
@@ -588,6 +602,11 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
               </div>
             ))}
           </div>
+        </Section>
+
+        {/* Natural Language */}
+        <Section title="Natural Language" theme={theme}>
+          <NaturalLanguageSettingsSection theme={theme} onSettingChange={recordSettingChange} />
         </Section>
 
         {/* Danger Zone */}
@@ -801,4 +820,166 @@ function styles(t: Theme): Record<string, React.CSSProperties> {
       cursor: 'pointer',
     },
   };
+}
+
+// ─── Natural Language ─────────────────────────────────────────────────────
+
+function NaturalLanguageSettingsSection({ theme, onSettingChange }: {
+  theme: Theme;
+  onSettingChange: (setting: string, label: string, oldValue: unknown, newValue: unknown) => void;
+}) {
+  const [prefs, setPrefs] = useNLPrefs();
+  const [status, setStatus] = useState<ClassifierStatus>(getClassifierStatus);
+  const [exportMsg, setExportMsg] = useState<string | null>(null);
+  const s = styles(theme);
+
+  useEffect(() => subscribeClassifierStatus(setStatus), []);
+
+  const handleToggleEnable = useCallback(
+    (next: boolean) => {
+      onSettingChange('nl.enabled', 'Expose NL features', prefs.enabled, next);
+      setPrefs({ enabled: next });
+      if (next) void initClassifier();
+    },
+    [setPrefs, onSettingChange, prefs.enabled],
+  );
+
+  const centroidStatusText = useMemo(() => {
+    if (status.state === 'error' && status.message?.startsWith('centroids.json missing')) {
+      return status.message;
+    }
+    if (status.centroidCount > 0) return `${status.centroidCount}/27 cells loaded`;
+    if (status.state === 'idle') return 'not loaded';
+    return status.message ?? '—';
+  }, [status]);
+
+  const modelStatusText = useMemo(() => {
+    switch (status.state) {
+      case 'ready':
+        return `ready (${status.backend})`;
+      case 'loading':
+        return `${status.message ?? 'loading'} · ${Math.round(status.progress * 100)}%`;
+      case 'error':
+        return status.message ?? 'error';
+      default:
+        return prefs.enabled ? 'waiting' : 'disabled';
+    }
+  }, [status, prefs.enabled]);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <ToggleRow
+        theme={theme}
+        label="Expose NL features"
+        detail="Adds a Natural Language nav item + document explorer for local classification."
+        checked={prefs.enabled}
+        onChange={handleToggleEnable}
+      />
+      <ToggleRow
+        theme={theme}
+        label="Auto-classify on upload"
+        detail="Start embedding immediately once a document is dropped."
+        checked={prefs.autoClassifyOnUpload}
+        onChange={(v) => {
+          onSettingChange('nl.autoClassifyOnUpload', 'Auto-classify on upload', prefs.autoClassifyOnUpload, v);
+          setPrefs({ autoClassifyOnUpload: v });
+        }}
+      />
+      <ToggleRow
+        theme={theme}
+        label="Clause↔clause similarity edges"
+        detail="Expensive: lazy top-k similarity graph edges. Off by default."
+        checked={prefs.emitSimilarityEdges}
+        onChange={(v) => {
+          onSettingChange('nl.emitSimilarityEdges', 'Clause↔clause similarity edges', prefs.emitSimilarityEdges, v);
+          setPrefs({ emitSimilarityEdges: v });
+        }}
+      />
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+        <Field label="Model" value={modelStatusText} theme={theme} />
+        <Field label="Centroids" value={centroidStatusText} theme={theme} />
+        <Field label="Backend" value={status.backend} theme={theme} />
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        <div style={{
+          fontFamily: "'JetBrains Mono', monospace",
+          fontSize: 9,
+          fontWeight: 700,
+          letterSpacing: '0.08em',
+          textTransform: 'uppercase',
+          color: theme.textMuted,
+        }}>
+          Standalone tool
+        </div>
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+          <button
+            style={s.actionBtn}
+            onClick={() => window.open('./nl/natural_language.html', '_blank', 'noopener,noreferrer')}
+          >
+            Open Natural Language form
+          </button>
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        <div style={{
+          fontFamily: "'JetBrains Mono', monospace",
+          fontSize: 9,
+          fontWeight: 700,
+          letterSpacing: '0.08em',
+          textTransform: 'uppercase',
+          color: theme.textMuted,
+        }}>
+          Export for /nl/ folder
+        </div>
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+          <button
+            style={s.actionBtn}
+            onClick={() => {
+              const n = downloadClassifiedClauses();
+              setExportMsg(`Exported ${n} classified clauses.`);
+            }}
+          >
+            Download clauses
+          </button>
+          <button
+            style={s.actionBtn}
+            onClick={() => {
+              const n = downloadUserCorrections();
+              setExportMsg(`Exported ${n} corrections.`);
+            }}
+          >
+            Download corrections
+          </button>
+          <button
+            style={s.actionBtn}
+            onClick={() => {
+              const r = downloadBundle();
+              setExportMsg(`Bundle: ${r.clauses} clauses, ${r.corrections} corrections.`);
+            }}
+          >
+            Download bundle
+          </button>
+        </div>
+        {exportMsg && (
+          <div style={{
+            fontFamily: "'JetBrains Mono', monospace",
+            fontSize: 10,
+            color: theme.textMuted,
+          }}>
+            {exportMsg}
+          </div>
+        )}
+        <div style={{
+          fontFamily: "'JetBrains Mono', monospace",
+          fontSize: 9,
+          color: theme.textMuted,
+        }}>
+          Drop the JSON into <code>nl/training_data/</code> and re-run <code>generate_centroids.py</code>.
+        </div>
+      </div>
+    </div>
+  );
 }

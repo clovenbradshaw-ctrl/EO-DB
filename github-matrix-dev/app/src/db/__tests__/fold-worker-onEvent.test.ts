@@ -9,8 +9,8 @@
  *
  * These tests pin that contract so the wiring in eo-store.ts (which
  * depends on onEvent firing for every imported event so the Zustand
- * recentEvents buffer, the GDrive saveOp batch, and the PeerSync broadcast
- * queue all catch up) stays correct.
+ * recentEvents buffer and the PeerSync broadcast queue all catch up)
+ * stays correct.
  */
 
 import { describe, it, expect } from 'vitest';
