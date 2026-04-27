@@ -52,6 +52,7 @@ import {
 } from '../ingestion/airtable-hydration-checkpoint';
 import { resumableHydrationSync } from '../ingestion/airtable-resumable-hydration';
 import { hydrationBundleFilename } from '../ingestion/airtable-hydration-bundle';
+import { isAminoHomeserver } from '../lib/matrix-domain';
 import { useTheme, type Theme } from '../theme';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -198,6 +199,11 @@ export function AirtableSettingsSection({
   const [patInput, setPatInput] = useState('');
   const [patSaving, setPatSaving] = useState(false);
 
+  // ── Amino auto-sync gate ──
+  // Amino users get continuous sync turned on by default — the toggle is
+  // hidden and the service starts as soon as an API key is available.
+  const isAmino = isAminoHomeserver(session.homeserver);
+
   // ── Sync service ref ──
   const syncServiceRef = useRef<AirtableSyncService | null>(null);
 
@@ -305,6 +311,34 @@ export function AirtableSettingsSection({
     // to re-hydrate every time a log entry is added.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [store, matrixClient, roomId, session.userId]);
+
+  // ── Amino auto-start ──
+  // For Amino users we skip the manual toggle: as soon as the apiKey,
+  // Matrix client, and store are all in hand, spin up the sync service.
+  // The service's `running` guard prevents duplicate starts, and the
+  // unmount cleanup effect above handles stop().
+  useEffect(() => {
+    if (!isAmino) return;
+    if (!store || !matrixClient || !roomId) return;
+    if (!apiKey) return;
+    if (syncServiceRef.current) return;
+    const service = new AirtableSyncService(
+      matrixClient,
+      roomId,
+      store,
+      session.userId,
+      () => useAirtableStore.getState().apiKey,
+      buildCustomization(),
+    );
+    syncServiceRef.current = service;
+    useAirtableStore.getState().setContinuousSync(true);
+    service.start();
+    // buildCustomization closes over per-render state (manifest, table
+    // selections); we deliberately re-build only when the identity-level
+    // deps change so we don't tear down a running service every time the
+    // user toggles a checkbox in the table picker.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAmino, store, matrixClient, roomId, session.userId, apiKey]);
 
   // ── Persist sync log to IndexedDB (debounced) whenever it changes ──
   useEffect(() => {
@@ -1829,8 +1863,9 @@ export function AirtableSettingsSection({
                   </div>
                 </div>
 
-                {/* Continuous sync toggle */}
-                {matrixClient && roomId && (
+                {/* Continuous sync toggle — hidden for Amino users, who have
+                    sync auto-started without needing to flip a checkbox. */}
+                {matrixClient && roomId && !isAmino && (
                   <div style={s.continuousSyncSection}>
                     <div style={s.continuousSyncRow}>
                       <label style={s.checkLabel}>
