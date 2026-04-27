@@ -262,7 +262,7 @@ export function FigureFields({ figure, onNavigate, profileFields, recordTs, allE
         ts: new Date().toISOString(),
         acquired_ts: new Date().toISOString(),
       });
-      syncEditToAirtable({ target: figure.target, fieldKey, value: parsed, getStateByPrefix }).catch(console.warn);
+      syncEditToAirtable({ target: figure.target, fieldKey, value: parsed }).catch(console.warn);
     } catch { /* ignore */ }
   }
 

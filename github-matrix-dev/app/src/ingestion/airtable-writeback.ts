@@ -4,10 +4,14 @@
  * When a user edits a field on a record that originated from Airtable
  * (target starts with `at.`), this module sends the update back via
  * the Airtable API so the two systems stay in sync.
+ *
+ * The PAT comes from `useAirtableStore` — the same in-memory source
+ * used by discovery, manual sync, and continuous sync. Reading it via
+ * `createAirtableClient()` ensures we always pick up the freshly-entered
+ * key (and the `viaAminoProxy` flag) instead of a stale persisted copy.
  */
 
-import { AirtableClient } from './airtable-client';
-import type { EoState } from '../db/types';
+import { createAirtableClient } from './airtable-store';
 
 // ─── Target parsing ────────────────────────────────────────────────────────
 
@@ -23,28 +27,12 @@ export function parseAirtableTarget(target: string): AirtableParts | null {
   return { baseId: parts[1], tableId: parts[2], recordId: parts[3] };
 }
 
-// ─── API key discovery ─────────────────────────────────────────────────────
-
-const KEY_PREFIX = 'system.ingestion.airtable.keys.';
-
-export async function findAirtableApiKey(
-  getStateByPrefix: (prefix: string) => Promise<EoState[]>,
-): Promise<string | null> {
-  const states = await getStateByPrefix(KEY_PREFIX);
-  for (const state of states) {
-    const key = state.value?.api_key;
-    if (typeof key === 'string' && key) return key;
-  }
-  return null;
-}
-
 // ─── Writeback ─────────────────────────────────────────────────────────────
 
 export interface WritebackOpts {
   target: string;
   fieldKey: string;
   value: any;
-  getStateByPrefix: (prefix: string) => Promise<EoState[]>;
 }
 
 /**
@@ -55,13 +43,14 @@ export async function syncEditToAirtable(opts: WritebackOpts): Promise<void> {
   const parsed = parseAirtableTarget(opts.target);
   if (!parsed) return;
 
-  const apiKey = await findAirtableApiKey(opts.getStateByPrefix);
-  if (!apiKey) {
-    console.warn('[airtable-writeback] No API key found — skipping sync');
+  let client;
+  try {
+    client = createAirtableClient();
+  } catch {
+    console.warn('[airtable-writeback] Airtable store not connected — skipping sync');
     return;
   }
 
-  const client = new AirtableClient(apiKey);
   await client.updateRecord(
     parsed.baseId,
     parsed.tableId,
