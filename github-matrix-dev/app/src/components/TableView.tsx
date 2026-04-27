@@ -1627,7 +1627,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
           acquired_ts: new Date().toISOString(),
         });
       }
-      syncEditToAirtable({ target, fieldKey, value: ids, getStateByPrefix }).catch(console.warn);
+      syncEditToAirtable({ target, fieldKey, value: ids }).catch(console.warn);
     } catch { /* ignore */ }
   }
 
@@ -1677,7 +1677,7 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
           acquired_ts: new Date().toISOString(),
         });
       }
-      syncEditToAirtable({ target, fieldKey, value: parsed, getStateByPrefix }).catch(console.warn);
+      syncEditToAirtable({ target, fieldKey, value: parsed }).catch(console.warn);
     } catch { /* ignore */ }
     setEditingCell(null);
   }
