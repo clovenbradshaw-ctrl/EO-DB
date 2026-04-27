@@ -162,6 +162,7 @@ interface EoDbState {
   getStateByPrefix: (prefix: string) => Promise<EoState[]>;
   getStateByPrefixPage: (prefix: string, limit: number, afterTarget?: string) => Promise<StatePage>;
   manualSnapshot: () => Promise<{ mxc: string; seq: number }>;
+  flushToOpfs: () => Promise<void>;
   /**
    * Manually save current data to the Matrix media store and record the
    * resulting mxc URI in room state (EO_SNAPSHOT_STATE_TYPE) so any device
@@ -585,6 +586,19 @@ export const useEoStore = create<EoDbState>((set, get) => ({
       await gdriveSync.forceSave();
     }
     return { mxc: 'gdrive', seq: lastSeq };
+  },
+
+  async flushToOpfs() {
+    const { store, workerClient, recentEvents } = get();
+    if (!store) throw new Error('Store not initialized');
+    const lastSeq = await store.getCurrentSeq();
+    const memStore = store as MemoryStore;
+    if (workerClient && typeof memStore.getKvEntries === 'function') {
+      await saveKvSnapshot(workerClient, memStore.getKvEntries(), recentEvents, lastSeq);
+      saveInitCache(workerClient).catch((e) =>
+        console.warn('[EO-DB] flushToOpfs: init-cache save failed:', e),
+      );
+    }
   },
 
   async manualMatrixMediaSnapshot() {
