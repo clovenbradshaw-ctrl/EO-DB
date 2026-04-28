@@ -194,11 +194,6 @@ export function AirtableSettingsSection({
   // ── Expanded tables (for field preview): Set of tableId ──
   const [expandedTables, setExpandedTables] = useState<Set<string>>(new Set());
 
-  // ── Manual PAT entry (paste/re-enter) ──
-  const [pastingPat, setPastingPat] = useState(false);
-  const [patInput, setPatInput] = useState('');
-  const [patSaving, setPatSaving] = useState(false);
-
   // ── Amino auto-sync gate ──
   // Amino users get continuous sync turned on by default — the toggle is
   // hidden and the service starts as soon as an API key is available.
@@ -371,72 +366,6 @@ export function AirtableSettingsSection({
     syncServiceRef.current?.stop();
     syncServiceRef.current = null;
     useAirtableStore.getState().disconnect();
-  }
-
-  // ── Save manually-pasted PAT ──
-  async function handleSavePat() {
-    const key = patInput.trim();
-    if (!key) return;
-    setPatSaving(true);
-    try {
-      await useAirtableStore.getState().connectWithKey(key);
-      setPatInput('');
-      setPastingPat(false);
-    } catch {
-      // Error is set in the store; keep the input open so the user can retry.
-    } finally {
-      setPatSaving(false);
-    }
-  }
-
-  function renderPatEntry() {
-    return (
-      <div style={{ marginTop: 10, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
-        <input
-          type="password"
-          value={patInput}
-          onChange={(e) => setPatInput(e.target.value)}
-          placeholder="patXXXXXXXXXXXXXX..."
-          autoFocus
-          disabled={patSaving}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') handleSavePat();
-            else if (e.key === 'Escape') { setPastingPat(false); setPatInput(''); }
-          }}
-          style={{
-            flex: 1,
-            minWidth: 220,
-            padding: '6px 10px',
-            fontSize: 12,
-            border: `1px solid ${theme.border}`,
-            borderRadius: 5,
-            background: theme.bgCard,
-            color: theme.text,
-            fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
-          }}
-        />
-        <button
-          onClick={handleSavePat}
-          disabled={patSaving || !patInput.trim()}
-          style={{
-            ...s.actionBtn,
-            background: '#2563eb',
-            color: '#fff',
-            borderColor: '#2563eb',
-            opacity: (patSaving || !patInput.trim()) ? 0.5 : 1,
-          }}
-        >
-          {patSaving ? 'Verifying…' : 'Save'}
-        </button>
-        <button
-          onClick={() => { setPastingPat(false); setPatInput(''); }}
-          disabled={patSaving}
-          style={s.actionBtn}
-        >
-          Cancel
-        </button>
-      </div>
-    );
   }
 
   // ── Resolve which display field to use for a table ──
@@ -1246,37 +1175,20 @@ export function AirtableSettingsSection({
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
               <button
                 onClick={handleConnect}
-                disabled={connecting || patSaving}
+                disabled={connecting}
                 style={{ ...s.connectBtn, opacity: connecting ? 0.5 : 1 }}
               >
                 {connecting ? 'Connecting...' : 'Connect to Airtable'}
               </button>
-              {!pastingPat && (
-                <button
-                  onClick={() => { setPatInput(''); setPastingPat(true); }}
-                  disabled={connecting || patSaving}
-                  style={s.actionBtn}
-                >
-                  Paste PAT
-                </button>
-              )}
             </div>
-            {pastingPat && renderPatEntry()}
           </div>
         ) : (
           <div>
             <div style={s.connectedRow}>
               <div style={s.connectedDot} />
               <span style={{ fontSize: 12, color: theme.successText }}>Connected</span>
-              <button
-                onClick={() => { setPatInput(''); setPastingPat((v) => !v); }}
-                style={{ ...s.disconnectBtn, marginLeft: 'auto', color: theme.text, borderColor: theme.border }}
-              >
-                {pastingPat ? 'Cancel' : 'Re-enter PAT'}
-              </button>
-              <button onClick={handleDisconnect} style={{ ...s.disconnectBtn, marginLeft: 0 }}>Disconnect</button>
+              <button onClick={handleDisconnect} style={{ ...s.disconnectBtn, marginLeft: 'auto' }}>Disconnect</button>
             </div>
-            {pastingPat && renderPatEntry()}
 
             {lastSyncAt && (
               <div style={{ fontSize: 11, color: theme.textMuted, marginTop: 4 }}>
