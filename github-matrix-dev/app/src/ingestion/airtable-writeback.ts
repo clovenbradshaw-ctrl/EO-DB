@@ -1,14 +1,11 @@
 /**
- * Airtable writeback — pushes local edits back to Airtable.
+ * Airtable writeback — disabled.
  *
- * When a user edits a field on a record that originated from Airtable
- * (target starts with `at.`), this module sends the update back via
- * the Airtable API so the two systems stay in sync.
+ * Local field edits are NOT pushed back to Airtable. `syncEditToAirtable`
+ * is a no-op so the existing call sites in TableView/FigureFields can stay
+ * unchanged when writeback is re-enabled.
  */
 
-import { AirtableClient } from './airtable-client';
-import { useAirtableStore } from './airtable-store';
-import { AMINO_AIRTABLE_BASE_ID } from '../lib/amino-config';
 import type { EoState } from '../db/types';
 
 // ─── Target parsing ────────────────────────────────────────────────────────
@@ -54,37 +51,8 @@ export interface WritebackOpts {
  * Fire-and-forget — callers should `.catch(console.warn)`.
  */
 export async function syncEditToAirtable(opts: WritebackOpts): Promise<void> {
-  const parsed = parseAirtableTarget(opts.target);
-  if (!parsed) return;
-
-  // Amino users hold the matrix token in the in-memory store, not in EO
-  // state — route their writebacks through the gateway via op:update.
-  const storeState = useAirtableStore.getState();
-  if (storeState.viaAminoProxy && storeState.apiKey) {
-    const client = new AirtableClient(storeState.apiKey, undefined, {
-      viaAminoProxy: true,
-      aminoBaseId: AMINO_AIRTABLE_BASE_ID,
-    });
-    await client.updateRecord(
-      parsed.baseId,
-      parsed.tableId,
-      parsed.recordId,
-      { [opts.fieldKey]: opts.value },
-    );
-    return;
-  }
-
-  const apiKey = await findAirtableApiKey(opts.getStateByPrefix);
-  if (!apiKey) {
-    console.warn('[airtable-writeback] No API key found — skipping sync');
-    return;
-  }
-
-  const client = new AirtableClient(apiKey);
-  await client.updateRecord(
-    parsed.baseId,
-    parsed.tableId,
-    parsed.recordId,
-    { [opts.fieldKey]: opts.value },
-  );
+  // Writeback to Airtable is disabled — local edits stay local until the
+  // policy on round-tripping into the source-of-truth base is settled.
+  void opts;
+  return;
 }
