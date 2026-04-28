@@ -43,6 +43,7 @@ import type {
   AirtableClient,
   AirtableRecord,
 } from './airtable-client';
+import { NoLastModifiedFieldError } from './airtable-client';
 import {
   discoverSchema,
   processHydrationBundle,
@@ -328,30 +329,54 @@ async function runFetchPhase(
 
     let pageIndex = 0;
     let reachedLimit = false;
-    for await (const page of client.paginateRecords(t.baseId, t.tableId, {
-      returnFieldsByFieldId: t.useFieldIds,
-    })) {
-      let records: AirtableRecord[] = page;
-      if (t.recordsFetched + records.length > limit) {
-        records = records.slice(0, Math.max(0, limit - t.recordsFetched));
-        reachedLimit = true;
-      }
-      if (records.length > 0) {
-        const line: HydrationBundlePage = {
-          type: 'page',
-          baseId: t.baseId,
+    let skippedNoLm = false;
+    try {
+      for await (const page of client.paginateRecords(t.baseId, t.tableId, {
+        returnFieldsByFieldId: t.useFieldIds,
+      })) {
+        let records: AirtableRecord[] = page;
+        if (t.recordsFetched + records.length > limit) {
+          records = records.slice(0, Math.max(0, limit - t.recordsFetched));
+          reachedLimit = true;
+        }
+        if (records.length > 0) {
+          const line: HydrationBundlePage = {
+            type: 'page',
+            baseId: t.baseId,
+            baseName: t.baseName,
+            tableId: t.tableId,
+            tableName: t.tableName,
+            useFieldIds: t.useFieldIds,
+            pageIndex,
+            records,
+          };
+          writer.appendLine(line);
+          t.recordsFetched += records.length;
+          t.pagesFetched = pageIndex + 1;
+          pageIndex++;
+        }
+        opts?.onProgress?.({
+          phase: 'collecting',
+          checkpointPhase: 'fetching',
+          base: t.baseName,
           baseName: t.baseName,
+          baseId: t.baseId,
+          table: t.tableName,
           tableId: t.tableId,
-          tableName: t.tableName,
-          useFieldIds: t.useFieldIds,
-          pageIndex,
-          records,
-        };
-        writer.appendLine(line);
-        t.recordsFetched += records.length;
-        t.pagesFetched = pageIndex + 1;
-        pageIndex++;
+          records_so_far: t.recordsFetched,
+          tableIndex: i,
+          totalTables: checkpoint.tables.length,
+        });
+        if (reachedLimit) break;
       }
+    } catch (e) {
+      if (!(e instanceof NoLastModifiedFieldError)) throw e;
+      // Table has no `lastModifiedTime` field — gateway can't serve it.
+      // Mark the checkpoint slot complete with zero records so the resume
+      // loop advances past it, and surface the skip via onProgress so the
+      // sync log gets a single quiet `table_skipped` entry instead of a
+      // recurring red sync_error.
+      skippedNoLm = true;
       opts?.onProgress?.({
         phase: 'collecting',
         checkpointPhase: 'fetching',
@@ -360,11 +385,19 @@ async function runFetchPhase(
         baseId: t.baseId,
         table: t.tableName,
         tableId: t.tableId,
-        records_so_far: t.recordsFetched,
+        records_so_far: 0,
         tableIndex: i,
         totalTables: checkpoint.tables.length,
+        skipReason: 'no_last_modified_field',
       });
-      if (reachedLimit) break;
+    }
+    if (skippedNoLm) {
+      t.fetch = 'complete';
+      t.recordsFetched = 0;
+      t.pagesFetched = 0;
+      await saveCheckpoint(store, checkpoint);
+      opts?.onCheckpoint?.(checkpoint);
+      continue;
     }
 
     writer.appendLine({
