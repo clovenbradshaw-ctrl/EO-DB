@@ -13,6 +13,7 @@
 
 import {
   AirtableApiError,
+  AminoProxyUnsupportedError,
   NonJsonResponseError,
   RateLimitedError,
   ScopeMissingError,
@@ -201,29 +202,131 @@ const AIRTABLE_API = 'https://api.airtable.com/v0';
 const AIRTABLE_META_API = 'https://api.airtable.com/v0/meta';
 
 /**
- * n8n proxy that forwards Airtable API calls using n8n-side credentials.
- * Auth is a Matrix access token in the request body — n8n validates the
- * token against `app.aminoimmigration.com` before forwarding, which keeps
- * the shared Airtable PAT on the server instead of in every user's browser.
- * Only used when `viaAminoProxy: true` is passed; server-side callers
- * always hit Airtable directly.
+ * EO/// DB Airtable Gateway — the n8n workflow that brokers every Airtable
+ * call for users on the `app.aminoimmigration.com` Matrix homeserver.
+ *
+ * Auth: the client sends `Authorization: Bearer <matrix_access_token>`. n8n
+ * calls `/account/whoami` against the Amino homeserver to validate before
+ * forwarding to Airtable with its own OAuth credential — the browser never
+ * sees an Airtable PAT.
+ *
+ * Protocol: not a transparent URL forwarder. Requests are op-routed
+ * (`schema | sync | search | update`) and responses are wrapped in a
+ * `{ ok, data } | { ok: false, error, detail }` envelope. The `request()`
+ * method below translates the AirtableClient's existing URL+method shape
+ * into the matching op so callers (paginateRecords, getBaseSchema, etc.)
+ * keep working unchanged.
  */
-const AIRTABLE_PROXY_WEBHOOK = 'https://n8n.intelechia.com/webhook/airtable-proxy-amino';
+const AIRTABLE_PROXY_WEBHOOK = 'https://n8n.intelechia.com/webhook/eodb/airtable';
 
 /**
- * Split an Airtable API URL into the `{ path, query }` shape the n8n proxy
- * expects. The proxy reconstructs the final URL as `https://api.airtable.com/v0/${path}?${query}`.
+ * Marker prefix for the synthetic `offset` we return from Amino-gateway
+ * `paginateRecords` so the existing pagination loop keeps calling us. The
+ * real value carried is the gateway's `highWaterMark`, which we feed back
+ * as `since` on the next op:sync call.
  */
-function splitAirtableUrl(url: string): { path: string; query: Record<string, string> } {
-  const u = new URL(url);
-  const path = u.pathname.replace(/^\/+/, '').replace(/^v0\//, '');
-  const query: Record<string, string> = {};
-  u.searchParams.forEach((value, key) => { query[key] = value; });
-  return { path, query };
-}
+const AMINO_OFFSET_PREFIX = '__amino:';
 
 function safeJsonParse(input: string): unknown {
   try { return JSON.parse(input); } catch { return input; }
+}
+
+/**
+ * The four URL families the AirtableClient generates against `api.airtable.com`.
+ * `parseAirtableUrl` classifies each one so the Amino branch can dispatch to
+ * the right gateway op.
+ */
+type AirtableUrlKind =
+  | { kind: 'listBases' }
+  | { kind: 'schema'; baseId: string }
+  | { kind: 'records'; baseId: string; tableId: string; query: URLSearchParams }
+  | { kind: 'record'; baseId: string; tableId: string; recordId: string }
+  | { kind: 'webhook'; baseId: string }
+  | { kind: 'unknown' };
+
+function parseAirtableUrl(url: string): AirtableUrlKind {
+  let u: URL;
+  try { u = new URL(url); } catch { return { kind: 'unknown' }; }
+  const segs = u.pathname.replace(/^\/+/, '').split('/').filter(Boolean);
+  // `meta/bases` and `meta/bases/{baseId}/tables` come from AIRTABLE_META_API,
+  // which already includes `/v0/meta` — segs[0] is `v0`.
+  if (segs[0] === 'v0' && segs[1] === 'meta' && segs[2] === 'bases') {
+    if (segs.length === 3) return { kind: 'listBases' };
+    if (segs[4] === 'tables') return { kind: 'schema', baseId: segs[3] };
+  }
+  if (segs[0] === 'v0' && segs[1] === 'bases' && segs[3] === 'webhooks') {
+    return { kind: 'webhook', baseId: segs[2] };
+  }
+  if (segs[0] === 'v0' && segs.length >= 3) {
+    const baseId = segs[1];
+    const tableId = decodeURIComponent(segs[2]);
+    if (segs.length === 3) return { kind: 'records', baseId, tableId, query: u.searchParams };
+    return { kind: 'record', baseId, tableId, recordId: segs[3] };
+  }
+  return { kind: 'unknown' };
+}
+
+/**
+ * Pull the ISO timestamp out of the LAST_MODIFIED_TIME filter the sync code
+ * builds (`IS_AFTER(LAST_MODIFIED_TIME(), DATETIME_PARSE('...'))`). The
+ * gateway expects `since` as a top-level body field; the formula text itself
+ * is ignored server-side. Returns `undefined` when no usable timestamp is
+ * found, which makes op:sync pull every record (initial hydration).
+ */
+function extractSinceFromFilter(filter: string): string | undefined {
+  const m = filter.match(/DATETIME_PARSE\('([^']+)'\)/);
+  return m ? m[1] : undefined;
+}
+
+/**
+ * n8n's Airtable node returns records in the standard `{id, createdTime, fields}`
+ * shape. The gateway's `Sync: shape response` code defensively reads both
+ * `rec.fields[name]` and `rec[name]`, so to be safe we re-wrap any record
+ * whose `fields` is missing into the canonical shape.
+ */
+function normalizeAminoRecord(rec: any): AirtableRecord {
+  if (rec && typeof rec === 'object' && rec.id && rec.fields && typeof rec.fields === 'object') {
+    return {
+      id: String(rec.id),
+      createdTime: typeof rec.createdTime === 'string' ? rec.createdTime : '',
+      fields: rec.fields as Record<string, any>,
+    };
+  }
+  const { id, createdTime, ...rest } = rec ?? {};
+  return {
+    id: String(id ?? ''),
+    createdTime: typeof createdTime === 'string' ? createdTime : '',
+    fields: rest as Record<string, any>,
+  };
+}
+
+interface AminoEnvelopeOk<T> { ok: true; data: T }
+interface AminoEnvelopeErr { ok: false; error: string; detail?: string }
+type AminoEnvelope<T> = AminoEnvelopeOk<T> | AminoEnvelopeErr;
+
+interface AminoSchemaResponse {
+  baseId: string;
+  tables: AirtableTable[];
+  _eoHints?: Record<string, {
+    lastModifiedField: { id: string; name: string } | null;
+    createdField: { id: string; name: string } | null;
+    primaryField: { id: string; name: string } | null;
+  }>;
+  _eoMeta?: { fetchedAt: string; cacheTtlSec: number; fromCache: boolean; ageSec?: number };
+}
+
+interface AminoSyncResponse {
+  records: any[];
+  count: number;
+  highWaterMark: string | null;
+  hasMore: boolean;
+  table: string;
+  lastModifiedField: string;
+}
+
+interface AminoSearchResponse {
+  records: any[];
+  count: number;
 }
 
 /**
@@ -326,22 +429,29 @@ export class AirtableClient {
   private bucket: TokenBucket;
   private onResponse?: AirtableResponseHook;
   private readonly viaAminoProxy: boolean;
+  private readonly aminoBaseId: string | null;
 
   /**
    * @param apiKey  When `viaAminoProxy` is false (default), an Airtable PAT
    *                sent as a Bearer token to `api.airtable.com`. When
    *                `viaAminoProxy` is true, a Matrix access token for
-   *                `app.aminoimmigration.com` that n8n validates before
-   *                forwarding the request with its own Airtable PAT.
+   *                `app.aminoimmigration.com` that the gateway validates
+   *                before forwarding the request with its own Airtable
+   *                OAuth credential.
+   * @param opts.aminoBaseId  Required when `viaAminoProxy` is true. The
+   *                          single Airtable base id the Amino tenant has
+   *                          access to (the gateway has no `list bases`
+   *                          op, so we synthesize it client-side).
    */
   constructor(
     private readonly apiKey: string,
     ratePerSec: number = 4,
-    opts?: { onResponse?: AirtableResponseHook; viaAminoProxy?: boolean },
+    opts?: { onResponse?: AirtableResponseHook; viaAminoProxy?: boolean; aminoBaseId?: string },
   ) {
     this.bucket = new TokenBucket(ratePerSec, ratePerSec);
     this.onResponse = opts?.onResponse;
     this.viaAminoProxy = opts?.viaAminoProxy === true;
+    this.aminoBaseId = opts?.aminoBaseId ?? null;
   }
 
   /**
@@ -352,7 +462,20 @@ export class AirtableClient {
     this.onResponse = hook;
   }
 
+  /**
+   * True when this client routes through the EO/// DB Airtable Gateway
+   * instead of `api.airtable.com` directly. Sync code uses this to skip
+   * code paths the gateway doesn't expose (webhook lifecycle, snapshot
+   * bundle export, etc.) without first eating an AminoProxyUnsupportedError.
+   */
+  isAminoProxy(): boolean {
+    return this.viaAminoProxy;
+  }
+
   private async request<T>(url: string, init?: RequestInit, retries = 3): Promise<T> {
+    if (this.viaAminoProxy) {
+      return this.requestViaAminoGateway<T>(url, init);
+    }
     await this.bucket.acquire();
 
     for (let attempt = 0; attempt <= retries; attempt++) {
@@ -360,33 +483,14 @@ export class AirtableClient {
       const method = (init?.method ?? 'GET').toUpperCase();
       let res: Response;
       try {
-        if (this.viaAminoProxy) {
-          const { path, query } = splitAirtableUrl(url);
-          let forwardBody: unknown = undefined;
-          if (init?.body != null) {
-            forwardBody = typeof init.body === 'string' ? safeJsonParse(init.body) : init.body;
-          }
-          res = await fetch(AIRTABLE_PROXY_WEBHOOK, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              matrix_token: this.apiKey,
-              method,
-              path,
-              query,
-              ...(forwardBody !== undefined ? { body: forwardBody } : {}),
-            }),
-          });
-        } else {
-          res = await fetch(url, {
-            ...init,
-            headers: {
-              'Authorization': `Bearer ${this.apiKey}`,
-              'Content-Type': 'application/json',
-              ...init?.headers,
-            },
-          });
-        }
+        res = await fetch(url, {
+          ...init,
+          headers: {
+            'Authorization': `Bearer ${this.apiKey}`,
+            'Content-Type': 'application/json',
+            ...init?.headers,
+          },
+        });
       } catch (e) {
         const msg = (e as Error)?.message ?? String(e);
         try {
@@ -461,6 +565,175 @@ export class AirtableClient {
     }
 
     throw new RateLimitedError('Airtable API: max retries exceeded (429)');
+  }
+
+  /**
+   * Translate the AirtableClient's URL+method shape into an op call against
+   * the EO/// DB Airtable Gateway. Keeps the public method signatures
+   * (`paginateRecords`, `getBaseSchema`, `updateRecord`, …) unchanged so the
+   * sync code doesn't need to know whether it's talking to the gateway or
+   * to api.airtable.com directly.
+   *
+   * Operations the gateway intentionally doesn't expose — list bases, get
+   * record by id, webhook lifecycle, create/delete record — throw
+   * AminoProxyUnsupportedError. Callers that can degrade gracefully (the
+   * polling-only update sync, for instance) catch it; callers that can't
+   * surface the error to the user.
+   */
+  private async requestViaAminoGateway<T>(url: string, init?: RequestInit): Promise<T> {
+    await this.bucket.acquire();
+    const startedAt = Date.now();
+    const method = (init?.method ?? 'GET').toUpperCase();
+    const observe = (status: number, ok: boolean, error?: string): void => {
+      try {
+        this.onResponse?.({
+          url, method, status, statusText: ok ? 'OK' : 'Gateway',
+          ok, durationMs: Date.now() - startedAt,
+          ...(error ? { error } : {}),
+        });
+      } catch { /* observer must never break the request */ }
+    };
+
+    const parsed = parseAirtableUrl(url);
+
+    if (parsed.kind === 'listBases') {
+      if (!this.aminoBaseId) {
+        observe(501, false, 'aminoBaseId not configured');
+        throw new AminoProxyUnsupportedError(
+          'listBases via Amino gateway requires aminoBaseId — set it on the AirtableClient.',
+        );
+      }
+      observe(200, true);
+      return ({
+        bases: [{ id: this.aminoBaseId, name: 'Amino', permissionLevel: 'create' }],
+      } as AirtableBasesResponse) as unknown as T;
+    }
+
+    if (parsed.kind === 'webhook') {
+      observe(501, false, 'webhook ops not supported');
+      throw new AminoProxyUnsupportedError(
+        'Airtable webhook lifecycle is not exposed by the Amino gateway. Use polling-based sync.',
+      );
+    }
+
+    if (parsed.kind === 'record' && method === 'GET') {
+      observe(501, false, 'getRecord not supported');
+      throw new AminoProxyUnsupportedError(
+        `Single-record GET is not exposed by the Amino gateway (${parsed.baseId}/${parsed.tableId}/${parsed.recordId}).`,
+      );
+    }
+
+    if (parsed.kind === 'record' && (method === 'DELETE' || method === 'POST')) {
+      observe(501, false, `${method} not supported`);
+      throw new AminoProxyUnsupportedError(
+        `Record ${method} is not exposed by the Amino gateway (only PATCH via op:update is supported).`,
+      );
+    }
+
+    if (parsed.kind === 'unknown') {
+      observe(501, false, `unrecognized URL: ${url}`);
+      throw new AminoProxyUnsupportedError(`Unrecognized Airtable URL for Amino gateway: ${url}`);
+    }
+
+    if (parsed.kind === 'schema') {
+      const data = await this.callGateway<AminoSchemaResponse>('schema', {
+        site: { base: parsed.baseId },
+      }, observe);
+      return ({ tables: data.tables ?? [] } as AirtableBaseSchema) as unknown as T;
+    }
+
+    if (parsed.kind === 'records') {
+      const filter = parsed.query.get('filterByFormula') ?? '';
+      let since = extractSinceFromFilter(filter);
+      const offsetParam = parsed.query.get('offset') ?? '';
+      if (offsetParam.startsWith(AMINO_OFFSET_PREFIX)) {
+        const fromOffset = offsetParam.slice(AMINO_OFFSET_PREFIX.length);
+        if (fromOffset) since = fromOffset;
+      }
+      const pageSizeParam = parsed.query.get('pageSize');
+      const limit = Math.min(Math.max(Number(pageSizeParam) || 100, 1), 100);
+
+      const data = await this.callGateway<AminoSyncResponse>('sync', {
+        site: { base: parsed.baseId, table: parsed.tableId },
+        ...(since ? { since } : {}),
+        limit,
+      }, observe);
+
+      const records = (data.records ?? []).map(normalizeAminoRecord);
+      const nextOffset = data.hasMore && data.highWaterMark
+        ? `${AMINO_OFFSET_PREFIX}${data.highWaterMark}`
+        : undefined;
+      return ({ records, offset: nextOffset } as AirtableListResponse) as unknown as T;
+    }
+
+    // PATCH single record → op:update
+    const bodyParsed = init?.body
+      ? safeJsonParse(typeof init.body === 'string' ? init.body : '') as { fields?: Record<string, any> } | string
+      : { fields: {} };
+    const fields = (typeof bodyParsed === 'object' && bodyParsed && 'fields' in bodyParsed && bodyParsed.fields)
+      ? bodyParsed.fields
+      : {};
+    const updated = await this.callGateway<unknown>('update', {
+      site: { base: parsed.baseId, table: parsed.tableId, recordId: parsed.recordId },
+      payload: fields,
+    }, observe);
+    return updated as T;
+  }
+
+  /**
+   * POST one op to the gateway and unwrap the `{ ok, data }` envelope. Maps
+   * `{ ok: false }` and non-2xx responses onto the same AirtableApiError
+   * subclasses the direct-API path uses, so callers don't need a separate
+   * catch for the gateway.
+   */
+  private async callGateway<T>(
+    op: 'schema' | 'sync' | 'search' | 'update',
+    body: Record<string, unknown>,
+    observe: (status: number, ok: boolean, error?: string) => void,
+  ): Promise<T> {
+    let res: Response;
+    try {
+      res = await fetch(AIRTABLE_PROXY_WEBHOOK, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.apiKey}`,
+        },
+        body: JSON.stringify({ op, ...body }),
+      });
+    } catch (e) {
+      const msg = (e as Error)?.message ?? String(e);
+      observe(0, false, msg);
+      throw e;
+    }
+
+    const text = await res.text();
+    let parsed: AminoEnvelope<T> | null = null;
+    try { parsed = JSON.parse(text) as AminoEnvelope<T>; } catch { parsed = null; }
+
+    if (!parsed) {
+      observe(res.status, false, 'non-JSON response');
+      throw new NonJsonResponseError(
+        `Amino gateway returned a non-JSON body (${res.status} ${res.statusText}; body: ${text.slice(0, 200)})`,
+        res.status,
+        text.slice(0, 200),
+      );
+    }
+
+    if (!res.ok || parsed.ok === false) {
+      const err = parsed.ok === false ? parsed : null;
+      const message = err
+        ? `Amino gateway: ${err.error}${err.detail ? ` — ${err.detail}` : ''}`
+        : `Amino gateway HTTP ${res.status}`;
+      observe(res.status, false, message);
+      if (res.status === 401 || err?.error === 'unauthorized') {
+        throw new AirtableApiError(message, 401, 'AUTHENTICATION_REQUIRED');
+      }
+      throw new AirtableApiError(message, res.status || 502);
+    }
+
+    observe(res.status, true);
+    return parsed.data;
   }
 
   async listBases(): Promise<AirtableBase[]> {

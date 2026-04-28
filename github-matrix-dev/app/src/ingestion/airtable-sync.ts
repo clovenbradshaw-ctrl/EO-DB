@@ -1362,6 +1362,11 @@ export async function registerWebhooksForBases(
   client: AirtableClient,
   baseIds: string[],
 ): Promise<WebhookRegistrationResult[]> {
+  // The Amino gateway intentionally doesn't expose webhook ops — the only
+  // change-detection path for those users is op:sync polling. Skip the
+  // attempt instead of letting every base log an AminoProxyUnsupportedError.
+  if (client.isAminoProxy()) return [];
+
   const results: WebhookRegistrationResult[] = [];
   const seen = new Set<string>();
   for (const baseId of baseIds) {

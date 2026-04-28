@@ -7,6 +7,8 @@
  */
 
 import { AirtableClient } from './airtable-client';
+import { useAirtableStore } from './airtable-store';
+import { AMINO_AIRTABLE_BASE_ID } from '../lib/amino-config';
 import type { EoState } from '../db/types';
 
 // ─── Target parsing ────────────────────────────────────────────────────────
@@ -54,6 +56,23 @@ export interface WritebackOpts {
 export async function syncEditToAirtable(opts: WritebackOpts): Promise<void> {
   const parsed = parseAirtableTarget(opts.target);
   if (!parsed) return;
+
+  // Amino users hold the matrix token in the in-memory store, not in EO
+  // state — route their writebacks through the gateway via op:update.
+  const storeState = useAirtableStore.getState();
+  if (storeState.viaAminoProxy && storeState.apiKey) {
+    const client = new AirtableClient(storeState.apiKey, undefined, {
+      viaAminoProxy: true,
+      aminoBaseId: AMINO_AIRTABLE_BASE_ID,
+    });
+    await client.updateRecord(
+      parsed.baseId,
+      parsed.tableId,
+      parsed.recordId,
+      { [opts.fieldKey]: opts.value },
+    );
+    return;
+  }
 
   const apiKey = await findAirtableApiKey(opts.getStateByPrefix);
   if (!apiKey) {
