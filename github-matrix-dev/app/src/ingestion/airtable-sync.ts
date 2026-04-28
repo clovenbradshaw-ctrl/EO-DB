@@ -21,6 +21,7 @@ import type { EoEvent, Resolution } from '../db/types';
 import {
   AirtableClient,
   AirtableApiError,
+  NoLastModifiedFieldError,
   ScopeMissingError,
   WebhookGoneError,
   type AirtableBase,
@@ -127,6 +128,8 @@ export interface SyncProgress {
   ingested?: number;
   overwritten?: number;
   skipped?: number;
+  /** When set, this table was skipped before any network call. */
+  skipReason?: 'no_last_modified_field';
 }
 
 /**
@@ -387,6 +390,17 @@ function tableTarget(baseId: string, tableId: string): string {
 
 function baseTarget(baseId: string): string {
   return `at.${baseId}`;
+}
+
+/**
+ * A table without a `lastModifiedTime` field can't drive an incremental sync —
+ * the LAST_MODIFIED_TIME() filter has nothing to compare against, and the
+ * gateway can't tell which records changed since the last cursor. Tables in
+ * this state are skipped from both hydration and update sync; the user has to
+ * add a Last Modified field in Airtable before they show up.
+ */
+function tableHasLastModifiedField(table: { fields: { type: string }[] }): boolean {
+  return table.fields.some(f => f.type === 'lastModifiedTime');
 }
 
 // ─── Field metadata ─────────────────────────────────────────────────────────
@@ -1455,6 +1469,16 @@ export async function collectAirtableBundle(
 
     for (const table of base.tables) {
       if (baseTables && !baseTables.includes(table.id)) continue;
+      if (!tableHasLastModifiedField(table)) {
+        opts?.onProgress?.({
+          phase: 'collecting',
+          base: base.name,
+          table: table.name,
+          records_so_far: 0,
+          skipReason: 'no_last_modified_field',
+        });
+        continue;
+      }
 
       // Use field-id encoding whenever the schema gives us field ids; this
       // keeps us resilient to field renames between collection and ingestion.
@@ -1466,17 +1490,31 @@ export async function collectAirtableBundle(
 
       const records: AirtableRecord[] = [];
       let reachedLimit = false;
-      for await (const page of client.paginateRecords(base.id, table.id, {
-        returnFieldsByFieldId: useFieldIds,
-      })) {
-        for (const record of page) {
-          if (records.length >= limit) { reachedLimit = true; break; }
-          records.push(record);
+      try {
+        for await (const page of client.paginateRecords(base.id, table.id, {
+          returnFieldsByFieldId: useFieldIds,
+        })) {
+          for (const record of page) {
+            if (records.length >= limit) { reachedLimit = true; break; }
+            records.push(record);
+          }
+          opts?.onProgress?.({
+            phase: 'collecting', base: base.name, table: table.name, records_so_far: records.length,
+          });
+          if (reachedLimit) break;
         }
-        opts?.onProgress?.({
-          phase: 'collecting', base: base.name, table: table.name, records_so_far: records.length,
-        });
-        if (reachedLimit) break;
+      } catch (e) {
+        if (e instanceof NoLastModifiedFieldError) {
+          opts?.onProgress?.({
+            phase: 'collecting',
+            base: base.name,
+            table: table.name,
+            records_so_far: 0,
+            skipReason: 'no_last_modified_field',
+          });
+          continue;
+        }
+        throw e;
       }
 
       bundle.tables.push({
@@ -2134,7 +2172,22 @@ export async function updateSync(
       // 10s of wall clock).
       const tablesToSync = tables.filter((t) => {
         if (baseTables && !baseTables.includes(t.id)) return false;
-        return hydratedTableIds.has(t.id);
+        if (!hydratedTableIds.has(t.id)) return false;
+        if (!tableHasLastModifiedField(t)) {
+          opts?.onProgress?.({
+            phase: 'syncing',
+            base: base.name,
+            baseName: base.name,
+            baseId: base.id,
+            table: t.name,
+            tableId: t.id,
+            strategy: 'lastModified',
+            preserveExisting,
+            skipReason: 'no_last_modified_field',
+          });
+          return false;
+        }
+        return true;
       });
       for (let i = 0; i < tablesToSync.length; i++) {
         const table = tablesToSync[i];
@@ -2152,14 +2205,33 @@ export async function updateSync(
           preserveExisting,
           cursor,
         });
-        const result = await syncTable(
-          store, client, base.id, base.name, table.id, table.name, agent, cursor,
-          exclusions, preserveExisting,
-          opts?.onEvent, opts?.onProgress, recordLimit,
-          defaultResolution,
-          'lastModified',
-          opts?.onChange,
-        );
+        let result: SyncResult;
+        try {
+          result = await syncTable(
+            store, client, base.id, base.name, table.id, table.name, agent, cursor,
+            exclusions, preserveExisting,
+            opts?.onEvent, opts?.onProgress, recordLimit,
+            defaultResolution,
+            'lastModified',
+            opts?.onChange,
+          );
+        } catch (e) {
+          if (e instanceof NoLastModifiedFieldError) {
+            opts?.onProgress?.({
+              phase: 'syncing',
+              base: base.name,
+              baseName: base.name,
+              baseId: base.id,
+              table: table.name,
+              tableId: table.id,
+              strategy: 'lastModified',
+              preserveExisting,
+              skipReason: 'no_last_modified_field',
+            });
+            continue;
+          }
+          throw e;
+        }
         syncResults.push(result);
         opts?.onTableComplete?.(result);
 

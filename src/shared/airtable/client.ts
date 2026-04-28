@@ -14,6 +14,7 @@
 import {
   AirtableApiError,
   AminoProxyUnsupportedError,
+  NoLastModifiedFieldError,
   NonJsonResponseError,
   RateLimitedError,
   ScopeMissingError,
@@ -728,6 +729,16 @@ export class AirtableClient {
       observe(res.status, false, message);
       if (res.status === 401 || err?.error === 'unauthorized') {
         throw new AirtableApiError(message, 401, 'AUTHENTICATION_REQUIRED');
+      }
+      // Tables without a `lastModifiedTime` field can't be incrementally
+      // synced — the gateway tells us up front. Throw a typed error so the
+      // sync loop can demote it to a quiet skip instead of a sync_error.
+      if (err?.error === 'no_lm_field') {
+        const detailMatch = err.detail?.match(/Table\s+"([^"]+)"\s+\(([^)]+)\)/);
+        throw new NoLastModifiedFieldError(message, {
+          tableName: detailMatch?.[1],
+          tableId: detailMatch?.[2],
+        });
       }
       throw new AirtableApiError(message, res.status || 502);
     }
