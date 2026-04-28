@@ -524,9 +524,11 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   // TabBar subscribes to the store directly, so Layout only subscribes to
   // the active-tab id (needed by the route-sync effect below).
   const activeTabId = useTabsStore((s) => s.activeTabId);
+  const tabs = useTabsStore((s) => s.tabs);
   const hydrateTabs = useTabsStore((s) => s.hydrate);
   const openTabAction = useTabsStore((s) => s.openTab);
   const updateActiveTabRoute = useTabsStore((s) => s.updateActiveTab);
+  const setTabMeta = useTabsStore((s) => s.setTabMeta);
 
   // Seed the tabs store from the URL on first mount.
   useEffect(() => {
@@ -981,6 +983,26 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       }
     });
   }, [ready, lastSeq, getStateByPrefix]);
+
+  // Replace the raw scope leaf (e.g. "tblXxxx") with the table's display name
+  // (state.value.name) on records tabs once the underlying state resolves.
+  useEffect(() => {
+    if (allStates.length === 0 || tabs.length === 0) return;
+    const byTarget = new Map<string, EoState>();
+    for (const st of allStates) {
+      if (!byTarget.has(st.target)) byTarget.set(st.target, st);
+    }
+    for (const tab of tabs) {
+      if (tab.view !== 'records' || !tab.scope) continue;
+      const st = byTarget.get(tab.scope);
+      const name = st && typeof st.value === 'object' && st.value
+        ? (st.value as { name?: unknown }).name
+        : undefined;
+      if (typeof name === 'string' && name && tab.title !== name) {
+        setTabMeta(tab.id, { title: name });
+      }
+    }
+  }, [allStates, tabs, setTabMeta]);
 
   // Load records scoped to selected scope for the time scrubber
   useEffect(() => {
