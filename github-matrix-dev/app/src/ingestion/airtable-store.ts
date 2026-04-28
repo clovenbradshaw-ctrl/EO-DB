@@ -11,6 +11,7 @@ import { AirtableClient } from './airtable-client';
 import type { AirtableResponseInfo, AirtableResponseHook } from './airtable-client';
 import { resetWebhookPermissionCache } from './airtable-sync';
 import type { HydrationManifest, HydrationResult, UpdateSyncResult, SyncStrategy } from './airtable-sync';
+import { AMINO_AIRTABLE_BASE_ID } from '../lib/amino-config';
 
 // ─── Sync activity log ──────────────────────────────────────────────────────
 
@@ -375,6 +376,7 @@ export function createAirtableClient(
   return new AirtableClient(apiKey, opts.ratePerSec ?? 4, {
     onResponse: opts.onResponse,
     viaAminoProxy,
+    ...(viaAminoProxy ? { aminoBaseId: AMINO_AIRTABLE_BASE_ID } : {}),
   });
 }
 
@@ -402,13 +404,22 @@ export const useAirtableStore = create<AirtableSyncState>((set, get) => ({
   async connectFromWebhook(matrixAccessToken: string): Promise<void> {
     set({ connecting: true, error: null });
     try {
-      // Hosted-Amino path: Airtable calls go through the n8n
-      // `airtable-proxy-amino` webhook, which validates the Matrix
-      // access token against `app.aminoimmigration.com` before
-      // forwarding to Airtable with n8n-side credentials. The browser
-      // never sees the Airtable PAT.
-      const client = new AirtableClient(matrixAccessToken, undefined, { viaAminoProxy: true });
-      await client.listBases();
+      // Hosted-Amino path: every Airtable call goes through the n8n
+      // EO/// DB Airtable Gateway (`webhook/eodb/airtable`), which
+      // validates the Matrix access token against
+      // `app.aminoimmigration.com` before forwarding to Airtable with
+      // its own OAuth credential. The browser never sees an Airtable
+      // PAT, and the gateway exposes only one pre-configured base.
+      const client = new AirtableClient(matrixAccessToken, undefined, {
+        viaAminoProxy: true,
+        aminoBaseId: AMINO_AIRTABLE_BASE_ID,
+      });
+      // Validate by fetching the schema for the Amino base — this
+      // round-trips the matrix token through the gateway's whoami check
+      // and confirms the gateway can reach Airtable. The synthetic
+      // `listBases` would succeed without a network call, which would
+      // give us a false positive on auth failure.
+      await client.getBaseSchema(AMINO_AIRTABLE_BASE_ID);
       resetWebhookPermissionCache();
       set({
         apiKey: matrixAccessToken,

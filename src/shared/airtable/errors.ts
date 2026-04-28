@@ -71,6 +71,19 @@ export class NonJsonResponseError extends AirtableApiError {
 }
 
 /**
+ * The Amino n8n gateway has no op for the requested operation (list bases,
+ * fetch a single record by id, webhook lifecycle, create/delete record).
+ * Surfaced as 501 in the response observer so the UI can hide affordances
+ * for capabilities the gateway intentionally doesn't expose.
+ */
+export class AminoProxyUnsupportedError extends AirtableApiError {
+  constructor(message: string) {
+    super(message, 501, 'AMINO_PROXY_UNSUPPORTED');
+    this.name = 'AminoProxyUnsupportedError';
+  }
+}
+
+/**
  * Airtable reported a field type the type-map doesn't know. Thrown only by
  * the strict variant of `mapAirtableType`; the loose variant returns 'text'
  * for back-compat.
