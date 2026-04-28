@@ -22,8 +22,9 @@ import {
 } from '../matrix/snapshot';
 import {
   eodbBlobDataIdForRoom,
+  gzipBytes,
   storeBlobToDrive,
-  type BlobEnvelope,
+  type BlobUploadMeta,
 } from './eodb-blob-endpoint';
 
 const DEBOUNCE_MS = 10_000;
@@ -202,25 +203,33 @@ export class EodbBlobWriter {
       };
       const plainBytes = pack(payload);
       const contentHash = await sha256hex(plainBytes);
+      const plaintextSize = plainBytes.byteLength;
+
+      // Compress before encrypting. Event logs are extremely repetitive
+      // (room IDs, agent strings, ISO timestamps, schema field names) and
+      // compress 8–15× — the difference between fitting under nginx's
+      // client_max_body_size and a 413.
+      const compressed = await gzipBytes(plainBytes);
 
       const iv = crypto.getRandomValues(new Uint8Array(12));
       const ctBuf = await crypto.subtle.encrypt(
         { name: 'AES-GCM', iv },
         entry.key,
-        plainBytes as unknown as ArrayBuffer,
+        compressed as unknown as ArrayBuffer,
       );
+      const ciphertext = new Uint8Array(ctBuf);
 
-      const envelope: BlobEnvelope = {
-        v: 1,
+      const meta: BlobUploadMeta = {
+        v: 2,
         iv: bufferToBase64(iv),
-        ct: bufferToBase64(new Uint8Array(ctBuf)),
         content_hash: contentHash,
         key_id: keyId,
-        plaintext_size: plainBytes.byteLength,
+        plaintext_size: plaintextSize,
+        compression: 'gzip',
       };
 
       const dataId = await eodbBlobDataIdForRoom(roomId);
-      const stored = await storeBlobToDrive(matrixToken, dataId, envelope, roomId);
+      const stored = await storeBlobToDrive(matrixToken, dataId, meta, ciphertext, roomId);
       const uri = stored.uri;
 
       await setSnapshotStateEvent(client, roomId, uri, currentSeq, keyId);
@@ -236,7 +245,8 @@ export class EodbBlobWriter {
       this.lastSavedSeq = currentSeq;
       this.lastSaveAt = Date.now();
       this.lastError = null;
-      this.lastDiagnostic = `Saved ${events.length} events (${plainBytes.byteLength} B plaintext) as ${dataId}`;
+      this.lastDiagnostic =
+        `Saved ${events.length} events (${plaintextSize} B plain → ${compressed.byteLength} B gz → ${ciphertext.byteLength} B ct) as ${dataId}`;
       this.consecutiveFailures = 0;
       this.backoffUntil = null;
     } catch (err: unknown) {
