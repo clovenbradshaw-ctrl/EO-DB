@@ -22,13 +22,35 @@ const DRIVE_UPLOAD = 'https://www.googleapis.com/upload/drive/v3/files';
 const PROXY_TIMEOUT_MS = 20_000;
 const PROBE_TIMEOUT_MS = 8_000;
 
+/**
+ * On-disk envelope (Drive file body, JSON). `v: 1` is the legacy
+ * uncompressed variant; `v: 2` adds `compression` and gzips the plaintext
+ * before AES-GCM. `content_hash` and `plaintext_size` always refer to the
+ * ORIGINAL plaintext (msgpack bytes) — i.e. pre-compression — so reads can
+ * verify integrity after gunzip.
+ */
 export interface BlobEnvelope {
-  v: 1;
+  v: 1 | 2;
   iv: string;
   ct: string;
   content_hash: string;
   key_id: string;
   plaintext_size: number;
+  compression?: 'gzip' | 'none';
+}
+
+/**
+ * Metadata carried alongside the raw ciphertext when uploading via the new
+ * binary mode. The proxy re-wraps `{...meta, ct: base64(body)}` into the JSON
+ * envelope above before PATCHing Drive, so the at-rest format is unchanged.
+ */
+export interface BlobUploadMeta {
+  v: 2;
+  iv: string;
+  content_hash: string;
+  key_id: string;
+  plaintext_size: number;
+  compression: 'gzip' | 'none';
 }
 
 export type BlobProbe = 'exists' | 'missing' | 'unknown';
@@ -115,7 +137,8 @@ export interface DriveStoreResult {
 export async function storeBlobToDrive(
   matrixToken: string,
   dataId: string,
-  envelope: BlobEnvelope,
+  meta: BlobUploadMeta,
+  ciphertext: Uint8Array,
   spaceRoomId: string | null,
 ): Promise<DriveStoreResult> {
   const fileName = dataIdToFileName(dataId);
@@ -141,15 +164,32 @@ export async function storeBlobToDrive(
   }
 
   const uploadUrl = `${DRIVE_UPLOAD}/${encodeURIComponent(fileId)}?uploadType=media`;
-  const { status, raw } = await driveProxy(
-    matrixToken,
-    uploadUrl,
-    'PATCH',
-    envelope as unknown as Record<string, unknown>,
-    spaceRoomId,
-  );
-  if (status < 200 || status >= 300) {
-    throw new Error(`Drive media upload failed: HTTP ${status} ${raw.slice(0, 200)}`);
+
+  // Binary upload mode: ciphertext goes on the wire as raw bytes; metadata
+  // travels in X-Eo-* headers. The proxy re-wraps it into the JSON envelope
+  // expected at rest. Skips the +33% base64 + JSON-escape tax on the
+  // browser→nginx hop, which is the only hop that's size-constrained.
+  const res = await fetch(EO_STORE_WEBHOOK, {
+    method: 'POST',
+    signal: AbortSignal.timeout(PROXY_TIMEOUT_MS),
+    headers: {
+      'Content-Type': 'application/octet-stream',
+      'X-Eo-Matrix-Token': matrixToken,
+      ...(spaceRoomId ? { 'X-Eo-Space-Room-Id': spaceRoomId } : {}),
+      'X-Eo-Drive-Url': uploadUrl,
+      'X-Eo-Drive-Method': 'PATCH',
+      'X-Eo-Envelope-Version': String(meta.v),
+      'X-Eo-Iv': meta.iv,
+      'X-Eo-Key-Id': meta.key_id,
+      'X-Eo-Content-Hash': meta.content_hash,
+      'X-Eo-Plaintext-Size': String(meta.plaintext_size),
+      'X-Eo-Compression': meta.compression,
+    },
+    body: new Blob([ciphertext as BlobPart]),
+  });
+  const raw = await res.text();
+  if (res.status < 200 || res.status >= 300) {
+    throw new Error(`Drive media upload failed: HTTP ${res.status} ${raw.slice(0, 200)}`);
   }
 
   return { fileId, uri: `gdrive://${fileId}`, created };
@@ -193,6 +233,22 @@ export async function fetchBlobFromDrive(
     throw new Error(`Drive download returned non-JSON body: ${(e as Error).message}`);
   }
   return { fileId, uri: `gdrive://${fileId}`, envelope };
+}
+
+/** gzip a buffer using the browser CompressionStream API. */
+export async function gzipBytes(input: Uint8Array): Promise<Uint8Array> {
+  const cs = new CompressionStream('gzip');
+  const stream = new Blob([input as BlobPart]).stream().pipeThrough(cs);
+  const buf = await new Response(stream).arrayBuffer();
+  return new Uint8Array(buf);
+}
+
+/** Inverse of gzipBytes. */
+export async function gunzipBytes(input: Uint8Array): Promise<Uint8Array> {
+  const ds = new DecompressionStream('gzip');
+  const stream = new Blob([input as BlobPart]).stream().pipeThrough(ds);
+  const buf = await new Response(stream).arrayBuffer();
+  return new Uint8Array(buf);
 }
 
 /**
