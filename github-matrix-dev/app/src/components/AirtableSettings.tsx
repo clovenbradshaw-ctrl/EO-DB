@@ -1952,6 +1952,7 @@ function SyncLogRow({ entry, userId }: { entry: SyncLogEntry; userId: string }) 
     change_detected:    '✎',
     snapshot_downloaded:'⬇',
     snapshot_imported:  '⬆',
+    table_skipped:      '·',
   };
 
   const label: Record<SyncLogEntry['type'], string> = {
@@ -1966,6 +1967,7 @@ function SyncLogRow({ entry, userId }: { entry: SyncLogEntry; userId: string }) 
     change_detected:    'change detected',
     snapshot_downloaded:'snapshot downloaded',
     snapshot_imported:  'snapshot imported',
+    table_skipped:      'table skipped',
   };
 
   const color: Partial<Record<SyncLogEntry['type'], string>> = {

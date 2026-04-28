@@ -93,6 +93,13 @@ export class AirtableSyncService {
   /** Tracks whether a remote device holds the sync lock (via to-device signal). */
   private remoteLockHeld = false;
 
+  /**
+   * Tables already logged as skipped — keyed by `${baseId}/${tableId}`. Each
+   * skipped table emits one `table_skipped` log entry per process lifetime,
+   * not one per tick, so the log doesn't fill with duplicates every 30s.
+   */
+  private skippedLogged = new Set<string>();
+
   constructor(
     private matrixClient: MatrixClient,
     private roomId: string,
@@ -714,6 +721,25 @@ export class AirtableSyncService {
     const state = useAirtableStore.getState();
     const prev = state.currentSync;
     if (!prev) return;
+
+    if (p.skipReason === 'no_last_modified_field' && p.table) {
+      const key = `${p.baseId ?? ''}/${p.tableId ?? p.table}`;
+      if (!this.skippedLogged.has(key)) {
+        this.skippedLogged.add(key);
+        useAirtableStore.getState().addSyncLogEntry({
+          ts: Date.now(),
+          type: 'table_skipped',
+          source: 'local',
+          syncer: this.agent,
+          device: this.deviceId,
+          baseId: p.baseId,
+          baseName: p.baseName ?? p.base,
+          tableName: p.table,
+          detail: `${p.table}: no Last Modified Time field — add one in Airtable to enable sync`,
+        });
+      }
+      return;
+    }
 
     // Merge per-table roll-up — grow the array when we see a new table,
     // patch the existing entry on each update. Keep tableId as the match key

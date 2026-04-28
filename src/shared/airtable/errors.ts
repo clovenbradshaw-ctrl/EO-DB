@@ -84,6 +84,24 @@ export class AminoProxyUnsupportedError extends AirtableApiError {
 }
 
 /**
+ * Gateway-level signal that a table can't be incrementally synced because it
+ * has no `lastModifiedTime` field. Distinct from a generic AirtableApiError
+ * so callers can demote it to a quiet skip rather than treating each tick
+ * as a sync failure.
+ */
+export class NoLastModifiedFieldError extends AirtableApiError {
+  readonly tableId?: string;
+  readonly tableName?: string;
+
+  constructor(message: string, opts?: { tableId?: string; tableName?: string }) {
+    super(message, 422, 'NO_LM_FIELD');
+    this.name = 'NoLastModifiedFieldError';
+    this.tableId = opts?.tableId;
+    this.tableName = opts?.tableName;
+  }
+}
+
+/**
  * Airtable reported a field type the type-map doesn't know. Thrown only by
  * the strict variant of `mapAirtableType`; the loose variant returns 'text'
  * for back-compat.

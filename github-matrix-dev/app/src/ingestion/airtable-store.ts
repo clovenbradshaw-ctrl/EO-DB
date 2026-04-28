@@ -31,7 +31,9 @@ export type SyncLogEventType =
   /** Snapshot bytes were written to local disk via "Download from Airtable". */
   | 'snapshot_downloaded'
   /** Snapshot file was uploaded into the local DB via "Import snapshot". */
-  | 'snapshot_imported';
+  | 'snapshot_imported'
+  /** A table was skipped because it has no `lastModifiedTime` field. */
+  | 'table_skipped';
 
 export interface SyncLogEntry {
   /** Unix ms timestamp. */
