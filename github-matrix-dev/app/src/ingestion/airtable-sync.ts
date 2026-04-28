@@ -399,7 +399,7 @@ function baseTarget(baseId: string): string {
  * this state are skipped from both hydration and update sync; the user has to
  * add a Last Modified field in Airtable before they show up.
  */
-function tableHasLastModifiedField(table: { fields: { type: string }[] }): boolean {
+export function tableHasLastModifiedField(table: { fields: { type: string }[] }): boolean {
   return table.fields.some(f => f.type === 'lastModifiedTime');
 }
 

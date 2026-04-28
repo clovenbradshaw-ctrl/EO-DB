@@ -1007,6 +1007,19 @@ export function AirtableSettingsSection({
           setBundleBlobSize(size);
         },
         onProgress: (p) => {
+          if (p.skipReason === 'no_last_modified_field' && p.table) {
+            useAirtableStore.getState().addSyncLogEntry({
+              ts: Date.now(),
+              type: 'table_skipped',
+              source: 'local',
+              syncer: session.userId,
+              baseId: p.baseId,
+              baseName: p.baseName ?? p.base,
+              tableName: p.table,
+              detail: `${p.table}: no Last Modified Time field — add one in Airtable to enable sync`,
+            });
+            return;
+          }
           const parts: string[] = [];
           if (p.checkpointPhase === 'fetching') parts.push('Fetching');
           else if (p.checkpointPhase === 'uploading') parts.push('Saving to Drive');
