@@ -1370,8 +1370,16 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   // the latest entries without re-running due to mergedEntries changes.
   mergedEntriesRef.current = mergedEntries;
 
-  // Filter out soft-deleted spaces from the browser entries
-  const activeEntries = useMemo(() => mergedEntries.filter((e) => !isSpaceDeleted(e.spaceTarget) && !isSpaceArchived(e.spaceTarget)), [mergedEntries, spaces, spaceEntries]);
+  // Filter out soft-deleted spaces from the browser entries.
+  // Amino-hosted accounts always present a single unified "Amino" space —
+  // the homeserver is single-tenant by design, so collapsing avoids exposing
+  // multiple internal spaces to end users.
+  const activeEntries = useMemo(() => {
+    const filtered = mergedEntries.filter((e) => !isSpaceDeleted(e.spaceTarget) && !isSpaceArchived(e.spaceTarget));
+    if (!isAmino || filtered.length === 0) return filtered;
+    const canonical = filtered.find((e) => e.spaceTarget === 'space_amino' || e.displayName.toLowerCase() === 'amino') ?? filtered[0];
+    return [{ ...canonical, displayName: 'Amino' }];
+  }, [mergedEntries, spaces, spaceEntries, isAmino]);
   const deletedSpaceCount = getDeletedSpaces().length;
   const archivedSpaceCount = getArchivedSpaces().length;
 
@@ -2497,7 +2505,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               flexShrink: 0,
             }} />
             {selectedSpace
-              ? formatSpaceName(selectedSpace.split('.').pop() || '')
+              ? (isAmino ? 'Amino' : formatSpaceName(selectedSpace.split('.').pop() || ''))
               : 'All Spaces'}
             {activeTypeDef && (
               <span style={{
@@ -2631,7 +2639,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               onOpenRecycleBin={() => { setShowRecycleBin(true); setSpaceOpen(false); }}
               deletedCount={deletedSpaceCount}
               archivedCount={archivedSpaceCount}
-              publicEntries={publicSpaceEntries.filter((e) =>
+              publicEntries={isAmino ? [] : publicSpaceEntries.filter((e) =>
                 !activeEntries.some((a) => a.mainRoomId === e.mainRoomId)
               )}
               onRequestAccess={async (roomId) => {
