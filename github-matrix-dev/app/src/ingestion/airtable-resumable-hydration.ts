@@ -47,6 +47,7 @@ import { NoLastModifiedFieldError } from './airtable-client';
 import {
   discoverSchema,
   processHydrationBundle,
+  tableHasLastModifiedField,
   type HydrationManifest,
   type HydrationResult,
   type RawImportBundle,
@@ -222,6 +223,24 @@ async function bootstrapCheckpoint(
     if (selected && !baseTables?.length) continue;
     for (const table of base.tables) {
       if (baseTables && !baseTables.includes(table.id)) continue;
+      if (!tableHasLastModifiedField(table)) {
+        // Tables without a `lastModifiedTime` field can't be incrementally
+        // synced — surface the skip once, then exclude from the checkpoint
+        // so the resume loop never tries them. This matches the polling and
+        // in-memory hydration paths.
+        opts?.onProgress?.({
+          phase: 'collecting',
+          checkpointPhase: 'fetching',
+          base: base.name,
+          baseName: base.name,
+          baseId: base.id,
+          table: table.name,
+          tableId: table.id,
+          records_so_far: 0,
+          skipReason: 'no_last_modified_field',
+        });
+        continue;
+      }
       tables.push({
         baseId: base.id,
         baseName: base.name,
