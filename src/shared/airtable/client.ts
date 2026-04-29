@@ -321,6 +321,15 @@ interface AminoSyncResponse {
   count: number;
   highWaterMark: string | null;
   hasMore: boolean;
+  /**
+   * Airtable's native opaque pagination token, forwarded by the gateway.
+   * Present iff there's another page in the SAME (filter+sort) query the
+   * gateway issued — that is, iff `hasMore` is true. The client uses this
+   * for within-run pagination instead of `highWaterMark`, because Airtable's
+   * `IS_AFTER` filter is strict and silently drops records whose
+   * `lastModifiedTime` exactly equals the previous page's tail.
+   */
+  offset: string | null;
   table: string;
   lastModifiedField: string;
 }
@@ -644,12 +653,18 @@ export class AirtableClient {
     }
 
     if (parsed.kind === 'records') {
+      // `since` is pinned across the whole pagination loop. Airtable's
+      // opaque `offset` is only valid within the (filterByFormula + sort)
+      // it was issued under — advancing `since` per-page would invalidate
+      // the offset and silently drop rows that share a lastModifiedTime
+      // with the previous page's tail (the strict `IS_AFTER` boundary).
       const filter = parsed.query.get('filterByFormula') ?? '';
-      let since = extractSinceFromFilter(filter);
+      const since = extractSinceFromFilter(filter);
       const offsetParam = parsed.query.get('offset') ?? '';
+      let airtableOffset: string | undefined;
       if (offsetParam.startsWith(AMINO_OFFSET_PREFIX)) {
         const fromOffset = offsetParam.slice(AMINO_OFFSET_PREFIX.length);
-        if (fromOffset) since = fromOffset;
+        if (fromOffset) airtableOffset = fromOffset;
       }
       const pageSizeParam = parsed.query.get('pageSize');
       const limit = Math.min(Math.max(Number(pageSizeParam) || 100, 1), 100);
@@ -657,12 +672,16 @@ export class AirtableClient {
       const data = await this.callGateway<AminoSyncResponse>('sync', {
         site: { base: parsed.baseId, table: parsed.tableId },
         ...(since ? { since } : {}),
+        ...(airtableOffset ? { offset: airtableOffset } : {}),
         limit,
       }, observe);
 
       const records = (data.records ?? []).map(normalizeAminoRecord);
-      const nextOffset = data.hasMore && data.highWaterMark
-        ? `${AMINO_OFFSET_PREFIX}${data.highWaterMark}`
+      // Use Airtable's native offset for within-run continuation. The
+      // gateway forwards it from the upstream response; when it's null the
+      // run is exhausted and pagination stops cleanly.
+      const nextOffset = data.offset
+        ? `${AMINO_OFFSET_PREFIX}${data.offset}`
         : undefined;
       return ({ records, offset: nextOffset } as AirtableListResponse) as unknown as T;
     }

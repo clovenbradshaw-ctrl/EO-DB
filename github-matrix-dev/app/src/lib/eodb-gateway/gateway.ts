@@ -20,8 +20,20 @@ export type GatewayOp = 'schema' | 'sync' | 'search' | 'update';
 export interface GatewayBody {
   op: GatewayOp;
   site?: { base?: string; table?: string; recordId?: string };
-  /** ISO timestamp cursor for op:sync. Omitted on first run. */
+  /**
+   * ISO timestamp cursor for op:sync. Pinned across the whole pagination
+   * loop of a single run — if you advance it per-page, Airtable's opaque
+   * `offset` (which is bound to the filter+sort it was issued under) stops
+   * being valid.
+   */
   since?: string;
+  /**
+   * Airtable's opaque pagination token, forwarded as the `offset` query
+   * param to the upstream Airtable list-records call. Null/omitted on the
+   * first call of a run; carry whatever the previous response returned on
+   * each subsequent call.
+   */
+  offset?: string;
   /** Page size cap for op:sync / op:search (max 100 server-side). */
   limit?: number;
   /** Airtable formula for op:search. */
