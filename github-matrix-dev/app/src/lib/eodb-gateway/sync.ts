@@ -1,25 +1,39 @@
 /**
  * Absorber loop — per-table cursor, folded into the Given-Log.
  *
- * This is the EO-native shape. The cursor is per-table, persisted as
- * `highWaterMark`. Each sync pull becomes a batch of `REC` events appended
- * to the log, then the fold derives current state.
+ * This is the EO-native shape. The cursor is per-table, persisted as the
+ * highest `lastModifiedTime` we've absorbed for this table. Each sync pull
+ * becomes a batch of `REC` events appended to the log, then the fold
+ * derives current state.
  *
  * Subtleties this module enforces:
+ *   - Pin `since` across the loop. Airtable's `offset` is bound to the
+ *     (filterByFormula + sort) it was issued under; advancing `since`
+ *     per-page invalidates it and at best re-fetches rows, at worst errors.
+ *   - Paginate within a run via Airtable's opaque `offset`, NOT by stepping
+ *     the timestamp cursor. The gateway's `IS_AFTER` filter is strict —
+ *     stepping by `highWaterMark` silently drops every record that ties on
+ *     the previous page's tail timestamp (the bug that was capping pulls
+ *     at ~2.5k for bulk-imported tables).
+ *   - Accumulate `highWaterMark` in memory; commit it ONCE at the end,
+ *     after `hasMore: false`. If the loop crashes mid-stream the next run
+ *     replays from the old cursor and re-absorbs the pages it already had —
+ *     fine because absorb is idempotent on record id. Writing partial
+ *     cursors would skip the unread tail forever.
  *   - Persist the cursor only after the fold succeeds. If folding throws,
  *     we want to retry the same window, not skip it.
- *   - Page using `highWaterMark`, not `offset`. Restarting from the last
- *     persisted highWaterMark mid-stream is correct; resuming an offset is
- *     fragile.
  *   - One absorber per table — slow tables shouldn't block fast ones.
- *   - The loop is bounded (50 pages = 5000 records max per sync run) so a
- *     server-side bug can't spin us forever.
+ *   - The loop is bounded at MAX_PAGES as a runaway safety net (~20k rows
+ *     at limit=100); hitting it is a bug, not a normal terminator.
  */
 import { gateway } from './gateway';
 import { idb } from './idb';
 import { AMINO_AIRTABLE_BASE_ID } from '../amino-config';
 
-const MAX_PAGES = 50;
+/** Runaway safety net — at limit=100 this caps a single run at ~20k rows. */
+const MAX_PAGES = 200;
+/** Per-page sleep, sized to keep us under Airtable's 5 req/sec per-base ceiling. */
+const PAGE_THROTTLE_MS = 220;
 
 export interface SyncRecord {
   id: string;
@@ -33,6 +47,12 @@ export interface SyncResponse {
   count: number;
   highWaterMark: string | null;
   hasMore: boolean;
+  /**
+   * Airtable's opaque pagination token, forwarded by the gateway. Pass it
+   * back as `offset` on the next call to continue the same query. Null
+   * when the run is exhausted.
+   */
+  offset: string | null;
   table: string;
   /** Field name the gateway used as the canonical event time for this batch. */
   lastModifiedField: string;
@@ -95,8 +115,13 @@ export async function resetCursor(tableId: string): Promise<void> {
 
 /**
  * Pull every record modified since the table's persisted cursor, fold each
- * page into the caller's store, then advance the cursor to the latest
- * `highWaterMark`. Bounded at MAX_PAGES iterations.
+ * page into the caller's store, then advance the cursor — committed once,
+ * after the run drains. Within a run, pagination uses Airtable's opaque
+ * `offset`; `since` stays pinned at the loaded cursor.
+ *
+ * Recovery contract: if the loop crashes the cursor is NOT touched, so the
+ * next run replays from the same `since` and re-absorbs the pages it had.
+ * Absorb must be idempotent on record id for that to be a no-op.
  */
 export async function syncTable(
   tableId: string,
@@ -105,17 +130,22 @@ export async function syncTable(
   const baseId = opts.baseId ?? AMINO_AIRTABLE_BASE_ID;
   const limit = opts.limit ?? 100;
 
-  let since = await getCursor(tableId);
+  // Pin `since` for the whole run. Mutating it per-page would invalidate
+  // Airtable's `offset`, which is bound to the (filter+sort) it was issued
+  // under — see the module docstring for why this matters.
+  const since = await getCursor(tableId);
+
+  let offset: string | null = null;
+  let highWaterMark: string | null = since;
   let recordCount = 0;
   let pages = 0;
-  let lastHighWaterMark: string | null = null;
-  let truncated = false;
 
-  for (let i = 0; i < MAX_PAGES; i++) {
-    const data = await gateway<SyncResponse>({
+  do {
+    const data: SyncResponse = await gateway<SyncResponse>({
       op: 'sync',
       site: { base: baseId, table: tableId },
       ...(since ? { since } : {}),
+      ...(offset ? { offset } : {}),
       limit,
     });
     pages++;
@@ -139,31 +169,33 @@ export async function syncTable(
       recordCount += events.length;
     }
 
-    if (data.highWaterMark) lastHighWaterMark = data.highWaterMark;
+    if (data.highWaterMark && (!highWaterMark || data.highWaterMark > highWaterMark)) {
+      highWaterMark = data.highWaterMark;
+    }
+    offset = data.offset;
 
-    if (!data.hasMore) {
-      if (lastHighWaterMark) {
-        await idb.set(cursorKey(tableId), lastHighWaterMark);
-      }
-      return { recordCount, pages, cursor: lastHighWaterMark, truncated: false };
+    if (pages >= MAX_PAGES) {
+      // Runaway safety net. We don't persist a partial cursor here: a
+      // mid-run cursor write would skip the unread tail forever on the
+      // next run. Surface the condition so the caller can investigate.
+      throw new Error(
+        `[eodb-gateway] syncTable(${tableId}): pagination runaway — stopped after ${pages} pages`,
+      );
     }
 
-    if (!data.highWaterMark) {
-      // Server says hasMore but didn't give us a cursor — break to avoid
-      // an infinite identical query.
-      truncated = true;
-      break;
-    }
+    if (offset) await sleep(PAGE_THROTTLE_MS);
+  } while (offset);
 
-    since = data.highWaterMark;
+  // Drained cleanly. Commit the high-water mark once, atomically — this
+  // is the sole place the cursor advances.
+  if (highWaterMark && highWaterMark !== since) {
+    await idb.set(cursorKey(tableId), highWaterMark);
   }
+  return { recordCount, pages, cursor: highWaterMark, truncated: false };
+}
 
-  // Hit the page cap. Persist what we have so the next run resumes from
-  // here instead of replaying the same prefix.
-  if (lastHighWaterMark) {
-    await idb.set(cursorKey(tableId), lastHighWaterMark);
-  }
-  return { recordCount, pages, cursor: lastHighWaterMark, truncated: truncated || pages >= MAX_PAGES };
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
