@@ -339,22 +339,27 @@ function RecentChangesPanel({ theme }: { theme: Theme }) {
         <div>
           {head && (
             <div style={{ padding: '10px 12px' }}>
-              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
+              <table style={{ width: '100%', tableLayout: 'fixed', borderCollapse: 'collapse', fontSize: 11 }}>
+                <colgroup>
+                  <col style={{ width: '22%' }} />
+                  <col style={{ width: '39%' }} />
+                  <col style={{ width: '39%' }} />
+                </colgroup>
                 <thead>
                   <tr style={{ color: theme.textMuted, textAlign: 'left' }}>
-                    <th style={{ padding: '0 0 4px 0', fontWeight: 500 }}>field</th>
-                    <th style={{ padding: '0 0 4px 0', fontWeight: 500 }}>before</th>
+                    <th style={{ padding: '0 8px 4px 0', fontWeight: 500 }}>field</th>
+                    <th style={{ padding: '0 8px 4px 0', fontWeight: 500 }}>before</th>
                     <th style={{ padding: '0 0 4px 0', fontWeight: 500 }}>after</th>
                   </tr>
                 </thead>
                 <tbody>
                   {head.diffs.map((d, i) => (
                     <tr key={i} style={{ borderTop: `1px solid ${theme.borderLight}` }}>
-                      <td style={{ padding: '4px 8px 4px 0', color: theme.text, fontWeight: 500 }}>{d.field}</td>
-                      <td style={{ padding: '4px 8px 4px 0', color: theme.dangerText, textDecoration: 'line-through' }}>
+                      <td style={{ padding: '4px 8px 4px 0', color: theme.text, fontWeight: 500, verticalAlign: 'top', wordBreak: 'break-word', overflowWrap: 'anywhere' }}>{d.field}</td>
+                      <td style={{ padding: '4px 8px 4px 0', color: theme.dangerText, textDecoration: 'line-through', verticalAlign: 'top', wordBreak: 'break-word', overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' }}>
                         {formatValue(d.before)}
                       </td>
-                      <td style={{ padding: '4px 0', color: theme.successText }}>
+                      <td style={{ padding: '4px 0', color: theme.successText, verticalAlign: 'top', wordBreak: 'break-word', overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' }}>
                         {formatValue(d.after)}
                       </td>
                     </tr>
