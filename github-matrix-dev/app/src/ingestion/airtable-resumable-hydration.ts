@@ -45,17 +45,24 @@ import type {
 } from './airtable-client';
 import { NoLastModifiedFieldError } from './airtable-client';
 import {
+  buildHydrationContext,
   discoverSchema,
+  emitHydrationSchema,
+  ingestRecordPageStreaming,
   processHydrationBundle,
   tableHasLastModifiedField,
+  writeTableHydrationCursor,
   type HydrationManifest,
   type HydrationResult,
+  type HydrationTableContext,
+  type HydrationTableSchema,
   type RawImportBundle,
   type SyncCustomization,
   type SyncProgress,
   type SyncResult,
   type ProvenanceResult,
 } from './airtable-sync';
+import { useEoStore } from '../store/eo-store';
 import {
   HydrationBundleWriter,
   hydrationBundleFilename,
@@ -170,9 +177,9 @@ export async function resumableHydrationSync(
   }
   emitTee(writer, opts);
 
-  // ── Phase A: fetch ──────────────────────────────────────────────────────
+  // ── Phase A: fetch + stream-fold ────────────────────────────────────────
   if (checkpoint.phase === 'fetching' || checkpoint.phase === 'error') {
-    await runFetchPhase(store, client, drive, writer, checkpoint, opts);
+    await runFetchPhase(store, client, agent, drive, writer, checkpoint, opts);
     checkpoint.phase = 'fetched';
     await saveCheckpoint(store, checkpoint);
     opts?.onCheckpoint?.(checkpoint);
@@ -190,6 +197,18 @@ export async function resumableHydrationSync(
     checkpoint.phase = 'complete';
     await saveCheckpoint(store, checkpoint);
     opts?.onCheckpoint?.(checkpoint);
+  }
+
+  // Final durability barrier: drain the persistFn queue and write the
+  // kv-snapshot so a hard reload restores everything we just folded —
+  // both the streamed Phase A pages and any Phase B tables that resumed
+  // from the bundle. Per-table flushes inside Phase A already cover the
+  // common case; this is the catch-all for the last table, schema events,
+  // and any tables Phase B handled.
+  try {
+    await useEoStore.getState().flushToOpfs();
+  } catch (err) {
+    console.warn('[EO-DB] resumable final flushToOpfs failed:', err);
   }
 
   opts?.onProgress?.({
@@ -306,11 +325,23 @@ function emitTee(
   }
 }
 
-// ─── Phase A: fetch ────────────────────────────────────────────────────────
+// ─── Phase A: fetch + stream-fold ─────────────────────────────────────────
+//
+// Per page: fold the records into the EoStore via the streaming helpers in
+// `airtable-sync.ts`, append the page to the NDJSON bundle (writer + Drive),
+// update the checkpoint, then emit progress. Per table: when the last page
+// drains, write the cursor and `flushToOpfs` so a hard reload survives even
+// if mid-table tables haven't finished yet. Phase B (`runFoldPhase`) then
+// becomes a no-op for tables marked `fold:'complete'` here.
+//
+// This is the durability contract: the user's count climbs as records
+// arrive, AND those records are durably in OPFS by the time the table
+// boundary is announced.
 
 async function runFetchPhase(
   store: EoStore,
   client: AirtableClient,
+  agent: string,
   drive: HydrationBundleDrive | null,
   writer: HydrationBundleWriter,
   checkpoint: HydrationCheckpoint,
@@ -318,19 +349,25 @@ async function runFetchPhase(
 ): Promise<void> {
   const recordLimit = opts?.customization?.recordLimit;
   const limit = recordLimit && recordLimit > 0 ? recordLimit : Infinity;
+  const preserveExisting = opts?.customization?.preserveExisting ?? false;
+  const defaultResolution = opts?.customization?.defaultResolution;
+  const fieldExclusions = opts?.customization?.fieldExclusions;
+  const displayFields = opts?.customization?.displayFields;
+  const onEvent = opts?.onEvent as ((e: any) => void) | undefined;
 
   for (let i = 0; i < checkpoint.tables.length; i++) {
     const t = checkpoint.tables[i];
-    if (t.fetch === 'complete') continue;
+    if (t.fetch === 'complete' && t.fold === 'complete') continue;
 
     // A partial table from a prior crash: reset counters; the bundle's
     // table slice will be rewritten because Drive overwrites the whole
-    // file on upload. (Any prior partial pages in the in-memory writer
-    // can't be surgically removed, but because we only upload after full
-    // tables, Drive never saw the partial.)
+    // file on upload. The fold is idempotent on `client_event_id`, so
+    // re-streaming records the previous attempt already folded is safe.
     t.fetch = 'in_progress';
+    t.fold = 'in_progress';
     t.recordsFetched = 0;
     t.pagesFetched = 0;
+    t.recordsFolded = 0;
     await saveCheckpoint(store, checkpoint);
     opts?.onCheckpoint?.(checkpoint);
     opts?.onProgress?.({
@@ -346,6 +383,36 @@ async function runFetchPhase(
       totalTables: checkpoint.tables.length,
     });
 
+    // Locate the schema entry for this table. The manifest captured at
+    // bootstrap is the source of truth; the resumable path persists it on
+    // the checkpoint so we don't have to re-discover on resume.
+    const baseSchema = checkpoint.manifest?.bases.find((b) => b.id === t.baseId);
+    const tableSchema = baseSchema?.tables.find((tb) => tb.id === t.tableId);
+
+    // Emit the per-table schema events ONCE before streaming records.
+    // Idempotent — `at-base:`, `at-table:`, `at-field:*` event ids dedup
+    // across resumes, so re-running on Resume is a no-op for the schema.
+    let ctx: HydrationTableContext | null = null;
+    if (baseSchema && tableSchema) {
+      const tblSchema: HydrationTableSchema = {
+        id: tableSchema.id,
+        name: tableSchema.name,
+        primaryFieldId: tableSchema.primaryFieldId,
+        fieldCount: tableSchema.fieldCount,
+        fields: tableSchema.fields,
+      };
+      await emitHydrationSchema(
+        store,
+        { id: baseSchema.id, name: baseSchema.name },
+        tblSchema,
+        agent,
+        displayFields?.[t.tableId],
+        onEvent,
+      );
+      const exclusions = fieldExclusions?.[t.tableId] ?? undefined;
+      ctx = await buildHydrationContext(store, t.baseId, t.tableId, exclusions);
+    }
+
     let pageIndex = 0;
     let reachedLimit = false;
     let skippedNoLm = false;
@@ -359,6 +426,10 @@ async function runFetchPhase(
           reachedLimit = true;
         }
         if (records.length > 0) {
+          // 1. Append the page to the bundle FIRST so a fold crash mid-page
+          //    doesn't silently lose the fetched records — the bundle still
+          //    has them and Phase B (or a manual re-import of the bundle)
+          //    can replay.
           const line: HydrationBundlePage = {
             type: 'page',
             baseId: t.baseId,
@@ -373,6 +444,24 @@ async function runFetchPhase(
           t.recordsFetched += records.length;
           t.pagesFetched = pageIndex + 1;
           pageIndex++;
+
+          // 2. Fold the page into the EoStore inline. processEvent forwards
+          //    each event to OPFS via the persistFn; the count badge in the
+          //    UI ticks up as soon as `lastSeq` advances. If schema lookup
+          //    failed above we skip the fold gracefully — Phase B will
+          //    catch up from the bundle.
+          if (ctx) {
+            const result = await ingestRecordPageStreaming(
+              store, t.baseId, t.tableId, ctx, records, agent,
+              {
+                preserveExisting,
+                defaultResolution,
+                onEvent,
+                tableName: t.tableName,
+              },
+            );
+            t.recordsFolded += result.ingested;
+          }
         }
         opts?.onProgress?.({
           phase: 'collecting',
@@ -386,6 +475,11 @@ async function runFetchPhase(
           tableIndex: i,
           totalTables: checkpoint.tables.length,
         });
+        // Persist the checkpoint after every page so a tab close mid-table
+        // resumes from the right page count on next launch (records folded
+        // so far are already durable via the per-event persistFn forwarder).
+        await saveCheckpoint(store, checkpoint);
+        opts?.onCheckpoint?.(checkpoint);
         if (reachedLimit) break;
       }
     } catch (e) {
@@ -412,8 +506,10 @@ async function runFetchPhase(
     }
     if (skippedNoLm) {
       t.fetch = 'complete';
+      t.fold = 'complete';
       t.recordsFetched = 0;
       t.pagesFetched = 0;
+      t.recordsFolded = 0;
       await saveCheckpoint(store, checkpoint);
       opts?.onCheckpoint?.(checkpoint);
       continue;
@@ -426,6 +522,38 @@ async function runFetchPhase(
       recordCount: t.recordsFetched,
     });
     t.fetch = 'complete';
+    t.fold = 'complete';
+
+    // Mark the table's hydration cursor so subsequent updateSync calls
+    // pull only post-hydration deltas. Done before flushToOpfs so the
+    // cursor is part of the durability barrier.
+    await writeTableHydrationCursor(store, t.baseId, t.tableId);
+
+    // Per-table durability barrier: drain the persistFn queue and write
+    // the kv-snapshot. After this point a hard reload restores every
+    // record we just streamed for this table.
+    try {
+      await useEoStore.getState().flushToOpfs();
+    } catch (err) {
+      console.warn('[EO-DB] resumable per-table flushToOpfs failed:', err);
+    }
+
+    // Surface a per-table-complete result to the caller (mirrors the shape
+    // of `processHydrationBundle`'s `onTableComplete` so callers can wire
+    // the same UI roll-up regardless of which path produced the table).
+    const tableResult: SyncResult = {
+      base_id: t.baseId,
+      table_id: t.tableId,
+      table_name: t.tableName,
+      records_fetched: t.recordsFetched,
+      records_ingested: t.recordsFolded,
+      records_overwritten: 0,
+      records_skipped_no_change: 0,
+      records_skipped_duplicate: 0,
+      cursor_before: null,
+      cursor_after: new Date().toISOString(),
+    };
+    opts?.onTableComplete?.(tableResult);
 
     // Upload at every table boundary — that's our recovery granularity.
     if (drive) {
@@ -454,14 +582,12 @@ async function runFetchPhase(
         };
       } catch (e) {
         // An upload failure is recoverable: the user can retry, and the
-        // table's data is still in the in-memory writer. We persist the
-        // checkpoint (marking the table fetched) so a page reload still
-        // picks up where we left off — but only after the NEXT successful
-        // upload, since that's the only way Drive knows about the data.
-        // For now, surface the error and bail so the user sees it.
+        // table's data is in the EoStore (folded) AND the in-memory
+        // writer. We persist the checkpoint (marking the table fetched
+        // and folded) so a reload still picks up where we left off, then
+        // surface the error so the user sees it.
         checkpoint.error = `bundle upload failed after table "${t.tableName}": ${(e as Error).message}`;
         checkpoint.phase = 'error';
-        t.fetch = 'in_progress';
         await saveCheckpoint(store, checkpoint);
         opts?.onCheckpoint?.(checkpoint);
         throw e;
@@ -572,5 +698,28 @@ async function runFoldPhase(
     provenance,
   });
 
-  return result;
+  // Phase A streamed many (or all) tables straight into the EoStore — those
+  // tables aren't reflected in `result.sync_results` because Phase B only
+  // processed the pending-bundle subset. Fold the streamed counts back in
+  // so callers see a correct aggregate ("X records ingested via bundle").
+  const streamedTables = checkpoint.tables.filter((t) => !pendingKeys.has(`${t.baseId}:${t.tableId}`));
+  const streamedSyncResults: SyncResult[] = streamedTables.map((t) => ({
+    base_id: t.baseId,
+    table_id: t.tableId,
+    table_name: t.tableName,
+    records_fetched: t.recordsFetched,
+    records_ingested: t.recordsFolded,
+    records_overwritten: 0,
+    records_skipped_no_change: 0,
+    records_skipped_duplicate: 0,
+    cursor_before: null,
+    cursor_after: new Date().toISOString(),
+  }));
+  const streamedIngested = streamedTables.reduce((s, t) => s + t.recordsFolded, 0);
+
+  return {
+    ...result,
+    sync_results: [...streamedSyncResults, ...result.sync_results],
+    total_records_ingested: result.total_records_ingested + streamedIngested,
+  };
 }

@@ -51,6 +51,7 @@ import {
   type HydrationCheckpoint,
 } from '../ingestion/airtable-hydration-checkpoint';
 import { resumableHydrationSync } from '../ingestion/airtable-resumable-hydration';
+import { runAirtableSync, SyncBusyError } from '../ingestion/airtable-sync-runner';
 import { hydrationBundleFilename } from '../ingestion/airtable-hydration-bundle';
 import { isAminoHomeserver } from '../lib/matrix-domain';
 import { useTheme, type Theme } from '../theme';
@@ -602,13 +603,18 @@ export function AirtableSettingsSection({
 
       let result;
       try {
-        result = mode === 'hydrate'
-          ? await hydrationSync(store, client, session.userId, {
-              onProgress,
-              onEvent: progressListener.onEvent,
-              customization,
-            })
-          : await updateSync(store, client, session.userId, {
+        // Gate the actual network + fold work behind the in-process sync
+        // runner so a manual click can't interleave with the continuous
+        // tick or a resumable hydration on this same tab.
+        result = await runAirtableSync(
+          mode === 'hydrate' ? 'manual-hydrate' : 'manual-update',
+          () => mode === 'hydrate'
+            ? hydrationSync(store, client, session.userId, {
+                onProgress,
+                onEvent: progressListener.onEvent,
+                customization,
+              })
+            : updateSync(store, client, session.userId, {
               onProgress,
               onEvent: progressListener.onEvent,
               customization,
@@ -639,7 +645,8 @@ export function AirtableSettingsSection({
                   recordsChanged: 1,
                 });
               },
-            });
+            }),
+        );
       } finally {
         // Flush any pending throttled update so the UI sees the final
         // lastSeq even if the sync ended on an in-flight timer.
@@ -703,13 +710,16 @@ export function AirtableSettingsSection({
         },
       }));
     } catch (e: any) {
+      const busy = e instanceof SyncBusyError;
       const snap = useAirtableStore.getState().currentSync;
       useAirtableStore.getState().addSyncLogEntry({
         ts: Date.now(),
-        type: 'sync_error',
+        type: busy ? 'sync_skipped' : 'sync_error',
         source: 'local',
         syncer: session.userId,
-        detail: e.message || 'Sync failed',
+        detail: busy
+          ? `${modeLabel} deferred — ${e.active} already running`
+          : (e.message || 'Sync failed'),
         strategy,
         preserveExisting,
         baseId: snap?.baseId,
@@ -722,7 +732,12 @@ export function AirtableSettingsSection({
       saveCurrentSync(store, null);
       setSyncStatus((prev) => ({
         ...prev,
-        [statusKey]: { state: 'error', message: e.message || 'Sync failed' },
+        [statusKey]: {
+          state: 'error',
+          message: busy
+            ? 'Another sync is running — wait for it to finish, then try again'
+            : (e.message || 'Sync failed'),
+        },
       }));
     }
   }
@@ -995,49 +1010,51 @@ export function AirtableSettingsSection({
     });
 
     try {
-      const result = await resumableHydrationSync(store, client, session.userId, null, {
-        customization,
-        forceRestart: restart,
-        onCheckpoint: (cp) => {
-          // Fresh object so React's referential equality notices.
-          setHydrationCheckpoint({ ...cp });
-        },
-        onBundleTee: (blob, size) => {
-          bundleBlobRef.current = blob;
-          setBundleBlobSize(size);
-        },
-        onProgress: (p) => {
-          if (p.skipReason === 'no_last_modified_field' && p.table) {
-            useAirtableStore.getState().addSyncLogEntry({
-              ts: Date.now(),
-              type: 'table_skipped',
-              source: 'local',
-              syncer: session.userId,
-              baseId: p.baseId,
-              baseName: p.baseName ?? p.base,
-              tableName: p.table,
-              detail: `${p.table}: no Last Modified Time field — add one in Airtable to enable sync`,
-            });
-            return;
-          }
-          const parts: string[] = [];
-          if (p.checkpointPhase === 'fetching') parts.push('Fetching');
-          else if (p.checkpointPhase === 'uploading') parts.push('Saving to Drive');
-          else if (p.checkpointPhase === 'folding') parts.push('Ingesting');
-          if (p.table) parts.push(p.table);
-          if (p.records_so_far) parts.push(`${p.records_so_far} records`);
-          if (p.totalTables && p.tableIndex != null) {
-            parts.push(`[${p.tableIndex + 1}/${p.totalTables}]`);
-          }
-          setSyncStatus((prev) => ({
-            ...prev,
-            resumableHydrate: {
-              state: 'syncing',
-              message: parts.join(' · ') || 'Working…',
-            },
-          }));
-        },
-      });
+      const result = await runAirtableSync('resumable-hydrate', () =>
+        resumableHydrationSync(store, client, session.userId, null, {
+          customization,
+          forceRestart: restart,
+          onCheckpoint: (cp) => {
+            // Fresh object so React's referential equality notices.
+            setHydrationCheckpoint({ ...cp });
+          },
+          onBundleTee: (blob, size) => {
+            bundleBlobRef.current = blob;
+            setBundleBlobSize(size);
+          },
+          onProgress: (p) => {
+            if (p.skipReason === 'no_last_modified_field' && p.table) {
+              useAirtableStore.getState().addSyncLogEntry({
+                ts: Date.now(),
+                type: 'table_skipped',
+                source: 'local',
+                syncer: session.userId,
+                baseId: p.baseId,
+                baseName: p.baseName ?? p.base,
+                tableName: p.table,
+                detail: `${p.table}: no Last Modified Time field — add one in Airtable to enable sync`,
+              });
+              return;
+            }
+            const parts: string[] = [];
+            if (p.checkpointPhase === 'fetching') parts.push('Fetching');
+            else if (p.checkpointPhase === 'uploading') parts.push('Saving to Drive');
+            else if (p.checkpointPhase === 'folding') parts.push('Ingesting');
+            if (p.table) parts.push(p.table);
+            if (p.records_so_far) parts.push(`${p.records_so_far} records`);
+            if (p.totalTables && p.tableIndex != null) {
+              parts.push(`[${p.tableIndex + 1}/${p.totalTables}]`);
+            }
+            setSyncStatus((prev) => ({
+              ...prev,
+              resumableHydrate: {
+                state: 'syncing',
+                message: parts.join(' · ') || 'Working…',
+              },
+            }));
+          },
+        }),
+      );
 
       const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
       const ingested = result.fold?.total_records_ingested ?? 0;
@@ -1062,20 +1079,25 @@ export function AirtableSettingsSection({
       // record of the last successful run (and can download its bundle).
       setHydrationCheckpoint({ ...result.checkpoint });
     } catch (e: any) {
+      const busy = e instanceof SyncBusyError;
       useAirtableStore.getState().addSyncLogEntry({
         ts: Date.now(),
-        type: 'sync_error',
+        type: busy ? 'sync_skipped' : 'sync_error',
         source: 'local',
         syncer: session.userId,
-        detail: `Resumable hydration failed: ${e.message || e}`,
+        detail: busy
+          ? `Resumable hydration deferred — ${e.active} already running`
+          : `Resumable hydration failed: ${e.message || e}`,
         durationMs: Date.now() - startedAt,
       });
       setSyncStatus((prev) => ({
         ...prev,
         resumableHydrate: {
           state: 'error',
-          message: e.message || 'Resumable hydration failed',
-          detail: 'Checkpoint preserved — click "Resume" to continue.',
+          message: busy
+            ? 'Another sync is running — wait for it to finish, then try again'
+            : (e.message || 'Resumable hydration failed'),
+          detail: busy ? undefined : 'Checkpoint preserved — click "Resume" to continue.',
         },
       }));
       // Refresh checkpoint so the UI reflects whatever progress was saved
@@ -1966,6 +1988,7 @@ function SyncLogRow({ entry, userId }: { entry: SyncLogEntry; userId: string }) 
     snapshot_downloaded:'⬇',
     snapshot_imported:  '⬆',
     table_skipped:      '·',
+    sync_skipped:       '⏭',
   };
 
   const label: Record<SyncLogEntry['type'], string> = {
@@ -1981,6 +2004,7 @@ function SyncLogRow({ entry, userId }: { entry: SyncLogEntry; userId: string }) 
     snapshot_downloaded:'snapshot downloaded',
     snapshot_imported:  'snapshot imported',
     table_skipped:      'table skipped',
+    sync_skipped:       'sync deferred',
   };
 
   const color: Partial<Record<SyncLogEntry['type'], string>> = {

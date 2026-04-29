@@ -45,6 +45,7 @@ import {
   saveContinuousEnabled,
   saveCurrentSync,
 } from './airtable-persistence';
+import { runAirtableSync, SyncBusyError } from './airtable-sync-runner';
 import { airtableSyncEventTypes } from '../lib/matrix-domain';
 import { createImportProgressListener, useEoStore } from '../store/eo-store';
 
@@ -462,6 +463,33 @@ export class AirtableSyncService {
     const isPrimary = await this.claimPrimarySyncer();
     if (!isPrimary) return;
 
+    // Defer if a manual button (handleSync / handleResumableHydrate) is
+    // mid-flight on this same device — the in-process gate is the only
+    // thing protecting us from interleaving two whole hydrations against
+    // the same EoStore. We try-await once instead of rejecting because the
+    // continuous tick is a passive surface; the next interval will retry.
+    try {
+      await runAirtableSync('continuous-tick', () => this.runTickBody(apiKey));
+    } catch (e) {
+      if (e instanceof SyncBusyError) {
+        useAirtableStore.getState().addSyncLogEntry({
+          ts: Date.now(),
+          type: 'sync_skipped',
+          source: 'local',
+          syncer: this.agent,
+          device: this.deviceId,
+          detail: `Deferred — ${e.active} already running`,
+        });
+        return;
+      }
+      throw e;
+    }
+  }
+
+  /** The actual tick body — wrapped by the in-process gate. */
+  private async runTickBody(_apiKey: string): Promise<void> {
+    void _apiKey;
+
     // Seed local cursors from room state BEFORE marking syncing — picks up
     // any advances written by a previous leader on a different device. The
     // max-merge in seedCursorsFromMap guarantees a stale state event can't
@@ -519,7 +547,17 @@ export class AirtableSyncService {
       // strip's "N cycles this session" indicator. Errors below still count
       // — a failed cycle is still a cycle the user wants to see.
       useAirtableStore.getState().incCycle();
-      const isHydrated = headBefore?.hydrated ?? false;
+      // Fresh-device probe: a remote device may have set head.hydrated=true
+      // but THIS device's store can still be empty (just installed, just
+      // signed in on a new browser). If we trust the room flag here we'll
+      // fall through to updateSync, which skips every table that has no
+      // local cursor — and seedCursorsFromMap above would even install
+      // recent cursors that make polling return zero rows. Re-run the
+      // initial hydration whenever the local log is empty, regardless of
+      // what other devices in the room reported.
+      const remotelyHydrated = headBefore?.hydrated ?? false;
+      const localSeq = await this.store.getCurrentSeq();
+      const isHydrated = remotelyHydrated && localSeq > 0;
 
       // Merge sync settings into customization
       const { syncSettings } = useAirtableStore.getState();

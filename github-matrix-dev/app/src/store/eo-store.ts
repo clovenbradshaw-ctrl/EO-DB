@@ -246,11 +246,14 @@ export const useEoStore = create<EoDbState>((set, get) => ({
       }
     }
 
-    // From here on, every log: write also persists to OPFS.
+    // From here on, every log: write also persists to OPFS. Returning the
+    // appendRaw promise lets MemoryStore track the queue so flushToOpfs
+    // can drain pending writes before snapshotting (otherwise a 30k-event
+    // burst can leave the kv-snapshot ahead of the OPFS log).
     memStore.enablePersistence((event) => {
-      appendRaw(workerClient, event).catch((e) =>
-        console.warn('[EO-DB] appendRaw failed:', e),
-      );
+      return appendRaw(workerClient, event).catch((e) => {
+        console.warn('[EO-DB] appendRaw failed:', e);
+      });
     });
 
     const lastSeq = await memStore.getCurrentSeq();
@@ -591,8 +594,15 @@ export const useEoStore = create<EoDbState>((set, get) => ({
   async flushToOpfs() {
     const { store, workerClient, recentEvents } = get();
     if (!store) throw new Error('Store not initialized');
-    const lastSeq = await store.getCurrentSeq();
     const memStore = store as MemoryStore;
+    // Drain any in-flight appendRaw writes BEFORE capturing the kv-snapshot.
+    // Without this barrier, a hydration that just ran 30k processEvent calls
+    // can leave the worker's OPFS log behind the kv map; a hard reload then
+    // restores a snapshot whose log: entries don't actually exist on disk.
+    if (typeof memStore.awaitPersistence === 'function') {
+      await memStore.awaitPersistence();
+    }
+    const lastSeq = await store.getCurrentSeq();
     if (workerClient && typeof memStore.getKvEntries === 'function') {
       await saveKvSnapshot(workerClient, memStore.getKvEntries(), recentEvents, lastSeq);
       saveInitCache(workerClient).catch((e) =>
