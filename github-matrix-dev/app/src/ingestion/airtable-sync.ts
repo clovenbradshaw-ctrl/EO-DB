@@ -597,6 +597,38 @@ function recordEventId(baseId: string, tableId: string, recordId: string, conten
 
 // ─── Ingest a single record ────────────────────────────────────────────────
 
+/**
+ * Exported alias for the record-ingest helper. Used by the resumable
+ * streaming path so it can fold each Airtable page into the EoStore as the
+ * page arrives, instead of buffering the whole table into a bundle first.
+ *
+ * The implementation lives in the `ingestRecord` private below — this is
+ * just a re-export so the call surface from outside this module stays
+ * narrow and explicit.
+ */
+export function ingestAirtableRecord(
+  store: EoStore,
+  baseId: string,
+  tableId: string,
+  record: AirtableRecord,
+  agent: string,
+  fieldMeta: Map<string, FieldMeta>,
+  exclusions: SyncExclusions = EMPTY_EXCLUSIONS,
+  preserveExisting: boolean = false,
+  onEvent?: (event: any) => void,
+  displayField?: string,
+  defaultResolution?: Resolution,
+  onChange?: RecordChangeListener,
+  tableName?: string,
+  nulledFields?: Map<string, Set<string>>,
+): Promise<'ingested' | 'overwritten' | 'skipped_no_change' | 'skipped_duplicate'> {
+  return ingestRecord(
+    store, baseId, tableId, record, agent, fieldMeta, exclusions,
+    preserveExisting, onEvent, displayField, defaultResolution, onChange,
+    tableName, nulledFields,
+  );
+}
+
 async function ingestRecord(
   store: EoStore,
   baseId: string,
@@ -1529,6 +1561,233 @@ export async function collectAirtableBundle(
   }
 
   return bundle;
+}
+
+// ─── Streaming hydration helpers ──────────────────────────────────────────
+//
+// These are the primitives the resumable hydration path uses to fold each
+// Airtable page into the EoStore as it arrives, instead of buffering the
+// whole table into a bundle first. They share their behaviour with the
+// inline implementation inside `processHydrationBundle` below — both paths
+// emit identical events (same `client_event_id` shape), so re-folding a
+// table that streamed mid-run is a no-op when Phase B falls back to the
+// bundle.
+
+/**
+ * Manifest table type with the fields needed to emit a hydration schema.
+ * Mirrors what `discoverSchema` produces on the manifest.
+ */
+export interface HydrationTableSchema {
+  id: string;
+  name: string;
+  primaryFieldId?: string;
+  fieldCount: number;
+  fields: Array<{ id: string; name: string; type: string; options?: Record<string, any> }>;
+}
+
+/**
+ * Idempotently emit base + table + per-field schema events for a hydration
+ * target. Safe to call repeatedly across resumes (every event uses a
+ * content-aware `client_event_id` and the dedup layer treats duplicates as
+ * no-ops).
+ */
+export async function emitHydrationSchema(
+  store: EoStore,
+  base: { id: string; name: string },
+  table: HydrationTableSchema,
+  agent: string,
+  displayFieldOverride: string | undefined,
+  onEvent?: (event: any) => void,
+): Promise<void> {
+  // Base container.
+  try {
+    await processEvent(store, {
+      op: 'DEF',
+      target: baseTarget(base.id),
+      operand: { name: base.name, _airtable: { type: 'base', base_id: base.id } },
+      agent,
+      ts: new Date().toISOString(),
+      acquired_ts: new Date().toISOString(),
+      client_event_id: `at-base:${base.id}`,
+    }, onEvent);
+  } catch { /* idempotent */ }
+
+  // Table container with schema.
+  try {
+    await processEvent(store, {
+      op: 'DEF',
+      target: tableTarget(base.id, table.id),
+      operand: {
+        name: table.name,
+        field_count: table.fieldCount,
+        fields: table.fields,
+        _displayField: displayFieldOverride || table.primaryFieldId || undefined,
+        _airtable: { type: 'table', base_id: base.id, table_id: table.id },
+      },
+      agent,
+      ts: new Date().toISOString(),
+      acquired_ts: new Date().toISOString(),
+      client_event_id: `at-table:${base.id}:${table.id}`,
+    }, onEvent);
+  } catch { /* idempotent */ }
+
+  // Per-field schema entities under _schema container.
+  const schemaTarget = `${tableTarget(base.id, table.id)}._schema`;
+  try {
+    await processEvent(store, {
+      op: 'INS',
+      target: schemaTarget,
+      operand: { _airtable: { type: 'schema', base_id: base.id, table_id: table.id } },
+      agent,
+      ts: new Date().toISOString(),
+      acquired_ts: new Date().toISOString(),
+      client_event_id: `at-ins-schema:${base.id}:${table.id}`,
+    }, onEvent);
+  } catch { /* idempotent */ }
+
+  for (const field of table.fields) {
+    const fieldTarget = `${schemaTarget}.${field.id}`;
+    try {
+      await processEvent(store, {
+        op: 'INS',
+        target: fieldTarget,
+        operand: { _airtable: { type: 'field', field_id: field.id, table_id: table.id } },
+        agent,
+        ts: new Date().toISOString(),
+        acquired_ts: new Date().toISOString(),
+        client_event_id: `at-ins-field:${base.id}:${table.id}:${field.id}`,
+      }, onEvent);
+    } catch { /* idempotent */ }
+    try {
+      await processEvent(store, {
+        op: 'DEF',
+        target: fieldTarget,
+        operand: {
+          name: field.name,
+          type: field.type,
+          _airtable: { field_id: field.id, table_id: table.id, base_id: base.id },
+        },
+        agent,
+        ts: new Date().toISOString(),
+        acquired_ts: new Date().toISOString(),
+        client_event_id: `at-field:${base.id}:${table.id}:${field.id}`,
+      }, onEvent);
+    } catch { /* idempotent */ }
+
+    // Mapped EO-DB column type. multipleRecordLinks also stores the linked
+    // table's EO target so consumers can resolve relationships without
+    // re-querying Airtable.
+    const mapped = mapAirtableTypeOrNull(field.type);
+    const eoType = mapped ?? 'text';
+    const typeOperand: Record<string, unknown> = { type: eoType };
+    if (mapped === null) typeOperand.unknownAirtableType = field.type;
+    if (field.type === 'multipleRecordLinks' && field.options?.linkedTableId) {
+      typeOperand.linkedTable = tableTarget(base.id, field.options.linkedTableId as string);
+    }
+    try {
+      await processEvent(store, {
+        op: 'DEF',
+        target: `${fieldTarget}.type`,
+        operand: typeOperand,
+        agent,
+        ts: new Date().toISOString(),
+        acquired_ts: new Date().toISOString(),
+        client_event_id: `at-field-type:${base.id}:${table.id}:${field.id}`,
+      }, onEvent);
+    } catch { /* idempotent */ }
+
+    await emitFieldConstraints(store, fieldTarget, field, agent, base.id, table.id, onEvent);
+  }
+}
+
+/**
+ * Per-table context the streaming fold loop needs. Build once after the
+ * schema has been emitted; reuse for every page. Mirrors the inline
+ * derivation that `processHydrationBundle` does at lines ~1744-1746.
+ */
+export interface HydrationTableContext {
+  fieldMeta: Map<string, FieldMeta>;
+  displayField: string | undefined;
+  exclusions: SyncExclusions;
+  /** undefined for hydration mode — empty stores have nothing to preserve. */
+  nulledFields: Map<string, Set<string>> | undefined;
+}
+
+export async function buildHydrationContext(
+  store: EoStore,
+  baseId: string,
+  tableId: string,
+  exclusions: SyncExclusions = EMPTY_EXCLUSIONS,
+): Promise<HydrationTableContext> {
+  const fieldMeta = await getTableFieldMeta(store, baseId, tableId);
+  const tableState = await getState(store, tableTarget(baseId, tableId));
+  const displayField: string | undefined = tableState?.value?._displayField;
+  return { fieldMeta, displayField, exclusions, nulledFields: undefined };
+}
+
+/** Counts returned per page so the caller can drive its progress UI. */
+export interface PageFoldResult {
+  ingested: number;
+  overwritten: number;
+  skippedNoChange: number;
+  skippedDuplicate: number;
+}
+
+/**
+ * Fold a single page of Airtable records into the store. The caller is
+ * expected to have already emitted the table's schema (via
+ * `emitHydrationSchema`) and built a context (via `buildHydrationContext`).
+ */
+export async function ingestRecordPageStreaming(
+  store: EoStore,
+  baseId: string,
+  tableId: string,
+  ctx: HydrationTableContext,
+  records: AirtableRecord[],
+  agent: string,
+  opts?: {
+    preserveExisting?: boolean;
+    defaultResolution?: Resolution;
+    onEvent?: (event: any) => void;
+    onChange?: RecordChangeListener;
+    tableName?: string;
+  },
+): Promise<PageFoldResult> {
+  let ingested = 0;
+  let overwritten = 0;
+  let skippedNoChange = 0;
+  let skippedDuplicate = 0;
+  for (const record of records) {
+    const r = await ingestRecord(
+      store, baseId, tableId, record, agent, ctx.fieldMeta,
+      ctx.exclusions, opts?.preserveExisting ?? false,
+      opts?.onEvent, ctx.displayField, opts?.defaultResolution,
+      opts?.onChange, opts?.tableName, ctx.nulledFields,
+    );
+    switch (r) {
+      case 'ingested': ingested++; break;
+      case 'overwritten': ingested++; overwritten++; break;
+      case 'skipped_no_change': skippedNoChange++; break;
+      case 'skipped_duplicate': skippedDuplicate++; break;
+    }
+  }
+  return { ingested, overwritten, skippedNoChange, skippedDuplicate };
+}
+
+/**
+ * Write the per-table cursor that gates incremental polling. Called after
+ * the streaming fold finishes the last page of a table, so subsequent
+ * `updateSync` calls only pull rows modified after this point.
+ */
+export async function writeTableHydrationCursor(
+  store: EoStore,
+  baseId: string,
+  tableId: string,
+  cursor?: string,
+): Promise<string> {
+  const value = cursor ?? new Date().toISOString();
+  await setCursor(store, baseId, tableId, value);
+  return value;
 }
 
 /**

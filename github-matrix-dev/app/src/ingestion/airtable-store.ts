@@ -33,7 +33,9 @@ export type SyncLogEventType =
   /** Snapshot file was uploaded into the local DB via "Import snapshot". */
   | 'snapshot_imported'
   /** A table was skipped because it has no `lastModifiedTime` field. */
-  | 'table_skipped';
+  | 'table_skipped'
+  /** A continuous tick deferred because another sync (manual / resumable) was already running. */
+  | 'sync_skipped';
 
 export interface SyncLogEntry {
   /** Unix ms timestamp. */
