@@ -12,7 +12,7 @@
  * (eo.airtable.head) so only one client calls the Airtable API at a time.
  */
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { pack } from 'msgpackr';
 import type { MatrixClient } from 'matrix-js-sdk';
 import { useEoStore, createImportProgressListener } from '../store/eo-store';
@@ -47,12 +47,21 @@ import {
 import {
   loadCheckpoint as loadHydrationCheckpoint,
   clearCheckpoint as clearHydrationCheckpoint,
+  saveCheckpoint as saveHydrationCheckpoint,
   summarizeCheckpoint,
+  customizationSignature,
   type HydrationCheckpoint,
+  type HydrationTableCheckpoint,
 } from '../ingestion/airtable-hydration-checkpoint';
 import { resumableHydrationSync } from '../ingestion/airtable-resumable-hydration';
 import { runAirtableSync, SyncBusyError } from '../ingestion/airtable-sync-runner';
-import { hydrationBundleFilename } from '../ingestion/airtable-hydration-bundle';
+import {
+  hydrationBundleFilename,
+  HYDRATION_BUNDLE_FORMAT,
+  type HydrationBundleHeader,
+} from '../ingestion/airtable-hydration-bundle';
+import { createHydrationBundleDrive } from '../ingestion/airtable-hydration-bundle-drive';
+import { loadSpaceKeyring } from '../crypto/keyring-store';
 import { isAminoHomeserver } from '../lib/matrix-domain';
 import { useTheme, type Theme } from '../theme';
 
@@ -234,6 +243,23 @@ export function AirtableSettingsSection({
   const [hydrationCheckpoint, setHydrationCheckpoint] = useState<HydrationCheckpoint | null>(null);
   const bundleBlobRef = useRef<Blob | null>(null);
   const [bundleBlobSize, setBundleBlobSize] = useState<number>(0);
+
+  // ── Drive backend for hydration bundles ─────────────────────────────────
+  //
+  // Wires the same `/webhook/eo-store` proxy the EoStore uses into the
+  // resumable-hydration orchestrator. Bundles are encrypted with the space
+  // keyring, chunked at 32 MB plaintext boundaries, and stored as one Drive
+  // file per chunk plus a small encrypted manifest. Without this the
+  // orchestrator's Drive parameter would be `null` and bundles would only
+  // live in the in-memory tee — i.e. lost on reload.
+  const hydrationDrive = useMemo(() => {
+    if (!session.accessToken || !roomId) return null;
+    return createHydrationBundleDrive({
+      matrixToken: session.accessToken,
+      spaceRoomId: roomId,
+      loadKeyring: () => loadSpaceKeyring(roomId),
+    });
+  }, [session.accessToken, roomId]);
 
   // Load any persisted checkpoint on mount so the "Resume" CTA appears
   // immediately after a reload without waiting for the user to click anything.
@@ -969,6 +995,181 @@ export function AirtableSettingsSection({
     }
   }
 
+  // ── Initial hydration alt: import an externally-generated NDJSON bundle ──
+  //
+  // Reads a `.ndjson` hydration bundle (produced by either an offline export
+  // tool or a previous "Hydrate via Drive" run), encrypts + chunks it onto
+  // Drive via the same proxy the EoStore uses, then runs the fold path so
+  // the local store ends up populated. The Drive copy is the durable
+  // bootstrap — a future session can resume from it without re-uploading.
+  //
+  // Why upload before folding: the resumable orchestrator's contract is
+  // "Drive is the source of truth"; storing first means a reload mid-fold
+  // can recover from Drive instead of asking the user for the file again.
+  async function handleImportHydrationBundleFile(file: File): Promise<void> {
+    if (!store) return;
+    if (!hydrationDrive) {
+      setSyncStatus((prev) => ({
+        ...prev,
+        bundleImport: {
+          state: 'error',
+          message: 'Drive backend unavailable — connect a space first.',
+        },
+      }));
+      return;
+    }
+    setSyncStatus((prev) => ({
+      ...prev,
+      bundleImport: { state: 'syncing', message: `Reading ${file.name}…` },
+    }));
+    const startedAt = Date.now();
+    try {
+      const buffer = await file.arrayBuffer();
+      const bytes = new Uint8Array(buffer);
+
+      // Validate the header before doing anything Drive-bound — a malformed
+      // file shouldn't burn upload quota.
+      const newline = bytes.indexOf(0x0a);
+      if (newline < 0) throw new Error('Bundle has no header line');
+      let header: HydrationBundleHeader;
+      try {
+        header = JSON.parse(new TextDecoder().decode(bytes.subarray(0, newline))) as HydrationBundleHeader;
+      } catch (e) {
+        throw new Error(`Bundle header is not JSON: ${(e as Error).message}`);
+      }
+      if (header.format !== HYDRATION_BUNDLE_FORMAT) {
+        throw new Error(`Unexpected bundle format: ${String(header.format)}`);
+      }
+
+      const sizeMB = (bytes.byteLength / (1024 * 1024)).toFixed(1);
+      setSyncStatus((prev) => ({
+        ...prev,
+        bundleImport: { state: 'syncing', message: `Encrypting + uploading ${sizeMB} MB to Drive…` },
+      }));
+
+      const fileName = hydrationBundleFilename(header.importId);
+      const upload = await hydrationDrive.uploadHydrationBundle(bytes, {
+        fileName,
+        importId: header.importId,
+      });
+
+      // Synthesize a checkpoint that puts the orchestrator straight into
+      // Phase B (fold). Every table in the manifest is marked
+      // `fetch:'complete'` since the bundle already contains every page;
+      // `fold:'pending'` so processHydrationBundle actually does the work.
+      const customization = buildCustomization();
+      const tables: HydrationTableCheckpoint[] = [];
+      for (const base of header.manifest.bases) {
+        for (const table of base.tables) {
+          tables.push({
+            baseId: base.id,
+            baseName: base.name,
+            tableId: table.id,
+            tableName: table.name,
+            useFieldIds: table.fields.length > 0,
+            recordsFetched: 0,
+            pagesFetched: 0,
+            fetch: 'complete',
+            recordsFolded: 0,
+            fold: 'pending',
+          });
+        }
+      }
+      const checkpoint: HydrationCheckpoint = {
+        importId: header.importId,
+        startedAt: Date.now(),
+        updatedAt: Date.now(),
+        phase: 'fetched',
+        customizationSig: customizationSignature(customization),
+        manifest: header.manifest,
+        bundle: {
+          fileName,
+          driveFileId: upload.driveFileId,
+          byteSize: upload.byteSize,
+          uploadedAt: new Date().toISOString(),
+        },
+        tables,
+      };
+      await saveHydrationCheckpoint(store, checkpoint);
+      setHydrationCheckpoint({ ...checkpoint });
+
+      useAirtableStore.getState().addSyncLogEntry({
+        ts: Date.now(),
+        type: 'snapshot_imported',
+        source: 'local',
+        syncer: session.userId,
+        detail: `${file.name}: uploaded ${sizeMB} MB to Drive (${tables.length} table(s)) — folding…`,
+        durationMs: Date.now() - startedAt,
+      });
+
+      setSyncStatus((prev) => ({
+        ...prev,
+        bundleImport: {
+          state: 'syncing',
+          message: 'Folding bundle into local store…',
+        },
+      }));
+
+      // Hand off to the standard resumable orchestrator. With phase='fetched'
+      // it skips Phase A entirely, downloads the bundle from Drive, and runs
+      // the fold. The Drive download is redundant for THIS session (we still
+      // have `bytes` in memory), but it exercises the same code path a
+      // resume-after-reload would take, so any breakage shows up here on the
+      // happy path instead of weeks later.
+      const client = createAirtableClient({});
+      const result = await runAirtableSync('resumable-hydrate', () =>
+        resumableHydrationSync(store, client, session.userId, hydrationDrive, {
+          customization,
+          forceRestart: false,
+          onCheckpoint: (cp) => setHydrationCheckpoint({ ...cp }),
+        }),
+      );
+
+      const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
+      const ingested = result.fold?.total_records_ingested ?? 0;
+      try {
+        await useEoStore.getState().manualSnapshot();
+      } catch (e: unknown) {
+        console.warn('[EO-DB] bundle import: local bake failed:', e);
+      }
+      try {
+        getSyncedTableIds(store).then(setSyncedTableIds);
+      } catch { /* advisory */ }
+
+      useAirtableStore.getState().addSyncLogEntry({
+        ts: Date.now(),
+        type: 'hydration_complete',
+        source: 'local',
+        syncer: session.userId,
+        detail: `Bundle import: ${ingested} records via Drive bundle, ${seconds}s`,
+        durationMs: Date.now() - startedAt,
+        recordsScanned: ingested,
+      });
+      setSyncStatus((prev) => ({
+        ...prev,
+        bundleImport: {
+          state: 'done',
+          message: `Imported ${ingested} records from ${file.name}`,
+          detail: `Bundle persisted to Drive as ${fileName}; ${tables.length} table(s) folded.`,
+        },
+      }));
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : String(e);
+      useAirtableStore.getState().addSyncLogEntry({
+        ts: Date.now(),
+        type: 'sync_error',
+        source: 'local',
+        syncer: session.userId,
+        detail: `Bundle import failed: ${message}`,
+        durationMs: Date.now() - startedAt,
+      });
+      setSyncStatus((prev) => ({
+        ...prev,
+        bundleImport: { state: 'error', message },
+      }));
+    }
+  }
+
   // ── Resumable hydration (save-first via Drive, then fold) ──
   //
   // Three-way entry:
@@ -1011,7 +1212,7 @@ export function AirtableSettingsSection({
 
     try {
       const result = await runAirtableSync('resumable-hydrate', () =>
-        resumableHydrationSync(store, client, session.userId, null, {
+        resumableHydrationSync(store, client, session.userId, hydrationDrive, {
           customization,
           forceRestart: restart,
           onCheckpoint: (cp) => {
@@ -1760,6 +1961,52 @@ export function AirtableSettingsSection({
                     })()}
                     {(() => {
                       const status = syncStatus.resumableBundleDownload;
+                      if (!status || status.state === 'idle') return null;
+                      return (
+                        <div style={{
+                          ...s.statusMsg,
+                          color: status.state === 'error' ? theme.dangerText : status.state === 'done' ? theme.successText : theme.textSecondary,
+                        }}>
+                          {status.state === 'syncing' && <span style={s.spinner} />}
+                          {status.message}
+                          {status.detail && <span style={s.statusDetail}> {status.detail}</span>}
+                        </div>
+                      );
+                    })()}
+
+                    {/* Import an existing NDJSON bundle (e.g. produced by an
+                        offline export tool) and persist it to Drive as the
+                        durable bootstrap. */}
+                    <label
+                      style={{
+                        ...s.syncModeBtn,
+                        marginTop: 6,
+                        display: 'inline-block',
+                        textAlign: 'center',
+                        cursor: hydrationDrive ? 'pointer' : 'not-allowed',
+                        opacity: hydrationDrive ? 1 : 0.6,
+                      }}
+                      title={hydrationDrive
+                        ? 'Encrypt + upload a .ndjson bundle to Drive, then fold into the local store.'
+                        : 'Connect a space to enable Drive-backed import.'}
+                    >
+                      {syncStatus.bundleImport?.state === 'syncing'
+                        ? 'Importing…'
+                        : 'Import .ndjson bundle (Drive)'}
+                      <input
+                        type="file"
+                        accept=".ndjson,application/x-ndjson,application/octet-stream"
+                        style={{ display: 'none' }}
+                        disabled={!hydrationDrive || syncStatus.bundleImport?.state === 'syncing'}
+                        onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          if (file) void handleImportHydrationBundleFile(file);
+                          e.target.value = '';
+                        }}
+                      />
+                    </label>
+                    {(() => {
+                      const status = syncStatus.bundleImport;
                       if (!status || status.state === 'idle') return null;
                       return (
                         <div style={{
