@@ -68,6 +68,52 @@ export function eventHash(event: EoEventInput | EoEvent): string {
 }
 
 /**
+ * Canonical content id for a replicated event.
+ *
+ * If the event has no HLC (legacy / local-only path), this delegates to
+ * `eventHash` and returns a byte-identical id — so `client_event_id`-based
+ * idempotency keeps working untouched.
+ *
+ * If the event carries an HLC, the id covers the replication-relevant
+ * payload deterministically across replicas:
+ *   sha256(op | target | deepSerialize(operand) | agent | branch
+ *          | replica_id | hlc.wall_ms | hlc.logical
+ *          | resolves | rule_id)
+ *
+ * Excluded by design (per spec §4.1, adapted for our event shape):
+ *   - `ts` and `acquired_ts`: informational, vary per replica
+ *   - `caused_by`: causal links, not part of identity
+ *   - `seq`, `client_event_id`: derived / local
+ *   - `meta`, `level`, `triggered_by`, `source`, `objectType`,
+ *     `context_envelope`, `nul_state`: bookkeeping that does not change which
+ *     event this is. (Promote into the id later if any of these turn out to
+ *     be identity-bearing for a specific operator.)
+ */
+export function canonicalEventId(event: EoEventInput | EoEvent): string {
+  const hlc = (event as any).hlc as { wall_ms: number; logical: number } | undefined;
+  if (!hlc) {
+    // Legacy path: identical bytes to today's client_event_id.
+    return eventHash(event);
+  }
+  const branch = (event as any).branch ?? 'main';
+  const replica = (event as any).replica_id ?? '';
+  const resolves = (event as any).resolves ?? '';
+  const rule_id = (event as any).rule_id ?? '';
+  const input =
+    event.op + '\0' +
+    event.target + '\0' +
+    deepSerialize(event.operand) + '\0' +
+    event.agent + '\0' +
+    branch + '\0' +
+    replica + '\0' +
+    String(hlc.wall_ms) + '\0' +
+    String(hlc.logical) + '\0' +
+    resolves + '\0' +
+    rule_id;
+  return 'ev:' + createHash('sha256').update(input).digest('hex');
+}
+
+/**
  * Store fingerprint — lightweight digest of the full projected state.
  *
  * Computes a rolling hash over all state keys + transformation hashes.

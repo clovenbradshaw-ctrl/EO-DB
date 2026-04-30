@@ -100,6 +100,22 @@ export type LoggableOperator = 'NUL' | 'INS' | 'SEG' | 'CON' | 'SYN' | 'DEF' | '
 // SIG is submittable but ephemeral — tracked locally, never persisted to the log.
 export type ExternalOperator = 'NUL' | 'SIG' | 'INS' | 'SEG' | 'CON' | 'SYN' | 'DEF' | 'EVA';
 
+// ─── Replication: Hybrid Logical Clock ────────────────────────────────────────
+
+/**
+ * Hybrid Logical Clock — per-replica per-shard logical timestamp.
+ * `wall_ms` is the highest wall-clock time observed (own or received);
+ * `logical` is a counter that breaks ties when wall_ms doesn't advance.
+ *
+ * Total order across replicas: compare wall_ms, then logical, then replica_id.
+ * Causality: an event with HLC H carries `caused_by` for explicit parents;
+ * concurrent events share overlapping HLC windows without an ancestry link.
+ */
+export interface HLC {
+  wall_ms: number;
+  logical: number;
+}
+
 // An event in the log
 export interface EoEvent {
   seq: number;
@@ -118,6 +134,18 @@ export interface EoEvent {
   objectType?: string;            // semantic object class hint (optional)
   context_envelope?: ContextEnvelope; // set during partition operation (F2.1)
   nul_state?: NulState;               // set by system on NUL events (F1.2)
+
+  // ─── Replication fields (all optional; absent on legacy/local-only events) ──
+  /** Stable id of the replica that originated this event. */
+  replica_id?: string;
+  /** Hybrid logical clock at origin. Required for cross-replica causality. */
+  hlc?: HLC;
+  /** Explicit causal parents (event ids / client_event_ids). Order-independent. */
+  caused_by?: string[];
+  /** For EVA events that resolve a DEF: the DEF event's id. */
+  resolves?: string;
+  /** For EVA events that resolve a DEF: the EVA_RULE event's id. */
+  rule_id?: string;
 }
 
 // Projected state at a target
