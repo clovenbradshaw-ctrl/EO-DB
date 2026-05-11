@@ -177,11 +177,23 @@ export function SlicesBrowser({ scope, recordCount, userId, onBack, onSelectSlic
     return !q || 'grid view'.includes(q);
   }, [query]);
 
+  function defaultNameFor(type: SliceType): string {
+    return `New ${SLICE_TYPE_META[type].label} slice`;
+  }
+
   function resetCreateForm() {
     setNewSliceName('');
     setNewSliceType('grid');
     setNewSliceVisibility('shared');
     setNewKanbanField('');
+  }
+
+  function openCreateForm() {
+    setNewSliceName(defaultNameFor('grid'));
+    setNewSliceType('grid');
+    setNewSliceVisibility('shared');
+    setNewKanbanField('');
+    setShowCreate(true);
   }
 
   async function handleCreateSlice() {
@@ -263,6 +275,7 @@ export function SlicesBrowser({ scope, recordCount, userId, onBack, onSelectSlic
 
   function renderSliceRow(slice: SavedSlice, isActive: boolean) {
     const vtMeta = SLICE_TYPE_META[(slice.sliceType || 'grid') as SliceType];
+    const IconCmp = vtMeta.Icon;
     const isPrivate = slice.visibility === 'private';
     return (
       <div
@@ -270,8 +283,8 @@ export function SlicesBrowser({ scope, recordCount, userId, onBack, onSelectSlic
         style={{ ...s.sliceItem, ...(isActive ? s.sliceItemActive : {}) }}
         onClick={() => onSelectSlice(slice)}
       >
-        <span style={{ ...s.sliceIcon, ...(isActive ? { color: theme.accent } : {}) }}>
-          {isPrivate ? '\uD83D\uDD12' : vtMeta.icon}
+        <span style={{ ...s.sliceIcon, ...(isActive ? { color: theme.accent } : {}), display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
+          {isPrivate ? '\uD83D\uDD12' : <IconCmp size={14} weight={isActive ? 'fill' : 'regular'} />}
         </span>
         <span style={s.sliceName}>{slice.name}</span>
         <span style={s.sliceBadge}>
@@ -339,7 +352,7 @@ export function SlicesBrowser({ scope, recordCount, userId, onBack, onSelectSlic
             {!showCreate ? (
               <button
                 style={s.createBtn}
-                onClick={() => setShowCreate(true)}
+                onClick={openCreateForm}
                 title="Create a new slice for this object"
               >
                 + Create a slice
@@ -351,6 +364,13 @@ export function SlicesBrowser({ scope, recordCount, userId, onBack, onSelectSlic
                 </div>
                 <input
                   autoFocus
+                  ref={(el) => {
+                    // Pre-select the default name so typing immediately replaces it.
+                    if (el && el === document.activeElement && el.selectionStart === 0 && el.selectionEnd === 0) {
+                      el.select();
+                    }
+                  }}
+                  onFocus={(e) => e.currentTarget.select()}
                   value={newSliceName}
                   onChange={(e) => setNewSliceName(e.target.value)}
                   onKeyDown={(e) => {
@@ -363,11 +383,20 @@ export function SlicesBrowser({ scope, recordCount, userId, onBack, onSelectSlic
                 <div style={{ display: 'flex', gap: 4, marginTop: 8, flexWrap: 'wrap' as const }}>
                   {(Object.keys(SLICE_TYPE_META) as SliceType[]).map((vt) => {
                     const meta = SLICE_TYPE_META[vt];
+                    const IconCmp = meta.Icon;
                     const active = newSliceType === vt;
                     return (
                       <button
                         key={vt}
-                        onClick={() => setNewSliceType(vt)}
+                        onClick={() => {
+                          // If the user hasn't moved away from the default
+                          // auto-generated name yet, retitle it to match the
+                          // newly-selected slice type.
+                          if (newSliceName === defaultNameFor(newSliceType)) {
+                            setNewSliceName(defaultNameFor(vt));
+                          }
+                          setNewSliceType(vt);
+                        }}
                         style={{
                           display: 'inline-flex', alignItems: 'center', gap: 4,
                           padding: '4px 8px', fontSize: 11, fontWeight: active ? 600 : 400,
@@ -377,7 +406,7 @@ export function SlicesBrowser({ scope, recordCount, userId, onBack, onSelectSlic
                           color: active ? theme.accent : theme.textSecondary,
                         }}
                       >
-                        <span style={{ fontSize: 12 }}>{meta.icon}</span>
+                        <IconCmp size={14} weight={active ? 'fill' : 'regular'} />
                         {meta.label}
                       </button>
                     );

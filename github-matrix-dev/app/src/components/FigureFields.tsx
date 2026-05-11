@@ -372,7 +372,18 @@ export function FigureFields({ figure, onNavigate, profileFields, recordTs, allE
             >
               {editing?.fieldKey === key ? (
                 <form
-                  style={{ width: '100%' }}
+                  style={{
+                    width: '100%',
+                    maxWidth: fts?.type === 'number'
+                      || fts?.type === 'currency'
+                      || fts?.type === 'percent'
+                      || fts?.type === 'rating'
+                      || fts?.type === 'count'
+                      || fts?.type === 'duration'
+                      || fts?.type === 'autoNumber'
+                      ? 200
+                      : undefined,
+                  }}
                   onSubmit={(e) => {
                     e.preventDefault();
                     const input = (e.target as HTMLFormElement).elements.namedItem('fieldVal') as HTMLInputElement;
@@ -1101,6 +1112,20 @@ function renderFieldValue(
         </span>
       );
     }
+  }
+
+  // Numbers and booleans get a max-width so the cell doesn't visually stretch
+  // across a wide value column when shown next to richer fields.
+  if (typeof val === 'number' || typeof val === 'boolean') {
+    return (
+      <span style={{
+        display: 'inline-block',
+        maxWidth: 220,
+        fontVariantNumeric: 'tabular-nums',
+      }}>
+        {String(val)}
+      </span>
+    );
   }
 
   // Default: plain string

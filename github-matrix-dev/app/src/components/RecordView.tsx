@@ -35,6 +35,7 @@ import {
   detailLayoutTarget,
   defaultLayout,
 } from './detail-layout';
+import { useRecordViewPrefs } from '../lib/record-view-prefs';
 
 interface RecordViewProps {
   target: string;
@@ -91,6 +92,8 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
 
   const { theme } = useTheme();
   const s = makeStyles(theme);
+  const [recordViewPrefs, setRecordViewPrefs] = useRecordViewPrefs();
+  const showDiscovery = recordViewPrefs.showDiscovery;
 
   useEffect(() => {
     if (!ready) return; // store is hydrating — keep loading, retry when ready flips true
@@ -391,6 +394,14 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
             >
               {'\u2699'}
             </button>
+            {/* Discovery toggle \u2014 show/hide the bottom insights block */}
+            <button
+              style={{ ...s.gearBtn, opacity: showDiscovery ? 1 : 0.55, fontSize: 13 }}
+              onClick={() => setRecordViewPrefs({ showDiscovery: !showDiscovery })}
+              title={showDiscovery ? 'Hide discovery sections' : 'Show discovery sections'}
+            >
+              {showDiscovery ? '\u25c9' : '\u25cb'}
+            </button>
           </div>
         </div>
       </div>
@@ -479,6 +490,8 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
         </Section>
       )}
 
+      {/* Discovery — opt-in insights block (toggle in header) */}
+      {showDiscovery && <>
       {/* Similar Records — reason-based similarity cards */}
       <LazySection
         title="Similar Records"
@@ -552,6 +565,7 @@ export function RecordView({ target, onNavigate, permissions, profileFields }: R
       >
         {recCycle && <RecCycleMap cycle={recCycle} onNavigate={onNavigate} />}
       </LazySection>
+      </>}
 
       {/* Metadata footer */}
       <div style={s.metaFooter}>
@@ -701,9 +715,6 @@ function LazySection({
   };
 
   const hasContent = children !== undefined && children !== null && children !== false;
-
-  // Hide entirely once loaded and confirmed empty
-  if (loaded && !loading && !error && !hasContent) return null;
 
   return (
     <div style={s.section}>

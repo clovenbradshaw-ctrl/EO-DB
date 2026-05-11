@@ -457,9 +457,12 @@ export function SliceTabs({ openScopes, activeScope, onSelectScope, onCloseScope
                 }}
               >
                 <span style={s.tabIcon}>
-                  {isActive && scSig.activeSliceId === '__schema'
-                    ? SLICE_TYPE_META.schema.icon
-                    : SLICE_TYPE_META.grid.icon}
+                  {(() => {
+                    const IconCmp = (isActive && scSig.activeSliceId === '__schema'
+                      ? SLICE_TYPE_META.schema
+                      : SLICE_TYPE_META.grid).Icon;
+                    return <IconCmp size={12} />;
+                  })()}
                 </span>
                 <span style={s.tabCollectionLabel}>{collectionName}</span>
                 <span style={s.tabSeparator}>/</span>
@@ -503,7 +506,7 @@ export function SliceTabs({ openScopes, activeScope, onSelectScope, onCloseScope
                       />
                     ) : (
                       <>
-                        <span style={s.tabIcon}>{vtMeta.icon}</span>
+                        <span style={s.tabIcon}>{(() => { const IconCmp = vtMeta.Icon; return <IconCmp size={12} />; })()}</span>
                         {slice.visibility === 'private' && <span style={s.tabLockIcon}>{'\uD83D\uDD12'}</span>}
                         <span style={s.tabCollectionLabel}>{collectionName}</span>
                         <span style={s.tabSeparator}>/</span>
@@ -575,6 +578,15 @@ export function SliceTabs({ openScopes, activeScope, onSelectScope, onCloseScope
             </div>
             <input
               autoFocus
+              ref={(el) => {
+                if (el && !newSliceName) {
+                  const def = `New ${SLICE_TYPE_META[newSliceType].label} slice`;
+                  setNewSliceName(def);
+                  // Defer select to next tick so the value is rendered first.
+                  setTimeout(() => el.select(), 0);
+                }
+              }}
+              onFocus={(e) => e.currentTarget.select()}
               value={newSliceName}
               onChange={(e) => setNewSliceName(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') handleSaveNew(); if (e.key === 'Escape') setShowNameInput(false); }}
@@ -602,7 +614,7 @@ export function SliceTabs({ openScopes, activeScope, onSelectScope, onCloseScope
                       color: active ? theme.accent : theme.textSecondary,
                     }}
                   >
-                    <span style={{ fontSize: 12 }}>{meta.icon}</span>
+                    {(() => { const IconCmp = meta.Icon; return <IconCmp size={14} weight={active ? 'fill' : 'regular'} />; })()}
                     {meta.label}
                   </button>
                 );

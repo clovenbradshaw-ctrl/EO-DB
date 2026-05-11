@@ -1,5 +1,15 @@
 import type { SortRule } from './SortPanel';
 import type { FilterRule } from './filter-types';
+import {
+  Table,
+  Graph,
+  Kanban,
+  CalendarBlank,
+  Images,
+  TreeStructure,
+  IdentificationCard,
+  type Icon as PhosphorIcon,
+} from '@phosphor-icons/react';
 
 // ---------------------------------------------------------------------------
 // SliceType — the kind of visualization for a saved slice
@@ -7,14 +17,14 @@ import type { FilterRule } from './filter-types';
 
 export type SliceType = 'grid' | 'graph' | 'kanban' | 'calendar' | 'gallery' | 'schema' | 'record';
 
-export const SLICE_TYPE_META: Record<SliceType, { label: string; icon: string }> = {
-  grid: { label: 'Grid', icon: '\u229E' },
-  graph: { label: 'Graph', icon: '\u2B21' },
-  kanban: { label: 'Kanban', icon: '\u25A5' },
-  calendar: { label: 'Calendar', icon: '\u25F7' },
-  gallery: { label: 'Gallery', icon: '\u25A6' },
-  schema: { label: 'Schema', icon: '\u2261' },
-  record: { label: 'Record', icon: '\u25C9' },
+export const SLICE_TYPE_META: Record<SliceType, { label: string; icon: string; Icon: PhosphorIcon }> = {
+  grid: { label: 'Grid', icon: '\u229E', Icon: Table },
+  graph: { label: 'Graph', icon: '\u2B21', Icon: Graph },
+  kanban: { label: 'Kanban', icon: '\u25A5', Icon: Kanban },
+  calendar: { label: 'Calendar', icon: '\u25F7', Icon: CalendarBlank },
+  gallery: { label: 'Gallery', icon: '\u25A6', Icon: Images },
+  schema: { label: 'Schema', icon: '\u2261', Icon: TreeStructure },
+  record: { label: 'Record', icon: '\u25C9', Icon: IdentificationCard },
 };
 
 // ---------------------------------------------------------------------------
