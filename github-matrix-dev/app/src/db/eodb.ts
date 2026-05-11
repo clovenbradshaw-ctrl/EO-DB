@@ -62,6 +62,15 @@ export interface CollectionHeader {
    * instead of re-scanning the whole base.
    */
   airtable_cursor?: Record<string, Record<string, { lastModified?: string; webhookCursor?: number }>>;
+  /**
+   * Block-chain metadata for `.eodb` payloads sealed as Matrix blocks.
+   * Absent on standalone snapshots / pre-block files; reader treats absence
+   * as "not a block" (index 0 with null prior is genesis).
+   */
+  blockIndex?: number;
+  priorBlockEventId?: string | null;
+  /** Schema version under which the block was sealed (for hydration dispatch). */
+  schemaVersion?: string;
 }
 
 export interface FrameHeader {
