@@ -41,6 +41,7 @@ export async function uploadSeedFile(
   client: MatrixClient,
   roomId: string,
   bytes: Uint8Array,
+  eventCount: number = 0,
 ): Promise<SeedUploadResult> {
   if (bytes.byteLength === 0) {
     throw new Error('Seed file is empty');
@@ -54,7 +55,7 @@ export async function uploadSeedFile(
     roomId,
     myDeviceId,
     bytes,
-    0,
+    eventCount,
     head,
     { schemaVersion: BLOCK_SCHEMA_VERSION },
   );
