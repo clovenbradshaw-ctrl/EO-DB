@@ -151,6 +151,8 @@ export interface EoEvent {
   client_event_id?: string;
   triggered_by?: number;          // for REC/INS2+: seq of the human-initiated event that caused the cycle
   meta?: Record<string, any>;
+  branch?: string;                // branch this event belongs to ('main' if absent)
+  source?: string;                // originating sync method: 'user' | 'airtable' | 'sync' | 'sandbox' | 'revert' | ...
   context_envelope?: ContextEnvelope; // set during partition operation (F2.1)
   /**
    * Depth coordinate in the operator × site × resolution lattice. Defaults to
