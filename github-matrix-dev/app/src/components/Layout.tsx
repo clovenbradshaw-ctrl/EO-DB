@@ -8,7 +8,7 @@ import { createFoldWorkerClient, initFoldWorker, type FoldWorkerClient } from '.
 import { SyncManager } from '../matrix/sync-manager';
 import { PeerSync } from '../matrix/peer-sync';
 import { WebRTCPeer } from '../matrix/webrtc-peer';
-import { hydrateBlocksIfStale } from '../sync/block-hydration';
+import { hydrateBlocksIfStale, listenForChainUpdates, isAutoIngestEnabled } from '../sync/block-hydration';
 import {
   startNetworkSyncSystem,
   isOperatorSyncEnabled,
@@ -1736,6 +1736,24 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             hydrateBlocksIfStale(hydrateClient, spaceRoomId, hydrateStore, {
               bulkApply: (events) => useEoStore.getState().batchImport(events),
             }).catch((e) => console.warn('[EO-DB] block-chain hydration failed:', e));
+
+            // Auto-ingest live updates from other clients (see cold-start
+            // branch below for full context). Same guards: gated by
+            // isAutoIngestEnabled, idempotent via hydrateBlocksIfStale.
+            let ingestInFlight = false;
+            const stopListening = listenForChainUpdates(hydrateClient, spaceRoomId, () => {
+              if (!isAutoIngestEnabled(spaceRoomId)) return;
+              if (ingestInFlight) return;
+              const liveStore = useEoStore.getState().store;
+              if (!liveStore) return;
+              ingestInFlight = true;
+              hydrateBlocksIfStale(hydrateClient, spaceRoomId, liveStore, {
+                bulkApply: (events) => useEoStore.getState().batchImport(events),
+              })
+                .catch((e) => console.warn('[EO-DB] auto-ingest fold failed:', e))
+                .finally(() => { ingestInFlight = false; });
+            });
+            cleanupFns.push(stopListening);
           }
         }
 
@@ -1857,6 +1875,26 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           hydrateBlocksIfStale(hydrateClient, spaceRoomId, hydrateStore, {
             bulkApply: (events) => useEoStore.getState().batchImport(events),
           }).catch((e) => console.warn('[EO-DB] block-chain hydration failed:', e));
+
+          // Auto-ingest: subscribe to live m.eo.head / m.eo.block / disabled
+          // state-event changes and fold the new gap incrementally. Idempotent
+          // (hydrateBlocksIfStale short-circuits when the head matches what's
+          // already folded) and gated by the per-room preference, so the user
+          // can opt out via the Uploaded Blocks UI.
+          let ingestInFlight = false;
+          const stopListening = listenForChainUpdates(hydrateClient, spaceRoomId, () => {
+            if (!isAutoIngestEnabled(spaceRoomId)) return;
+            if (ingestInFlight) return;
+            const liveStore = useEoStore.getState().store;
+            if (!liveStore) return;
+            ingestInFlight = true;
+            hydrateBlocksIfStale(hydrateClient, spaceRoomId, liveStore, {
+              bulkApply: (events) => useEoStore.getState().batchImport(events),
+            })
+              .catch((e) => console.warn('[EO-DB] auto-ingest fold failed:', e))
+              .finally(() => { ingestInFlight = false; });
+          });
+          cleanupFns.push(stopListening);
         }
       }
 

@@ -18,6 +18,7 @@ import {
   EO_EVENT_TYPE,
   EO_BLOCK_TYPE,
   EO_BLOCK_DISABLED_STATE_TYPE,
+  EO_HEAD_STATE_TYPE,
   downloadEncryptedAttachment,
   matrixEventToEo,
 } from '../matrix/event-bridge';
@@ -545,4 +546,95 @@ export async function setBlockDisabled(
     content as any,
     blockEventId,
   );
+}
+
+// ─── Auto-ingest: live listener for chain updates ──────────────────────
+
+const AUTO_INGEST_LS_KEY_PREFIX = 'eo-db-auto-ingest:';
+
+/**
+ * Read the per-room auto-ingest preference. Default true — new blocks
+ * fold automatically as they're sealed by other clients unless the user
+ * has explicitly turned it off in the Uploaded Blocks UI.
+ */
+export function isAutoIngestEnabled(roomId: string): boolean {
+  try {
+    const v = localStorage.getItem(AUTO_INGEST_LS_KEY_PREFIX + roomId);
+    return v !== '0';
+  } catch {
+    return true;
+  }
+}
+
+/** Persist the per-room auto-ingest preference. */
+export function setAutoIngestEnabled(roomId: string, enabled: boolean): void {
+  try {
+    localStorage.setItem(AUTO_INGEST_LS_KEY_PREFIX + roomId, enabled ? '1' : '0');
+  } catch {
+    // localStorage write failures are non-fatal — the preference reverts
+    // to the default (enabled) on the next read.
+  }
+}
+
+/**
+ * Listen for chain advances on the room and fire `onHeadChange` whenever
+ * `m.eo.head` updates or a new `m.eo.block` lands on the timeline. The
+ * caller is responsible for the actual fold (typically
+ * `hydrateBlocksIfStale`) and for honoring `isAutoIngestEnabled`.
+ *
+ * Returns a `cleanup` function — call it on space switch / unmount /
+ * matrix-client disposal to remove the listeners.
+ *
+ * Coalesces back-to-back updates with a small debounce so a burst of
+ * state events (e.g. a sync delivering both m.eo.block + m.eo.head in
+ * the same response) triggers exactly one fold attempt.
+ */
+export function listenForChainUpdates(
+  client: MatrixClient,
+  roomId: string,
+  onHeadChange: () => void,
+  debounceMs: number = 500,
+): () => void {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let disposed = false;
+
+  const schedule = () => {
+    if (disposed) return;
+    if (timer !== null) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      if (disposed) return;
+      try {
+        onHeadChange();
+      } catch (e) {
+        console.warn('[block-hydration] auto-ingest handler threw:', e);
+      }
+    }, debounceMs);
+  };
+
+  const onStateEvent = (event: MatrixEvent) => {
+    if (event.getRoomId() !== roomId) return;
+    const type = event.getType();
+    if (type !== EO_HEAD_STATE_TYPE && type !== EO_BLOCK_DISABLED_STATE_TYPE) return;
+    schedule();
+  };
+
+  const onTimeline = (event: MatrixEvent) => {
+    if (event.getRoomId() !== roomId) return;
+    if (event.getType() !== EO_BLOCK_TYPE) return;
+    schedule();
+  };
+
+  client.on('RoomState.events' as any, onStateEvent);
+  client.on('Room.timeline' as any, onTimeline);
+
+  return () => {
+    disposed = true;
+    if (timer !== null) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    client.off('RoomState.events' as any, onStateEvent);
+    client.off('Room.timeline' as any, onTimeline);
+  };
 }

@@ -19,6 +19,8 @@ import {
   listBlockChain,
   setBlockDisabled,
   hydrateBlocksIfStale,
+  isAutoIngestEnabled,
+  setAutoIngestEnabled,
   type BlockListEntry,
 } from '../sync/block-hydration';
 
@@ -44,6 +46,22 @@ export function BlockListSection({ matrixClient, roomId }: BlockListSectionProps
   const [busyEventId, setBusyEventId] = useState<string | null>(null);
   const [reapplyBusy, setReapplyBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Read the current auto-ingest preference. Default true — new blocks
+  // from other clients fold automatically as they're sealed.
+  const [autoIngest, setAutoIngestState] = useState<boolean>(
+    () => (roomId ? isAutoIngestEnabled(roomId) : true),
+  );
+
+  useEffect(() => {
+    if (roomId) setAutoIngestState(isAutoIngestEnabled(roomId));
+  }, [roomId]);
+
+  function toggleAutoIngest() {
+    if (!roomId) return;
+    const next = !autoIngest;
+    setAutoIngestEnabled(roomId, next);
+    setAutoIngestState(next);
+  }
 
   const refresh = useCallback(async () => {
     if (!matrixClient || !roomId) return;
@@ -125,6 +143,33 @@ export function BlockListSection({ matrixClient, roomId }: BlockListSectionProps
         events; the file stays on the homeserver (encrypted) and can be re-enabled
         at any time. The chain itself is never broken.
       </div>
+
+      {/* Auto-ingest toggle — when enabled, blocks uploaded by any client
+          fold into local state automatically on the next /sync tick. When
+          disabled, new blocks are listed but not folded until the user
+          explicitly clicks "Re-apply chain locally" below. */}
+      <label style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        fontSize: 11,
+        color: theme.text,
+        cursor: roomId ? 'pointer' : 'not-allowed',
+        opacity: roomId ? 1 : 0.6,
+      }}>
+        <input
+          type="checkbox"
+          checked={autoIngest}
+          disabled={!roomId}
+          onChange={toggleAutoIngest}
+        />
+        <span>
+          Auto-ingest new blocks
+          <span style={{ color: theme.textMuted, marginLeft: 8 }}>
+            (fold blocks uploaded by other clients as soon as they land)
+          </span>
+        </span>
+      </label>
 
       {disabled && (
         <span style={{ fontSize: 11, color: theme.textMuted }}>
