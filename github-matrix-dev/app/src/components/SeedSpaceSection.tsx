@@ -36,6 +36,7 @@ export function SeedSpaceSection({
   const { theme } = useTheme();
   const store = useEoStore((s) => s.store);
   const batchImport = useEoStore((s) => s.batchImport);
+  const flushToOpfs = useEoStore((s) => s.flushToOpfs);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [status, setStatus] = useState<Status>({ kind: 'idle' });
 
@@ -78,6 +79,17 @@ export function SeedSpaceSection({
           bulkApply: (events, onBulkProgress) => batchImport(events, onBulkProgress),
         },
       );
+      // Persist the post-import kv state to OPFS so the next page refresh
+      // can restore from the snapshot instead of replaying the entire log.
+      // Without this, a 83k-event seed leaves the OPFS log fully populated
+      // but the kv-snapshot stale, and init has to walk every log entry on
+      // every refresh. Mirrors the post-sync flushToOpfs in the Airtable
+      // hydration path.
+      try {
+        await flushToOpfs();
+      } catch (e) {
+        console.warn('[EO-DB] post-seed flushToOpfs failed:', e);
+      }
       setStatus({
         kind: 'done',
         fileName,
