@@ -298,3 +298,70 @@ export async function sealBlockFromEvents(
     tailCutoffEventId: lastId ?? '',
   };
 }
+
+/**
+ * Seal a precomputed `.eodb` byte payload as a new block. Used by the
+ * seed-uploader fast path to upload the input file verbatim instead of
+ * unpacking it into an event array and re-packing it through
+ * {@link buildBlockBytes}. The caller is responsible for ensuring the
+ * payload is a valid `.eodb` (matching `schemaVersion`) — the block
+ * message's `event_count` is informational only and the readers
+ * (block-hydration) re-derive the event list from the payload itself.
+ *
+ * `first_event_id` / `last_event_id` are null because the events never
+ * passed through the room timeline before being sealed; they live only
+ * inside the encrypted attachment.
+ */
+export async function sealBlockFromPayload(
+  client: MatrixClient,
+  roomId: string,
+  clientId: string,
+  payload: Uint8Array,
+  eventCount: number,
+  head: HeadState,
+  opts: { schemaVersion?: string } = {},
+): Promise<SealResult> {
+  const schemaVersion = opts.schemaVersion ?? BLOCK_SCHEMA_VERSION;
+  const newBlockIndex = head.block_count;
+
+  const attachment = await uploadEncryptedAttachment(
+    client,
+    payload,
+    `block-${newBlockIndex}.eodb`,
+  );
+
+  const myUserId = client.getUserId() ?? '@unknown:unknown';
+  const myDeviceId = client.getDeviceId() ?? clientId;
+
+  const blockBody: BlockMessage = {
+    block_index: newBlockIndex,
+    event_count: eventCount,
+    first_event_id: null,
+    last_event_id: null,
+    prior_block_event_id: head.latest_block_event_id,
+    schema_version: schemaVersion,
+    file: attachment,
+    sealed_by: { user_id: myUserId, device_id: myDeviceId },
+    sealed_at: new Date().toISOString(),
+  };
+
+  const sendResult = await client.sendEvent(roomId, EO_BLOCK_TYPE as any, blockBody as any);
+  const newBlockEventId = sendResult.event_id;
+
+  const newHead: HeadState = {
+    schema_version: schemaVersion,
+    latest_block_event_id: newBlockEventId,
+    genesis_event_id: head.genesis_event_id ?? newBlockEventId,
+    block_count: newBlockIndex + 1,
+    tail_cutoff_event_id: head.tail_cutoff_event_id,
+    updated_at: new Date().toISOString(),
+  };
+  await client.sendStateEvent(roomId, EO_HEAD_STATE_TYPE as any, newHead as any, '');
+
+  return {
+    blockIndex: newBlockIndex,
+    blockEventId: newBlockEventId,
+    eventCount,
+    tailCutoffEventId: '',
+  };
+}
