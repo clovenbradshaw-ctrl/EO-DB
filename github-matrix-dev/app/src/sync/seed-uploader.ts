@@ -22,6 +22,7 @@ import { EodbStreamReader, FRAME_TYPES, isEodbV2 } from '../db/eodb';
 import {
   readHeadState,
   sealBlockFromEvents,
+  sealBlockFromPayload,
   BLOCK_SCHEMA_VERSION,
   type HeadState,
   type SealResult,
@@ -143,6 +144,13 @@ export type SeedFormat = 'eodb' | 'ndjson';
 export interface ParsedSeed {
   format: SeedFormat;
   events: EoEventInput[];
+  /**
+   * Original input bytes when the seed is an `.eodb`. Kept so the
+   * hot-start path can upload the file directly as the genesis block
+   * payload instead of re-packing the parsed events. Undefined for
+   * NDJSON seeds (no native `.eodb` framing on disk).
+   */
+  rawBytes?: Uint8Array;
 }
 
 function decodeText(bytes: Uint8Array): string {
@@ -172,7 +180,7 @@ export async function parseSeedFile(bytes: Uint8Array, fileName?: string): Promi
       }
       frame = await reader.readNextFrame();
     }
-    return { format: 'eodb', events: events as EoEventInput[] };
+    return { format: 'eodb', events: events as EoEventInput[], rawBytes: bytes };
   }
 
   // Fallback: NDJSON (one event per line).
@@ -302,6 +310,70 @@ export async function seedSpaceFromFile(
     if (!head.latest_block_event_id && currentSeq === 0) {
       const myUserId = client.getUserId?.() ?? '@seed:local';
       const myDeviceId = client.getDeviceId?.() ?? 'seed';
+      const schemaVersion = opts.schemaVersion ?? BLOCK_SCHEMA_VERSION;
+
+      // Raw-bytes fast path: when the seed is an `.eodb` already on disk,
+      // upload the input bytes verbatim as the genesis block payload.
+      // Skips msgpack-packing the events list back into our block format
+      // (which for 80k+ events stalls the main thread for tens of
+      // seconds before any network activity).
+      //
+      // Block readers (block-hydration.readBlockEvents) parse the .eodb
+      // via EodbStreamReader, which only consumes LOG_SEGMENT frames and
+      // ignores header drift — the input file's header doesn't have to
+      // match our chain position because chain walking uses the
+      // `m.eo.block` room event's `prior_block_event_id`, not the
+      // payload header. Events have their own timestamps and content
+      // hashes, so source provenance is preserved through the upload.
+      if (seed.rawBytes && seed.rawBytes.byteLength > 0) {
+        const result = await withRetry(
+          () => sealBlockFromPayload(
+            client,
+            roomId,
+            myDeviceId,
+            seed.rawBytes!,
+            total,
+            head,
+            { schemaVersion },
+          ),
+          SEAL_RETRY_ATTEMPTS,
+          `seal genesis from raw .eodb (${seed.rawBytes.byteLength} bytes, ${total} events)`,
+        );
+
+        // Half of the progress bar for the upload (one tick — the upload
+        // is a single network round-trip); the local fold drives the
+        // remaining half.
+        const sealReportBudget = opts.bulkApply ? Math.floor(total / 2) : 0;
+        if (sealReportBudget > 0) opts.onProgress?.(sealReportBudget, total);
+
+        const eventsWithAgent = events.map(e =>
+          e.agent ? e : { ...e, agent: opts.defaultAgent ?? myUserId }
+        );
+
+        if (opts.bulkApply) {
+          await opts.bulkApply(eventsWithAgent, (current, _bulkTotal) => {
+            const scaled = Math.floor((current / eventsWithAgent.length) * (total - sealReportBudget));
+            opts.onProgress?.(sealReportBudget + scaled, total);
+          });
+          opts.onProgress?.(total, total);
+        } else {
+          for (let i = 0; i < eventsWithAgent.length; i++) {
+            await processEvent(store, eventsWithAgent[i]);
+            opts.onProgress?.(i + 1, total);
+          }
+        }
+
+        return {
+          total,
+          added: total,
+          skipped: 0,
+          hotStartGenesis: {
+            blockEventId: result.blockEventId,
+            blockIndex: result.blockIndex,
+          },
+        };
+      }
+
       const eventsWithAgent = events.map(e =>
         e.agent ? e : { ...e, agent: opts.defaultAgent ?? myUserId }
       );
@@ -324,7 +396,6 @@ export async function seedSpaceFromFile(
       // rows packed into >50 MiB, the default `max_upload_size`, and
       // the homeserver returned `[500] Internal server error` from
       // `/_matrix/media/v3/upload` instead of a clean 413.
-      const schemaVersion = opts.schemaVersion ?? BLOCK_SCHEMA_VERSION;
       const maxUploadBytes = await getMaxUploadBytes(client);
       let chunkSize = pickInitialChunkSize(eventsWithAgent, maxUploadBytes);
 
