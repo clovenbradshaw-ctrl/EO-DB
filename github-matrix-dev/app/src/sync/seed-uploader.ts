@@ -146,6 +146,18 @@ export interface SeedApplyOptions {
   defaultAgent?: string;
   /** Schema-version stamp for hot-start genesis blocks. */
   schemaVersion?: string;
+  /**
+   * Optional bulk-apply hook. When provided, novel events are folded via
+   * this callback in a single batch instead of through the per-event
+   * `processEvent` loop. Wire this to `useEoStore.getState().batchImport`
+   * in the app so large seeds (80k+ events) go through the chunked,
+   * throttled, worker-pooled import path that yields to the browser
+   * between chunks. Without it, applying a 500MB seed hangs the tab.
+   */
+  bulkApply?: (
+    events: EoEventInput[],
+    onProgress?: (current: number, total: number) => void,
+  ) => Promise<unknown>;
 }
 
 /**
@@ -194,10 +206,16 @@ export async function seedSpaceFromFile(
         { schemaVersion: opts.schemaVersion ?? BLOCK_SCHEMA_VERSION },
       );
 
-      // Apply locally too so the running session reflects the seed.
-      for (let i = 0; i < eventsWithAgent.length; i++) {
-        await processEvent(store, eventsWithAgent[i]);
-        opts.onProgress?.(i + 1, total);
+      // Apply locally too so the running session reflects the seed. Prefer
+      // the bulk-apply hook (chunked, worker-pooled, yields between chunks)
+      // when wired; otherwise fall back to the per-event loop used by tests.
+      if (opts.bulkApply) {
+        await opts.bulkApply(eventsWithAgent, opts.onProgress);
+      } else {
+        for (let i = 0; i < eventsWithAgent.length; i++) {
+          await processEvent(store, eventsWithAgent[i]);
+          opts.onProgress?.(i + 1, total);
+        }
       }
 
       return {
@@ -213,6 +231,40 @@ export async function seedSpaceFromFile(
   }
 
   // Diff path: O(events) check against `idem:` keys.
+  if (opts.bulkApply) {
+    // Pre-filter in a yield-aware pass so 80k-event seeds don't block the
+    // main thread. The filter is read-only against the store, so we can
+    // safely yield every YIELD_EVERY events; React paints + input runs.
+    const YIELD_EVERY = 1000;
+    const novel: EoEventInput[] = [];
+    let skippedCount = 0;
+    for (let i = 0; i < events.length; i++) {
+      const ev = events[i];
+      const id = ev.client_event_id!;
+      if (await isAlreadyApplied(store, id)) {
+        skippedCount++;
+      } else {
+        novel.push(ev);
+      }
+      // Halve the progress bar for the filter pass so the user sees motion
+      // during the pre-scan; bulkApply reports the second half.
+      if ((i + 1) % YIELD_EVERY === 0 || i === events.length - 1) {
+        opts.onProgress?.(Math.floor((i + 1) / 2), total);
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      }
+    }
+
+    if (novel.length > 0) {
+      const filterHalf = Math.floor(total / 2);
+      await opts.bulkApply(novel, (current, _bulkTotal) => {
+        const scaled = Math.floor((current / novel.length) * (total - filterHalf));
+        opts.onProgress?.(filterHalf + scaled, total);
+      });
+    }
+    opts.onProgress?.(total, total);
+    return { total, added: novel.length, skipped: skippedCount };
+  }
+
   let added = 0;
   let skipped = 0;
   for (let i = 0; i < events.length; i++) {
