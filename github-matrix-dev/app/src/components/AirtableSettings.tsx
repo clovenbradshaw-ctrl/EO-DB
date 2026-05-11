@@ -516,8 +516,8 @@ export function AirtableSettingsSection({
 
     const statusKey = mode;
     const modeLabel = mode === 'hydrate' ? 'Full Sync' : 'Update Sync';
-    const strategy: 'hydration' | 'lastModified' | 'fullDiff' =
-      mode === 'hydrate' ? 'hydration' : (syncSettings.syncStrategy as 'lastModified' | 'fullDiff');
+    const strategy: 'hydration' | 'lastModified' =
+      mode === 'hydrate' ? 'hydration' : 'lastModified';
     const tickStart = Date.now();
     setSyncStatus((prev) => ({ ...prev, [statusKey]: { state: 'syncing', message: `Starting ${modeLabel}...` } }));
 
@@ -2122,29 +2122,10 @@ export function AirtableSettingsSection({
                     </div>
                   </div>
 
-                  {/* Sync strategy */}
-                  <div style={s.settingRow}>
-                    <label style={s.settingLabel}>Check against</label>
-                    <div style={s.settingInputRow}>
-                      <select
-                        value={syncSettings.syncStrategy}
-                        onChange={(e) => {
-                          const val = e.target.value as 'lastModified' | 'fullDiff';
-                          useAirtableStore.getState().setSyncSettings({ syncStrategy: val });
-                          syncServiceRef.current?.saveSyncSettings({ syncStrategy: val });
-                        }}
-                        style={s.settingSelect}
-                      >
-                        <option value="lastModified">Webhook payloads (incremental)</option>
-                        <option value="fullDiff">Full field diff (thorough)</option>
-                      </select>
-                      <span style={s.settingHint}>
-                        {syncSettings.syncStrategy === 'lastModified'
-                          ? 'Drains Airtable\'s webhooks-payloads API — the authoritative change feed. Registers one webhook per base on first use and advances an integer cursor on every poll. Falls back to a LAST_MODIFIED_TIME filter if the token lacks webhooks:manage.'
-                          : 'Re-fetches all records and compares field-by-field against EO-DB state. Catches changes that timestamps might miss, but heavier on API quota.'}
-                      </span>
-                    </div>
-                  </div>
+                  {/* Strategy is auto-decided per tick: if any selected
+                      (base, table) is missing a cursor, the next sync is a
+                      full hydration; otherwise it's an incremental update.
+                      No user-facing setting — cursor presence is the truth. */}
 
                   {/* Last sync info */}
                   {lastSyncAt && (
@@ -2462,7 +2443,6 @@ function LiveSyncCard({
   const strategyLabel =
     snap.strategy === 'hydration'    ? 'Full hydration (no cursor)'
     : snap.strategy === 'lastModified' ? 'Incremental (LAST_MODIFIED_TIME)'
-    : snap.strategy === 'fullDiff'     ? 'Full field diff'
     : snap.strategy;
 
   return (

@@ -242,9 +242,6 @@ export interface CurrentSyncSnapshot {
 export interface AirtableSyncSettings {
   /** Seconds between automatic sync polls. Min 15, max 600, default 30. */
   syncIntervalSec: number;
-  /** What triggers a sync check: 'lastModified' uses Airtable's LAST_MODIFIED_TIME,
-   *  'fullDiff' re-fetches all and diffs locally (more thorough but heavier). */
-  syncStrategy: 'lastModified' | 'fullDiff';
   /** Whether to preserve existing EO-DB values (never overwrite). */
   preserveExisting: boolean;
   /** Maximum records per table per sync (0 = no limit). */
@@ -253,7 +250,6 @@ export interface AirtableSyncSettings {
 
 export const DEFAULT_SYNC_SETTINGS: AirtableSyncSettings = {
   syncIntervalSec: 30,
-  syncStrategy: 'lastModified',
   preserveExisting: false,
   recordLimit: 0,
 };

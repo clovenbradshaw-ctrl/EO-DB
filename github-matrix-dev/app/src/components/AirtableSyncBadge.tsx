@@ -165,7 +165,6 @@ function AirtableBadgeDetails({ lastSyncAt }: { lastSyncAt: string | null }) {
   } else {
     rows.push(['Status', 'Idle']);
     if (lastSyncAt) rows.push(['Last sync', new Date(lastSyncAt).toLocaleString()]);
-    rows.push(['Strategy setting', describeStrategy(syncSettings.syncStrategy)]);
     rows.push(['Mode setting', syncSettings.preserveExisting ? 'Preserve existing' : 'May overwrite']);
     rows.push(['Poll interval', `${syncSettings.syncIntervalSec}s`]);
   }
@@ -203,7 +202,6 @@ function describeStrategy(s?: string): string {
   switch (s) {
     case 'hydration':    return 'Full hydration (no cursor)';
     case 'lastModified': return 'Incremental (LAST_MODIFIED_TIME)';
-    case 'fullDiff':     return 'Full field diff';
     default:             return s ?? 'unknown';
   }
 }

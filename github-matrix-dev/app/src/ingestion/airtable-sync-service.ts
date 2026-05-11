@@ -27,6 +27,7 @@ import {
   hydrationSync,
   seedCursorsFromMap,
   updateSync,
+  getSyncedTableIds,
   type SyncCustomization,
   type SyncProgress,
   type HydrationResult,
@@ -265,9 +266,6 @@ export class AirtableSyncService {
         const partial: Partial<AirtableSyncSettings> = {};
         if (typeof content.syncIntervalSec === 'number') {
           partial.syncIntervalSec = Math.max(MIN_SYNC_INTERVAL_SEC, Math.min(MAX_SYNC_INTERVAL_SEC, content.syncIntervalSec));
-        }
-        if (content.syncStrategy === 'lastModified' || content.syncStrategy === 'fullDiff') {
-          partial.syncStrategy = content.syncStrategy;
         }
         if (typeof content.preserveExisting === 'boolean') {
           partial.preserveExisting = content.preserveExisting;
@@ -547,17 +545,16 @@ export class AirtableSyncService {
       // strip's "N cycles this session" indicator. Errors below still count
       // — a failed cycle is still a cycle the user wants to see.
       useAirtableStore.getState().incCycle();
-      // Fresh-device probe: a remote device may have set head.hydrated=true
-      // but THIS device's store can still be empty (just installed, just
-      // signed in on a new browser). If we trust the room flag here we'll
-      // fall through to updateSync, which skips every table that has no
-      // local cursor — and seedCursorsFromMap above would even install
-      // recent cursors that make polling return zero rows. Re-run the
-      // initial hydration whenever the local log is empty, regardless of
-      // what other devices in the room reported.
-      const remotelyHydrated = headBefore?.hydrated ?? false;
-      const localSeq = await this.store.getCurrentSeq();
-      const isHydrated = remotelyHydrated && localSeq > 0;
+      // Auto-decide hydration vs cursor sync from per-table cursor presence.
+      // A cursor only exists if a previous hydrationSync wrote one, so its
+      // absence is the ground-truth signal that this device needs to hydrate.
+      // This survives a fresh device install (no cursors locally), a leader
+      // handoff (seedCursorsFromMap above just imported any room-state
+      // cursors), and never trusts head.hydrated — which could lie if the
+      // remote flag was set by another room member whose data we don't have.
+      const syncedTableIds = await getSyncedTableIds(this.store);
+      const needsHydration = !Object.values(syncedTableIds).some((tables) => tables.length > 0);
+      void headBefore;
 
       // Merge sync settings into customization
       const { syncSettings } = useAirtableStore.getState();
@@ -567,10 +564,8 @@ export class AirtableSyncService {
         recordLimit: syncSettings.recordLimit > 0 ? syncSettings.recordLimit : undefined,
       };
 
-      const plannedStrategy: 'hydration' | 'lastModified' | 'fullDiff' =
-        !isHydrated ? 'hydration'
-        : syncSettings.syncStrategy === 'fullDiff' ? 'fullDiff'
-        : 'lastModified';
+      const plannedStrategy: 'hydration' | 'lastModified' =
+        needsHydration ? 'hydration' : 'lastModified';
 
       // Initial snapshot — the UI flips from "idle — next in Ns" to "preparing"
       // the moment the tick claims the lock, so the user sees something even
@@ -594,8 +589,6 @@ export class AirtableSyncService {
         device: this.deviceId,
         detail: plannedStrategy === 'hydration'
           ? 'Continuous tick — initial hydration'
-          : plannedStrategy === 'fullDiff'
-          ? 'Continuous tick — full field diff'
           : 'Continuous tick — LAST_MODIFIED_TIME',
         strategy: plannedStrategy,
         preserveExisting: !!effectiveCustomization.preserveExisting,
@@ -607,7 +600,6 @@ export class AirtableSyncService {
       const onProgress = (p: SyncProgress) => this.applyProgress(p);
 
       let result: HydrationResult | UpdateSyncResult;
-      let ranHydration = false;
 
       // Bridge per-event fold output into Zustand so subscribers like
       // TableView (which re-fetches on `lastSeq` change) refresh as the
@@ -615,7 +607,7 @@ export class AirtableSyncService {
       // the MemoryStore + OPFS log but the UI never repaints until reload.
       const progressListener = createImportProgressListener();
       try {
-        if (!isHydrated) {
+        if (needsHydration) {
           // TODO: reinstate snapshot bootstrap via n8n blob store so fresh
           // devices can skip a 20k+ record Airtable scan.
           result = await hydrationSync(this.store, client, this.agent, {
@@ -623,54 +615,41 @@ export class AirtableSyncService {
             onEvent: progressListener.onEvent,
             onProgress,
           });
-          ranHydration = true;
         } else {
-          // 'fullDiff' strategy: pass null cursor by re-hydrating with
-          // preserveExisting=false, so every field is compared.
-          // 'lastModified' strategy (default): incremental via LAST_MODIFIED_TIME cursor.
-          if (syncSettings.syncStrategy === 'fullDiff') {
-            result = await hydrationSync(this.store, client, this.agent, {
-              customization: { ...effectiveCustomization, preserveExisting: false },
-              onEvent: progressListener.onEvent,
-              onProgress,
-            });
-            ranHydration = true;
-          } else {
-            result = await updateSync(this.store, client, this.agent, {
-              customization: effectiveCustomization,
-              onEvent: progressListener.onEvent,
-              onProgress,
-              onCursorAdvance: (baseId, tableId, cursor) =>
-                this.writeCursorToRoom(baseId, tableId, cursor),
-              // Surface per-record diffs to the "Recent changes" UI panel.
-              // ingestRecord only fires this for actual mutations (not
-              // skip-no-change), so the buffer reflects real edits.
-              onChange: (report) => {
-                useAirtableStore.getState().addRecentChange({
-                  ts: Date.now(),
-                  baseId: report.baseId,
-                  tableId: report.tableId,
-                  tableName: report.tableName ?? report.tableId,
-                  recordId: report.recordId,
-                  recordLabel: report.recordLabel,
-                  diffs: report.diffs,
-                });
-                useAirtableStore.getState().addSyncLogEntry({
-                  ts: Date.now(),
-                  type: 'change_detected',
-                  source: 'local',
-                  syncer: this.agent,
-                  device: this.deviceId,
-                  detail: `${report.diffs.length} field${report.diffs.length === 1 ? '' : 's'}: ${report.diffs.map((d) => d.field).join(', ')}`,
-                  baseId: report.baseId,
-                  tableName: report.tableName,
-                  recordId: report.recordId,
-                  diffs: report.diffs,
-                  recordsChanged: 1,
-                });
-              },
-            });
-          }
+          result = await updateSync(this.store, client, this.agent, {
+            customization: effectiveCustomization,
+            onEvent: progressListener.onEvent,
+            onProgress,
+            onCursorAdvance: (baseId, tableId, cursor) =>
+              this.writeCursorToRoom(baseId, tableId, cursor),
+            // Surface per-record diffs to the "Recent changes" UI panel.
+            // ingestRecord only fires this for actual mutations (not
+            // skip-no-change), so the buffer reflects real edits.
+            onChange: (report) => {
+              useAirtableStore.getState().addRecentChange({
+                ts: Date.now(),
+                baseId: report.baseId,
+                tableId: report.tableId,
+                tableName: report.tableName ?? report.tableId,
+                recordId: report.recordId,
+                recordLabel: report.recordLabel,
+                diffs: report.diffs,
+              });
+              useAirtableStore.getState().addSyncLogEntry({
+                ts: Date.now(),
+                type: 'change_detected',
+                source: 'local',
+                syncer: this.agent,
+                device: this.deviceId,
+                detail: `${report.diffs.length} field${report.diffs.length === 1 ? '' : 's'}: ${report.diffs.map((d) => d.field).join(', ')}`,
+                baseId: report.baseId,
+                tableName: report.tableName,
+                recordId: report.recordId,
+                diffs: report.diffs,
+                recordsChanged: 1,
+              });
+            },
+          });
         }
       } finally {
         // Flush any pending throttled Zustand update so the UI sees the
@@ -688,7 +667,7 @@ export class AirtableSyncService {
         }
       }
 
-      await this.signalCompletion(result, !isHydrated, plannedStrategy);
+      await this.signalCompletion(result, needsHydration, plannedStrategy);
     } catch (e: any) {
       console.error('[EO-DB] Airtable sync failed:', e);
       const snap = useAirtableStore.getState().currentSync;
@@ -840,7 +819,7 @@ export class AirtableSyncService {
   private async signalCompletion(
     result: HydrationResult | UpdateSyncResult,
     wasHydration: boolean,
-    strategy: 'hydration' | 'lastModified' | 'fullDiff',
+    strategy: 'hydration' | 'lastModified',
   ): Promise<void> {
     const now = new Date().toISOString();
     const snap = useAirtableStore.getState().currentSync;
