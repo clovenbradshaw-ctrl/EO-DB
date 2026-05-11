@@ -8,6 +8,7 @@ import { createFoldWorkerClient, initFoldWorker, type FoldWorkerClient } from '.
 import { SyncManager } from '../matrix/sync-manager';
 import { PeerSync } from '../matrix/peer-sync';
 import { WebRTCPeer } from '../matrix/webrtc-peer';
+import { hydrateBlocksIfStale } from '../sync/block-hydration';
 import {
   startNetworkSyncSystem,
   isOperatorSyncEnabled,
@@ -1720,6 +1721,24 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           existing.spaceRooms = resolvedSpaceRooms;
         }
 
+        // SEG: check if the block chain has advanced past what we've
+        // folded locally. Idempotent — chain hasn't moved → no-op,
+        // costing one m.eo.head state lookup. Chain has moved → fetch
+        // only the new blocks (stopAt the persisted hydrated head) and
+        // fold them through batchImport so the main thread stays
+        // responsive. Fire-and-forget so the UI doesn't wait on network
+        // round-trips; the fold engine dedups by client_event_id so
+        // concurrent live events + hydration converge.
+        if (MATRIX_ENABLED && spaceRoomId && matrixClientRef.current) {
+          const hydrateClient = matrixClientRef.current;
+          const hydrateStore = useEoStore.getState().store;
+          if (hydrateStore) {
+            hydrateBlocksIfStale(hydrateClient, spaceRoomId, hydrateStore, {
+              bulkApply: (events) => useEoStore.getState().batchImport(events),
+            }).catch((e) => console.warn('[EO-DB] block-chain hydration failed:', e));
+          }
+        }
+
         // Restore cached sync manager (legacy path — null in new spaces)
         if (existing.syncManager) {
           useEoStore.getState().setSyncManager(existing.syncManager);
@@ -1824,6 +1843,22 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       // ready=true is already set above — UI is unblocked before this await.
       const spaceRoomId = await resolveRoom();
       if (isStale()) return;
+
+      // SEG: same boundary check as the cache-hit branch above. On cold
+      // start the snapshot is empty (or was just loaded from OPFS), and
+      // m.eo.head may point at a chain head that doesn't yet have its
+      // blocks folded into the local store. Fire-and-forget — the fold
+      // engine dedups concurrent live events + hydration via
+      // client_event_id, so no risk of double application.
+      if (MATRIX_ENABLED && spaceRoomId && matrixClientRef.current) {
+        const hydrateClient = matrixClientRef.current;
+        const hydrateStore = useEoStore.getState().store;
+        if (hydrateStore) {
+          hydrateBlocksIfStale(hydrateClient, spaceRoomId, hydrateStore, {
+            bulkApply: (events) => useEoStore.getState().batchImport(events),
+          }).catch((e) => console.warn('[EO-DB] block-chain hydration failed:', e));
+        }
+      }
 
       // If Matrix is ready but we couldn't get a room, surface the error.
       // Only show this when matrixReady=true — if Matrix hasn't connected yet,

@@ -98,5 +98,27 @@ describe('block-hydration', () => {
       ]);
       await expect(walkBlockChain(client, '!room', '$b')).rejects.toThrow(/cycle/i);
     });
+
+    it('stops at stopAtBlockEventId (incremental hydration)', async () => {
+      // Genesis ← block1 ← block2 ← block3 (latest); stop at $b1 (exclusive).
+      // Expected return: blocks newer than $b1, i.e. [$b2, $b3] in chrono order.
+      const client = makeMockClient([
+        { id: '$genesis', prior: null, index: 0 },
+        { id: '$b1', prior: '$genesis', index: 1 },
+        { id: '$b2', prior: '$b1', index: 2 },
+        { id: '$b3', prior: '$b2', index: 3 },
+      ]);
+      const chain = await walkBlockChain(client, '!room', '$b3', '$b1');
+      expect(chain.map((c) => c.eventId)).toEqual(['$b2', '$b3']);
+    });
+
+    it('returns empty when latest equals stopAtBlockEventId (nothing new)', async () => {
+      const client = makeMockClient([
+        { id: '$genesis', prior: null, index: 0 },
+        { id: '$b1', prior: '$genesis', index: 1 },
+      ]);
+      const chain = await walkBlockChain(client, '!room', '$b1', '$b1');
+      expect(chain).toEqual([]);
+    });
   });
 });

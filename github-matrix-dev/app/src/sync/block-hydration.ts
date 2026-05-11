@@ -66,17 +66,24 @@ async function fetchBlockMessage(
 /**
  * Walk the chain backwards from the latest block. Returns the chain in
  * chronological order (genesis first, head last).
+ *
+ * If `stopAtBlockEventId` is set, the walk halts as soon as it reaches
+ * that event (exclusive — the stop block is treated as already-known and
+ * not included in the returned chain). Used by incremental hydration to
+ * fetch only the blocks added since the last successful hydrate.
  */
 export async function walkBlockChain(
   client: MatrixClient,
   roomId: string,
   latestBlockEventId: string,
+  stopAtBlockEventId: string | null = null,
 ): Promise<Array<{ eventId: string; content: BlockMessage }>> {
   const chain: Array<{ eventId: string; content: BlockMessage }> = [];
   let cursor: string | null = latestBlockEventId;
   const seen = new Set<string>();
 
   while (cursor) {
+    if (cursor === stopAtBlockEventId) break;
     if (seen.has(cursor)) {
       throw new Error(`Block chain cycle detected at ${cursor}`);
     }
@@ -124,19 +131,30 @@ export async function readBlockEvents(payload: Uint8Array): Promise<EoEvent[]> {
 
 /**
  * Apply a block's events to the store. Currently every schema version
- * dispatches to the same `processEvent` — the switch is here so future
+ * dispatches to the same fold path — the switch is here so future
  * schema bumps (e.g. operand-shape changes) can branch without touching
  * the surrounding hydration code.
+ *
+ * When `bulkApply` is supplied, events go through it in one call
+ * (chunked, worker-pooled, yield-aware — see `useEoStore.batchImport`).
+ * Without it we fall back to the per-event `processEvent` loop, which
+ * holds the main thread for large blocks but matches what older callers
+ * (and the test harness) expect.
  */
 async function applyBlockEvents(
   store: EoStore,
   events: EoEventInput[],
   schemaVersion: string,
   onEvent?: (ev: EoEvent) => void,
+  bulkApply?: (events: EoEventInput[]) => Promise<unknown>,
 ): Promise<void> {
   switch (schemaVersion) {
     case 'eo-2026-04':
     default:
+      if (bulkApply && events.length > 0) {
+        await bulkApply(events);
+        return;
+      }
       for (const ev of events) {
         await processEvent(store, ev, onEvent);
       }
@@ -190,6 +208,25 @@ export interface HydrationResult {
   blockCount: number;
   blockEventCount: number;
   tailEventCount: number;
+  /** The chain head this hydrate covered, or null if the chain is empty. */
+  latestBlockEventId: string | null;
+}
+
+export interface HydrationOptions {
+  /**
+   * Halt the chain walk when this block event id is reached. Used by
+   * incremental hydration to skip blocks already folded on a prior run.
+   */
+  stopAtBlockEventId?: string | null;
+  /**
+   * Optional bulk-apply hook for the fold phase. When provided, block
+   * events go through it in one call per block — wire to
+   * `useEoStore.getState().batchImport` so the chunked, worker-pooled,
+   * yield-aware fold path is used. Without it, hydration falls back to
+   * a per-event `processEvent` loop that pins the main thread on large
+   * blocks (~ tens of seconds for an 80k-event chain).
+   */
+  bulkApply?: (events: EoEventInput[]) => Promise<unknown>;
 }
 
 /**
@@ -205,6 +242,7 @@ export async function hydrateFromBlocks(
   store: EoStore,
   onEvent?: (ev: EoEvent) => void,
   onProgress?: (p: HydrationProgress) => void,
+  opts: HydrationOptions = {},
 ): Promise<HydrationResult> {
   onProgress?.({ phase: 'head' });
   const head = readHeadState(client, roomId);
@@ -214,12 +252,23 @@ export async function hydrateFromBlocks(
     onProgress?.({ phase: 'tail' });
     const tailApplied = await applyTail(client, roomId, null, store, onEvent);
     onProgress?.({ phase: 'done', tailEventCount: tailApplied });
-    return { blockCount: 0, blockEventCount: 0, tailEventCount: tailApplied };
+    return {
+      blockCount: 0,
+      blockEventCount: 0,
+      tailEventCount: tailApplied,
+      latestBlockEventId: null,
+    };
   }
 
-  // Phase 2: walk the chain.
+  // Phase 2: walk the chain (short-circuited by stopAtBlockEventId for
+  // incremental hydration).
   onProgress?.({ phase: 'chain' });
-  const chain = await walkBlockChain(client, roomId, head.latest_block_event_id);
+  const chain = await walkBlockChain(
+    client,
+    roomId,
+    head.latest_block_event_id,
+    opts.stopAtBlockEventId ?? null,
+  );
 
   // Phase 3: parallel download + decrypt + parse.
   onProgress?.({ phase: 'download', blockCount: chain.length });
@@ -235,7 +284,13 @@ export async function hydrateFromBlocks(
   let totalBlockEvents = 0;
   onProgress?.({ phase: 'apply', blockCount: chain.length });
   for (const block of decoded) {
-    await applyBlockEvents(store, block.events as EoEventInput[], block.schemaVersion, onEvent);
+    await applyBlockEvents(
+      store,
+      block.events as EoEventInput[],
+      block.schemaVersion,
+      onEvent,
+      opts.bulkApply,
+    );
     totalBlockEvents += block.events.length;
   }
 
@@ -249,5 +304,113 @@ export async function hydrateFromBlocks(
     eventCount: totalBlockEvents,
     tailEventCount: tailApplied,
   });
-  return { blockCount: chain.length, blockEventCount: totalBlockEvents, tailEventCount: tailApplied };
+  return {
+    blockCount: chain.length,
+    blockEventCount: totalBlockEvents,
+    tailEventCount: tailApplied,
+    latestBlockEventId: head.latest_block_event_id,
+  };
+}
+
+// ─── Incremental, idempotent hydration entry point ─────────────────────
+
+const HYDRATED_HEAD_LS_KEY_PREFIX = 'eo-db-hydrated-head:';
+
+function readPersistedHydratedHead(roomId: string): string | null {
+  try {
+    return localStorage.getItem(HYDRATED_HEAD_LS_KEY_PREFIX + roomId);
+  } catch {
+    return null;
+  }
+}
+
+function writePersistedHydratedHead(roomId: string, blockEventId: string | null): void {
+  try {
+    if (blockEventId) {
+      localStorage.setItem(HYDRATED_HEAD_LS_KEY_PREFIX + roomId, blockEventId);
+    } else {
+      localStorage.removeItem(HYDRATED_HEAD_LS_KEY_PREFIX + roomId);
+    }
+  } catch {
+    // localStorage write failures are non-fatal — worst case we re-hydrate
+    // unnecessarily on the next load (fold engine dedups by client_event_id).
+  }
+}
+
+/**
+ * Run block-chain hydration only when the chain has advanced beyond
+ * what's already been folded locally.
+ *
+ * Reads `m.eo.head.latest_block_event_id` and compares against a
+ * locally-persisted "last successfully hydrated head" (in
+ * `localStorage`, keyed per room). If they match, hydration is a no-op.
+ * Otherwise, it runs {@link hydrateFromBlocks} stopping at the
+ * already-hydrated boundary so only the new blocks are downloaded and
+ * folded. The fold engine dedups by `client_event_id`, so the
+ * worst-case "stale localStorage but stale store" pair re-folds events
+ * idempotently — never duplicates.
+ *
+ * Designed to be cheap on the refresh path: when the chain hasn't
+ * moved, returns without touching the network.
+ *
+ * Returns `null` when nothing was done; otherwise the hydration result.
+ */
+export async function hydrateBlocksIfStale(
+  client: MatrixClient,
+  roomId: string,
+  store: EoStore,
+  opts: HydrationOptions & {
+    onEvent?: (ev: EoEvent) => void;
+    onProgress?: (p: HydrationProgress) => void;
+    /**
+     * Force a full re-walk back to genesis even when the persisted head
+     * matches. Used after a "wipe + restore from chain" admin action.
+     */
+    force?: boolean;
+  } = {},
+): Promise<HydrationResult | null> {
+  const head = readHeadState(client, roomId);
+  const persistedHead = readPersistedHydratedHead(roomId);
+
+  if (!head.latest_block_event_id) {
+    // Empty chain — clear stale persisted head if any, then still let
+    // hydrateFromBlocks walk the tail.
+    if (persistedHead) writePersistedHydratedHead(roomId, null);
+    const result = await hydrateFromBlocks(
+      client,
+      roomId,
+      store,
+      opts.onEvent,
+      opts.onProgress,
+      { bulkApply: opts.bulkApply },
+    );
+    return result;
+  }
+
+  // Chain hasn't moved since the last successful hydrate — skip.
+  if (!opts.force && persistedHead === head.latest_block_event_id) {
+    return null;
+  }
+
+  const result = await hydrateFromBlocks(
+    client,
+    roomId,
+    store,
+    opts.onEvent,
+    opts.onProgress,
+    {
+      bulkApply: opts.bulkApply,
+      // When force is set we re-walk to genesis. Otherwise stop where
+      // we left off — the fold engine still dedups inside that range
+      // via client_event_id, so a missed gap (e.g. localStorage cleared
+      // mid-hydrate last time) is recovered by walking further back.
+      stopAtBlockEventId: opts.force ? null : persistedHead,
+    },
+  );
+
+  // Persist the new head only on success. Failure leaves the
+  // localStorage value untouched so the next load re-attempts the same
+  // gap rather than skipping it.
+  writePersistedHydratedHead(roomId, result.latestBlockEventId);
+  return result;
 }
