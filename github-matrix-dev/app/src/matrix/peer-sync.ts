@@ -87,18 +87,34 @@ export class PeerSync {
    */
   onPermissionsUpdated?: () => void;
 
+  /**
+   * Optional bulk-apply hook for incoming peer event batches. When wired
+   * (typically `useEoStore.getState().batchImport`) the chunked,
+   * worker-pooled fold path absorbs the batch in one call. Without it,
+   * `processIncomingPeerEvents` falls back to a per-event loop that
+   * yields between chunks so a 50-event batch can't pin the main thread.
+   */
+  private bulkApply?: (events: EoEventInput[]) => Promise<unknown>;
+
   constructor(
     client: MatrixClient,
     roomId: string,
     store: EoStore,
     onEvent?: (event: any) => void,
     keyring?: LocalKeyring,
+    bulkApply?: (events: EoEventInput[]) => Promise<unknown>,
   ) {
     this.client = client;
     this.roomId = roomId;
     this.store = store;
     this.onEvent = onEvent;
     this.keyring = keyring || { keys: new Map() };
+    this.bulkApply = bulkApply;
+  }
+
+  /** Allow swapping the bulk-apply hook after construction. */
+  setBulkApply(bulkApply: (events: EoEventInput[]) => Promise<unknown>): void {
+    this.bulkApply = bulkApply;
   }
 
   /** Allow updating keyring after construction. */
@@ -423,8 +439,18 @@ export class PeerSync {
       events = content.events;
     }
 
-    for (const event of events) {
-      await processEvent(this.store, event, this.onEvent);
+    if (events.length === 0) return;
+    if (this.bulkApply) {
+      await this.bulkApply(events);
+      return;
+    }
+    // Fallback: yield every 50 events so a batch can't pin the main thread.
+    // BATCH_SIZE is 50 already so this is once per typical batch boundary.
+    for (let i = 0; i < events.length; i++) {
+      await processEvent(this.store, events[i], this.onEvent);
+      if ((i + 1) % 50 === 0) {
+        await new Promise<void>((r) => setTimeout(r, 0));
+      }
     }
   }
 

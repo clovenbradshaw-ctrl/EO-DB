@@ -1797,7 +1797,14 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           try {
             const wrtc = new WebRTCPeer(matrixClientRef.current, spaceRoomId, useEoStore.getState().store!, onFoldEvent);
             wrtc.start();
-            const ps = new PeerSync(matrixClientRef.current, spaceRoomId, useEoStore.getState().store!, onFoldEvent);
+            const ps = new PeerSync(
+              matrixClientRef.current,
+              spaceRoomId,
+              useEoStore.getState().store!,
+              onFoldEvent,
+              undefined,
+              (events) => useEoStore.getState().batchImport(events),
+            );
             ps.setWebRTCPeer(wrtc);
             await ps.start();
             if (!isStale()) {
@@ -1987,7 +1994,14 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             });
             console.log('[EO-DB] Operator-native sync active for', spaceRoomId);
           } else {
-            peerSync = new PeerSync(matrixClientRef.current, spaceRoomId, useEoStore.getState().store!, onFoldEvent);
+            peerSync = new PeerSync(
+              matrixClientRef.current,
+              spaceRoomId,
+              useEoStore.getState().store!,
+              onFoldEvent,
+              undefined,
+              (events) => useEoStore.getState().batchImport(events),
+            );
             peerSync.setWebRTCPeer(webrtcPeer);
             await peerSync.start();
             if (isStale()) { peerSync.stop(); webrtcPeer.stop(); return; }

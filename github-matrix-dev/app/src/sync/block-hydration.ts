@@ -137,12 +137,44 @@ export async function readBlockEvents(payload: Uint8Array): Promise<EoEvent[]> {
  * dispatches to the same fold path — the switch is here so future
  * schema bumps (e.g. operand-shape changes) can branch without touching
  * the surrounding hydration code.
+/**
+ * Chunk size for the yielding-fallback loop. Sized so each chunk takes a
+ * few ms at worst-case event cost; between chunks we yield to the macro-
+ * task queue so user input + render don't starve. Used when no
+ * `bulkApply` hook is wired (tests, brand-new caller).
+ */
+const FOLD_YIELD_CHUNK = 250;
+
+/**
+ * Fold `events` through `processEvent` while yielding to the event loop
+ * every `FOLD_YIELD_CHUNK` events. Only called when `bulkApply` is not
+ * available — the wired UI path goes through `useEoStore.batchImport`
+ * which is worker-pooled and inherently chunked. This fallback is here
+ * so tests and ad-hoc callers don't pin the main thread on large inputs.
+ */
+async function foldWithYield(
+  store: EoStore,
+  events: EoEventInput[],
+  onEvent?: (ev: EoEvent) => void,
+): Promise<void> {
+  for (let i = 0; i < events.length; i++) {
+    await processEvent(store, events[i], onEvent);
+    if ((i + 1) % FOLD_YIELD_CHUNK === 0) {
+      await new Promise<void>((r) => setTimeout(r, 0));
+    }
+  }
+}
+
+/**
+ * Apply a block's events to the store. Currently every schema version
+ * dispatches to the same fold path — the switch is here so future schema
+ * bumps (e.g. operand-shape changes) can branch without touching the
+ * surrounding hydration code.
  *
  * When `bulkApply` is supplied, events go through it in one call
  * (chunked, worker-pooled, yield-aware — see `useEoStore.batchImport`).
- * Without it we fall back to the per-event `processEvent` loop, which
- * holds the main thread for large blocks but matches what older callers
- * (and the test harness) expect.
+ * Without it we fall back to {@link foldWithYield}, which yields between
+ * chunks so the main thread stays responsive even on the fallback path.
  */
 async function applyBlockEvents(
   store: EoStore,
@@ -154,13 +186,12 @@ async function applyBlockEvents(
   switch (schemaVersion) {
     case 'eo-2026-04':
     default:
-      if (bulkApply && events.length > 0) {
+      if (events.length === 0) return;
+      if (bulkApply) {
         await bulkApply(events);
         return;
       }
-      for (const ev of events) {
-        await processEvent(store, ev, onEvent);
-      }
+      await foldWithYield(store, events, onEvent);
       return;
   }
 }
@@ -171,6 +202,11 @@ async function applyBlockEvents(
  * Walk the room timeline forward from `cutoffEventId` and fold every EO
  * event found. If `cutoffEventId` is null, the entire timeline is folded
  * (room has no sealed blocks yet).
+ *
+ * When `bulkApply` is supplied, the tail events are bundled and handed
+ * to the chunked, worker-pooled fold path in a single call — same hook
+ * used by {@link applyBlockEvents}. Without it the fallback yields
+ * between chunks so a long tail doesn't pin the main thread.
  */
 async function applyTail(
   client: MatrixClient,
@@ -178,13 +214,14 @@ async function applyTail(
   cutoffEventId: string | null,
   store: EoStore,
   onEvent?: (ev: EoEvent) => void,
+  bulkApply?: (events: EoEventInput[]) => Promise<unknown>,
 ): Promise<number> {
   const room = client.getRoom(roomId);
   if (!room) return 0;
 
   const timeline = room.getLiveTimeline().getEvents();
+  const tail: EoEventInput[] = [];
   let passedCutoff = cutoffEventId === null;
-  let applied = 0;
 
   for (const ev of timeline) {
     if (!passedCutoff) {
@@ -192,10 +229,16 @@ async function applyTail(
       continue;
     }
     if (ev.getType() !== EO_EVENT_TYPE) continue;
-    await processEvent(store, matrixEventToEo(ev), onEvent);
-    applied++;
+    tail.push(matrixEventToEo(ev));
   }
-  return applied;
+  if (tail.length === 0) return 0;
+
+  if (bulkApply) {
+    await bulkApply(tail);
+  } else {
+    await foldWithYield(store, tail, onEvent);
+  }
+  return tail.length;
 }
 
 // ─── Top-level entry point ─────────────────────────────────────────────
@@ -286,7 +329,7 @@ export async function hydrateFromBlocks(
   if (!head.latest_block_event_id) {
     // Brand-new room: nothing sealed yet. Fold the entire timeline.
     onProgress?.({ phase: 'tail' });
-    const tailApplied = await applyTail(client, roomId, null, store, onEvent);
+    const tailApplied = await applyTail(client, roomId, null, store, onEvent, opts.bulkApply);
     onProgress?.({ phase: 'done', tailEventCount: tailApplied });
     return {
       blockCount: 0,
@@ -341,7 +384,7 @@ export async function hydrateFromBlocks(
 
   // Phase 5: walk the tail forward from the cutoff.
   onProgress?.({ phase: 'tail' });
-  const tailApplied = await applyTail(client, roomId, head.tail_cutoff_event_id, store, onEvent);
+  const tailApplied = await applyTail(client, roomId, head.tail_cutoff_event_id, store, onEvent, opts.bulkApply);
 
   onProgress?.({
     phase: 'done',
