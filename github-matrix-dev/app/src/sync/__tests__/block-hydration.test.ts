@@ -7,10 +7,28 @@
  * a chain in chronological order via prior_block_event_id.
  */
 
-import { describe, it, expect } from 'vitest';
-import { readBlockEvents, walkBlockChain } from '../block-hydration';
+import { describe, it, expect, beforeEach } from 'vitest';
+import {
+  readBlockEvents,
+  walkBlockChain,
+  clearAllHydratedHeadMarkers,
+  getPersistedHydratedHead,
+  setPersistedHydratedHead,
+} from '../block-hydration';
 import { buildBlockBytes, BLOCK_SCHEMA_VERSION } from '../block-sealer';
 import type { EoEventInput } from '../../db/types';
+
+function makeLocalStorage(): Storage {
+  const map = new Map<string, string>();
+  return {
+    getItem: (k: string) => map.get(k) ?? null,
+    setItem: (k: string, v: string) => { map.set(k, v); },
+    removeItem: (k: string) => { map.delete(k); },
+    clear: () => map.clear(),
+    get length() { return map.size; },
+    key: (i: number) => Array.from(map.keys())[i] ?? null,
+  } as Storage;
+}
 
 function makeEvent(i: number): EoEventInput {
   return {
@@ -119,6 +137,53 @@ describe('block-hydration', () => {
       ]);
       const chain = await walkBlockChain(client, '!room', '$b1', '$b1');
       expect(chain).toEqual([]);
+    });
+  });
+
+  // V5 / V9 — hydration cursor lifecycle. The cursor was historically only
+  // in localStorage; on logout the same keys are scrubbed so a new account
+  // doesn't inherit a "we already hydrated up to X" marker. The same
+  // helpers are also called by the boot path to reconcile the snapshot's
+  // `hydratedHead` against localStorage.
+  describe('hydration cursor helpers', () => {
+    beforeEach(() => {
+      (globalThis as { localStorage?: Storage }).localStorage = makeLocalStorage();
+    });
+
+    it('round-trips a single room cursor through get/set', () => {
+      setPersistedHydratedHead('!a:t', '$blockA');
+      expect(getPersistedHydratedHead('!a:t')).toBe('$blockA');
+    });
+
+    it('returns null when the cursor has not been set', () => {
+      expect(getPersistedHydratedHead('!nope:t')).toBeNull();
+    });
+
+    it('setPersistedHydratedHead(null) clears the cursor', () => {
+      setPersistedHydratedHead('!a:t', '$blockA');
+      setPersistedHydratedHead('!a:t', null);
+      expect(getPersistedHydratedHead('!a:t')).toBeNull();
+    });
+
+    it('clearAllHydratedHeadMarkers wipes every per-room cursor', () => {
+      setPersistedHydratedHead('!a:t', '$blockA');
+      setPersistedHydratedHead('!b:t', '$blockB');
+      setPersistedHydratedHead('!c:t', '$blockC');
+      // Set an unrelated localStorage key — must NOT be removed.
+      localStorage.setItem('unrelated', 'keep me');
+
+      clearAllHydratedHeadMarkers();
+
+      expect(getPersistedHydratedHead('!a:t')).toBeNull();
+      expect(getPersistedHydratedHead('!b:t')).toBeNull();
+      expect(getPersistedHydratedHead('!c:t')).toBeNull();
+      expect(localStorage.getItem('unrelated')).toBe('keep me');
+    });
+
+    it('clearAllHydratedHeadMarkers is a no-op when there are no cursors', () => {
+      localStorage.setItem('something-else', 'x');
+      clearAllHydratedHeadMarkers();
+      expect(localStorage.getItem('something-else')).toBe('x');
     });
   });
 });

@@ -5,10 +5,18 @@ import { persistSpaceMeta, listSpaceMeta, clearAllSpaceMetas, saveSpaceMeta, rem
 import { clearSpaceLocalData } from '../db/clear-space-data';
 import { Modal } from './Modal';
 import { createFoldWorkerClient, initFoldWorker, type FoldWorkerClient } from '../db/lazy-fold';
-import { SyncManager } from '../matrix/sync-manager';
+import { SyncManager, eraseOfflineQueueDb } from '../matrix/sync-manager';
 import { PeerSync } from '../matrix/peer-sync';
 import { WebRTCPeer } from '../matrix/webrtc-peer';
-import { hydrateBlocksIfStale, listenForChainUpdates, isAutoIngestEnabled } from '../sync/block-hydration';
+import {
+  hydrateBlocksIfStale,
+  listenForChainUpdates,
+  isAutoIngestEnabled,
+  clearAllHydratedHeadMarkers,
+  getPersistedHydratedHead,
+  setPersistedHydratedHead,
+} from '../sync/block-hydration';
+import type { BlockDriveMirrorDeps } from '../sync/block-drive-mirror';
 import {
   startNetworkSyncSystem,
   isOperatorSyncEnabled,
@@ -183,6 +191,25 @@ function spaceAliasLocal(spaceName: string): string {
 function spaceAliasFull(spaceName: string, userId: string): string {
   const server = userId.split(':').slice(1).join(':');
   return `#${spaceAliasLocal(spaceName)}:${server}`;
+}
+
+/**
+ * Build the deps `hydrateBlocksIfStale` needs to use the Drive mirror as a
+ * read fallback. Returns null when the Matrix client has no access token
+ * yet (pre-login race) — callers then hydrate from mxc:// only, which is
+ * the same behavior as before mirroring existed.
+ */
+function buildBlockMirror(
+  client: ReturnType<typeof createMatrixClient>,
+  spaceRoomId: string,
+): BlockDriveMirrorDeps | null {
+  const token = client.getAccessToken?.();
+  if (!token) return null;
+  return {
+    matrixToken: token,
+    spaceRoomId,
+    loadKeyring: () => loadSpaceKeyring(spaceRoomId),
+  };
 }
 
 /**
@@ -717,9 +744,17 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           : matrixReady
             ? 'online'
             : 'syncing';
+  // V4: surface block-chain hydration state to the user. The chain SEG
+  // fires fire-and-forget after init, so the UI is interactive but reads
+  // may lag the homeserver's head until it completes. The status badge
+  // already supports a `syncing` state; piggyback on its message slot
+  // when the higher-priority error/detail/initial-sync messages aren't
+  // claiming it.
+  const hydratingChain = useEoStore((s) => s.hydratingChain);
   const connectionMessage = connectionError?.message
     ?? connectionDetail
-    ?? (connectionState === 'syncing' ? 'Matrix is starting and performing initial sync.' : undefined);
+    ?? (connectionState === 'syncing' ? 'Matrix is starting and performing initial sync.' : undefined)
+    ?? (hydratingChain ? 'Catching up on the block chain — local reads may be slightly stale.' : undefined);
 
   // Helper to select a space and persist the choice.
   //
@@ -1733,11 +1768,24 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           const hydrateClient = matrixClientRef.current;
           const hydrateStore = useEoStore.getState().store;
           if (hydrateStore) {
-            hydrateBlocksIfStale(hydrateClient, spaceRoomId, hydrateStore, {
-              bulkApply: (events) => useEoStore.getState().batchImport(events),
-            })
+            // Reconcile the snapshot's hydration cursor with localStorage
+            // before triggering hydrateBlocksIfStale. If localStorage was
+            // cleared but the snapshot recorded the cursor, restore it so
+            // the SEG check short-circuits on "chain hasn't moved".
+            // (V9 of HELIX-AUDIT-2026-05-11.md.)
+            const snapHead = useEoStore.getState().snapshotHydratedHead;
+            if (snapHead && !getPersistedHydratedHead(spaceRoomId)) {
+              setPersistedHydratedHead(spaceRoomId, snapHead);
+            }
+            const mirror = buildBlockMirror(hydrateClient, spaceRoomId);
+            useEoStore.getState().runChainHydrate(() =>
+              hydrateBlocksIfStale(hydrateClient, spaceRoomId, hydrateStore, {
+                bulkApply: (events) => useEoStore.getState().batchImport(events),
+                mirror,
+              }),
+            )
               .then((r) => {
-                if (r) return useEoStore.getState().flushToOpfs();
+                if (r) return useEoStore.getState().flushToOpfs(r.latestBlockEventId);
               })
               .catch((e) => console.warn('[EO-DB] block-chain hydration failed:', e));
 
@@ -1751,11 +1799,14 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               const liveStore = useEoStore.getState().store;
               if (!liveStore) return;
               ingestInFlight = true;
-              hydrateBlocksIfStale(hydrateClient, spaceRoomId, liveStore, {
-                bulkApply: (events) => useEoStore.getState().batchImport(events),
-              })
+              useEoStore.getState().runChainHydrate(() =>
+                hydrateBlocksIfStale(hydrateClient, spaceRoomId, liveStore, {
+                  bulkApply: (events) => useEoStore.getState().batchImport(events),
+                  mirror,
+                }),
+              )
                 .then((r) => {
-                  if (r) return useEoStore.getState().flushToOpfs();
+                  if (r) return useEoStore.getState().flushToOpfs(r.latestBlockEventId);
                 })
                 .catch((e) => console.warn('[EO-DB] auto-ingest fold failed:', e))
                 .finally(() => { ingestInFlight = false; });
@@ -1774,7 +1825,14 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           try {
             const wrtc = new WebRTCPeer(matrixClientRef.current, spaceRoomId, useEoStore.getState().store!, onFoldEvent);
             wrtc.start();
-            const ps = new PeerSync(matrixClientRef.current, spaceRoomId, useEoStore.getState().store!, onFoldEvent);
+            const ps = new PeerSync(
+              matrixClientRef.current,
+              spaceRoomId,
+              useEoStore.getState().store!,
+              onFoldEvent,
+              undefined,
+              (events) => useEoStore.getState().batchImport(events),
+            );
             ps.setWebRTCPeer(wrtc);
             await ps.start();
             if (!isStale()) {
@@ -1872,23 +1930,24 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       // SEG: same boundary check as the cache-hit branch above. On cold
       // start the snapshot is empty (or was just loaded from OPFS), and
       // m.eo.head may point at a chain head that doesn't yet have its
-      // blocks folded into the local store. Fire-and-forget — the fold
-      // engine dedups concurrent live events + hydration via
-      // client_event_id, so no risk of double application.
+      // blocks folded into the local store.
+      //
+      // The initial SEG is owned by `PeerSync.start()` via its
+      // `chainSeg` hook (constructed below) — that places the trigger
+      // inside the sync layer rather than the UI shell, satisfying V8.
+      // Here we only wire the V9 reconciliation (snapshot cursor →
+      // localStorage backfill) and the auto-ingest listener that
+      // handles subsequent chain updates.
       if (MATRIX_ENABLED && spaceRoomId && matrixClientRef.current) {
         const hydrateClient = matrixClientRef.current;
         const hydrateStore = useEoStore.getState().store;
         if (hydrateStore) {
-          hydrateBlocksIfStale(hydrateClient, spaceRoomId, hydrateStore, {
-            bulkApply: (events) => useEoStore.getState().batchImport(events),
-          })
-            .then((r) => {
-              // Persist the kv-snapshot + init-cache so the next refresh
-              // restores from the snapshot directly instead of re-folding
-              // the entire OPFS log. Skipped when hydrate was a no-op.
-              if (r) return useEoStore.getState().flushToOpfs();
-            })
-            .catch((e) => console.warn('[EO-DB] block-chain hydration failed:', e));
+          // V9 reconciliation — see cached-space branch for full context.
+          const snapHead = useEoStore.getState().snapshotHydratedHead;
+          if (snapHead && !getPersistedHydratedHead(spaceRoomId)) {
+            setPersistedHydratedHead(spaceRoomId, snapHead);
+          }
+          const mirror = buildBlockMirror(hydrateClient, spaceRoomId);
 
           // Auto-ingest: subscribe to live m.eo.head / m.eo.block / disabled
           // state-event changes and fold the new gap incrementally. Idempotent
@@ -1904,9 +1963,10 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             ingestInFlight = true;
             hydrateBlocksIfStale(hydrateClient, spaceRoomId, liveStore, {
               bulkApply: (events) => useEoStore.getState().batchImport(events),
+              mirror,
             })
               .then((r) => {
-                if (r) return useEoStore.getState().flushToOpfs();
+                if (r) return useEoStore.getState().flushToOpfs(r.latestBlockEventId);
               })
               .catch((e) => console.warn('[EO-DB] auto-ingest fold failed:', e))
               .finally(() => { ingestInFlight = false; });
@@ -1961,7 +2021,31 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             });
             console.log('[EO-DB] Operator-native sync active for', spaceRoomId);
           } else {
-            peerSync = new PeerSync(matrixClientRef.current, spaceRoomId, useEoStore.getState().store!, onFoldEvent);
+            const psClient = matrixClientRef.current;
+            const psStore = useEoStore.getState().store!;
+            const psMirror = buildBlockMirror(psClient, spaceRoomId);
+            // V8: PeerSync.start() owns the initial chain-SEG via this
+            // closure, replacing the Layout-side initial hydrate call.
+            // listenForChainUpdates (wired earlier in this effect) still
+            // handles subsequent updates from other clients.
+            const psChainSeg = () =>
+              useEoStore.getState().runChainHydrate(() =>
+                hydrateBlocksIfStale(psClient, spaceRoomId, psStore, {
+                  bulkApply: (events) => useEoStore.getState().batchImport(events),
+                  mirror: psMirror,
+                }).then((r) => {
+                  if (r) return useEoStore.getState().flushToOpfs(r.latestBlockEventId);
+                }),
+              );
+            peerSync = new PeerSync(
+              psClient,
+              spaceRoomId,
+              psStore,
+              onFoldEvent,
+              undefined,
+              (events) => useEoStore.getState().batchImport(events),
+              psChainSeg,
+            );
             peerSync.setWebRTCPeer(webrtcPeer);
             await peerSync.start();
             if (isStale()) { peerSync.stop(); webrtcPeer.stop(); return; }
@@ -2067,9 +2151,36 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     // Also clear Matrix crypto stores — they use a different prefix and
     // would otherwise cause device-ID mismatches on the next login.
     await clearMatrixCryptoStore();
+    // Wipe block-chain hydration cursors so a new account doesn't inherit
+    // a "we already hydrated up to X" marker that would skip blocks on
+    // re-login. (V5/V9 of HELIX-AUDIT-2026-05-11.md.)
+    clearAllHydratedHeadMarkers();
+    // Drop the IDB offline queue so queued writes from the prior session
+    // don't get replayed under the new account's identity. (V5.)
+    await eraseOfflineQueueDb();
 
     onLogout();
   }
+
+  // Auto-REC on session expiry: when Matrix returns 401 / M_UNKNOWN_TOKEN
+  // (surfaced via connectionError.phase === 'auth'), the prior session's
+  // token is dead. Trust in any persisted state from this session is now
+  // unverifiable, so trigger the same handleLogout path the user would
+  // hit via the "Re-login" button. Without this, the user can continue
+  // editing against state that the homeserver will reject on next flush.
+  // (V6 of HELIX-AUDIT-2026-05-11.md.)
+  const handleLogoutRef = useRef(handleLogout);
+  handleLogoutRef.current = handleLogout;
+  const autoLogoutFiredRef = useRef(false);
+  useEffect(() => {
+    if (connectionError?.phase !== 'auth') {
+      autoLogoutFiredRef.current = false;
+      return;
+    }
+    if (autoLogoutFiredRef.current) return;
+    autoLogoutFiredRef.current = true;
+    void handleLogoutRef.current();
+  }, [connectionError]);
 
   // Handle tab visibility changes.
   //

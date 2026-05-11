@@ -86,7 +86,16 @@ export type FoldWorkerPayload =
    * should show — persisted alongside the kv so refresh can skip the
    * per-init `readLogSince` scan of the in-memory store.
    */
-  | { type: 'saveKvSnapshot'; entries: [string, unknown][]; recentTail: EoEvent[]; seq: number }
+  /**
+   * `hydratedHead` is the block-chain event id the snapshot's kv map has
+   * already folded up to (null = no block chain or pre-genesis). Same
+   * value that `block-hydration.writePersistedHydratedHead` writes to
+   * localStorage; keeping it in the snapshot makes the boundary marker
+   * atomic with the kv map — a snapshot restore brings its own cursor
+   * along, and a missing localStorage key no longer means "re-walk the
+   * whole chain". (V9 of HELIX-AUDIT-2026-05-11.md.)
+   */
+  | { type: 'saveKvSnapshot'; entries: [string, unknown][]; recentTail: EoEvent[]; seq: number; hydratedHead?: string | null }
   /**
    * loadKvSnapshot — read 'kv-snapshot.bin' and return its entries,
    * or null if no snapshot exists.
@@ -130,6 +139,15 @@ export interface FoldWorkerClient {
     reject: (e: Error) => void;
   }>;
   nextId: number;
+  /**
+   * Latches to `true` once the underlying Worker has fired its `onerror`
+   * (unrecoverable crash). All subsequent `send()` calls reject
+   * immediately rather than postMessage'ing into a dead worker that
+   * would never respond. The host should observe this via `onDied` and
+   * either re-init the space (which creates a fresh client) or surface
+   * an error to the user.
+   */
+  dead: boolean;
   onRecOscillation?: (ev: {
     target: string;
     cyclingStates: Record<string, unknown>[];
@@ -138,6 +156,13 @@ export interface FoldWorkerClient {
   onEventEmitted?: (ev: EoEvent) => void;
   onProgress?: (current: number, total: number) => void;
   onTelemetry?: (t: { avgMicrosPerEvent: number }) => void;
+  /**
+   * Fires when the underlying Worker dies. The host is expected to tear
+   * down this client and either recreate it from scratch (re-run
+   * `createFoldWorkerClient` + `initFoldWorker`) or report the failure.
+   * Same event delivered to `worker.onerror`.
+   */
+  onDied?: (e: ErrorEvent) => void;
 }
 
 // ─── createFoldWorkerClient ───────────────────────────────────────────────────
@@ -152,6 +177,7 @@ export function createFoldWorkerClient(): FoldWorkerClient {
     worker,
     pendingRequests: new Map(),
     nextId: 1,
+    dead: false,
   };
 
   worker.onmessage = (e: MessageEvent<FoldWorkerResponse>) => {
@@ -194,11 +220,21 @@ export function createFoldWorkerClient(): FoldWorkerClient {
   };
 
   worker.onerror = (e) => {
+    // Latch dead so subsequent send() calls fail fast instead of posting
+    // into a worker that will never respond.
+    client.dead = true;
     // Reject all pending on unrecoverable Worker error
     for (const [, pending] of client.pendingRequests) {
       pending.reject(new Error(`Worker error: ${e.message}`));
     }
     client.pendingRequests.clear();
+    // Notify the host so it can re-init (replaces this client) or
+    // surface the failure. Synchronous — host doesn't get to await.
+    try {
+      client.onDied?.(e);
+    } catch (cbErr) {
+      console.warn('[EO-DB] fold-worker onDied handler threw:', cbErr);
+    }
   };
 
   return client;
@@ -207,6 +243,11 @@ export function createFoldWorkerClient(): FoldWorkerClient {
 // ─── Low-level send ───────────────────────────────────────────────────────────
 
 function send<T>(client: FoldWorkerClient, msg: FoldWorkerPayload): Promise<T> {
+  if (client.dead) {
+    return Promise.reject(
+      new Error('Fold worker is dead — host must re-init before sending again'),
+    );
+  }
   return new Promise<T>((resolve, reject) => {
     const id = client.nextId++;
     client.pendingRequests.set(id, {
@@ -323,20 +364,24 @@ export function saveKvSnapshot(
   entries: [string, unknown][],
   recentTail: EoEvent[],
   seq: number,
+  hydratedHead?: string | null,
 ): Promise<void> {
-  return send(client, { type: 'saveKvSnapshot', entries, recentTail, seq });
+  return send(client, { type: 'saveKvSnapshot', entries, recentTail, seq, hydratedHead });
 }
 
 /**
  * Load a previously saved kv snapshot from OPFS. Returns null if no snapshot
  * exists yet (first load) or if the file is corrupt. `recentTail` is the last
  * ~2 000 events captured at save time — used directly as Zustand state on the
- * no-change refresh path.
+ * no-change refresh path. `hydratedHead`, when present, is the block-chain
+ * event id the snapshot already covers; older snapshots without this field
+ * return `undefined` so callers can fall back to the legacy localStorage
+ * marker.
  */
 export function loadKvSnapshot(
   client: FoldWorkerClient,
-): Promise<{ entries: [string, unknown][]; recentTail: EoEvent[]; seq: number } | null> {
-  return send<{ entries: [string, unknown][]; recentTail: EoEvent[]; seq: number } | null>(
+): Promise<{ entries: [string, unknown][]; recentTail: EoEvent[]; seq: number; hydratedHead?: string | null } | null> {
+  return send<{ entries: [string, unknown][]; recentTail: EoEvent[]; seq: number; hydratedHead?: string | null } | null>(
     client,
     { type: 'loadKvSnapshot' },
   );

@@ -982,15 +982,17 @@ function buildFoldEntry(target: string): FoldEntry {
 
       case 'saveKvSnapshot': {
         if (!opfsDir) throw new Error('Worker not initialized');
-        // Bumped to version 2: payload now carries `recentTail` alongside the
-        // kv entries so the main thread can skip `readLogSince` on refresh.
-        // v1 snapshots are ignored on load (loadKvSnapshot treats them as a
-        // miss and the main thread falls through to its existing fallback).
+        // Version 2 carries `recentTail` alongside the kv entries so the
+        // main thread can skip `readLogSince` on refresh. `hydratedHead`
+        // is optional and forward-compatible — readers must accept its
+        // absence (older snapshots, callers that don't track a chain
+        // cursor). v1 snapshots are ignored on load.
         const payload = pack({
           version: 2,
           seq: req.seq,
           entries: req.entries,
           recentTail: req.recentTail,
+          hydratedHead: req.hydratedHead ?? null,
         }) as Uint8Array;
         const exactBuf = payload.buffer.slice(
           payload.byteOffset,
@@ -1019,6 +1021,7 @@ function buildFoldEntry(target: string): FoldEntry {
             seq: number;
             entries: [string, unknown][];
             recentTail?: EoEvent[];
+            hydratedHead?: string | null;
           };
           // Only v2 is supported — v1 snapshots don't carry recentTail so we
           // treat them as a miss and let the main thread rebuild via readLogSince.
@@ -1030,6 +1033,7 @@ function buildFoldEntry(target: string): FoldEntry {
               seq: data.seq,
               entries: data.entries,
               recentTail: data.recentTail ?? [],
+              hydratedHead: data.hydratedHead ?? null,
             },
           });
         } catch {

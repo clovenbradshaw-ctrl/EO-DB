@@ -20,6 +20,7 @@ import {
   sealBlockFromPayload,
   BLOCK_SCHEMA_VERSION,
 } from './block-sealer';
+import type { BlockDriveMirrorDeps } from './block-drive-mirror';
 
 export interface SeedUploadResult {
   blockEventId: string;
@@ -36,12 +37,17 @@ export interface SeedUploadResult {
  * on the read side; the seed becomes a no-op for state but adds a
  * block to the chain. Use the block-toggle admin path to disable
  * unwanted blocks rather than skipping the upload.
+ *
+ * When `mirror` is supplied, the same plaintext bytes are also written
+ * to Drive (fire-and-forget) so subsequent reads have a fallback if
+ * the homeserver media path is slow or unreachable.
  */
 export async function uploadSeedFile(
   client: MatrixClient,
   roomId: string,
   bytes: Uint8Array,
   eventCount: number = 0,
+  mirror: BlockDriveMirrorDeps | null = null,
 ): Promise<SeedUploadResult> {
   if (bytes.byteLength === 0) {
     throw new Error('Seed file is empty');
@@ -57,7 +63,7 @@ export async function uploadSeedFile(
     bytes,
     eventCount,
     head,
-    { schemaVersion: BLOCK_SCHEMA_VERSION },
+    { schemaVersion: BLOCK_SCHEMA_VERSION, mirror },
   );
 
   return {
