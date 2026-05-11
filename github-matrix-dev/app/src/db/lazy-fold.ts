@@ -130,6 +130,15 @@ export interface FoldWorkerClient {
     reject: (e: Error) => void;
   }>;
   nextId: number;
+  /**
+   * Latches to `true` once the underlying Worker has fired its `onerror`
+   * (unrecoverable crash). All subsequent `send()` calls reject
+   * immediately rather than postMessage'ing into a dead worker that
+   * would never respond. The host should observe this via `onDied` and
+   * either re-init the space (which creates a fresh client) or surface
+   * an error to the user.
+   */
+  dead: boolean;
   onRecOscillation?: (ev: {
     target: string;
     cyclingStates: Record<string, unknown>[];
@@ -138,6 +147,13 @@ export interface FoldWorkerClient {
   onEventEmitted?: (ev: EoEvent) => void;
   onProgress?: (current: number, total: number) => void;
   onTelemetry?: (t: { avgMicrosPerEvent: number }) => void;
+  /**
+   * Fires when the underlying Worker dies. The host is expected to tear
+   * down this client and either recreate it from scratch (re-run
+   * `createFoldWorkerClient` + `initFoldWorker`) or report the failure.
+   * Same event delivered to `worker.onerror`.
+   */
+  onDied?: (e: ErrorEvent) => void;
 }
 
 // ─── createFoldWorkerClient ───────────────────────────────────────────────────
@@ -152,6 +168,7 @@ export function createFoldWorkerClient(): FoldWorkerClient {
     worker,
     pendingRequests: new Map(),
     nextId: 1,
+    dead: false,
   };
 
   worker.onmessage = (e: MessageEvent<FoldWorkerResponse>) => {
@@ -194,11 +211,21 @@ export function createFoldWorkerClient(): FoldWorkerClient {
   };
 
   worker.onerror = (e) => {
+    // Latch dead so subsequent send() calls fail fast instead of posting
+    // into a worker that will never respond.
+    client.dead = true;
     // Reject all pending on unrecoverable Worker error
     for (const [, pending] of client.pendingRequests) {
       pending.reject(new Error(`Worker error: ${e.message}`));
     }
     client.pendingRequests.clear();
+    // Notify the host so it can re-init (replaces this client) or
+    // surface the failure. Synchronous — host doesn't get to await.
+    try {
+      client.onDied?.(e);
+    } catch (cbErr) {
+      console.warn('[EO-DB] fold-worker onDied handler threw:', cbErr);
+    }
   };
 
   return client;
@@ -207,6 +234,11 @@ export function createFoldWorkerClient(): FoldWorkerClient {
 // ─── Low-level send ───────────────────────────────────────────────────────────
 
 function send<T>(client: FoldWorkerClient, msg: FoldWorkerPayload): Promise<T> {
+  if (client.dead) {
+    return Promise.reject(
+      new Error('Fold worker is dead — host must re-init before sending again'),
+    );
+  }
   return new Promise<T>((resolve, reject) => {
     const id = client.nextId++;
     client.pendingRequests.set(id, {

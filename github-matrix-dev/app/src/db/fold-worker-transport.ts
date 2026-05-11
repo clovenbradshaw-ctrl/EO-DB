@@ -294,14 +294,39 @@ export function createWorkerShardPool(options: {
   // workers are free, so busyUntil[i] starts as an immediately-resolved
   // Promise; each dispatch chains a new promise onto the slot.
   const busyUntil: Promise<void>[] = [];
+
+  let terminated = false;
+
+  /**
+   * Wire a pool-level error handler that respawns a dead slot. Without
+   * this, a worker that crashed (OOM, uncaught throw, postMessage
+   * size limit) leaves its slot wedged: subsequent dispatches post into
+   * a dead worker that never responds, and the dispatch promise hangs
+   * indefinitely. Replacing the slot via the same factory keeps the
+   * round-robin shape intact.
+   */
+  const attachWorker = (idx: number, w: Worker): void => {
+    w.addEventListener('error', () => {
+      if (terminated) return;
+      try { w.terminate(); } catch { /* already dead */ }
+      const replacement = workerFactory();
+      workers[idx] = replacement;
+      // Reset the slot's busy chain — anyone awaiting `prior` from the
+      // dead worker would otherwise wait forever.
+      busyUntil[idx] = Promise.resolve();
+      attachWorker(idx, replacement);
+    });
+  };
+
   for (let i = 0; i < workerCount; i++) {
-    workers.push(workerFactory());
+    const w = workerFactory();
+    workers.push(w);
     busyUntil.push(Promise.resolve());
+    attachWorker(i, w);
   }
 
   let nextWorker = 0;
   let nextId = 1;
-  let terminated = false;
 
   const dispatcher: ShardDispatcher = async (req: ShardRequest): Promise<ShardResponse> => {
     if (terminated) {
