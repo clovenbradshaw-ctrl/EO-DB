@@ -105,6 +105,44 @@ function terminateCachedWorkerPool(): void {
   }
 }
 
+// ─── Fold-quiescent gate ──────────────────────────────────────────────
+//
+// A snapshot written mid-fold claims a `seq` it hasn't earned: the
+// kv map captured in `entries` lags behind the events still in flight,
+// and on next boot the OPFS log replay re-applies events that the fold
+// engine already half-applied. The fold dedup makes this idempotent for
+// correctness, but the audit trail is broken and the snapshot misreports
+// its own coverage. (V10 of HELIX-AUDIT-2026-05-11.md.)
+//
+// `batchImport` increments `foldsInFlight` on entry and decrements in
+// `finally`. `flushToOpfs` awaits quiescence before writing — the wait
+// loops because a new fold can start in the gap between resolver firing
+// and the loop check (textbook condition-variable pattern), but in
+// practice flushes fire from visibility-change / post-hydrate so the
+// race is unusual.
+let foldsInFlight = 0;
+const foldQuiescentWaiters: Array<() => void> = [];
+
+function enterFold(): void {
+  foldsInFlight++;
+}
+
+function exitFold(): void {
+  foldsInFlight = Math.max(0, foldsInFlight - 1);
+  if (foldsInFlight === 0 && foldQuiescentWaiters.length > 0) {
+    const drained = foldQuiescentWaiters.splice(0);
+    for (const w of drained) {
+      try { w(); } catch { /* never let one waiter break the next */ }
+    }
+  }
+}
+
+async function awaitFoldQuiescent(): Promise<void> {
+  while (foldsInFlight > 0) {
+    await new Promise<void>((resolve) => foldQuiescentWaiters.push(resolve));
+  }
+}
+
 interface EoDbState {
   /** The in-memory store (set after space init) */
   store: EoStore | null;
@@ -163,7 +201,21 @@ interface EoDbState {
   getStateByPrefix: (prefix: string) => Promise<EoState[]>;
   getStateByPrefixPage: (prefix: string, limit: number, afterTarget?: string) => Promise<StatePage>;
   manualSnapshot: () => Promise<{ seq: number }>;
-  flushToOpfs: () => Promise<void>;
+  /**
+   * Persist the current kv map + recent-tail to OPFS.
+   * `hydratedHead`, when provided, records the block-chain event id this
+   * snapshot already covers. The boot path reads it back to skip a
+   * redundant chain walk even when localStorage is empty (e.g. cleared
+   * by browser, cross-device export). See block-hydration's
+   * `getPersistedHydratedHead`. (V9 of HELIX-AUDIT-2026-05-11.md.)
+   */
+  flushToOpfs: (hydratedHead?: string | null) => Promise<void>;
+  /**
+   * Hydration cursor recorded inside the last loaded kv-snapshot. Null
+   * means either no snapshot, an older v2 snapshot without the field,
+   * or a snapshot explicitly written without a chain cursor. (V9.)
+   */
+  snapshotHydratedHead: string | null;
   teardown: () => void;
 
   onDispatch: ((event: EoEventInput) => void) | null;
@@ -182,6 +234,7 @@ export const useEoStore = create<EoDbState>((set, get) => ({
   userManifest: null,
   activeUserType: null,
   onDispatch: null,
+  snapshotHydratedHead: null,
 
   async init(workerClient: FoldWorkerClient, workerHeadSeq?: number) {
     const wasReady = get().ready;
@@ -206,6 +259,7 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     let snapshotSeq = 0;
     let cachedTail: EoEvent[] = [];
     let snapshotHit = false;
+    let snapshotHydratedHead: string | null = null;
     let memStore: ReturnType<typeof createMemoryStore>;
     try {
       const snapshot = await loadKvSnapshot(workerClient);
@@ -213,6 +267,7 @@ export const useEoStore = create<EoDbState>((set, get) => ({
         memStore = createMemoryStore({ initialKv: snapshot.entries, initialSeq: snapshot.seq });
         snapshotSeq = snapshot.seq;
         cachedTail = snapshot.recentTail;
+        snapshotHydratedHead = snapshot.hydratedHead ?? null;
         snapshotHit = true;
       } else {
         memStore = createMemoryStore();
@@ -290,7 +345,7 @@ export const useEoStore = create<EoDbState>((set, get) => ({
       }
     }
 
-    set({ store: memStore, workerClient, lastSeq, ready: true, recentEvents: hydrated });
+    set({ store: memStore, workerClient, lastSeq, ready: true, recentEvents: hydrated, snapshotHydratedHead });
 
     // ── Persist an updated snapshot for the next page refresh ────────────────
     // Skip the resave when nothing changed — the on-disk snapshot is already
@@ -299,7 +354,11 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     // (fire-and-forget) so the UI is unblocked immediately, and also ask the
     // worker to refresh its init-cache so buildIndex can be skipped next time.
     if (!nothingNew) {
-      saveKvSnapshot(workerClient, memStore.getKvEntries(), hydrated, lastSeq).catch((e) =>
+      // Carry forward the snapshot's hydration cursor (V9). The chain
+      // hasn't been re-walked here — the OPFS log delta replay only adds
+      // raw events — so the prior snapshot's chain coverage is still
+      // accurate.
+      saveKvSnapshot(workerClient, memStore.getKvEntries(), hydrated, lastSeq, snapshotHydratedHead).catch((e) =>
         console.warn('[EO-DB] kv snapshot save failed:', e),
       );
       saveInitCache(workerClient).catch((e) =>
@@ -400,6 +459,12 @@ export const useEoStore = create<EoDbState>((set, get) => ({
   },
 
   async batchImport(events: EoEventInput[], onProgress?: (current: number, total: number) => void) {
+    // Bracket the fold so concurrent `flushToOpfs` calls wait for
+    // quiescence — see the comment on `foldsInFlight` above. The whole
+    // body runs inside the gate: chunk loop, store emits, and the final
+    // straggler emit all complete before quiescence is signalled.
+    enterFold();
+    try {
     const { store } = get();
     if (!store) throw new Error('Store not initialized');
 
@@ -542,6 +607,7 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     onProgress?.(totalEvents, totalEvents);
 
     return lastSeq;
+    } finally { exitFold(); }
   },
 
   async horizon(target: string, opts?: HorizonOpts) {
@@ -569,7 +635,7 @@ export const useEoStore = create<EoDbState>((set, get) => ({
   },
 
   async manualSnapshot() {
-    const { store, workerClient, recentEvents } = get();
+    const { store, workerClient, recentEvents, snapshotHydratedHead } = get();
     if (!store) throw new Error('Store not initialized');
 
     // Persist the current in-memory KV state to OPFS.
@@ -577,7 +643,7 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     const memStore = store as MemoryStore;
     if (workerClient && typeof memStore.getKvEntries === 'function') {
       try {
-        await saveKvSnapshot(workerClient, memStore.getKvEntries(), recentEvents, lastSeq);
+        await saveKvSnapshot(workerClient, memStore.getKvEntries(), recentEvents, lastSeq, snapshotHydratedHead);
       } catch (e) {
         console.warn('[EO-DB] manualSnapshot: kv snapshot save failed:', e);
       }
@@ -591,8 +657,15 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     return { seq: lastSeq };
   },
 
-  async flushToOpfs() {
-    const { store, workerClient, recentEvents } = get();
+  async flushToOpfs(hydratedHead?: string | null) {
+    // Wait for any in-flight batchImport to drain before capturing the
+    // kv-snapshot. Without this, a snapshot written mid-fold reports a
+    // `seq` whose corresponding kv entries are still being mutated by
+    // the fold engine. The on-disk dedup keeps subsequent loads
+    // correct, but the snapshot's claim of coverage becomes a lie.
+    // (V10 of HELIX-AUDIT-2026-05-11.md.)
+    await awaitFoldQuiescent();
+    const { store, workerClient, recentEvents, snapshotHydratedHead } = get();
     if (!store) throw new Error('Store not initialized');
     const memStore = store as MemoryStore;
     // Drain any in-flight appendRaw writes BEFORE capturing the kv-snapshot.
@@ -604,7 +677,16 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     }
     const lastSeq = await store.getCurrentSeq();
     if (workerClient && typeof memStore.getKvEntries === 'function') {
-      await saveKvSnapshot(workerClient, memStore.getKvEntries(), recentEvents, lastSeq);
+      // If the caller didn't tell us "this snapshot now covers chain head X",
+      // carry forward whatever cursor the last snapshot already claimed.
+      // Persisting the cursor inside the snapshot makes it atomic with the
+      // kv map, so a missing localStorage entry no longer means
+      // "re-walk the entire chain". (V9.)
+      const head = hydratedHead === undefined ? snapshotHydratedHead : hydratedHead;
+      await saveKvSnapshot(workerClient, memStore.getKvEntries(), recentEvents, lastSeq, head);
+      if (head !== snapshotHydratedHead) {
+        set({ snapshotHydratedHead: head });
+      }
       saveInitCache(workerClient).catch((e) =>
         console.warn('[EO-DB] flushToOpfs: init-cache save failed:', e),
       );

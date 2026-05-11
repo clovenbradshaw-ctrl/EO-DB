@@ -86,7 +86,16 @@ export type FoldWorkerPayload =
    * should show — persisted alongside the kv so refresh can skip the
    * per-init `readLogSince` scan of the in-memory store.
    */
-  | { type: 'saveKvSnapshot'; entries: [string, unknown][]; recentTail: EoEvent[]; seq: number }
+  /**
+   * `hydratedHead` is the block-chain event id the snapshot's kv map has
+   * already folded up to (null = no block chain or pre-genesis). Same
+   * value that `block-hydration.writePersistedHydratedHead` writes to
+   * localStorage; keeping it in the snapshot makes the boundary marker
+   * atomic with the kv map — a snapshot restore brings its own cursor
+   * along, and a missing localStorage key no longer means "re-walk the
+   * whole chain". (V9 of HELIX-AUDIT-2026-05-11.md.)
+   */
+  | { type: 'saveKvSnapshot'; entries: [string, unknown][]; recentTail: EoEvent[]; seq: number; hydratedHead?: string | null }
   /**
    * loadKvSnapshot — read 'kv-snapshot.bin' and return its entries,
    * or null if no snapshot exists.
@@ -355,20 +364,24 @@ export function saveKvSnapshot(
   entries: [string, unknown][],
   recentTail: EoEvent[],
   seq: number,
+  hydratedHead?: string | null,
 ): Promise<void> {
-  return send(client, { type: 'saveKvSnapshot', entries, recentTail, seq });
+  return send(client, { type: 'saveKvSnapshot', entries, recentTail, seq, hydratedHead });
 }
 
 /**
  * Load a previously saved kv snapshot from OPFS. Returns null if no snapshot
  * exists yet (first load) or if the file is corrupt. `recentTail` is the last
  * ~2 000 events captured at save time — used directly as Zustand state on the
- * no-change refresh path.
+ * no-change refresh path. `hydratedHead`, when present, is the block-chain
+ * event id the snapshot already covers; older snapshots without this field
+ * return `undefined` so callers can fall back to the legacy localStorage
+ * marker.
  */
 export function loadKvSnapshot(
   client: FoldWorkerClient,
-): Promise<{ entries: [string, unknown][]; recentTail: EoEvent[]; seq: number } | null> {
-  return send<{ entries: [string, unknown][]; recentTail: EoEvent[]; seq: number } | null>(
+): Promise<{ entries: [string, unknown][]; recentTail: EoEvent[]; seq: number; hydratedHead?: string | null } | null> {
+  return send<{ entries: [string, unknown][]; recentTail: EoEvent[]; seq: number; hydratedHead?: string | null } | null>(
     client,
     { type: 'loadKvSnapshot' },
   );

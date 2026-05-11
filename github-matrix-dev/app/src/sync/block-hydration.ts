@@ -412,6 +412,24 @@ function readPersistedHydratedHead(roomId: string): string | null {
   }
 }
 
+/**
+ * Public read accessor — same value `readPersistedHydratedHead` returns,
+ * exported so the boot path can compare a kv-snapshot's `hydratedHead`
+ * against the localStorage marker and reconcile any mismatch. (V9.)
+ */
+export function getPersistedHydratedHead(roomId: string): string | null {
+  return readPersistedHydratedHead(roomId);
+}
+
+/**
+ * Public write accessor — used by the boot path to backfill a missing
+ * localStorage marker from a snapshot's `hydratedHead` field so the two
+ * stores stay in sync. (V9.)
+ */
+export function setPersistedHydratedHead(roomId: string, blockEventId: string | null): void {
+  writePersistedHydratedHead(roomId, blockEventId);
+}
+
 function writePersistedHydratedHead(roomId: string, blockEventId: string | null): void {
   try {
     if (blockEventId) {

@@ -8,7 +8,14 @@ import { createFoldWorkerClient, initFoldWorker, type FoldWorkerClient } from '.
 import { SyncManager, eraseOfflineQueueDb } from '../matrix/sync-manager';
 import { PeerSync } from '../matrix/peer-sync';
 import { WebRTCPeer } from '../matrix/webrtc-peer';
-import { hydrateBlocksIfStale, listenForChainUpdates, isAutoIngestEnabled, clearAllHydratedHeadMarkers } from '../sync/block-hydration';
+import {
+  hydrateBlocksIfStale,
+  listenForChainUpdates,
+  isAutoIngestEnabled,
+  clearAllHydratedHeadMarkers,
+  getPersistedHydratedHead,
+  setPersistedHydratedHead,
+} from '../sync/block-hydration';
 import type { BlockDriveMirrorDeps } from '../sync/block-drive-mirror';
 import {
   startNetworkSyncSystem,
@@ -1753,13 +1760,22 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           const hydrateClient = matrixClientRef.current;
           const hydrateStore = useEoStore.getState().store;
           if (hydrateStore) {
+            // Reconcile the snapshot's hydration cursor with localStorage
+            // before triggering hydrateBlocksIfStale. If localStorage was
+            // cleared but the snapshot recorded the cursor, restore it so
+            // the SEG check short-circuits on "chain hasn't moved".
+            // (V9 of HELIX-AUDIT-2026-05-11.md.)
+            const snapHead = useEoStore.getState().snapshotHydratedHead;
+            if (snapHead && !getPersistedHydratedHead(spaceRoomId)) {
+              setPersistedHydratedHead(spaceRoomId, snapHead);
+            }
             const mirror = buildBlockMirror(hydrateClient, spaceRoomId);
             hydrateBlocksIfStale(hydrateClient, spaceRoomId, hydrateStore, {
               bulkApply: (events) => useEoStore.getState().batchImport(events),
               mirror,
             })
               .then((r) => {
-                if (r) return useEoStore.getState().flushToOpfs();
+                if (r) return useEoStore.getState().flushToOpfs(r.latestBlockEventId);
               })
               .catch((e) => console.warn('[EO-DB] block-chain hydration failed:', e));
 
@@ -1778,7 +1794,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                 mirror,
               })
                 .then((r) => {
-                  if (r) return useEoStore.getState().flushToOpfs();
+                  if (r) return useEoStore.getState().flushToOpfs(r.latestBlockEventId);
                 })
                 .catch((e) => console.warn('[EO-DB] auto-ingest fold failed:', e))
                 .finally(() => { ingestInFlight = false; });
@@ -1909,6 +1925,11 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         const hydrateClient = matrixClientRef.current;
         const hydrateStore = useEoStore.getState().store;
         if (hydrateStore) {
+          // V9 reconciliation — see cached-space branch for full context.
+          const snapHead = useEoStore.getState().snapshotHydratedHead;
+          if (snapHead && !getPersistedHydratedHead(spaceRoomId)) {
+            setPersistedHydratedHead(spaceRoomId, snapHead);
+          }
           const mirror = buildBlockMirror(hydrateClient, spaceRoomId);
           hydrateBlocksIfStale(hydrateClient, spaceRoomId, hydrateStore, {
             bulkApply: (events) => useEoStore.getState().batchImport(events),
@@ -1918,7 +1939,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               // Persist the kv-snapshot + init-cache so the next refresh
               // restores from the snapshot directly instead of re-folding
               // the entire OPFS log. Skipped when hydrate was a no-op.
-              if (r) return useEoStore.getState().flushToOpfs();
+              if (r) return useEoStore.getState().flushToOpfs(r.latestBlockEventId);
             })
             .catch((e) => console.warn('[EO-DB] block-chain hydration failed:', e));
 
@@ -1939,7 +1960,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               mirror,
             })
               .then((r) => {
-                if (r) return useEoStore.getState().flushToOpfs();
+                if (r) return useEoStore.getState().flushToOpfs(r.latestBlockEventId);
               })
               .catch((e) => console.warn('[EO-DB] auto-ingest fold failed:', e))
               .finally(() => { ingestInFlight = false; });
