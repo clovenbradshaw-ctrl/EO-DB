@@ -1,17 +1,17 @@
 /**
- * Sync manager — orchestrates snapshot persistence, offline queue, and deduplication.
+ * Sync manager — orchestrates block-chain hydration, offline queue, and
+ * deduplication.
  *
- * SyncManager handles Matrix timeline event transport (com.eo-db.event) and
- * snapshot persistence in Matrix media. Google Drive handles async backup.
- *
- * Data is persisted as delta snapshots in Matrix media — each snapshot
- * contains only the events since the last one, plus up to 25 previous
- * snapshot URIs for fast chain traversal. Below 500 log entries the
- * hydration state lives in room data only.
+ * SyncManager handles Matrix timeline event transport (com.eo-db.event)
+ * and block-chain hydration. All persistence is Matrix-native: the live
+ * timeline is the tail, sealed history lives as encrypted `.eodb` blocks
+ * on `mxc://`, and a single `m.eo.head` room state event names the
+ * latest block.
  *
  * Offline queue is append-only via atomic read-modify-write through the
- * queue mutex. Events that fail to send are retried individually on reconnect;
- * idempotency hashing on the receiver side handles duplicates naturally.
+ * queue mutex. Events that fail to send are retried individually on
+ * reconnect; idempotency hashing on the receiver side handles duplicates
+ * naturally.
  */
 
 import { openDB } from 'idb';
@@ -23,7 +23,7 @@ import { processEvent } from '../db/fold';
 import { eventHash } from '../db/hash';
 import { AsyncMutex } from '../db/mutex';
 import { EO_EVENT_TYPE, getDataRoom, matrixEventToEo, sendEoEvent } from './event-bridge';
-import { findLatestSnapshot, maybeCreateSnapshot, createDeltaSnapshot, uploadDeltaSnapshot, setSnapshotStateEvent, restoreFromDeltaChain } from './snapshot';
+import { hydrateFromBlocks } from '../sync/block-hydration';
 import { isTransientError } from './connection-resilience';
 
 /** Mutex protecting the offline queue from concurrent read-modify-write. */
@@ -266,9 +266,9 @@ export class SyncManager {
       const currentSeq = await this.store.getCurrentSeq();
       if (currentSeq === 0) {
         try {
-          await withTimeout(this.hydrateFromSnapshot(), 30_000, 'Late snapshot hydration');
+          await withTimeout(this.hydrateFromBlockChain(), 60_000, 'Late block-chain hydration');
         } catch (e) {
-          console.warn('[EO-DB] Late snapshot hydration failed:', e);
+          console.warn('[EO-DB] Late block-chain hydration failed:', e);
         }
       }
       await this.replayTimelineEvents();
@@ -321,24 +321,26 @@ export class SyncManager {
     const currentSeq = await this.store.getCurrentSeq();
     const hydrationLanes: Promise<unknown>[] = [];
 
-    // Lane 1: Matrix media snapshot (only on fresh device — once we have any
-    // local data, the timeline + peer sync handle the delta).
+    // Lane 1: Block-chain hydration. On a fresh device this walks the
+    // m.eo.head → block chain → tail and folds every event. The fold
+    // engine deduplicates by client_event_id, so running concurrently
+    // with live timeline events is safe.
     if (currentSeq === 0) {
       hydrationLanes.push(
-        withTimeout(this.hydrateFromSnapshot(), 30_000, 'Snapshot hydration')
-          .catch(e => console.warn('[EO-DB] Snapshot hydration failed:', e)),
+        withTimeout(this.hydrateFromBlockChain(), 60_000, 'Block-chain hydration')
+          .catch(e => console.warn('[EO-DB] Block-chain hydration failed:', e)),
+      );
+    } else {
+      // Returning device — block hydration not needed, but still replay
+      // any timeline events newer than what's in the local store.
+      hydrationLanes.push(
+        this.replayTimelineEvents().catch(e =>
+          console.warn('[EO-DB] Timeline replay failed:', e),
+        ),
       );
     }
 
-    // Lane 2: Replay EO events already present in the room timeline from the
-    // initial Matrix sync. These aren't re-emitted through Room.timeline.
-    hydrationLanes.push(
-      this.replayTimelineEvents().catch(e =>
-        console.warn('[EO-DB] Timeline replay failed:', e),
-      ),
-    );
-
-    // Lane 3: Restore + flush the offline queue from the previous session.
+    // Lane 2: Restore + flush the offline queue from the previous session.
     hydrationLanes.push(
       this.restoreQueueFromIdb()
         .then(() => this.flushUnsyncedEvents())
@@ -367,19 +369,27 @@ export class SyncManager {
   }
 
   /**
-   * Hydrate the local store from the latest snapshot in room state.
+   * Hydrate the local store from the Matrix-native block chain.
    *
-   * Reads the latest URI from room state (O(1)), downloads the blob,
-   * and applies it. The blob's `prev_mxcs` array allows jumping backwards
-   * through history if the client needs to walk further.
+   * Reads `m.eo.head` (one state-event lookup), walks the block chain
+   * backwards via `prior_block_event_id`, downloads + decrypts every
+   * block in parallel, and folds the resulting events into the store.
+   * Finishes by walking the live timeline forward from `tail_cutoff_event_id`.
    */
-  private async hydrateFromSnapshot(): Promise<void> {
-    const snap = await findLatestSnapshot(this.client, this.roomId);
-    if (!snap) return;
-    const restoredSeq = await restoreFromDeltaChain(
-      this.client, this.store, snap.mxc, this.onEvent, this.keyring,
-    );
-    await this.store.put('meta:snapshot_seq', restoredSeq);
+  private async hydrateFromBlockChain(): Promise<void> {
+    await hydrateFromBlocks(this.client, this.roomId, this.store, this.onEvent);
+  }
+
+  /**
+   * Durability hook called by the host shell on tab-hide / beforeunload /
+   * logout. Block sealing runs on size/idle triggers from the compactor;
+   * we intentionally do NOT force a seal during page-close because a
+   * partially-uploaded block on tab kill would leave the head pointer
+   * out of sync. The local OPFS kv-snapshot path (via
+   * `useEoStore.flushToOpfs()`) handles same-device durability.
+   */
+  async saveSnapshot(): Promise<void> {
+    return;
   }
 
   /**
@@ -404,80 +414,6 @@ export class SyncManager {
       if (event.getType() !== EO_EVENT_TYPE) continue;
       await this.processIncomingEvent(event);
     }
-  }
-
-  /**
-   * Force-save a delta snapshot to Matrix media right now.
-   * Called on beforeunload / logout so data is always persisted.
-   */
-  async saveSnapshot(): Promise<void> {
-    // Matrix media snapshot saves are disabled — Filen is the primary store.
-    return;
-
-    const room = this.client.getRoom(this.roomId);
-    if (!room) {
-      console.warn('[EO-DB] Cannot save snapshot — room not available');
-      return;
-    }
-
-    const seq = await this.store.getCurrentSeq();
-    const lastSnapshotSeq: number = (await this.store.get('meta:snapshot_seq')) || 0;
-    if (seq === 0 || seq === lastSnapshotSeq) return; // nothing new to snapshot
-    const delta = await createDeltaSnapshot(this.store, this.client.getUserId()!);
-    const mxc = await uploadDeltaSnapshot(this.client, this.roomId, delta, this.keyring);
-    await this.store.put('meta:snapshot_seq', seq);
-    await this.store.put('meta:snapshot_mxc', mxc);
-    const prevMxcs: string[] = (await this.store.get('meta:snapshot_prev_mxcs')) || [];
-    await this.store.put('meta:snapshot_prev_mxcs', [mxc, ...prevMxcs].slice(0, 25));
-  }
-
-  /**
-   * Manual delta snapshot — captures log events since the last snapshot,
-   * uploads to Matrix media, and saves the mxc URI to room state so other
-   * devices can find and hydrate from it on next load.
-   *
-   * Each delta carries up to 25 previous snapshot URIs so hydrating
-   * devices can jump back in large strides. The room state event
-   * (EO_SNAPSHOT_STATE_TYPE) is written by uploadDeltaSnapshot().
-   */
-  async manualSnapshot(): Promise<{ mxc: string; seq: number }> {
-    const currentSeq = await this.store.getCurrentSeq();
-    const lastSnapshotSeq: number = (await this.store.get('meta:snapshot_seq')) || 0;
-
-    if (currentSeq === lastSnapshotSeq) {
-      throw new Error('No new events since last snapshot');
-    }
-
-    // 1. Create delta snapshot (events since last snapshot)
-    const delta = await createDeltaSnapshot(this.store, this.client.getUserId()!);
-
-    // 2. Upload to Matrix media (encrypted if keyring has keys)
-    const mxc = await uploadDeltaSnapshot(this.client, this.roomId, delta, this.keyring);
-
-    // 3. Record the mxc URI in a NUL event — this makes the snapshot
-    //    discoverable from the event log itself
-    await this.processLocalEvent({
-      op: 'NUL',
-      target: 'system.snapshot',
-      operand: {
-        mxc,
-        type: 'delta',
-        from_seq: delta.from_seq,
-        to_seq: delta.to_seq,
-        prev_mxcs: delta.prev_mxcs,
-        event_count: delta.events.length,
-      },
-      acquired_ts: new Date().toISOString(),
-    });
-
-    // 4. Update snapshot bookkeeping
-    await this.store.put('meta:snapshot_seq', currentSeq);
-    await this.store.put('meta:snapshot_mxc', mxc);
-    const prevMxcs: string[] = (await this.store.get('meta:snapshot_prev_mxcs')) || [];
-    await this.store.put('meta:snapshot_prev_mxcs', [mxc, ...prevMxcs].slice(0, 25));
-
-    // Room state already updated by uploadDeltaSnapshot (with key_id)
-    return { mxc, seq: currentSeq };
   }
 
   /**
@@ -579,9 +515,6 @@ export class SyncManager {
       // Offline — queue for later sync (mutex-protected append)
       await this.enqueueOfflineEvent(localEvent);
     }
-
-    // Auto-snapshot to Matrix media every 500 log entries
-    await maybeCreateSnapshot(this.client, this.roomId, this.store, this.client.getUserId()!, this.keyring);
 
     return seq;
   }
