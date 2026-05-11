@@ -23,7 +23,47 @@ import {
   readHeadState,
   sealBlockFromEvents,
   BLOCK_SCHEMA_VERSION,
+  type HeadState,
+  type SealResult,
 } from './block-sealer';
+
+/**
+ * Hot-start seeds get split into blocks of at most this many events. The
+ * resulting .eodb attachment for a chunk of this size lands in the tens
+ * of MB after msgpack-packing + AES-CTR encryption, which stays well
+ * under typical Matrix homeserver attachment limits (50–100 MB on
+ * synapse). Bigger is better for read amplification but past this the
+ * single upload becomes the dominant failure mode for slow networks.
+ *
+ * Well over `SEAL_TRIGGER.MIN_TAIL_EVENTS` (5000) — seed-derived blocks
+ * are intentionally larger than the live-sealer threshold so seeded
+ * spaces have a compact chain.
+ */
+const HOT_START_MAX_EVENTS_PER_BLOCK = 20_000;
+
+/** Per-block upload retry budget. Exponential backoff between attempts. */
+const SEAL_RETRY_ATTEMPTS = 3;
+
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  attempts: number,
+  label: string,
+): Promise<T> {
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      lastErr = e;
+      if (i < attempts - 1) {
+        const delayMs = 1000 * Math.pow(2, i);
+        console.warn(`[seed-uploader] ${label} attempt ${i + 1}/${attempts} failed, retrying in ${delayMs}ms:`, e);
+        await new Promise<void>((r) => setTimeout(r, delayMs));
+      }
+    }
+  }
+  throw lastErr;
+}
 
 // ─── Seed parsing ──────────────────────────────────────────────────────
 
@@ -195,22 +235,77 @@ export async function seedSpaceFromFile(
         e.agent ? e : { ...e, agent: opts.defaultAgent ?? myUserId }
       );
 
-      const result = await sealBlockFromEvents(
-        client,
-        roomId,
-        collectionId,
-        myDeviceId,
-        eventsWithAgent,
-        [],
-        head,
-        { schemaVersion: opts.schemaVersion ?? BLOCK_SCHEMA_VERSION },
-      );
+      // Split into multiple encrypted blocks if the seed is large. A
+      // single .eodb block for 80k+ events would balloon into a 100MB+
+      // attachment, which is exactly the upload that fails on the
+      // network layer. Each chunk seals into its own encrypted .eodb
+      // (AES-CTR via uploadEncryptedAttachment) and gets chained
+      // through prior_block_event_id, so the resulting block chain is
+      // the same shape as if it had been sealed live.
+      const schemaVersion = opts.schemaVersion ?? BLOCK_SCHEMA_VERSION;
+      const blockSize = Math.max(HOT_START_MAX_EVENTS_PER_BLOCK, 5000);
+      const blockCount = Math.ceil(eventsWithAgent.length / blockSize);
+
+      let currentHead: HeadState = head;
+      let firstResult: SealResult | null = null;
+
+      // Reserve the first half of the progress bar for sealing; the
+      // local fold reports the second half. (If there's no bulkApply
+      // hook the local fold below reports its own per-event progress.)
+      const sealReportBudget = opts.bulkApply ? Math.floor(total / 2) : 0;
+
+      for (let blockIdx = 0; blockIdx < blockCount; blockIdx++) {
+        const chunkStart = blockIdx * blockSize;
+        const chunkEnd = Math.min(chunkStart + blockSize, eventsWithAgent.length);
+        const chunkEvents = eventsWithAgent.slice(chunkStart, chunkEnd);
+
+        const result = await withRetry(
+          () => sealBlockFromEvents(
+            client,
+            roomId,
+            collectionId,
+            myDeviceId,
+            chunkEvents,
+            [],
+            currentHead,
+            { schemaVersion },
+          ),
+          SEAL_RETRY_ATTEMPTS,
+          `seal block ${blockIdx + 1}/${blockCount}`,
+        );
+
+        if (firstResult === null) firstResult = result;
+
+        // Advance our local head reflection so the next chunk chains
+        // off this just-sealed block. Mirror the head update that
+        // sealBlockFromEvents posted to the room state.
+        currentHead = {
+          schema_version: schemaVersion,
+          latest_block_event_id: result.blockEventId,
+          genesis_event_id: currentHead.genesis_event_id ?? result.blockEventId,
+          block_count: result.blockIndex + 1,
+          tail_cutoff_event_id: result.tailCutoffEventId || currentHead.tail_cutoff_event_id,
+          updated_at: new Date().toISOString(),
+        };
+
+        if (sealReportBudget > 0) {
+          const sealed = chunkEnd;
+          opts.onProgress?.(Math.floor((sealed / eventsWithAgent.length) * sealReportBudget), total);
+        }
+
+        // Yield between blocks so the browser can paint progress.
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      }
 
       // Apply locally too so the running session reflects the seed. Prefer
       // the bulk-apply hook (chunked, worker-pooled, yields between chunks)
       // when wired; otherwise fall back to the per-event loop used by tests.
       if (opts.bulkApply) {
-        await opts.bulkApply(eventsWithAgent, opts.onProgress);
+        await opts.bulkApply(eventsWithAgent, (current, _bulkTotal) => {
+          const scaled = Math.floor((current / eventsWithAgent.length) * (total - sealReportBudget));
+          opts.onProgress?.(sealReportBudget + scaled, total);
+        });
+        opts.onProgress?.(total, total);
       } else {
         for (let i = 0; i < eventsWithAgent.length; i++) {
           await processEvent(store, eventsWithAgent[i]);
@@ -223,8 +318,8 @@ export async function seedSpaceFromFile(
         added: total,
         skipped: 0,
         hotStartGenesis: {
-          blockEventId: result.blockEventId,
-          blockIndex: result.blockIndex,
+          blockEventId: firstResult!.blockEventId,
+          blockIndex: firstResult!.blockIndex,
         },
       };
     }
