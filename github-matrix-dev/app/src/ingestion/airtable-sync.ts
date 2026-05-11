@@ -99,9 +99,8 @@ export interface UpdateSyncResult {
  *                      Airtable token lacks webhook:manage scope) or when a
  *                      previously-registered webhook has expired and the
  *                      cursor is unrecoverable.
- *   - 'fullDiff'     — full re-hydration used as a full field-diff sweep
  */
-export type SyncStrategy = 'hydration' | 'webhook' | 'lastModified' | 'fullDiff';
+export type SyncStrategy = 'hydration' | 'webhook' | 'lastModified';
 
 export interface SyncProgress {
   phase: 'discovering' | 'collecting' | 'syncing' | 'fetching' | 'folding' | 'table_done';

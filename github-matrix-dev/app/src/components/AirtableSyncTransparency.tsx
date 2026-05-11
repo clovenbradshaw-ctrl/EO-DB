@@ -115,19 +115,17 @@ function HeaderStrip({
   // "last sync method" — derive from currentSync (in-flight) → log → fallback.
   const lastMethod = useMemo(() => {
     if (currentSync) {
-      // strategy on currentSync is `'hydration' | 'lastModified' | 'fullDiff'`.
-      // Use the endpoint URL to disambiguate webhook vs filterByFormula
-      // (both share the 'lastModified' strategy label).
+      // strategy on currentSync is `'hydration' | 'lastModified'`. Use the
+      // endpoint URL to disambiguate webhook vs filterByFormula (both share
+      // the 'lastModified' strategy label).
       if (currentSync.endpoint?.includes('/webhooks/')) return 'webhook';
       if (currentSync.strategy === 'hydration') return 'full';
-      if (currentSync.strategy === 'fullDiff') return 'fullDiff';
       return 'filter';
     }
     const last = syncLog.find((e) => e.type === 'webhook_poll' || e.type === 'sync_complete' || e.type === 'hydration_complete');
     if (!last) return '—';
     if (last.type === 'hydration_complete') return 'full';
     if (last.endpoint?.includes('/webhooks/')) return 'webhook';
-    if (last.strategy === 'fullDiff') return 'fullDiff';
     return 'filter';
   }, [currentSync, syncLog]);
 
