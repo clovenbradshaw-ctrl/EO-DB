@@ -23,7 +23,47 @@ import {
   readHeadState,
   sealBlockFromEvents,
   BLOCK_SCHEMA_VERSION,
+  type HeadState,
+  type SealResult,
 } from './block-sealer';
+
+/**
+ * Hot-start seeds get split into blocks of at most this many events. The
+ * resulting .eodb attachment for a chunk of this size lands in the tens
+ * of MB after msgpack-packing + AES-CTR encryption, which stays well
+ * under typical Matrix homeserver attachment limits (50–100 MB on
+ * synapse). Bigger is better for read amplification but past this the
+ * single upload becomes the dominant failure mode for slow networks.
+ *
+ * Well over `SEAL_TRIGGER.MIN_TAIL_EVENTS` (5000) — seed-derived blocks
+ * are intentionally larger than the live-sealer threshold so seeded
+ * spaces have a compact chain.
+ */
+const HOT_START_MAX_EVENTS_PER_BLOCK = 20_000;
+
+/** Per-block upload retry budget. Exponential backoff between attempts. */
+const SEAL_RETRY_ATTEMPTS = 3;
+
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  attempts: number,
+  label: string,
+): Promise<T> {
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      lastErr = e;
+      if (i < attempts - 1) {
+        const delayMs = 1000 * Math.pow(2, i);
+        console.warn(`[seed-uploader] ${label} attempt ${i + 1}/${attempts} failed, retrying in ${delayMs}ms:`, e);
+        await new Promise<void>((r) => setTimeout(r, delayMs));
+      }
+    }
+  }
+  throw lastErr;
+}
 
 // ─── Seed parsing ──────────────────────────────────────────────────────
 
@@ -146,6 +186,18 @@ export interface SeedApplyOptions {
   defaultAgent?: string;
   /** Schema-version stamp for hot-start genesis blocks. */
   schemaVersion?: string;
+  /**
+   * Optional bulk-apply hook. When provided, novel events are folded via
+   * this callback in a single batch instead of through the per-event
+   * `processEvent` loop. Wire this to `useEoStore.getState().batchImport`
+   * in the app so large seeds (80k+ events) go through the chunked,
+   * throttled, worker-pooled import path that yields to the browser
+   * between chunks. Without it, applying a 500MB seed hangs the tab.
+   */
+  bulkApply?: (
+    events: EoEventInput[],
+    onProgress?: (current: number, total: number) => void,
+  ) => Promise<unknown>;
 }
 
 /**
@@ -183,21 +235,82 @@ export async function seedSpaceFromFile(
         e.agent ? e : { ...e, agent: opts.defaultAgent ?? myUserId }
       );
 
-      const result = await sealBlockFromEvents(
-        client,
-        roomId,
-        collectionId,
-        myDeviceId,
-        eventsWithAgent,
-        [],
-        head,
-        { schemaVersion: opts.schemaVersion ?? BLOCK_SCHEMA_VERSION },
-      );
+      // Split into multiple encrypted blocks if the seed is large. A
+      // single .eodb block for 80k+ events would balloon into a 100MB+
+      // attachment, which is exactly the upload that fails on the
+      // network layer. Each chunk seals into its own encrypted .eodb
+      // (AES-CTR via uploadEncryptedAttachment) and gets chained
+      // through prior_block_event_id, so the resulting block chain is
+      // the same shape as if it had been sealed live.
+      const schemaVersion = opts.schemaVersion ?? BLOCK_SCHEMA_VERSION;
+      const blockSize = Math.max(HOT_START_MAX_EVENTS_PER_BLOCK, 5000);
+      const blockCount = Math.ceil(eventsWithAgent.length / blockSize);
 
-      // Apply locally too so the running session reflects the seed.
-      for (let i = 0; i < eventsWithAgent.length; i++) {
-        await processEvent(store, eventsWithAgent[i]);
-        opts.onProgress?.(i + 1, total);
+      let currentHead: HeadState = head;
+      let firstResult: SealResult | null = null;
+
+      // Reserve the first half of the progress bar for sealing; the
+      // local fold reports the second half. (If there's no bulkApply
+      // hook the local fold below reports its own per-event progress.)
+      const sealReportBudget = opts.bulkApply ? Math.floor(total / 2) : 0;
+
+      for (let blockIdx = 0; blockIdx < blockCount; blockIdx++) {
+        const chunkStart = blockIdx * blockSize;
+        const chunkEnd = Math.min(chunkStart + blockSize, eventsWithAgent.length);
+        const chunkEvents = eventsWithAgent.slice(chunkStart, chunkEnd);
+
+        const result = await withRetry(
+          () => sealBlockFromEvents(
+            client,
+            roomId,
+            collectionId,
+            myDeviceId,
+            chunkEvents,
+            [],
+            currentHead,
+            { schemaVersion },
+          ),
+          SEAL_RETRY_ATTEMPTS,
+          `seal block ${blockIdx + 1}/${blockCount}`,
+        );
+
+        if (firstResult === null) firstResult = result;
+
+        // Advance our local head reflection so the next chunk chains
+        // off this just-sealed block. Mirror the head update that
+        // sealBlockFromEvents posted to the room state.
+        currentHead = {
+          schema_version: schemaVersion,
+          latest_block_event_id: result.blockEventId,
+          genesis_event_id: currentHead.genesis_event_id ?? result.blockEventId,
+          block_count: result.blockIndex + 1,
+          tail_cutoff_event_id: result.tailCutoffEventId || currentHead.tail_cutoff_event_id,
+          updated_at: new Date().toISOString(),
+        };
+
+        if (sealReportBudget > 0) {
+          const sealed = chunkEnd;
+          opts.onProgress?.(Math.floor((sealed / eventsWithAgent.length) * sealReportBudget), total);
+        }
+
+        // Yield between blocks so the browser can paint progress.
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      }
+
+      // Apply locally too so the running session reflects the seed. Prefer
+      // the bulk-apply hook (chunked, worker-pooled, yields between chunks)
+      // when wired; otherwise fall back to the per-event loop used by tests.
+      if (opts.bulkApply) {
+        await opts.bulkApply(eventsWithAgent, (current, _bulkTotal) => {
+          const scaled = Math.floor((current / eventsWithAgent.length) * (total - sealReportBudget));
+          opts.onProgress?.(sealReportBudget + scaled, total);
+        });
+        opts.onProgress?.(total, total);
+      } else {
+        for (let i = 0; i < eventsWithAgent.length; i++) {
+          await processEvent(store, eventsWithAgent[i]);
+          opts.onProgress?.(i + 1, total);
+        }
       }
 
       return {
@@ -205,14 +318,48 @@ export async function seedSpaceFromFile(
         added: total,
         skipped: 0,
         hotStartGenesis: {
-          blockEventId: result.blockEventId,
-          blockIndex: result.blockIndex,
+          blockEventId: firstResult!.blockEventId,
+          blockIndex: firstResult!.blockIndex,
         },
       };
     }
   }
 
   // Diff path: O(events) check against `idem:` keys.
+  if (opts.bulkApply) {
+    // Pre-filter in a yield-aware pass so 80k-event seeds don't block the
+    // main thread. The filter is read-only against the store, so we can
+    // safely yield every YIELD_EVERY events; React paints + input runs.
+    const YIELD_EVERY = 1000;
+    const novel: EoEventInput[] = [];
+    let skippedCount = 0;
+    for (let i = 0; i < events.length; i++) {
+      const ev = events[i];
+      const id = ev.client_event_id!;
+      if (await isAlreadyApplied(store, id)) {
+        skippedCount++;
+      } else {
+        novel.push(ev);
+      }
+      // Halve the progress bar for the filter pass so the user sees motion
+      // during the pre-scan; bulkApply reports the second half.
+      if ((i + 1) % YIELD_EVERY === 0 || i === events.length - 1) {
+        opts.onProgress?.(Math.floor((i + 1) / 2), total);
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      }
+    }
+
+    if (novel.length > 0) {
+      const filterHalf = Math.floor(total / 2);
+      await opts.bulkApply(novel, (current, _bulkTotal) => {
+        const scaled = Math.floor((current / novel.length) * (total - filterHalf));
+        opts.onProgress?.(filterHalf + scaled, total);
+      });
+    }
+    opts.onProgress?.(total, total);
+    return { total, added: novel.length, skipped: skippedCount };
+  }
+
   let added = 0;
   let skipped = 0;
   for (let i = 0; i < events.length; i++) {

@@ -35,6 +35,8 @@ export function SeedSpaceSection({
 }: SeedSpaceSectionProps) {
   const { theme } = useTheme();
   const store = useEoStore((s) => s.store);
+  const batchImport = useEoStore((s) => s.batchImport);
+  const flushToOpfs = useEoStore((s) => s.flushToOpfs);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [status, setStatus] = useState<Status>({ kind: 'idle' });
 
@@ -55,6 +57,11 @@ export function SeedSpaceSection({
     if (!matrixClient || !roomId || !collectionId || !store) return;
     setStatus({ kind: 'applying', fileName, current: 0, total: seed.events.length });
     try {
+      // Throttle setState calls during apply — without this, an 80k-event
+      // seed fires 80k React renders on the progress label and pins the
+      // main thread even though the underlying bulk fold is chunked.
+      let lastProgressAt = 0;
+      const PROGRESS_THROTTLE_MS = 33; // ~30 Hz
       const result = await seedSpaceFromFile(
         matrixClient,
         roomId,
@@ -63,10 +70,26 @@ export function SeedSpaceSection({
         seed,
         {
           onProgress: (current, total) => {
-            setStatus({ kind: 'applying', fileName, current, total });
+            const now = Date.now();
+            if (current === total || now - lastProgressAt >= PROGRESS_THROTTLE_MS) {
+              lastProgressAt = now;
+              setStatus({ kind: 'applying', fileName, current, total });
+            }
           },
+          bulkApply: (events, onBulkProgress) => batchImport(events, onBulkProgress),
         },
       );
+      // Persist the post-import kv state to OPFS so the next page refresh
+      // can restore from the snapshot instead of replaying the entire log.
+      // Without this, a 83k-event seed leaves the OPFS log fully populated
+      // but the kv-snapshot stale, and init has to walk every log entry on
+      // every refresh. Mirrors the post-sync flushToOpfs in the Airtable
+      // hydration path.
+      try {
+        await flushToOpfs();
+      } catch (e) {
+        console.warn('[EO-DB] post-seed flushToOpfs failed:', e);
+      }
       setStatus({
         kind: 'done',
         fileName,

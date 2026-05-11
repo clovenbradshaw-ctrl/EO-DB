@@ -2695,7 +2695,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             </>
           )}
 
-          {selectedSpace && (() => {
+          {(() => {
             // Helper: is this view visible given the active role's visible_views restriction?
             function isNavViewVisible(view: View): boolean {
               if (!activeTypeDef?.visible_views?.length) return true;
