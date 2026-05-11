@@ -138,6 +138,69 @@ function base64ToBytes(b64: string): Uint8Array {
 }
 
 /**
+ * Download an mxc:// URI as raw bytes.
+ *
+ * Tries the authenticated media endpoint first
+ * (`/_matrix/client/v1/media/download/{server}/{mediaId}`, MSC3916).
+ * Modern Synapse (1.118+) enables this by default and returns 404 on
+ * the legacy unauthenticated `/_matrix/media/v3/download/...`. Falls
+ * back to the legacy endpoint if the authenticated request returns
+ * 404 or 401 — those signal "server doesn't support auth media yet"
+ * (older Synapse, Dendrite, Conduit pre-MSC3916).
+ *
+ * Throws with the most informative error from the path that was
+ * actually tried last.
+ */
+async function downloadMediaBytes(
+  client: MatrixClient,
+  mxc: string,
+): Promise<Uint8Array> {
+  // Try authenticated media first.
+  const authUrl = (client as any).mxcUrlToHttp?.(
+    mxc, undefined, undefined, undefined, false, false, true,
+  ) as string | null | undefined;
+  const accessToken = (client as any).getAccessToken?.() as string | null;
+
+  if (authUrl && accessToken) {
+    let resp: Response;
+    try {
+      resp = await fetch(authUrl, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+    } catch (e) {
+      // Network error on the authenticated path — try legacy.
+      resp = new Response(null, { status: 599, statusText: String(e) });
+    }
+    if (resp.ok) {
+      return new Uint8Array(await resp.arrayBuffer());
+    }
+    // 404/401 = server doesn't support auth media. Anything else
+    // (403, 500, network) is also worth retrying via the legacy path
+    // for maximum compatibility — the legacy path will surface its own
+    // error if it also fails.
+    if (resp.status !== 404 && resp.status !== 401 && resp.status !== 599) {
+      // For unexpected errors (e.g. 500), still try legacy but log.
+      console.warn(
+        `[media] auth download ${resp.status} ${resp.statusText} for ${mxc}, falling back to legacy`,
+      );
+    }
+  }
+
+  // Legacy unauthenticated endpoint.
+  const legacyUrl = client.mxcUrlToHttp(mxc);
+  if (!legacyUrl) {
+    throw new Error(`Cannot resolve mxc URL ${mxc}`);
+  }
+  const legacy = await fetch(legacyUrl);
+  if (!legacy.ok) {
+    throw new Error(
+      `Block download failed: ${legacy.status} ${legacy.statusText} (${legacyUrl})`,
+    );
+  }
+  return new Uint8Array(await legacy.arrayBuffer());
+}
+
+/**
  * Encrypt arbitrary bytes with a fresh AES-256-CTR key, upload the ciphertext
  * to Matrix media, and return the standard `m.file`-style `{url, key, iv,
  * hashes}` object suitable for embedding in a message event.
@@ -203,19 +266,17 @@ export async function uploadEncryptedAttachment(
  * decrypt with `attachment.key` + `attachment.iv`, and return plaintext.
  *
  * Throws on integrity failure (hash mismatch) before attempting decryption.
+ *
+ * Tries the authenticated media endpoint first (MSC3916, required by
+ * modern Synapse with `enable_authenticated_media: true`, which is the
+ * default in Synapse 1.118+). Falls back to the legacy unauthenticated
+ * endpoint for older homeservers that don't yet support `/client/v1/media`.
  */
 export async function downloadEncryptedAttachment(
   client: MatrixClient,
   attachment: EncryptedAttachment,
 ): Promise<Uint8Array> {
-  const httpUrl = client.mxcUrlToHttp(attachment.url);
-  if (!httpUrl) throw new Error(`Cannot resolve mxc URL ${attachment.url}`);
-
-  const response = await fetch(httpUrl);
-  if (!response.ok) {
-    throw new Error(`Block download failed: ${response.status} ${response.statusText} (${httpUrl})`);
-  }
-  const ciphertext = new Uint8Array(await response.arrayBuffer());
+  const ciphertext = await downloadMediaBytes(client, attachment.url);
 
   const shaBuf = await crypto.subtle.digest('SHA-256', ciphertext as unknown as BufferSource);
   const actualSha = bytesToBase64(new Uint8Array(shaBuf));

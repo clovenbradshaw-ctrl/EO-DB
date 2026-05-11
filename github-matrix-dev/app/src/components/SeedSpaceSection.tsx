@@ -12,7 +12,7 @@ import type { MatrixClient } from 'matrix-js-sdk';
 import { useTheme } from '../theme';
 import { useEoStore } from '../store/eo-store';
 import { uploadSeedFile } from '../sync/seed-uploader';
-import { hydrateBlocksIfStale } from '../sync/block-hydration';
+import { readBlockEvents } from '../sync/block-hydration';
 
 interface SeedSpaceSectionProps {
   matrixClient: MatrixClient | null | undefined;
@@ -52,18 +52,45 @@ export function SeedSpaceSection({
     setStatus({ kind: 'uploading', fileName: file.name, byteCount: file.size });
     try {
       const bytes = new Uint8Array(await file.arrayBuffer());
-      const result = await uploadSeedFile(matrixClient, roomId, bytes);
 
-      // Fold the newly-uploaded block into local state by walking the
-      // chain from where we left off. Fire-and-forget — the UI doesn't
-      // wait on it. The block is already on the homeserver and visible
-      // to every other client.
-      if (store) {
-        hydrateBlocksIfStale(matrixClient, roomId, store, {
-          bulkApply: (events) => batchImport(events),
-        })
-          .then(() => flushToOpfs())
-          .catch((e) => console.warn('[EO-DB] post-upload hydrate failed:', e));
+      // Parse once: we need the event list for local fold below, and we
+      // pass `events.length` to uploadSeedFile so the m.eo.block message
+      // carries an accurate event_count (used by the Uploaded Blocks UI).
+      // This is the only client-side parse on the upload path.
+      const events = await readBlockEvents(bytes);
+
+      const result = await uploadSeedFile(
+        matrixClient,
+        roomId,
+        bytes,
+        events.length,
+      );
+
+      // Fold the events we just parsed directly into local state.
+      // The alternative — calling hydrateBlocksIfStale — races against
+      // the Matrix SDK echoing the m.eo.head state event back via /sync.
+      // If hydrate runs before the echo lands, readHeadState returns an
+      // empty head and the new block is silently skipped. Folding from
+      // the in-memory event list avoids that round-trip entirely.
+      // Persist the hydrated-head marker so the next refresh's
+      // hydrateBlocksIfStale knows this block has been folded and
+      // doesn't re-walk the chain.
+      if (store && events.length > 0) {
+        try {
+          await batchImport(events);
+          try {
+            localStorage.setItem(
+              `eo-db-hydrated-head:${roomId}`,
+              result.blockEventId,
+            );
+          } catch {
+            // localStorage write failures are non-fatal — worst case we
+            // re-fold on the next refresh (dedup by client_event_id).
+          }
+          await flushToOpfs();
+        } catch (e) {
+          console.warn('[EO-DB] post-upload local fold failed:', e);
+        }
       }
 
       setStatus({
