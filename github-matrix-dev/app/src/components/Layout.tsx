@@ -1770,10 +1770,12 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               setPersistedHydratedHead(spaceRoomId, snapHead);
             }
             const mirror = buildBlockMirror(hydrateClient, spaceRoomId);
-            hydrateBlocksIfStale(hydrateClient, spaceRoomId, hydrateStore, {
-              bulkApply: (events) => useEoStore.getState().batchImport(events),
-              mirror,
-            })
+            useEoStore.getState().runChainHydrate(() =>
+              hydrateBlocksIfStale(hydrateClient, spaceRoomId, hydrateStore, {
+                bulkApply: (events) => useEoStore.getState().batchImport(events),
+                mirror,
+              }),
+            )
               .then((r) => {
                 if (r) return useEoStore.getState().flushToOpfs(r.latestBlockEventId);
               })
@@ -1789,10 +1791,12 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               const liveStore = useEoStore.getState().store;
               if (!liveStore) return;
               ingestInFlight = true;
-              hydrateBlocksIfStale(hydrateClient, spaceRoomId, liveStore, {
-                bulkApply: (events) => useEoStore.getState().batchImport(events),
-                mirror,
-              })
+              useEoStore.getState().runChainHydrate(() =>
+                hydrateBlocksIfStale(hydrateClient, spaceRoomId, liveStore, {
+                  bulkApply: (events) => useEoStore.getState().batchImport(events),
+                  mirror,
+                }),
+              )
                 .then((r) => {
                   if (r) return useEoStore.getState().flushToOpfs(r.latestBlockEventId);
                 })

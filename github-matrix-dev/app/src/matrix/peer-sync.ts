@@ -96,6 +96,18 @@ export class PeerSync {
    */
   private bulkApply?: (events: EoEventInput[]) => Promise<unknown>;
 
+  /**
+   * Optional chain-SEG callback fired from `start()` before peer
+   * announce. The host wires this to `hydrateBlocksIfStale` so a SEG
+   * always runs once per space mount — regardless of whether the UI
+   * shell remembered to fire it. (V8 of HELIX-AUDIT-2026-05-11.md.)
+   *
+   * Awaited; SEG runs to completion before peers are told about us.
+   * Failures are caught and logged so a homeserver outage doesn't
+   * block peer announce.
+   */
+  private chainSeg?: () => Promise<unknown>;
+
   constructor(
     client: MatrixClient,
     roomId: string,
@@ -103,6 +115,7 @@ export class PeerSync {
     onEvent?: (event: any) => void,
     keyring?: LocalKeyring,
     bulkApply?: (events: EoEventInput[]) => Promise<unknown>,
+    chainSeg?: () => Promise<unknown>,
   ) {
     this.client = client;
     this.roomId = roomId;
@@ -110,11 +123,17 @@ export class PeerSync {
     this.onEvent = onEvent;
     this.keyring = keyring || { keys: new Map() };
     this.bulkApply = bulkApply;
+    this.chainSeg = chainSeg;
   }
 
   /** Allow swapping the bulk-apply hook after construction. */
   setBulkApply(bulkApply: (events: EoEventInput[]) => Promise<unknown>): void {
     this.bulkApply = bulkApply;
+  }
+
+  /** Allow swapping the chain-SEG hook after construction. */
+  setChainSeg(chainSeg: () => Promise<unknown>): void {
+    this.chainSeg = chainSeg;
   }
 
   /** Allow updating keyring after construction. */
@@ -160,6 +179,20 @@ export class PeerSync {
       next.catch(() => {});
     };
     this.client.on('toDeviceEvent' as any, this.toDeviceHandler);
+
+    // Run the host-provided chain SEG (typically hydrateBlocksIfStale)
+    // before peer announce. This guarantees a SEG against the homeserver
+    // chain head on every start() — even if the UI shell forgets to
+    // trigger it. (V8 of HELIX-AUDIT-2026-05-11.md.)
+    if (this.chainSeg) {
+      try {
+        await this.chainSeg();
+      } catch (e) {
+        // Non-fatal — peer sync still proceeds; the next mount or
+        // listenForChainUpdates wake-up will re-attempt the SEG.
+        console.warn('[EO-DB] PeerSync chain SEG failed:', e);
+      }
+    }
 
     try {
       await this.announceToPeers();

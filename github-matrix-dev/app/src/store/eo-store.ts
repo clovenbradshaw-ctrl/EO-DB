@@ -216,6 +216,23 @@ interface EoDbState {
    * or a snapshot explicitly written without a chain cursor. (V9.)
    */
   snapshotHydratedHead: string | null;
+
+  /**
+   * True while a block-chain SEG / hydrate is in flight against the
+   * homeserver. Consumers that need fresh reads (admin tools,
+   * conflict-resolution UI) can subscribe to this and defer until it
+   * settles. Toggled by `runChainHydrate`. (V4 of
+   * HELIX-AUDIT-2026-05-11.md.)
+   */
+  hydratingChain: boolean;
+
+  /**
+   * Run a block-chain hydrate with the staleness flag set true for the
+   * duration. Wraps any `() => Promise<T>` so the helper composes with
+   * existing `hydrateBlocksIfStale` calls — flag is reset in `finally`
+   * even on rejection. Returns the hydrate's resolved value.
+   */
+  runChainHydrate: <T>(hydrate: () => Promise<T>) => Promise<T>;
   teardown: () => void;
 
   onDispatch: ((event: EoEventInput) => void) | null;
@@ -235,6 +252,20 @@ export const useEoStore = create<EoDbState>((set, get) => ({
   activeUserType: null,
   onDispatch: null,
   snapshotHydratedHead: null,
+  hydratingChain: false,
+
+  async runChainHydrate<T>(hydrate: () => Promise<T>): Promise<T> {
+    // A counter on the module-level would handle overlap, but in
+    // practice Layout's gate (`ingestInFlight` per listener) already
+    // serializes hydrate calls per space. Toggle a boolean and rely on
+    // the caller to not double-invoke.
+    set({ hydratingChain: true });
+    try {
+      return await hydrate();
+    } finally {
+      set({ hydratingChain: false });
+    }
+  },
 
   async init(workerClient: FoldWorkerClient, workerHeadSeq?: number) {
     const wasReady = get().ready;
