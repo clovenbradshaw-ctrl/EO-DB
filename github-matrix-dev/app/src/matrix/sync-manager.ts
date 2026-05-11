@@ -68,6 +68,24 @@ async function saveQueueToIdb(roomId: string, queue: QueueEntry[]): Promise<void
   }
 }
 
+/**
+ * Delete the entire offline-queue IndexedDB. Called on logout so a new
+ * session does not inherit queued writes from the prior account.
+ * Best-effort — failures here don't block the logout flow.
+ */
+export async function eraseOfflineQueueDb(): Promise<void> {
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const req = indexedDB.deleteDatabase(IDB_QUEUE_NAME);
+      req.onsuccess = () => resolve();
+      req.onerror = () => reject(req.error);
+      req.onblocked = () => resolve(); // some other tab holds it; best-effort
+    });
+  } catch (e) {
+    console.warn('[EO-DB] Failed to erase offline queue IDB on logout:', e);
+  }
+}
+
 // ─── Hydration timeout helper ─────────────────────────────────────────────────
 
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {

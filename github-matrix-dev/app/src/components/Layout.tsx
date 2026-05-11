@@ -5,10 +5,10 @@ import { persistSpaceMeta, listSpaceMeta, clearAllSpaceMetas, saveSpaceMeta, rem
 import { clearSpaceLocalData } from '../db/clear-space-data';
 import { Modal } from './Modal';
 import { createFoldWorkerClient, initFoldWorker, type FoldWorkerClient } from '../db/lazy-fold';
-import { SyncManager } from '../matrix/sync-manager';
+import { SyncManager, eraseOfflineQueueDb } from '../matrix/sync-manager';
 import { PeerSync } from '../matrix/peer-sync';
 import { WebRTCPeer } from '../matrix/webrtc-peer';
-import { hydrateBlocksIfStale, listenForChainUpdates, isAutoIngestEnabled } from '../sync/block-hydration';
+import { hydrateBlocksIfStale, listenForChainUpdates, isAutoIngestEnabled, clearAllHydratedHeadMarkers } from '../sync/block-hydration';
 import type { BlockDriveMirrorDeps } from '../sync/block-drive-mirror';
 import {
   startNetworkSyncSystem,
@@ -2107,9 +2107,36 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     // Also clear Matrix crypto stores — they use a different prefix and
     // would otherwise cause device-ID mismatches on the next login.
     await clearMatrixCryptoStore();
+    // Wipe block-chain hydration cursors so a new account doesn't inherit
+    // a "we already hydrated up to X" marker that would skip blocks on
+    // re-login. (V5/V9 of HELIX-AUDIT-2026-05-11.md.)
+    clearAllHydratedHeadMarkers();
+    // Drop the IDB offline queue so queued writes from the prior session
+    // don't get replayed under the new account's identity. (V5.)
+    await eraseOfflineQueueDb();
 
     onLogout();
   }
+
+  // Auto-REC on session expiry: when Matrix returns 401 / M_UNKNOWN_TOKEN
+  // (surfaced via connectionError.phase === 'auth'), the prior session's
+  // token is dead. Trust in any persisted state from this session is now
+  // unverifiable, so trigger the same handleLogout path the user would
+  // hit via the "Re-login" button. Without this, the user can continue
+  // editing against state that the homeserver will reject on next flush.
+  // (V6 of HELIX-AUDIT-2026-05-11.md.)
+  const handleLogoutRef = useRef(handleLogout);
+  handleLogoutRef.current = handleLogout;
+  const autoLogoutFiredRef = useRef(false);
+  useEffect(() => {
+    if (connectionError?.phase !== 'auth') {
+      autoLogoutFiredRef.current = false;
+      return;
+    }
+    if (autoLogoutFiredRef.current) return;
+    autoLogoutFiredRef.current = true;
+    void handleLogoutRef.current();
+  }, [connectionError]);
 
   // Handle tab visibility changes.
   //

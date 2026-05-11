@@ -426,6 +426,25 @@ function writePersistedHydratedHead(roomId: string, blockEventId: string | null)
 }
 
 /**
+ * Wipe every persisted hydration cursor in localStorage. Called on logout
+ * so a new session can't inherit a "we already hydrated up to X" marker
+ * from the prior account — without this, re-login with a populated OPFS
+ * but a fresh chain head would silently skip blocks.
+ */
+export function clearAllHydratedHeadMarkers(): void {
+  try {
+    const drop: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith(HYDRATED_HEAD_LS_KEY_PREFIX)) drop.push(k);
+    }
+    for (const k of drop) localStorage.removeItem(k);
+  } catch {
+    // ignore — same rationale as writePersistedHydratedHead
+  }
+}
+
+/**
  * Run block-chain hydration only when the chain has advanced beyond
  * what's already been folded locally.
  *
