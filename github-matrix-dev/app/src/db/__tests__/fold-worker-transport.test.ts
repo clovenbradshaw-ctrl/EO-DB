@@ -21,11 +21,15 @@
  * the runner.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   filterSnapshotForShard,
   snapshotStoreWithEdgeIndex,
+  createWorkerShardPool,
   type StoreSnapshotBundle,
+  type ShardRequest,
+  type WorkerDispatchMessage,
+  type WorkerResultMessage,
 } from '../fold-worker-transport';
 import { SHARDING_HASH_VERSION } from '../fold-pool';
 import type { EoStore, IteratorOpts } from '../encrypted-store';
@@ -342,5 +346,139 @@ describe('snapshotStoreWithEdgeIndex', () => {
     expect([...bundle.rdepFrom.get('c')!]).toEqual(['D2']);
     expect([...bundle.constituentsOf.get('D1')!].sort()).toEqual(['a', 'b']);
     expect([...bundle.constituentsOf.get('D2')!]).toEqual(['c']);
+  });
+});
+
+// ─── createWorkerShardPool — slot respawn on worker crash (V7) ─────────────
+
+/**
+ * Minimal Worker stand-in that records its events + supports a synthetic
+ * `dispatchError` to simulate a runtime crash. Real Web Workers fire
+ * `error` events asynchronously when a worker throws unhandled; we mimic
+ * that contract with `addEventListener('error', ...)`.
+ */
+function makeFakeWorker() {
+  const messageListeners = new Set<(ev: MessageEvent<WorkerResultMessage>) => void>();
+  const errorListeners = new Set<(ev: ErrorEvent) => void>();
+  let terminated = false;
+  let respondAutomatically = true;
+  const posts: WorkerDispatchMessage[] = [];
+
+  return {
+    posts,
+    get terminated() { return terminated; },
+    setRespondAutomatically(v: boolean) { respondAutomatically = v; },
+    addEventListener(kind: string, listener: (ev: any) => void) {
+      if (kind === 'message') messageListeners.add(listener);
+      else if (kind === 'error') errorListeners.add(listener);
+    },
+    removeEventListener(kind: string, listener: (ev: any) => void) {
+      if (kind === 'message') messageListeners.delete(listener);
+      else if (kind === 'error') errorListeners.delete(listener);
+    },
+    postMessage(msg: WorkerDispatchMessage) {
+      posts.push(msg);
+      if (!respondAutomatically) return;
+      // Asynchronously deliver a success response.
+      queueMicrotask(() => {
+        const reply: WorkerResultMessage = {
+          type: 'result',
+          id: msg.id,
+          response: {
+            mutations: [],
+            shardLastSeq: 0,
+            processedCount: 0,
+            emittedEvents: [],
+          },
+        };
+        for (const l of messageListeners) l({ data: reply } as MessageEvent<WorkerResultMessage>);
+      });
+    },
+    terminate() { terminated = true; },
+    /** Simulate an unhandled error from inside the worker. */
+    dispatchError(message = 'simulated crash') {
+      const ev = { message } as ErrorEvent;
+      for (const l of errorListeners) l(ev);
+    },
+  };
+}
+
+type FakeWorker = ReturnType<typeof makeFakeWorker>;
+
+function makeShardRequest(): ShardRequest {
+  return {
+    shardingHashVersion: SHARDING_HASH_VERSION,
+    snapshot: [],
+    currentSeq: 0,
+    shardTargets: ['a'],
+    targetsToPlanned: [],
+  };
+}
+
+describe('createWorkerShardPool slot respawn', () => {
+  it('replaces a dead worker via workerFactory and routes subsequent dispatches to the replacement', async () => {
+    const workers: FakeWorker[] = [];
+    const workerFactory = vi.fn(() => {
+      const w = makeFakeWorker();
+      workers.push(w);
+      return w as unknown as Worker;
+    });
+
+    const pool = createWorkerShardPool({ workerCount: 1, workerFactory });
+    expect(workerFactory).toHaveBeenCalledTimes(1);
+
+    // First dispatch goes to worker[0] and succeeds.
+    const r1 = await pool.dispatcher(makeShardRequest());
+    expect(r1.processedCount).toBe(0);
+    expect(workers[0].posts.length).toBe(1);
+
+    // Simulate the worker crashing. The pool-level error listener should
+    // terminate it and ask the factory for a replacement.
+    workers[0].dispatchError();
+    expect(workers[0].terminated).toBe(true);
+    expect(workerFactory).toHaveBeenCalledTimes(2);
+
+    // Subsequent dispatch must go to the fresh worker, not the dead one.
+    const r2 = await pool.dispatcher(makeShardRequest());
+    expect(r2.processedCount).toBe(0);
+    expect(workers[1].posts.length).toBe(1);
+    // The dead worker received no new posts after its crash.
+    expect(workers[0].posts.length).toBe(1);
+
+    pool.terminate();
+    expect(workers[1].terminated).toBe(true);
+  });
+
+  it('preserves round-robin across slots after a single-slot respawn', async () => {
+    const workers: FakeWorker[] = [];
+    const workerFactory = vi.fn(() => {
+      const w = makeFakeWorker();
+      workers.push(w);
+      return w as unknown as Worker;
+    });
+
+    const pool = createWorkerShardPool({ workerCount: 2, workerFactory });
+    expect(workers.length).toBe(2);
+
+    // Warm-up: one dispatch per slot.
+    await pool.dispatcher(makeShardRequest());
+    await pool.dispatcher(makeShardRequest());
+    expect(workers[0].posts.length).toBe(1);
+    expect(workers[1].posts.length).toBe(1);
+
+    // Crash slot 0. Slot 1 stays alive.
+    workers[0].dispatchError();
+    expect(workers.length).toBe(3); // factory called once more for the respawn
+    expect(workers[1].terminated).toBe(false);
+
+    // Two more dispatches. Round-robin starts at slot 0 (next after the
+    // previous cycle's slot 1). First lands on the fresh slot-0 worker
+    // (workers[2]), second on the still-alive workers[1].
+    await pool.dispatcher(makeShardRequest());
+    await pool.dispatcher(makeShardRequest());
+    expect(workers[2].posts.length).toBe(1);
+    expect(workers[1].posts.length).toBe(2);
+
+    pool.terminate();
   });
 });

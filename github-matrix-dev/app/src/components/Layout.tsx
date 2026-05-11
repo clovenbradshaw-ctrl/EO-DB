@@ -744,9 +744,17 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           : matrixReady
             ? 'online'
             : 'syncing';
+  // V4: surface block-chain hydration state to the user. The chain SEG
+  // fires fire-and-forget after init, so the UI is interactive but reads
+  // may lag the homeserver's head until it completes. The status badge
+  // already supports a `syncing` state; piggyback on its message slot
+  // when the higher-priority error/detail/initial-sync messages aren't
+  // claiming it.
+  const hydratingChain = useEoStore((s) => s.hydratingChain);
   const connectionMessage = connectionError?.message
     ?? connectionDetail
-    ?? (connectionState === 'syncing' ? 'Matrix is starting and performing initial sync.' : undefined);
+    ?? (connectionState === 'syncing' ? 'Matrix is starting and performing initial sync.' : undefined)
+    ?? (hydratingChain ? 'Catching up on the block chain — local reads may be slightly stale.' : undefined);
 
   // Helper to select a space and persist the choice.
   //
@@ -1922,9 +1930,14 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       // SEG: same boundary check as the cache-hit branch above. On cold
       // start the snapshot is empty (or was just loaded from OPFS), and
       // m.eo.head may point at a chain head that doesn't yet have its
-      // blocks folded into the local store. Fire-and-forget — the fold
-      // engine dedups concurrent live events + hydration via
-      // client_event_id, so no risk of double application.
+      // blocks folded into the local store.
+      //
+      // The initial SEG is owned by `PeerSync.start()` via its
+      // `chainSeg` hook (constructed below) — that places the trigger
+      // inside the sync layer rather than the UI shell, satisfying V8.
+      // Here we only wire the V9 reconciliation (snapshot cursor →
+      // localStorage backfill) and the auto-ingest listener that
+      // handles subsequent chain updates.
       if (MATRIX_ENABLED && spaceRoomId && matrixClientRef.current) {
         const hydrateClient = matrixClientRef.current;
         const hydrateStore = useEoStore.getState().store;
@@ -1935,17 +1948,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             setPersistedHydratedHead(spaceRoomId, snapHead);
           }
           const mirror = buildBlockMirror(hydrateClient, spaceRoomId);
-          hydrateBlocksIfStale(hydrateClient, spaceRoomId, hydrateStore, {
-            bulkApply: (events) => useEoStore.getState().batchImport(events),
-            mirror,
-          })
-            .then((r) => {
-              // Persist the kv-snapshot + init-cache so the next refresh
-              // restores from the snapshot directly instead of re-folding
-              // the entire OPFS log. Skipped when hydrate was a no-op.
-              if (r) return useEoStore.getState().flushToOpfs(r.latestBlockEventId);
-            })
-            .catch((e) => console.warn('[EO-DB] block-chain hydration failed:', e));
 
           // Auto-ingest: subscribe to live m.eo.head / m.eo.block / disabled
           // state-event changes and fold the new gap incrementally. Idempotent
@@ -2019,13 +2021,30 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             });
             console.log('[EO-DB] Operator-native sync active for', spaceRoomId);
           } else {
+            const psClient = matrixClientRef.current;
+            const psStore = useEoStore.getState().store!;
+            const psMirror = buildBlockMirror(psClient, spaceRoomId);
+            // V8: PeerSync.start() owns the initial chain-SEG via this
+            // closure, replacing the Layout-side initial hydrate call.
+            // listenForChainUpdates (wired earlier in this effect) still
+            // handles subsequent updates from other clients.
+            const psChainSeg = () =>
+              useEoStore.getState().runChainHydrate(() =>
+                hydrateBlocksIfStale(psClient, spaceRoomId, psStore, {
+                  bulkApply: (events) => useEoStore.getState().batchImport(events),
+                  mirror: psMirror,
+                }).then((r) => {
+                  if (r) return useEoStore.getState().flushToOpfs(r.latestBlockEventId);
+                }),
+              );
             peerSync = new PeerSync(
-              matrixClientRef.current,
+              psClient,
               spaceRoomId,
-              useEoStore.getState().store!,
+              psStore,
               onFoldEvent,
               undefined,
               (events) => useEoStore.getState().batchImport(events),
+              psChainSeg,
             );
             peerSync.setWebRTCPeer(webrtcPeer);
             await peerSync.start();
