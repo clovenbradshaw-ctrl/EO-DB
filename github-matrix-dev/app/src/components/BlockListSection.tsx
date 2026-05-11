@@ -114,6 +114,13 @@ export function BlockListSection({ matrixClient, roomId }: BlockListSectionProps
         bulkApply: (events) => batchImport(events),
         force: true,
       });
+      // Persist the kv-snapshot + init-cache so the next refresh restores
+      // from the snapshot directly instead of re-folding the OPFS log.
+      try {
+        await useEoStore.getState().flushToOpfs();
+      } catch (e) {
+        console.warn('[EO-DB] post-reapply flushToOpfs failed:', e);
+      }
     } catch (e: any) {
       setError(e?.message ?? String(e));
     } finally {
