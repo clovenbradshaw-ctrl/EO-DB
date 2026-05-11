@@ -13,7 +13,7 @@
  */
 
 import type { MatrixClient } from 'matrix-js-sdk';
-import { unpack } from 'msgpackr';
+import { pack, unpack } from 'msgpackr';
 import type { EoStore } from '../db/encrypted-store';
 import type { EoEvent, EoEventInput } from '../db/types';
 import { processEvent } from '../db/fold';
@@ -28,21 +28,103 @@ import {
 } from './block-sealer';
 
 /**
- * Hot-start seeds get split into blocks of at most this many events. The
- * resulting .eodb attachment for a chunk of this size lands in the tens
- * of MB after msgpack-packing + AES-CTR encryption, which stays well
- * under typical Matrix homeserver attachment limits (50–100 MB on
- * synapse). Bigger is better for read amplification but past this the
- * single upload becomes the dominant failure mode for slow networks.
- *
- * Well over `SEAL_TRIGGER.MIN_TAIL_EVENTS` (5000) — seed-derived blocks
- * are intentionally larger than the live-sealer threshold so seeded
- * spaces have a compact chain.
+ * Hard upper bound on events per hot-start block. The actual chunk size
+ * is chosen dynamically from the homeserver's reported max upload size
+ * (see {@link pickInitialChunkSize}), but we never exceed this many
+ * events per block regardless of how cheap the events look, because
+ * (a) read amplification on a 50k+ event block gets noticeable on cold
+ * fetches and (b) very large blocks dominate the failure budget on slow
+ * uploads.
  */
 const HOT_START_MAX_EVENTS_PER_BLOCK = 20_000;
 
+/**
+ * Floor for adaptive chunk halving. Below this we give up rather than
+ * spam the homeserver with one-block-per-event uploads. A homeserver
+ * that won't accept this much almost certainly has a misconfiguration
+ * or per-event payloads the user needs to address.
+ */
+const HOT_START_MIN_EVENTS_PER_BLOCK = 250;
+
+/**
+ * Default assumed homeserver max upload size when `getMediaConfig` is
+ * unavailable or returns no value. Matches Synapse's default
+ * `max_upload_size` of 50 MiB.
+ */
+const DEFAULT_MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
+
+/**
+ * Fraction of the homeserver's max upload size we'll target per block.
+ * Leaves room for the .eodb framing/header overhead and homeserver-side
+ * slop (mime sniffing, content-length checks against streamed body).
+ */
+const UPLOAD_SAFETY_FRACTION = 0.7;
+
 /** Per-block upload retry budget. Exponential backoff between attempts. */
 const SEAL_RETRY_ATTEMPTS = 3;
+
+/**
+ * Probe the connected homeserver for its advertised max upload size
+ * (`m.upload.size` from `/_matrix/media/v3/config`). Returns
+ * {@link DEFAULT_MAX_UPLOAD_BYTES} if the call fails or returns no value
+ * — both common when the SDK build doesn't expose the config endpoint or
+ * the homeserver is older.
+ */
+async function getMaxUploadBytes(client: MatrixClient): Promise<number> {
+  try {
+    const fn = (client as any).getMediaConfig;
+    if (typeof fn !== 'function') return DEFAULT_MAX_UPLOAD_BYTES;
+    const config = await fn.call(client);
+    const size = config?.['m.upload.size'];
+    if (typeof size === 'number' && size > 0) return size;
+  } catch {
+    // Treat any failure as "use the default" — overshooting the real
+    // limit just falls into the adaptive-halving retry below.
+  }
+  return DEFAULT_MAX_UPLOAD_BYTES;
+}
+
+/**
+ * Estimate the average msgpack-encoded size of an event by packing a
+ * sample. The .eodb LOG_SEGMENT writes events as a single packed array
+ * (see EodbWriter), so msgpack overhead per element is what matters.
+ * Adds a small constant for the per-block frame/header overhead.
+ */
+function estimateBytesPerEvent(events: EoEventInput[]): number {
+  if (events.length === 0) return 256;
+  const sampleSize = Math.min(events.length, 200);
+  // Take a slice from the middle of the list — first/last events are
+  // sometimes oddly shaped (initial scaffolding, summary rows).
+  const start = Math.max(0, Math.floor((events.length - sampleSize) / 2));
+  const sample = events.slice(start, start + sampleSize);
+  let bytes: number;
+  try {
+    bytes = pack(sample).length;
+  } catch {
+    return 512; // conservative fallback
+  }
+  return Math.max(64, Math.ceil(bytes / sample.length));
+}
+
+/**
+ * Pick the initial events-per-block based on the homeserver's reported
+ * limit and a sample of the seed's event sizes. The adaptive halving in
+ * the seal loop handles cases where this estimate is wrong (e.g. the
+ * sample under-represented payload sizes, or the homeserver fronts a
+ * stricter reverse proxy than its advertised limit).
+ */
+function pickInitialChunkSize(
+  events: EoEventInput[],
+  maxUploadBytes: number,
+): number {
+  const avgBytes = estimateBytesPerEvent(events);
+  const targetBytes = Math.floor(maxUploadBytes * UPLOAD_SAFETY_FRACTION);
+  const fromBytes = Math.max(1, Math.floor(targetBytes / avgBytes));
+  return Math.min(
+    HOT_START_MAX_EVENTS_PER_BLOCK,
+    Math.max(HOT_START_MIN_EVENTS_PER_BLOCK, fromBytes),
+  );
+}
 
 async function withRetry<T>(
   fn: () => Promise<T>,
@@ -242,9 +324,20 @@ export async function seedSpaceFromFile(
       // (AES-CTR via uploadEncryptedAttachment) and gets chained
       // through prior_block_event_id, so the resulting block chain is
       // the same shape as if it had been sealed live.
+      //
+      // Chunk sizing is dynamic: probe the homeserver's max upload
+      // size, sample the seed's per-event byte cost, and pick a count
+      // that should land under the limit. If the homeserver still
+      // rejects an upload (advertised limit lies, reverse proxy is
+      // stricter, content-length math drifts), we halve the chunk and
+      // retry. This was the failure mode for the
+      // airtable-hydration seed against synapse: 20k rich Airtable
+      // rows packed into >50 MiB, the default `max_upload_size`, and
+      // the homeserver returned `[500] Internal server error` from
+      // `/_matrix/media/v3/upload` instead of a clean 413.
       const schemaVersion = opts.schemaVersion ?? BLOCK_SCHEMA_VERSION;
-      const blockSize = Math.max(HOT_START_MAX_EVENTS_PER_BLOCK, 5000);
-      const blockCount = Math.ceil(eventsWithAgent.length / blockSize);
+      const maxUploadBytes = await getMaxUploadBytes(client);
+      let chunkSize = pickInitialChunkSize(eventsWithAgent, maxUploadBytes);
 
       let currentHead: HeadState = head;
       let firstResult: SealResult | null = null;
@@ -254,25 +347,46 @@ export async function seedSpaceFromFile(
       // hook the local fold below reports its own per-event progress.)
       const sealReportBudget = opts.bulkApply ? Math.floor(total / 2) : 0;
 
-      for (let blockIdx = 0; blockIdx < blockCount; blockIdx++) {
-        const chunkStart = blockIdx * blockSize;
-        const chunkEnd = Math.min(chunkStart + blockSize, eventsWithAgent.length);
-        const chunkEvents = eventsWithAgent.slice(chunkStart, chunkEnd);
+      let sealedCount = 0;
+      while (sealedCount < eventsWithAgent.length) {
+        const chunkEnd = Math.min(sealedCount + chunkSize, eventsWithAgent.length);
+        const chunkEvents = eventsWithAgent.slice(sealedCount, chunkEnd);
 
-        const result = await withRetry(
-          () => sealBlockFromEvents(
-            client,
-            roomId,
-            collectionId,
-            myDeviceId,
-            chunkEvents,
-            [],
-            currentHead,
-            { schemaVersion },
-          ),
-          SEAL_RETRY_ATTEMPTS,
-          `seal block ${blockIdx + 1}/${blockCount}`,
-        );
+        let result: SealResult;
+        try {
+          result = await withRetry(
+            () => sealBlockFromEvents(
+              client,
+              roomId,
+              collectionId,
+              myDeviceId,
+              chunkEvents,
+              [],
+              currentHead,
+              { schemaVersion },
+            ),
+            SEAL_RETRY_ATTEMPTS,
+            `seal block ${currentHead.block_count} (${chunkEvents.length} events)`,
+          );
+        } catch (e) {
+          // If the chunk is bigger than the homeserver actually
+          // accepts, halving it converges on a working size in
+          // O(log) reattempts. We only do this above the floor — at
+          // that point the failure isn't size-related.
+          if (chunkSize > HOT_START_MIN_EVENTS_PER_BLOCK) {
+            const next = Math.max(
+              HOT_START_MIN_EVENTS_PER_BLOCK,
+              Math.floor(chunkSize / 2),
+            );
+            console.warn(
+              `[seed-uploader] seal failed for ${chunkEvents.length}-event chunk after ${SEAL_RETRY_ATTEMPTS} attempts; halving chunk to ${next} and retrying:`,
+              e,
+            );
+            chunkSize = next;
+            continue;
+          }
+          throw e;
+        }
 
         if (firstResult === null) firstResult = result;
 
@@ -288,9 +402,13 @@ export async function seedSpaceFromFile(
           updated_at: new Date().toISOString(),
         };
 
+        sealedCount = chunkEnd;
+
         if (sealReportBudget > 0) {
-          const sealed = chunkEnd;
-          opts.onProgress?.(Math.floor((sealed / eventsWithAgent.length) * sealReportBudget), total);
+          opts.onProgress?.(
+            Math.floor((sealedCount / eventsWithAgent.length) * sealReportBudget),
+            total,
+          );
         }
 
         // Yield between blocks so the browser can paint progress.
