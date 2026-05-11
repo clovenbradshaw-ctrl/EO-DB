@@ -1735,7 +1735,11 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           if (hydrateStore) {
             hydrateBlocksIfStale(hydrateClient, spaceRoomId, hydrateStore, {
               bulkApply: (events) => useEoStore.getState().batchImport(events),
-            }).catch((e) => console.warn('[EO-DB] block-chain hydration failed:', e));
+            })
+              .then((r) => {
+                if (r) return useEoStore.getState().flushToOpfs();
+              })
+              .catch((e) => console.warn('[EO-DB] block-chain hydration failed:', e));
 
             // Auto-ingest live updates from other clients (see cold-start
             // branch below for full context). Same guards: gated by
@@ -1750,6 +1754,9 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               hydrateBlocksIfStale(hydrateClient, spaceRoomId, liveStore, {
                 bulkApply: (events) => useEoStore.getState().batchImport(events),
               })
+                .then((r) => {
+                  if (r) return useEoStore.getState().flushToOpfs();
+                })
                 .catch((e) => console.warn('[EO-DB] auto-ingest fold failed:', e))
                 .finally(() => { ingestInFlight = false; });
             });
@@ -1874,7 +1881,14 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         if (hydrateStore) {
           hydrateBlocksIfStale(hydrateClient, spaceRoomId, hydrateStore, {
             bulkApply: (events) => useEoStore.getState().batchImport(events),
-          }).catch((e) => console.warn('[EO-DB] block-chain hydration failed:', e));
+          })
+            .then((r) => {
+              // Persist the kv-snapshot + init-cache so the next refresh
+              // restores from the snapshot directly instead of re-folding
+              // the entire OPFS log. Skipped when hydrate was a no-op.
+              if (r) return useEoStore.getState().flushToOpfs();
+            })
+            .catch((e) => console.warn('[EO-DB] block-chain hydration failed:', e));
 
           // Auto-ingest: subscribe to live m.eo.head / m.eo.block / disabled
           // state-event changes and fold the new gap incrementally. Idempotent
@@ -1891,6 +1905,9 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             hydrateBlocksIfStale(hydrateClient, spaceRoomId, liveStore, {
               bulkApply: (events) => useEoStore.getState().batchImport(events),
             })
+              .then((r) => {
+                if (r) return useEoStore.getState().flushToOpfs();
+              })
               .catch((e) => console.warn('[EO-DB] auto-ingest fold failed:', e))
               .finally(() => { ingestInFlight = false; });
           });
