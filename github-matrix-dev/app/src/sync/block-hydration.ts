@@ -17,6 +17,7 @@ import type { MatrixClient, MatrixEvent } from 'matrix-js-sdk';
 import {
   EO_EVENT_TYPE,
   EO_BLOCK_TYPE,
+  EO_BLOCK_DISABLED_STATE_TYPE,
   downloadEncryptedAttachment,
   matrixEventToEo,
 } from '../matrix/event-bridge';
@@ -263,12 +264,21 @@ export async function hydrateFromBlocks(
   // Phase 2: walk the chain (short-circuited by stopAtBlockEventId for
   // incremental hydration).
   onProgress?.({ phase: 'chain' });
-  const chain = await walkBlockChain(
+  const fullChain = await walkBlockChain(
     client,
     roomId,
     head.latest_block_event_id,
     opts.stopAtBlockEventId ?? null,
   );
+
+  // Filter out disabled blocks before download+fold. The chain pointers
+  // (prior_block_event_id) stay intact server-side; we just skip
+  // downloading the payload and folding the events for any block whose
+  // m.eo.block.disabled state event is set.
+  const disabled = readDisabledBlocks(client, roomId);
+  const chain = disabled.size > 0
+    ? fullChain.filter((b) => !disabled.has(b.eventId))
+    : fullChain;
 
   // Phase 3: parallel download + decrypt + parse.
   onProgress?.({ phase: 'download', blockCount: chain.length });
@@ -413,4 +423,126 @@ export async function hydrateBlocksIfStale(
   // gap rather than skipping it.
   writePersistedHydratedHead(roomId, result.latestBlockEventId);
   return result;
+}
+
+// ─── Block list + admin toggle ─────────────────────────────────────────
+
+export interface BlockListEntry {
+  eventId: string;
+  blockIndex: number;
+  eventCount: number;
+  priorBlockEventId: string | null;
+  sealedAt: string;
+  sealedBy: { user_id: string; device_id: string };
+  disabled: boolean;
+  disabledReason?: string;
+  disabledBy?: string;
+}
+
+/**
+ * Read every `m.eo.block.disabled` state event in the room and return
+ * the set of disabled block-event-ids (where `content.disabled === true`).
+ * Cheap — pure local read against the SDK room state, no network.
+ */
+export function readDisabledBlocks(
+  client: MatrixClient,
+  roomId: string,
+): Set<string> {
+  const room = client.getRoom(roomId);
+  if (!room) return new Set();
+  const events = room.currentState.getStateEvents(EO_BLOCK_DISABLED_STATE_TYPE);
+  const result = new Set<string>();
+  for (const ev of events) {
+    const stateKey = ev.getStateKey();
+    if (!stateKey) continue;
+    const content = ev.getContent() as { disabled?: boolean };
+    if (content.disabled === true) result.add(stateKey);
+  }
+  return result;
+}
+
+/**
+ * List every block in the room's chain (newest first), annotated with
+ * its current disabled state. Used by the admin UI that shows uploaded
+ * blocks and lets operators toggle them on/off.
+ */
+export async function listBlockChain(
+  client: MatrixClient,
+  roomId: string,
+): Promise<BlockListEntry[]> {
+  const head = readHeadState(client, roomId);
+  if (!head.latest_block_event_id) return [];
+  const chain = await walkBlockChain(client, roomId, head.latest_block_event_id);
+  const disabled = readDisabledBlocks(client, roomId);
+  const disabledMeta = readDisabledMeta(client, roomId);
+
+  const entries: BlockListEntry[] = chain.map(({ eventId, content }) => {
+    const meta = disabledMeta.get(eventId);
+    return {
+      eventId,
+      blockIndex: content.block_index,
+      eventCount: content.event_count,
+      priorBlockEventId: content.prior_block_event_id,
+      sealedAt: content.sealed_at,
+      sealedBy: content.sealed_by,
+      disabled: disabled.has(eventId),
+      disabledReason: meta?.reason,
+      disabledBy: meta?.setBy,
+    };
+  });
+
+  // Newest first for UI ergonomics.
+  entries.reverse();
+  return entries;
+}
+
+function readDisabledMeta(
+  client: MatrixClient,
+  roomId: string,
+): Map<string, { reason?: string; setBy?: string }> {
+  const out = new Map<string, { reason?: string; setBy?: string }>();
+  const room = client.getRoom(roomId);
+  if (!room) return out;
+  const events = room.currentState.getStateEvents(EO_BLOCK_DISABLED_STATE_TYPE);
+  for (const ev of events) {
+    const stateKey = ev.getStateKey();
+    if (!stateKey) continue;
+    const content = ev.getContent() as { reason?: string; set_by?: string };
+    out.set(stateKey, { reason: content.reason, setBy: content.set_by });
+  }
+  return out;
+}
+
+/**
+ * Toggle a block's disabled state. Sends a `m.eo.block.disabled` state
+ * event keyed by the block's room-event id. Setting `disabled: false`
+ * (or sending content `{}`) re-enables the block on the next hydrate.
+ *
+ * After this call returns, local state is stale relative to the new
+ * disabled set — call `hydrateBlocksIfStale(..., { force: true })`
+ * followed by a kv-snapshot refresh to actually apply the change.
+ * The UI should prompt the user / trigger this re-fold explicitly.
+ */
+export async function setBlockDisabled(
+  client: MatrixClient,
+  roomId: string,
+  blockEventId: string,
+  disabled: boolean,
+  reason?: string,
+): Promise<void> {
+  const userId = client.getUserId?.() ?? '@unknown:unknown';
+  const content = disabled
+    ? {
+        disabled: true,
+        reason: reason ?? '',
+        set_by: userId,
+        set_at: new Date().toISOString(),
+      }
+    : { disabled: false, set_by: userId, set_at: new Date().toISOString() };
+  await client.sendStateEvent(
+    roomId,
+    EO_BLOCK_DISABLED_STATE_TYPE as any,
+    content as any,
+    blockEventId,
+  );
 }
