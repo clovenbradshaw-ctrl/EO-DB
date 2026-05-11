@@ -12,6 +12,7 @@ import { ArchivedSpacesSection } from './ArchivedSpaces';
 import { AirtableSettingsSection } from './AirtableSettings';
 import { GCalendarSettingsSection } from './GCalendarSettings';
 import { SeedSpaceSection } from './SeedSpaceSection';
+import { BlockListSection } from './BlockListSection';
 import { isAminoHomeserver } from '../lib/matrix-domain';
 import { usePresencePrefs } from '../lib/presence-prefs';
 import { useNLPrefs } from '../lib/nl-prefs';
@@ -554,12 +555,20 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
           </Section>
         )}
 
-        {/* Seed this space — upload a .eodb / NDJSON to bootstrap this room. */}
+        {/* Seed this space — upload a .eodb to bootstrap this room. */}
         <Section title="Seed this Space" theme={theme}>
           <SeedSpaceSection
             matrixClient={matrixClient}
             roomId={roomId}
             collectionId={roomId}
+          />
+        </Section>
+
+        {/* Uploaded blocks — list + per-block enable/disable. */}
+        <Section title="Uploaded Blocks" theme={theme}>
+          <BlockListSection
+            matrixClient={matrixClient}
+            roomId={roomId}
           />
         </Section>
 

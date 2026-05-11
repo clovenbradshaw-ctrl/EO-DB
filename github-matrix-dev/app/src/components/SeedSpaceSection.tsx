@@ -1,18 +1,18 @@
 /**
- * "This is the file to get started" — seed-upload UI.
+ * Seed-upload UI.
  *
- * Lets the space owner pick a `.eodb` or NDJSON bundle and apply it to
- * the current space. Diffs every event by `client_event_id` so uploading
- * the same file twice is a no-op. Brand-new spaces with an `.eodb` seed
- * take a hot-start path that posts the file directly as the genesis
- * block (one upload, one state event, fully hydrated chain).
+ * Pick a file → upload as encrypted media → post the m.eo.block event.
+ * That's it. No client-side parsing, no preview, no per-event progress —
+ * once the upload completes, the rest of the system handles fold via
+ * normal block-chain hydration.
  */
 
 import { useRef, useState } from 'react';
 import type { MatrixClient } from 'matrix-js-sdk';
 import { useTheme } from '../theme';
 import { useEoStore } from '../store/eo-store';
-import { parseSeedFile, seedSpaceFromFile, type ParsedSeed } from '../sync/seed-uploader';
+import { uploadSeedFile } from '../sync/seed-uploader';
+import { hydrateBlocksIfStale } from '../sync/block-hydration';
 
 interface SeedSpaceSectionProps {
   matrixClient: MatrixClient | null | undefined;
@@ -22,11 +22,16 @@ interface SeedSpaceSectionProps {
 
 type Status =
   | { kind: 'idle' }
-  | { kind: 'reading'; fileName: string }
-  | { kind: 'preview'; fileName: string; seed: ParsedSeed }
-  | { kind: 'applying'; fileName: string; current: number; total: number }
-  | { kind: 'done'; fileName: string; total: number; added: number; skipped: number; genesis?: boolean }
+  | { kind: 'uploading'; fileName: string; byteCount: number }
+  | { kind: 'done'; fileName: string; byteCount: number; blockEventId: string }
   | { kind: 'error'; fileName: string; message: string };
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
 
 export function SeedSpaceSection({
   matrixClient,
@@ -43,92 +48,60 @@ export function SeedSpaceSection({
   const disabled = !matrixClient || !roomId || !collectionId || !store;
 
   async function handleFile(file: File) {
-    setStatus({ kind: 'reading', fileName: file.name });
+    if (!matrixClient || !roomId) return;
+    setStatus({ kind: 'uploading', fileName: file.name, byteCount: file.size });
     try {
       const bytes = new Uint8Array(await file.arrayBuffer());
-      const seed = await parseSeedFile(bytes, file.name);
-      setStatus({ kind: 'preview', fileName: file.name, seed });
-    } catch (e: any) {
-      setStatus({ kind: 'error', fileName: file.name, message: e?.message ?? String(e) });
-    }
-  }
+      const result = await uploadSeedFile(matrixClient, roomId, bytes);
 
-  async function applyPreview(seed: ParsedSeed, fileName: string) {
-    if (!matrixClient || !roomId || !collectionId || !store) return;
-    setStatus({ kind: 'applying', fileName, current: 0, total: seed.events.length });
-    try {
-      // Throttle setState calls during apply — without this, an 80k-event
-      // seed fires 80k React renders on the progress label and pins the
-      // main thread even though the underlying bulk fold is chunked.
-      let lastProgressAt = 0;
-      const PROGRESS_THROTTLE_MS = 33; // ~30 Hz
-      const result = await seedSpaceFromFile(
-        matrixClient,
-        roomId,
-        collectionId,
-        store,
-        seed,
-        {
-          onProgress: (current, total) => {
-            const now = Date.now();
-            if (current === total || now - lastProgressAt >= PROGRESS_THROTTLE_MS) {
-              lastProgressAt = now;
-              setStatus({ kind: 'applying', fileName, current, total });
-            }
-          },
-          bulkApply: (events, onBulkProgress) => batchImport(events, onBulkProgress),
-        },
-      );
-      // Persist the post-import kv state to OPFS so the next page refresh
-      // can restore from the snapshot instead of replaying the entire log.
-      // Without this, a 83k-event seed leaves the OPFS log fully populated
-      // but the kv-snapshot stale, and init has to walk every log entry on
-      // every refresh. Mirrors the post-sync flushToOpfs in the Airtable
-      // hydration path.
-      try {
-        await flushToOpfs();
-      } catch (e) {
-        console.warn('[EO-DB] post-seed flushToOpfs failed:', e);
+      // Fold the newly-uploaded block into local state by walking the
+      // chain from where we left off. Fire-and-forget — the UI doesn't
+      // wait on it. The block is already on the homeserver and visible
+      // to every other client.
+      if (store) {
+        hydrateBlocksIfStale(matrixClient, roomId, store, {
+          bulkApply: (events) => batchImport(events),
+        })
+          .then(() => flushToOpfs())
+          .catch((e) => console.warn('[EO-DB] post-upload hydrate failed:', e));
       }
+
       setStatus({
         kind: 'done',
-        fileName,
-        total: result.total,
-        added: result.added,
-        skipped: result.skipped,
-        genesis: !!result.hotStartGenesis,
+        fileName: file.name,
+        byteCount: bytes.byteLength,
+        blockEventId: result.blockEventId,
       });
     } catch (e: any) {
-      setStatus({ kind: 'error', fileName, message: e?.message ?? String(e) });
+      setStatus({ kind: 'error', fileName: file.name, message: e?.message ?? String(e) });
     }
   }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
       <div style={{ fontSize: 12, color: theme.textSecondary }}>
-        Upload an <code style={{ fontSize: 11 }}>.eodb</code> or NDJSON event bundle to
-        seed this space. New events are folded in; events already present (matched by
-        content hash) are skipped. Empty spaces seeded with an <code style={{ fontSize: 11 }}>.eodb</code>
-        {' '}use a fast genesis-block path.
+        Upload an <code style={{ fontSize: 11 }}>.eodb</code> bundle to seed
+        this space. The file is uploaded as encrypted media; every client
+        in the room folds it through the normal block-chain hydration path
+        on the next sync tick.
       </div>
 
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
         <input
           ref={fileInputRef}
           type="file"
-          accept=".eodb,.ndjson,.jsonl,application/octet-stream,application/x-ndjson,application/json"
+          accept=".eodb,application/octet-stream"
           style={{ display: 'none' }}
           disabled={disabled}
           onChange={(e) => {
             const file = e.target.files?.[0];
             if (file) handleFile(file);
-            // Reset the input so the same file can be re-selected.
             if (fileInputRef.current) fileInputRef.current.value = '';
           }}
         />
         <button
           type="button"
-          disabled={disabled || status.kind === 'reading' || status.kind === 'applying'}
+          disabled={disabled || status.kind === 'uploading'}
           onClick={() => fileInputRef.current?.click()}
           style={{
             padding: '6px 12px',
@@ -150,68 +123,9 @@ export function SeedSpaceSection({
         )}
       </div>
 
-      {status.kind === 'reading' && (
+      {status.kind === 'uploading' && (
         <div style={{ fontSize: 11, color: theme.textMuted }}>
-          Reading <code>{status.fileName}</code>…
-        </div>
-      )}
-
-      {status.kind === 'preview' && (
-        <div style={{
-          padding: '8px 10px',
-          background: theme.bgCard,
-          border: `1px solid ${theme.border}`,
-          borderRadius: 4,
-          fontSize: 11,
-          color: theme.text,
-          display: 'flex',
-          flexDirection: 'column' as const,
-          gap: 6,
-        }}>
-          <div>
-            <strong>{status.fileName}</strong> — detected{' '}
-            <code>{status.seed.format}</code> with{' '}
-            <strong>{status.seed.events.length.toLocaleString()}</strong> events.
-          </div>
-          <div style={{ display: 'flex', gap: 6 }}>
-            <button
-              type="button"
-              onClick={() => applyPreview(status.seed, status.fileName)}
-              style={{
-                padding: '4px 10px',
-                fontSize: 11,
-                background: theme.accent,
-                color: theme.bg,
-                border: 'none',
-                borderRadius: 3,
-                cursor: 'pointer',
-              }}
-            >
-              Apply to this space
-            </button>
-            <button
-              type="button"
-              onClick={() => setStatus({ kind: 'idle' })}
-              style={{
-                padding: '4px 10px',
-                fontSize: 11,
-                background: 'transparent',
-                color: theme.text,
-                border: `1px solid ${theme.border}`,
-                borderRadius: 3,
-                cursor: 'pointer',
-              }}
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
-      )}
-
-      {status.kind === 'applying' && (
-        <div style={{ fontSize: 11, color: theme.textMuted }}>
-          Applying <code>{status.fileName}</code>… {status.current.toLocaleString()} /{' '}
-          {status.total.toLocaleString()}
+          Uploading <code>{status.fileName}</code> ({formatBytes(status.byteCount)})…
         </div>
       )}
 
@@ -224,9 +138,8 @@ export function SeedSpaceSection({
           borderRadius: 4,
           fontSize: 11,
         }}>
-          {status.genesis ? 'Sealed as genesis block. ' : ''}
-          Added <strong>{status.added.toLocaleString()}</strong>. Skipped{' '}
-          <strong>{status.skipped.toLocaleString()}</strong> already-present event(s).
+          Uploaded <strong>{status.fileName}</strong> ({formatBytes(status.byteCount)}).
+          Block <code>{status.blockEventId.slice(0, 12)}…</code> sealed.
         </div>
       )}
 
@@ -239,7 +152,7 @@ export function SeedSpaceSection({
           borderRadius: 4,
           fontSize: 11,
         }}>
-          Failed to seed <code>{status.fileName}</code>: {status.message}
+          Failed to upload <code>{status.fileName}</code>: {status.message}
         </div>
       )}
     </div>

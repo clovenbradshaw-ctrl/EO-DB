@@ -28,6 +28,18 @@ export const EO_CHAT_ROOM_TYPE = 'com.eo-db.chat.room';
 export const EO_HEAD_STATE_TYPE = 'm.eo.head';
 /** Timeline message event for a sealed block (carries the mxc:// pointer). */
 export const EO_BLOCK_TYPE = 'm.eo.block';
+/**
+ * State event flagging a previously-sealed block as disabled.
+ * `state_key` = the disabled block's room-event id.
+ * Content: `{ disabled: boolean, reason?: string, set_by?: string, set_at?: string }`.
+ *
+ * Disabled blocks stay in the chain (so prior_block_event_id pointers
+ * remain intact) but are skipped by `hydrateFromBlocks` — their events
+ * are not folded into the local store. Toggle back with `disabled:false`.
+ * Power-level gate this event type to operator+ so only admins can
+ * redact uploaded data without breaking the chain.
+ */
+export const EO_BLOCK_DISABLED_STATE_TYPE = 'm.eo.block.disabled';
 
 /** Room alias — configured at runtime via `configureMatrixDomain()`. */
 export function getDataRoom(): string {
