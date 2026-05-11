@@ -12,6 +12,13 @@ import { getAirtableTypeIcon, getAirtableTypeColor } from './field-type-icons';
 import { groupSchemaStates, extractEdgeAttrDefs } from '../db/schema-rules';
 import { LinkFieldPicker } from './LinkFieldPicker';
 import { RelationshipFieldPanel } from './RelationshipFieldPanel';
+import {
+  getFieldAuditTrail,
+  shortAgent as shortAgentName,
+  relativeTime,
+  formatSource,
+  type FieldAuditEntry,
+} from './field-audit';
 
 interface FieldTypeSchema {
   type?: string;
@@ -63,42 +70,40 @@ export function FigureFields({ figure, onNavigate, profileFields, recordTs, allE
     return reconstructAt(value as Record<string, unknown>, allEvents, recordTs);
   }, [recordTs, allEvents, value]);
 
-  // Per-field history: walk DEF events oldest→newest, tracking every value each
-  // field has held. Used to render the compact "values over time" trail under
-  // each cell while time travel is active.
-  const fieldHistories = useMemo<Map<string, Array<{ ts: number; value: unknown }>>>(() => {
-    const out = new Map<string, Array<{ ts: number; value: unknown }>>();
+  // Per-field audit trails: walk DEF events oldest→newest and record every
+  // write — value, agent, ts, syncing method, branch, seq — for each field.
+  // Used for both the inline "last updated" badge and the full history popover.
+  const fieldAudits = useMemo<Map<string, FieldAuditEntry[]>>(() => {
+    const out = new Map<string, FieldAuditEntry[]>();
     if (!allEvents || allEvents.length === 0) return out;
 
-    const defs = allEvents
-      .filter((e) => e.op === 'DEF')
-      .slice()
-      .sort((a, b) => new Date(a.ts).getTime() - new Date(b.ts).getTime());
-
-    const push = (key: string, ts: number, v: unknown) => {
-      if (key.startsWith('_')) return;
-      const prior = out.get(key);
-      // Dedupe consecutive identical values so the trail stays compact.
-      if (prior && prior.length > 0 && JSON.stringify(prior[prior.length - 1].value) === JSON.stringify(v)) return;
-      if (!prior) out.set(key, [{ ts, value: v }]);
-      else prior.push({ ts, value: v });
-    };
-
-    for (const evt of defs) {
-      const ts = new Date(evt.ts).getTime();
+    // Collect every field name we've seen mentioned in a DEF operand, including
+    // those promoted out of a `fields` sub-object.
+    const seen = new Set<string>();
+    for (const evt of allEvents) {
+      if (evt.op !== 'DEF') continue;
       const op = evt.operand as Record<string, unknown> | undefined;
       if (!op || typeof op !== 'object') continue;
-      for (const [k, v] of Object.entries(op)) {
-        if (k === 'fields' && v && typeof v === 'object' && !Array.isArray(v)) {
-          // Flattened fields sub-object — treat each inner key as its own field
-          for (const [fk, fv] of Object.entries(v as Record<string, unknown>)) push(fk, ts, fv);
+      for (const k of Object.keys(op)) {
+        if (k.startsWith('_')) continue;
+        if (k === 'fields' && op[k] && typeof op[k] === 'object' && !Array.isArray(op[k])) {
+          for (const fk of Object.keys(op[k] as Record<string, unknown>)) {
+            if (!fk.startsWith('_')) seen.add(fk);
+          }
         } else {
-          push(k, ts, v);
+          seen.add(k);
         }
       }
     }
+
+    for (const fk of seen) {
+      out.set(fk, getFieldAuditTrail(allEvents, fk));
+    }
     return out;
   }, [allEvents]);
+
+  // Currently-open audit popover (per-field history + revert controls).
+  const [auditOpen, setAuditOpen] = useState<string | null>(null);
 
   const scopeRoot = figure.target.split('.')[0];
   const resolver = useIdResolver(scopeRoot);
@@ -196,10 +201,32 @@ export function FigureFields({ figure, onNavigate, profileFields, recordTs, allE
     Object.entries(rawSigs).filter(([, e]) => now - Date.parse(e.since) < SIG_TTL_MS),
   );
 
-  function shortAgent(agentId: string): string {
-    // "@alice:matrix.org" → "alice", "user" → "user"
-    const match = agentId.match(/^@?([^:@]+)/);
-    return match ? match[1] : agentId;
+  const shortAgent = shortAgentName;
+
+  async function handleRevert(fieldKey: string, entry: FieldAuditEntry) {
+    setAuditOpen(null);
+    try {
+      await dispatch({
+        op: 'DEF',
+        target: figure.target,
+        operand: { [fieldKey]: entry.value },
+        agent: 'user',
+        ts: new Date().toISOString(),
+        acquired_ts: new Date().toISOString(),
+        source: 'revert',
+        meta: {
+          revertedFromSeq: entry.seq,
+          revertedFromTs: entry.ts,
+          revertedFromAgent: entry.agent,
+        },
+      });
+      syncEditToAirtable({
+        target: figure.target,
+        fieldKey,
+        value: entry.value,
+        getStateByPrefix,
+      }).catch(console.warn);
+    } catch { /* ignore */ }
   }
 
   function dispatchSig(fieldKey: string, opts: { draft: string } | { editing: false }) {
@@ -341,10 +368,15 @@ export function FigureFields({ figure, onNavigate, profileFields, recordTs, allE
         const currentVal = (value as Record<string, unknown>)[key];
         const valueChanged = isHistoric && JSON.stringify(val) !== JSON.stringify(currentVal);
         const notYetRecorded = isHistoric && val === undefined;
+        const auditTrail = fieldAudits.get(key) ?? [];
+        const latestAudit = auditTrail.length > 0 ? auditTrail[auditTrail.length - 1] : null;
+        const auditTooltip = latestAudit
+          ? `Last updated ${relativeTime(latestAudit.ts)} by ${shortAgent(latestAudit.agent)} via ${formatSource(latestAudit.source)} (seq ${latestAudit.seq})`
+          : 'No audit history';
         return (
           <div
             key={key}
-            style={{ ...s.cell, ...(notYetRecorded ? { opacity: 0.3 } : {}) }}
+            style={{ ...s.cell, ...(notYetRecorded ? { opacity: 0.3 } : {}), position: 'relative' as const }}
             onContextMenu={(e) => handleContextMenu(e, key)}
           >
             <div style={s.label}>
@@ -357,6 +389,17 @@ export function FigureFields({ figure, onNavigate, profileFields, recordTs, allE
                   {shortAgent(sigs[key].agent)} editing…
                 </span>
               )}
+              <button
+                type="button"
+                title={auditTooltip}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setAuditOpen(auditOpen === key ? null : key);
+                }}
+                style={s.auditBadge}
+              >
+                {auditTrail.length > 0 ? `v${auditTrail.length}` : '·'}
+              </button>
             </div>
             <div
               style={{ ...s.value, cursor: editing?.fieldKey === key ? 'auto' : (isLinkField ? 'default' : 'text'), position: 'relative' as const }}
@@ -568,9 +611,20 @@ export function FigureFields({ figure, onNavigate, profileFields, recordTs, allE
             </div>
             {isHistoric && (
               <FieldHistoryTrail
-                history={fieldHistories.get(key) ?? []}
+                history={auditTrail.map((e) => ({ ts: new Date(e.ts).getTime(), value: e.value }))}
                 recordTs={recordTs ?? null}
                 theme={theme}
+              />
+            )}
+            {auditOpen === key && (
+              <FieldAuditPopover
+                fieldKey={key}
+                trail={auditTrail}
+                currentValue={currentVal}
+                onClose={() => setAuditOpen(null)}
+                onRevert={(entry) => handleRevert(key, entry)}
+                theme={theme}
+                renderValue={(v) => renderFieldValue(v, onNavigate, theme, resolver)}
               />
             )}
           </div>
@@ -839,6 +893,184 @@ function FieldHistoryTrail({
         );
       })}
     </div>
+  );
+}
+
+/**
+ * Per-field audit popover — shows every write to a field with who/when/how,
+ * plus a "Revert" button on each prior entry. Revert dispatches a brand new
+ * DEF carrying the old value forward with current provenance.
+ */
+function FieldAuditPopover({
+  fieldKey,
+  trail,
+  currentValue,
+  onClose,
+  onRevert,
+  theme: t,
+  renderValue,
+}: {
+  fieldKey: string;
+  trail: FieldAuditEntry[];
+  currentValue: unknown;
+  onClose: () => void;
+  onRevert: (entry: FieldAuditEntry) => void;
+  theme: Theme;
+  renderValue: (v: unknown) => React.ReactNode;
+}) {
+  // Newest first so the latest write is at the top.
+  const ordered = [...trail].reverse();
+  const isCurrent = (entry: FieldAuditEntry) =>
+    JSON.stringify(entry.value) === JSON.stringify(currentValue);
+
+  return (
+    <>
+      <div
+        onClick={onClose}
+        style={{ position: 'fixed', inset: 0, zIndex: 9998 }}
+      />
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          position: 'absolute',
+          top: '100%',
+          left: 0,
+          right: 0,
+          marginTop: 4,
+          zIndex: 9999,
+          background: t.bgCard,
+          border: `1px solid ${t.border}`,
+          borderRadius: 6,
+          boxShadow: `0 8px 30px ${t.shadow}`,
+          padding: 10,
+          maxHeight: 360,
+          overflow: 'auto',
+        }}
+      >
+        <div
+          style={{
+            fontSize: 10,
+            fontFamily: "'JetBrains Mono', monospace",
+            color: t.textMuted,
+            textTransform: 'uppercase' as const,
+            letterSpacing: '0.06em',
+            marginBottom: 6,
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+          }}
+        >
+          <span>audit trail · {fieldKey}</span>
+          <span>{trail.length} {trail.length === 1 ? 'write' : 'writes'}</span>
+        </div>
+        {ordered.length === 0 ? (
+          <div style={{ fontSize: 12, color: t.textMuted, padding: '6px 4px' }}>
+            No DEF events recorded for this field yet.
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {ordered.map((entry) => {
+              const current = isCurrent(entry);
+              return (
+                <div
+                  key={entry.seq}
+                  style={{
+                    border: `1px solid ${current ? t.accent : t.borderLight}`,
+                    background: current ? `${t.accent}10` : 'transparent',
+                    borderRadius: 4,
+                    padding: '6px 8px',
+                    display: 'flex',
+                    flexDirection: 'column' as const,
+                    gap: 4,
+                  }}
+                >
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 6,
+                      fontSize: 10,
+                      fontFamily: "'JetBrains Mono', monospace",
+                      color: t.textMuted,
+                      flexWrap: 'wrap' as const,
+                    }}
+                  >
+                    <span style={{ color: current ? t.accent : t.textMuted }}>
+                      seq {entry.seq}
+                    </span>
+                    <span>·</span>
+                    <span title={entry.ts}>{relativeTime(entry.ts)}</span>
+                    <span>·</span>
+                    <span title={entry.agent}>{shortAgentName(entry.agent)}</span>
+                    <span>·</span>
+                    <span>{formatSource(entry.source)}</span>
+                    {entry.branch && entry.branch !== 'main' && (
+                      <>
+                        <span>·</span>
+                        <span>branch {entry.branch}</span>
+                      </>
+                    )}
+                    {entry.revertedFromSeq !== undefined && (
+                      <span
+                        style={{
+                          color: t.warning ?? t.textMuted,
+                          marginLeft: 'auto',
+                        }}
+                        title={`Reverted from seq ${entry.revertedFromSeq}`}
+                      >
+                        ↺ from seq {entry.revertedFromSeq}
+                      </span>
+                    )}
+                    {current && (
+                      <span
+                        style={{
+                          marginLeft: 'auto',
+                          color: t.accent,
+                          fontWeight: 500,
+                        }}
+                      >
+                        current
+                      </span>
+                    )}
+                  </div>
+                  <div
+                    style={{
+                      fontSize: 12,
+                      color: t.text,
+                      wordBreak: 'break-word' as const,
+                      minWidth: 0,
+                    }}
+                  >
+                    {renderValue(entry.value)}
+                  </div>
+                  {!current && (
+                    <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                      <button
+                        type="button"
+                        onClick={() => onRevert(entry)}
+                        style={{
+                          fontSize: 11,
+                          padding: '3px 8px',
+                          border: `1px solid ${t.border}`,
+                          borderRadius: 3,
+                          background: 'transparent',
+                          color: t.text,
+                          cursor: 'pointer',
+                          fontFamily: "'JetBrains Mono', monospace",
+                        }}
+                        title="Re-apply this value as a new DEF with current provenance"
+                      >
+                        revert to this value
+                      </button>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </>
   );
 }
 
@@ -1175,6 +1407,18 @@ function makeStyles(t: Theme): Record<string, React.CSSProperties> {
       border: `1px solid ${t.warningBorder ?? 'rgba(255,152,0,0.3)'}`,
       marginLeft: 4,
       animation: 'pulse 1.5s ease-in-out infinite',
+    },
+    auditBadge: {
+      fontFamily: "'JetBrains Mono', monospace",
+      fontSize: 9,
+      color: t.textMuted,
+      padding: '1px 5px',
+      borderRadius: 2,
+      background: 'transparent',
+      border: `1px solid ${t.borderLight}`,
+      marginLeft: 'auto',
+      cursor: 'pointer',
+      lineHeight: 1.2,
     },
   };
 }
