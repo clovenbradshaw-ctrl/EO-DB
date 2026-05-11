@@ -28,17 +28,6 @@ import {
 } from './block-sealer';
 
 /**
- * Hard upper bound on events per hot-start block. The actual chunk size
- * is chosen dynamically from the homeserver's reported max upload size
- * (see {@link pickInitialChunkSize}), but we never exceed this many
- * events per block regardless of how cheap the events look, because
- * (a) read amplification on a 50k+ event block gets noticeable on cold
- * fetches and (b) very large blocks dominate the failure budget on slow
- * uploads.
- */
-const HOT_START_MAX_EVENTS_PER_BLOCK = 20_000;
-
-/**
  * Floor for adaptive chunk halving. Below this we give up rather than
  * spam the homeserver with one-block-per-event uploads. A homeserver
  * that won't accept this much almost certainly has a misconfiguration
@@ -108,10 +97,12 @@ function estimateBytesPerEvent(events: EoEventInput[]): number {
 
 /**
  * Pick the initial events-per-block based on the homeserver's reported
- * limit and a sample of the seed's event sizes. The adaptive halving in
- * the seal loop handles cases where this estimate is wrong (e.g. the
- * sample under-represented payload sizes, or the homeserver fronts a
- * stricter reverse proxy than its advertised limit).
+ * limit and a sample of the seed's event sizes. The byte budget is the
+ * only ceiling — we want each block as large as the homeserver will
+ * accept so the seed lands in as few uploads as possible. Adaptive
+ * halving in the seal loop handles cases where this estimate is wrong
+ * (e.g. the sample under-represented payload sizes, or the homeserver
+ * fronts a stricter reverse proxy than its advertised limit).
  */
 function pickInitialChunkSize(
   events: EoEventInput[],
@@ -120,10 +111,8 @@ function pickInitialChunkSize(
   const avgBytes = estimateBytesPerEvent(events);
   const targetBytes = Math.floor(maxUploadBytes * UPLOAD_SAFETY_FRACTION);
   const fromBytes = Math.max(1, Math.floor(targetBytes / avgBytes));
-  return Math.min(
-    HOT_START_MAX_EVENTS_PER_BLOCK,
-    Math.max(HOT_START_MIN_EVENTS_PER_BLOCK, fromBytes),
-  );
+  const capped = Math.max(HOT_START_MIN_EVENTS_PER_BLOCK, fromBytes);
+  return Math.min(capped, events.length);
 }
 
 async function withRetry<T>(
