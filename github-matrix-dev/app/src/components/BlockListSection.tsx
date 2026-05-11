@@ -23,6 +23,7 @@ import {
   setAutoIngestEnabled,
   type BlockListEntry,
 } from '../sync/block-hydration';
+import { loadSpaceKeyring } from '../crypto/keyring-store';
 
 interface BlockListSectionProps {
   matrixClient: MatrixClient | null | undefined;
@@ -110,9 +111,17 @@ export function BlockListSection({ matrixClient, roomId }: BlockListSectionProps
       // that came from a now-disabled block. To fully wipe an
       // already-folded disabled block's contributions, the user must
       // wipe local data for this space (Settings → Switch & wipe cache).
+      const mirrorToken = matrixClient.getAccessToken?.();
       await hydrateBlocksIfStale(matrixClient, roomId, store, {
         bulkApply: (events) => batchImport(events),
         force: true,
+        mirror: mirrorToken
+          ? {
+              matrixToken: mirrorToken,
+              spaceRoomId: roomId,
+              loadKeyring: () => loadSpaceKeyring(roomId),
+            }
+          : null,
       });
       // Persist the kv-snapshot + init-cache so the next refresh restores
       // from the snapshot directly instead of re-folding the OPFS log.

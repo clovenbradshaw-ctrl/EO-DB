@@ -9,6 +9,7 @@ import { SyncManager } from '../matrix/sync-manager';
 import { PeerSync } from '../matrix/peer-sync';
 import { WebRTCPeer } from '../matrix/webrtc-peer';
 import { hydrateBlocksIfStale, listenForChainUpdates, isAutoIngestEnabled } from '../sync/block-hydration';
+import type { BlockDriveMirrorDeps } from '../sync/block-drive-mirror';
 import {
   startNetworkSyncSystem,
   isOperatorSyncEnabled,
@@ -183,6 +184,25 @@ function spaceAliasLocal(spaceName: string): string {
 function spaceAliasFull(spaceName: string, userId: string): string {
   const server = userId.split(':').slice(1).join(':');
   return `#${spaceAliasLocal(spaceName)}:${server}`;
+}
+
+/**
+ * Build the deps `hydrateBlocksIfStale` needs to use the Drive mirror as a
+ * read fallback. Returns null when the Matrix client has no access token
+ * yet (pre-login race) — callers then hydrate from mxc:// only, which is
+ * the same behavior as before mirroring existed.
+ */
+function buildBlockMirror(
+  client: ReturnType<typeof createMatrixClient>,
+  spaceRoomId: string,
+): BlockDriveMirrorDeps | null {
+  const token = client.getAccessToken?.();
+  if (!token) return null;
+  return {
+    matrixToken: token,
+    spaceRoomId,
+    loadKeyring: () => loadSpaceKeyring(spaceRoomId),
+  };
 }
 
 /**
@@ -1733,8 +1753,10 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           const hydrateClient = matrixClientRef.current;
           const hydrateStore = useEoStore.getState().store;
           if (hydrateStore) {
+            const mirror = buildBlockMirror(hydrateClient, spaceRoomId);
             hydrateBlocksIfStale(hydrateClient, spaceRoomId, hydrateStore, {
               bulkApply: (events) => useEoStore.getState().batchImport(events),
+              mirror,
             })
               .then((r) => {
                 if (r) return useEoStore.getState().flushToOpfs();
@@ -1753,6 +1775,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               ingestInFlight = true;
               hydrateBlocksIfStale(hydrateClient, spaceRoomId, liveStore, {
                 bulkApply: (events) => useEoStore.getState().batchImport(events),
+                mirror,
               })
                 .then((r) => {
                   if (r) return useEoStore.getState().flushToOpfs();
@@ -1879,8 +1902,10 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         const hydrateClient = matrixClientRef.current;
         const hydrateStore = useEoStore.getState().store;
         if (hydrateStore) {
+          const mirror = buildBlockMirror(hydrateClient, spaceRoomId);
           hydrateBlocksIfStale(hydrateClient, spaceRoomId, hydrateStore, {
             bulkApply: (events) => useEoStore.getState().batchImport(events),
+            mirror,
           })
             .then((r) => {
               // Persist the kv-snapshot + init-cache so the next refresh
@@ -1904,6 +1929,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             ingestInFlight = true;
             hydrateBlocksIfStale(hydrateClient, spaceRoomId, liveStore, {
               bulkApply: (events) => useEoStore.getState().batchImport(events),
+              mirror,
             })
               .then((r) => {
                 if (r) return useEoStore.getState().flushToOpfs();

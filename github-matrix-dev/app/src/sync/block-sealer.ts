@@ -34,6 +34,7 @@ import {
 import { EodbWriter, BufferSink, type CollectionHeader } from '../db/eodb';
 import type { EoEventInput } from '../db/types';
 import { claimEncoding, type EncodingMatrixClient } from './encoding-claim';
+import { mirrorBlockToDrive, type BlockDriveMirrorDeps } from './block-drive-mirror';
 
 // ─── Schemas ───────────────────────────────────────────────────────────
 
@@ -190,6 +191,12 @@ export interface SealOptions {
   skipClaim?: boolean;
   /** Override the schema version stamp. */
   schemaVersion?: string;
+  /**
+   * When supplied, the same plaintext `.eodb` bytes uploaded to `mxc://`
+   * are mirrored to Drive (fire-and-forget) so subsequent reads can
+   * fall back from a slow homeserver. Pass `null`/omit to disable.
+   */
+  mirror?: BlockDriveMirrorDeps | null;
 }
 
 /**
@@ -237,7 +244,7 @@ export async function sealBlockFromEvents(
   events: EoEventInput[],
   matrixEventIds: string[],
   head: HeadState,
-  opts: { schemaVersion?: string } = {},
+  opts: { schemaVersion?: string; mirror?: BlockDriveMirrorDeps | null } = {},
 ): Promise<SealResult> {
   const schemaVersion = opts.schemaVersion ?? BLOCK_SCHEMA_VERSION;
   const newBlockIndex = head.block_count;
@@ -258,6 +265,16 @@ export async function sealBlockFromEvents(
     payload,
     `block-${newBlockIndex}.eodb`,
   );
+
+  // 2a. Mirror the same plaintext to Drive — fire-and-forget. Failure here
+  // never blocks the canonical write; the mxc URL is what lands in
+  // m.eo.block and m.eo.head, and a missing mirror just means a slightly
+  // slower read on this block until the next successful seal of any block.
+  if (opts.mirror) {
+    void mirrorBlockToDrive(opts.mirror, payload, attachment.url).catch((e) =>
+      console.warn('[EO-DB] block Drive mirror failed:', e),
+    );
+  }
 
   // 3. Post m.eo.block message event
   const firstId = matrixEventIds[0] ?? null;
@@ -319,7 +336,7 @@ export async function sealBlockFromPayload(
   payload: Uint8Array,
   eventCount: number,
   head: HeadState,
-  opts: { schemaVersion?: string } = {},
+  opts: { schemaVersion?: string; mirror?: BlockDriveMirrorDeps | null } = {},
 ): Promise<SealResult> {
   const schemaVersion = opts.schemaVersion ?? BLOCK_SCHEMA_VERSION;
   const newBlockIndex = head.block_count;
@@ -329,6 +346,12 @@ export async function sealBlockFromPayload(
     payload,
     `block-${newBlockIndex}.eodb`,
   );
+
+  if (opts.mirror) {
+    void mirrorBlockToDrive(opts.mirror, payload, attachment.url).catch((e) =>
+      console.warn('[EO-DB] block Drive mirror failed:', e),
+    );
+  }
 
   const myUserId = client.getUserId() ?? '@unknown:unknown';
   const myDeviceId = client.getDeviceId() ?? clientId;

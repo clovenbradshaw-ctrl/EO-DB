@@ -13,6 +13,7 @@ import { useTheme } from '../theme';
 import { useEoStore } from '../store/eo-store';
 import { uploadSeedFile } from '../sync/seed-uploader';
 import { readBlockEvents } from '../sync/block-hydration';
+import { loadSpaceKeyring } from '../crypto/keyring-store';
 
 interface SeedSpaceSectionProps {
   matrixClient: MatrixClient | null | undefined;
@@ -59,11 +60,19 @@ export function SeedSpaceSection({
       // This is the only client-side parse on the upload path.
       const events = await readBlockEvents(bytes);
 
+      const mirrorToken = matrixClient.getAccessToken?.();
       const result = await uploadSeedFile(
         matrixClient,
         roomId,
         bytes,
         events.length,
+        mirrorToken
+          ? {
+              matrixToken: mirrorToken,
+              spaceRoomId: roomId,
+              loadKeyring: () => loadSpaceKeyring(roomId),
+            }
+          : null,
       );
 
       // Fold the events we just parsed directly into local state.

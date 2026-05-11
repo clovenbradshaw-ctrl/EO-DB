@@ -27,6 +27,7 @@ import type { EoStore } from '../db/encrypted-store';
 import type { EoEventInput, EoEvent } from '../db/types';
 import { processEvent } from '../db/fold';
 import { readHeadState, type BlockMessage } from './block-sealer';
+import { fetchBlockFromDriveMirror, type BlockDriveMirrorDeps } from './block-drive-mirror';
 
 // ─── Block event fetch ─────────────────────────────────────────────────
 
@@ -229,6 +230,39 @@ export interface HydrationOptions {
    * blocks (~ tens of seconds for an 80k-event chain).
    */
   bulkApply?: (events: EoEventInput[]) => Promise<unknown>;
+  /**
+   * When supplied, block downloads try the canonical `mxc://` first and
+   * fall back to the Drive mirror only if the Matrix download throws.
+   * Same deps the sealer uses to write the mirror — pass `null`/omit to
+   * stick with mxc-only.
+   */
+  mirror?: BlockDriveMirrorDeps | null;
+}
+
+/**
+ * Fetch a block's plaintext `.eodb` bytes. Tries the canonical Matrix
+ * media path first (`downloadEncryptedAttachment`); on failure, falls
+ * back to the Drive mirror keyed by the same mxc URI. Re-throws the
+ * original Matrix error if both fail (the mirror is a recovery cache,
+ * not a primary).
+ */
+async function fetchBlockBytes(
+  client: MatrixClient,
+  file: BlockMessage['file'],
+  mirror: BlockDriveMirrorDeps | null | undefined,
+): Promise<Uint8Array> {
+  try {
+    return await downloadEncryptedAttachment(client, file);
+  } catch (matrixErr) {
+    if (!mirror) throw matrixErr;
+    try {
+      const fromMirror = await fetchBlockFromDriveMirror(mirror, file.url);
+      if (fromMirror) return fromMirror;
+    } catch (mirrorErr) {
+      console.warn('[EO-DB] block Drive mirror read failed:', mirrorErr);
+    }
+    throw matrixErr;
+  }
 }
 
 /**
@@ -285,7 +319,7 @@ export async function hydrateFromBlocks(
   onProgress?.({ phase: 'download', blockCount: chain.length });
   const decoded = await Promise.all(
     chain.map(async ({ content }) => {
-      const bytes = await downloadEncryptedAttachment(client, content.file);
+      const bytes = await fetchBlockBytes(client, content.file, opts.mirror);
       const events = await readBlockEvents(bytes);
       return { schemaVersion: content.schema_version, events };
     }),
@@ -393,7 +427,7 @@ export async function hydrateBlocksIfStale(
       store,
       opts.onEvent,
       opts.onProgress,
-      { bulkApply: opts.bulkApply },
+      { bulkApply: opts.bulkApply, mirror: opts.mirror },
     );
     return result;
   }
@@ -411,6 +445,7 @@ export async function hydrateBlocksIfStale(
     opts.onProgress,
     {
       bulkApply: opts.bulkApply,
+      mirror: opts.mirror,
       // When force is set we re-walk to genesis. Otherwise stop where
       // we left off — the fold engine still dedups inside that range
       // via client_event_id, so a missed gap (e.g. localStorage cleared
