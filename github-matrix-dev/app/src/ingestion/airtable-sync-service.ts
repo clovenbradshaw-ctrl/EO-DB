@@ -38,6 +38,7 @@ import {
   createAirtableClient,
   webhookHealthPatch,
   DEFAULT_SYNC_SETTINGS,
+  AMINO_CONNECTION_ID,
   type AirtableSyncSettings,
   type SyncLogEntry,
   type CurrentSyncSnapshot,
@@ -109,6 +110,15 @@ export class AirtableSyncService {
     private agent: string,
     private getApiKey: () => string | null,
     private customization?: SyncCustomization,
+    /**
+     * Connection id this service instance is bound to. Defaults to
+     * `AMINO_CONNECTION_ID` so the existing single-connection Amino flow
+     * works unchanged. Phase 4's ApiConnectionsView routing will pass a
+     * per-connection id (one per `ApiConnectionConfig`) so multiple
+     * services can coexist without colliding on the in-process runner
+     * gate or other per-cid state.
+     */
+    private connectionId: string = AMINO_CONNECTION_ID,
   ) {
     this.deviceId = this.matrixClient.getDeviceId() ?? `browser-${Date.now()}`;
   }
@@ -467,7 +477,11 @@ export class AirtableSyncService {
     // the same EoStore. We try-await once instead of rejecting because the
     // continuous tick is a passive surface; the next interval will retry.
     try {
-      await runAirtableSync('continuous-tick', () => this.runTickBody(apiKey));
+      await runAirtableSync(
+        'continuous-tick',
+        () => this.runTickBody(apiKey),
+        { connectionId: this.connectionId },
+      );
     } catch (e) {
       if (e instanceof SyncBusyError) {
         useAirtableStore.getState().addSyncLogEntry({
