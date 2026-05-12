@@ -35,7 +35,8 @@ import {
 } from '../ingestion/airtable-snapshot';
 import { createMemoryStore } from '../db/memory-store';
 import { AirtableSyncTransparency } from './AirtableSyncTransparency';
-import type { Resolution } from '../db/types';
+import type { EoEventInput, Resolution } from '../db/types';
+import { publishEoEventBatch } from '../sync/publish-events';
 import { useAirtableStore, createAirtableClient, webhookHealthPatch, DEFAULT_SYNC_SETTINGS, type SyncLogEntry, type CurrentSyncSnapshot } from '../ingestion/airtable-store';
 import { AirtableSyncService } from '../ingestion/airtable-sync-service';
 import {
@@ -471,6 +472,12 @@ export function AirtableSettingsSection({
   }
 
   // ── Discover schema ──
+  // Fetches the Airtable manifest AND immediately persists every discovered
+  // base / table / field to the EO-DB store as EO operators. "Discovering"
+  // and "importing the schema" are conceptually the same user-facing action,
+  // so we don't gate the import on a second button click. emitHydrationSchema
+  // is idempotent (stable client_event_ids dedupe), so re-running Discover is
+  // a no-op when nothing has changed.
   async function handleDiscover() {
     if (!apiKey) return;
     setSyncStatus((prev) => ({ ...prev, discover: { state: 'discovering', message: 'Discovering bases & tables...' } }));
@@ -497,6 +504,77 @@ export function AirtableSettingsSection({
       // Refresh the synced index in case cursors were added since mount
       if (store) getSyncedTableIds(store).then(setSyncedTableIds);
 
+      // Immediately persist the discovered schema to EO-DB as EO operators
+      // AND publish them to the Matrix room so peers see the schema without
+      // having to re-discover. Bridge onEvent through createImportProgressListener
+      // so HolonNav, TableView, and friends repaint as DEF / INS events land —
+      // finalize() is required after the loop because the listener batches on
+      // a 100ms flush timer; without it the final batch never bumps `lastSeq`
+      // and the left-side nav stays empty until the next unrelated event.
+      // Inputs are collected in parallel and handed to publishEoEventBatch,
+      // which decides per-table whether to send each event inline as
+      // `m.eo.event` or to seal the batch into a media-store block + send a
+      // single `m.eo.block` pointer. Failure is non-fatal: discovery already
+      // succeeded; the local store has the schema even if room publish fails.
+      let tablesEmitted = 0;
+      let fieldsEmitted = 0;
+      let blocksSpilled = 0;
+      if (store) {
+        const progressListener = createImportProgressListener();
+        try {
+          for (const base of disc.bases) {
+            for (const table of base.tables) {
+              const inputs: EoEventInput[] = [];
+              await emitHydrationSchema(
+                store,
+                { id: base.id, name: base.name },
+                {
+                  id: table.id,
+                  name: table.name,
+                  primaryFieldId: table.primaryFieldId,
+                  fieldCount: table.fieldCount,
+                  fields: table.fields,
+                },
+                session.userId,
+                displayFieldSelections[table.id],
+                (event) => {
+                  progressListener.onEvent(event);
+                  const { seq: _seq, ...input } = event;
+                  void _seq;
+                  inputs.push(input as EoEventInput);
+                },
+              );
+              if (matrixClient && roomId && inputs.length > 0) {
+                try {
+                  const res = await publishEoEventBatch(matrixClient, roomId, inputs);
+                  if (res.mode === 'block') blocksSpilled += 1;
+                } catch (e) {
+                  console.warn(`[EO-DB] Publish schema events to room failed for ${base.name}/${table.name}:`, e);
+                }
+              }
+              tablesEmitted += 1;
+              fieldsEmitted += table.fields.length;
+            }
+          }
+          if (tablesEmitted > 0) {
+            const spillNote = blocksSpilled > 0
+              ? `, ${blocksSpilled} table${blocksSpilled !== 1 ? 's' : ''} spilled to media-store block${blocksSpilled !== 1 ? 's' : ''}`
+              : '';
+            useAirtableStore.getState().addSyncLogEntry({
+              ts: Date.now(),
+              type: 'sync_complete',
+              source: 'local',
+              syncer: session.userId,
+              detail: `Schema imported on discover: ${tablesEmitted} table${tablesEmitted !== 1 ? 's' : ''}, ${fieldsEmitted} field${fieldsEmitted !== 1 ? 's' : ''}${spillNote}`,
+            });
+          }
+        } catch (e) {
+          console.warn('[EO-DB] Auto-persist schema after discover failed:', e);
+        } finally {
+          progressListener.finalize();
+        }
+      }
+
       const baseCount = disc.bases.length;
       const tableCount = disc.bases.reduce((t, b) => t + b.tables.length, 0);
 
@@ -504,7 +582,9 @@ export function AirtableSettingsSection({
         ...prev,
         discover: {
           state: 'done',
-          message: `Found ${baseCount} base${baseCount !== 1 ? 's' : ''}, ${tableCount} table${tableCount !== 1 ? 's' : ''}`,
+          message: tablesEmitted > 0
+            ? `Found ${baseCount} base${baseCount !== 1 ? 's' : ''}, ${tableCount} table${tableCount !== 1 ? 's' : ''} — schema imported (${fieldsEmitted} field${fieldsEmitted !== 1 ? 's' : ''})`
+            : `Found ${baseCount} base${baseCount !== 1 ? 's' : ''}, ${tableCount} table${tableCount !== 1 ? 's' : ''}`,
         },
       }));
     } catch (e: any) {
@@ -535,54 +615,82 @@ export function AirtableSettingsSection({
       }
       setTableSelections(nextSelections);
 
-      // Emit base / table / field schema events to the EO-DB store. Bridge
-      // through createImportProgressListener so subscribers (TableView, etc.)
-      // repaint as schema events land — mirrors what hydrationSync does for
-      // its own schema emission.
+      // Emit base / table / field schema events to the EO-DB store AND
+      // publish them to the Matrix room so peers can see schema changes
+      // without re-discovering. Each table's events are collected into an
+      // input array (via the `onEvent` bridge) and handed to
+      // publishEoEventBatch, which auto-decides between sending each event
+      // inline as `m.eo.event` or sealing the batch into a media-store block
+      // + `m.eo.block` pointer when the payload exceeds Matrix's per-event
+      // size limit. progressListener.finalize() is mandatory — it batches
+      // on a 100 ms flush timer and HolonNav only repaints when `lastSeq`
+      // bumps.
       const progressListener = createImportProgressListener();
       let tablesEmitted = 0;
       let fieldsEmitted = 0;
-      for (const base of disc.bases) {
-        const selected = new Set(nextSelections[base.id] ?? []);
-        for (const table of base.tables) {
-          if (!selected.has(table.id)) continue;
-          const tblSchema: HydrationTableSchema = {
-            id: table.id,
-            name: table.name,
-            primaryFieldId: table.primaryFieldId,
-            fieldCount: table.fieldCount,
-            fields: table.fields,
-          };
-          setSyncStatus((prev) => ({
-            ...prev,
-            schemaSync: { state: 'discovering', message: `Writing schema for ${base.name} › ${table.name}…` },
-          }));
-          await emitHydrationSchema(
-            store,
-            { id: base.id, name: base.name },
-            tblSchema,
-            session.userId,
-            displayFieldSelections[table.id],
-            progressListener.onEvent,
-          );
-          tablesEmitted += 1;
-          fieldsEmitted += table.fields.length;
+      let blocksSpilled = 0;
+      try {
+        for (const base of disc.bases) {
+          const selected = new Set(nextSelections[base.id] ?? []);
+          for (const table of base.tables) {
+            if (!selected.has(table.id)) continue;
+            const tblSchema: HydrationTableSchema = {
+              id: table.id,
+              name: table.name,
+              primaryFieldId: table.primaryFieldId,
+              fieldCount: table.fieldCount,
+              fields: table.fields,
+            };
+            setSyncStatus((prev) => ({
+              ...prev,
+              schemaSync: { state: 'discovering', message: `Writing schema for ${base.name} › ${table.name}…` },
+            }));
+            const inputs: EoEventInput[] = [];
+            await emitHydrationSchema(
+              store,
+              { id: base.id, name: base.name },
+              tblSchema,
+              session.userId,
+              displayFieldSelections[table.id],
+              (event) => {
+                progressListener.onEvent(event);
+                const { seq: _seq, ...input } = event;
+                void _seq;
+                inputs.push(input as EoEventInput);
+              },
+            );
+            if (matrixClient && roomId && inputs.length > 0) {
+              try {
+                const res = await publishEoEventBatch(matrixClient, roomId, inputs);
+                if (res.mode === 'block') blocksSpilled += 1;
+              } catch (e) {
+                console.warn(`[EO-DB] Publish schema events to room failed for ${base.name}/${table.name}:`, e);
+              }
+            }
+            tablesEmitted += 1;
+            fieldsEmitted += table.fields.length;
+          }
         }
+      } finally {
+        progressListener.finalize();
       }
 
+      const spillNote = blocksSpilled > 0
+        ? `, ${blocksSpilled} table${blocksSpilled !== 1 ? 's' : ''} spilled to media-store block${blocksSpilled !== 1 ? 's' : ''}`
+        : '';
       useAirtableStore.getState().addSyncLogEntry({
         ts: Date.now(),
         type: 'sync_complete',
         source: 'local',
         syncer: session.userId,
-        detail: `Schema sync: ${tablesEmitted} table${tablesEmitted !== 1 ? 's' : ''}, ${fieldsEmitted} field${fieldsEmitted !== 1 ? 's' : ''}`,
+        detail: `Schema sync: ${tablesEmitted} table${tablesEmitted !== 1 ? 's' : ''}, ${fieldsEmitted} field${fieldsEmitted !== 1 ? 's' : ''}${spillNote}`,
       });
 
       const baseCount = disc.bases.length;
       const tableCount = disc.bases.reduce((t, b) => t + b.tables.length, 0);
       const summary = tablesEmitted === 0
         ? `Schema discovered: ${baseCount} base${baseCount !== 1 ? 's' : ''}, ${tableCount} table${tableCount !== 1 ? 's' : ''} (no tables selected — nothing persisted)`
-        : `Schema saved to EO-DB: ${tablesEmitted} table${tablesEmitted !== 1 ? 's' : ''}, ${fieldsEmitted} field${fieldsEmitted !== 1 ? 's' : ''}`;
+        : `Schema saved to EO-DB & room: ${tablesEmitted} table${tablesEmitted !== 1 ? 's' : ''}, ${fieldsEmitted} field${fieldsEmitted !== 1 ? 's' : ''}${spillNote}`;
       setSyncStatus((prev) => ({
         ...prev,
         schemaSync: { state: 'done', message: summary },
@@ -628,14 +736,15 @@ export function AirtableSettingsSection({
       // sync runs. emitHydrationSchema is idempotent (stable client_event_ids
       // dedupe), so this is safe to call on every tick. Failure is non-fatal.
       if (useAirtableStore.getState().syncSettings.syncSchemaOnEachSync) {
+        const preSyncListener = createImportProgressListener();
         try {
           const manifest = await discoverSchema(client);
           useAirtableStore.getState().setManifest(manifest);
-          const preSyncListener = createImportProgressListener();
           for (const base of manifest.bases) {
             const selected = new Set(tableSelections[base.id] ?? []);
             for (const table of base.tables) {
               if (!selected.has(table.id)) continue;
+              const inputs: EoEventInput[] = [];
               await emitHydrationSchema(
                 store,
                 { id: base.id, name: base.name },
@@ -648,12 +757,26 @@ export function AirtableSettingsSection({
                 },
                 session.userId,
                 displayFieldSelections[table.id],
-                preSyncListener.onEvent,
+                (event) => {
+                  preSyncListener.onEvent(event);
+                  const { seq: _seq, ...input } = event;
+                  void _seq;
+                  inputs.push(input as EoEventInput);
+                },
               );
+              if (matrixClient && roomId && inputs.length > 0) {
+                try {
+                  await publishEoEventBatch(matrixClient, roomId, inputs);
+                } catch (e) {
+                  console.warn(`[EO-DB] Publish pre-sync schema to room failed for ${base.name}/${table.name}:`, e);
+                }
+              }
             }
           }
         } catch (e) {
           console.warn('[EO-DB] Pre-sync schema emission failed:', e);
+        } finally {
+          preSyncListener.finalize();
         }
       }
 
