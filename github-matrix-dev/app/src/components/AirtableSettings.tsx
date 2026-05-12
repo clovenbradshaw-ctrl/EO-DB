@@ -471,6 +471,12 @@ export function AirtableSettingsSection({
   }
 
   // ── Discover schema ──
+  // Fetches the Airtable manifest AND immediately persists every discovered
+  // base / table / field to the EO-DB store as EO operators. "Discovering"
+  // and "importing the schema" are conceptually the same user-facing action,
+  // so we don't gate the import on a second button click. emitHydrationSchema
+  // is idempotent (stable client_event_ids dedupe), so re-running Discover is
+  // a no-op when nothing has changed.
   async function handleDiscover() {
     if (!apiKey) return;
     setSyncStatus((prev) => ({ ...prev, discover: { state: 'discovering', message: 'Discovering bases & tables...' } }));
@@ -497,6 +503,54 @@ export function AirtableSettingsSection({
       // Refresh the synced index in case cursors were added since mount
       if (store) getSyncedTableIds(store).then(setSyncedTableIds);
 
+      // Immediately persist the discovered schema to EO-DB as EO operators.
+      // Bridge onEvent through createImportProgressListener so HolonNav,
+      // TableView, and friends repaint as DEF / INS events land. finalize()
+      // is required after the loop — the listener batches with a 100ms flush
+      // timer, so without it the final batch never bumps `lastSeq` and the
+      // left-side nav stays empty until the next unrelated event. Failure is
+      // non-fatal: discovery already succeeded.
+      let tablesEmitted = 0;
+      let fieldsEmitted = 0;
+      if (store) {
+        const progressListener = createImportProgressListener();
+        try {
+          for (const base of disc.bases) {
+            for (const table of base.tables) {
+              await emitHydrationSchema(
+                store,
+                { id: base.id, name: base.name },
+                {
+                  id: table.id,
+                  name: table.name,
+                  primaryFieldId: table.primaryFieldId,
+                  fieldCount: table.fieldCount,
+                  fields: table.fields,
+                },
+                session.userId,
+                displayFieldSelections[table.id],
+                progressListener.onEvent,
+              );
+              tablesEmitted += 1;
+              fieldsEmitted += table.fields.length;
+            }
+          }
+          if (tablesEmitted > 0) {
+            useAirtableStore.getState().addSyncLogEntry({
+              ts: Date.now(),
+              type: 'sync_complete',
+              source: 'local',
+              syncer: session.userId,
+              detail: `Schema imported on discover: ${tablesEmitted} table${tablesEmitted !== 1 ? 's' : ''}, ${fieldsEmitted} field${fieldsEmitted !== 1 ? 's' : ''}`,
+            });
+          }
+        } catch (e) {
+          console.warn('[EO-DB] Auto-persist schema after discover failed:', e);
+        } finally {
+          progressListener.finalize();
+        }
+      }
+
       const baseCount = disc.bases.length;
       const tableCount = disc.bases.reduce((t, b) => t + b.tables.length, 0);
 
@@ -504,7 +558,9 @@ export function AirtableSettingsSection({
         ...prev,
         discover: {
           state: 'done',
-          message: `Found ${baseCount} base${baseCount !== 1 ? 's' : ''}, ${tableCount} table${tableCount !== 1 ? 's' : ''}`,
+          message: tablesEmitted > 0
+            ? `Found ${baseCount} base${baseCount !== 1 ? 's' : ''}, ${tableCount} table${tableCount !== 1 ? 's' : ''} — schema imported (${fieldsEmitted} field${fieldsEmitted !== 1 ? 's' : ''})`
+            : `Found ${baseCount} base${baseCount !== 1 ? 's' : ''}, ${tableCount} table${tableCount !== 1 ? 's' : ''}`,
         },
       }));
     } catch (e: any) {
@@ -536,38 +592,46 @@ export function AirtableSettingsSection({
       setTableSelections(nextSelections);
 
       // Emit base / table / field schema events to the EO-DB store. Bridge
-      // through createImportProgressListener so subscribers (TableView, etc.)
-      // repaint as schema events land — mirrors what hydrationSync does for
-      // its own schema emission.
+      // through createImportProgressListener so subscribers (HolonNav,
+      // TableView, etc.) repaint as schema events land — mirrors what
+      // hydrationSync does for its own schema emission. The listener batches
+      // updates on a 100ms flush timer, so we MUST call finalize() once all
+      // events are emitted; otherwise the final batch never lands in Zustand
+      // and `lastSeq` doesn't bump, leaving HolonNav stale until something
+      // else triggers a re-fetch.
       const progressListener = createImportProgressListener();
       let tablesEmitted = 0;
       let fieldsEmitted = 0;
-      for (const base of disc.bases) {
-        const selected = new Set(nextSelections[base.id] ?? []);
-        for (const table of base.tables) {
-          if (!selected.has(table.id)) continue;
-          const tblSchema: HydrationTableSchema = {
-            id: table.id,
-            name: table.name,
-            primaryFieldId: table.primaryFieldId,
-            fieldCount: table.fieldCount,
-            fields: table.fields,
-          };
-          setSyncStatus((prev) => ({
-            ...prev,
-            schemaSync: { state: 'discovering', message: `Writing schema for ${base.name} › ${table.name}…` },
-          }));
-          await emitHydrationSchema(
-            store,
-            { id: base.id, name: base.name },
-            tblSchema,
-            session.userId,
-            displayFieldSelections[table.id],
-            progressListener.onEvent,
-          );
-          tablesEmitted += 1;
-          fieldsEmitted += table.fields.length;
+      try {
+        for (const base of disc.bases) {
+          const selected = new Set(nextSelections[base.id] ?? []);
+          for (const table of base.tables) {
+            if (!selected.has(table.id)) continue;
+            const tblSchema: HydrationTableSchema = {
+              id: table.id,
+              name: table.name,
+              primaryFieldId: table.primaryFieldId,
+              fieldCount: table.fieldCount,
+              fields: table.fields,
+            };
+            setSyncStatus((prev) => ({
+              ...prev,
+              schemaSync: { state: 'discovering', message: `Writing schema for ${base.name} › ${table.name}…` },
+            }));
+            await emitHydrationSchema(
+              store,
+              { id: base.id, name: base.name },
+              tblSchema,
+              session.userId,
+              displayFieldSelections[table.id],
+              progressListener.onEvent,
+            );
+            tablesEmitted += 1;
+            fieldsEmitted += table.fields.length;
+          }
         }
+      } finally {
+        progressListener.finalize();
       }
 
       useAirtableStore.getState().addSyncLogEntry({
@@ -628,10 +692,10 @@ export function AirtableSettingsSection({
       // sync runs. emitHydrationSchema is idempotent (stable client_event_ids
       // dedupe), so this is safe to call on every tick. Failure is non-fatal.
       if (useAirtableStore.getState().syncSettings.syncSchemaOnEachSync) {
+        const preSyncListener = createImportProgressListener();
         try {
           const manifest = await discoverSchema(client);
           useAirtableStore.getState().setManifest(manifest);
-          const preSyncListener = createImportProgressListener();
           for (const base of manifest.bases) {
             const selected = new Set(tableSelections[base.id] ?? []);
             for (const table of base.tables) {
@@ -654,6 +718,8 @@ export function AirtableSettingsSection({
           }
         } catch (e) {
           console.warn('[EO-DB] Pre-sync schema emission failed:', e);
+        } finally {
+          preSyncListener.finalize();
         }
       }
 

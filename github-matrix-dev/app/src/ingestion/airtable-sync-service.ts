@@ -591,10 +591,10 @@ export class AirtableSyncService {
       // touch anyway. Failure is non-fatal: sync proceeds with the previously
       // cached manifest and any existing on-disk schema.
       if (syncSettings.syncSchemaOnEachSync) {
+        const preSyncListener = createImportProgressListener();
         try {
           const manifest = await discoverSchema(client);
           useAirtableStore.getState().setManifest(manifest);
-          const preSyncListener = createImportProgressListener();
           for (const base of manifest.bases) {
             const baseSyncedTables = new Set(syncedTableIds[base.id] ?? []);
             for (const table of base.tables) {
@@ -617,6 +617,8 @@ export class AirtableSyncService {
           }
         } catch (e) {
           console.warn('[EO-DB] Pre-sync schema emission failed:', e);
+        } finally {
+          preSyncListener.finalize();
         }
       }
 
