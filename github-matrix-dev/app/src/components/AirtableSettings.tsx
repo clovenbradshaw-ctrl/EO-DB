@@ -19,10 +19,12 @@ import { useEoStore, createImportProgressListener } from '../store/eo-store';
 import type { MatrixSession } from '../matrix/client';
 import {
   discoverSchema,
+  emitHydrationSchema,
   getSyncedTableIds,
   hydrationSync,
   updateSync,
   type HydrationManifest,
+  type HydrationTableSchema,
   type SyncCustomization,
 } from '../ingestion/airtable-sync';
 import {
@@ -511,12 +513,13 @@ export function AirtableSettingsSection({
   }
 
   // ── Explicitly sync the Airtable schema ──
-  // Re-fetches bases/tables/fields from Airtable and updates the cached
-  // manifest without touching record data or table selections. Surfaced as
-  // a dedicated button so the user can refresh metadata (e.g. after adding
-  // a new field in Airtable) without re-running a full data sync.
+  // Re-fetches bases/tables/fields from Airtable and persists them to the
+  // EO-DB store as proper EO operators (base/table/field DEF + INS events)
+  // so the schema lives in Matrix room state alongside record data — not
+  // just in the client-side manifest. Only emits for tables the user has
+  // selected; new tables surface in the picker but stay unselected.
   async function handleSyncSchema() {
-    if (!apiKey) return;
+    if (!apiKey || !store) return;
     setSyncStatus((prev) => ({ ...prev, schemaSync: { state: 'discovering', message: 'Refreshing Airtable schema…' } }));
 
     try {
@@ -526,22 +529,63 @@ export function AirtableSettingsSection({
 
       // Preserve the user's existing table selections; add newly-discovered
       // tables as unselected so we don't suddenly start syncing them.
-      setTableSelections((prev) => {
-        const next: Record<string, string[]> = { ...prev };
-        for (const base of disc.bases) {
-          if (!(base.id in next)) next[base.id] = [];
+      const nextSelections: Record<string, string[]> = { ...tableSelections };
+      for (const base of disc.bases) {
+        if (!(base.id in nextSelections)) nextSelections[base.id] = [];
+      }
+      setTableSelections(nextSelections);
+
+      // Emit base / table / field schema events to the EO-DB store. Bridge
+      // through createImportProgressListener so subscribers (TableView, etc.)
+      // repaint as schema events land — mirrors what hydrationSync does for
+      // its own schema emission.
+      const progressListener = createImportProgressListener();
+      let tablesEmitted = 0;
+      let fieldsEmitted = 0;
+      for (const base of disc.bases) {
+        const selected = new Set(nextSelections[base.id] ?? []);
+        for (const table of base.tables) {
+          if (!selected.has(table.id)) continue;
+          const tblSchema: HydrationTableSchema = {
+            id: table.id,
+            name: table.name,
+            primaryFieldId: table.primaryFieldId,
+            fieldCount: table.fieldCount,
+            fields: table.fields,
+          };
+          setSyncStatus((prev) => ({
+            ...prev,
+            schemaSync: { state: 'discovering', message: `Writing schema for ${base.name} › ${table.name}…` },
+          }));
+          await emitHydrationSchema(
+            store,
+            { id: base.id, name: base.name },
+            tblSchema,
+            session.userId,
+            displayFieldSelections[table.id],
+            progressListener.onEvent,
+          );
+          tablesEmitted += 1;
+          fieldsEmitted += table.fields.length;
         }
-        return next;
+      }
+
+      useAirtableStore.getState().addSyncLogEntry({
+        ts: Date.now(),
+        type: 'sync_complete',
+        source: 'local',
+        syncer: session.userId,
+        detail: `Schema sync: ${tablesEmitted} table${tablesEmitted !== 1 ? 's' : ''}, ${fieldsEmitted} field${fieldsEmitted !== 1 ? 's' : ''}`,
       });
 
       const baseCount = disc.bases.length;
       const tableCount = disc.bases.reduce((t, b) => t + b.tables.length, 0);
+      const summary = tablesEmitted === 0
+        ? `Schema discovered: ${baseCount} base${baseCount !== 1 ? 's' : ''}, ${tableCount} table${tableCount !== 1 ? 's' : ''} (no tables selected — nothing persisted)`
+        : `Schema saved to EO-DB: ${tablesEmitted} table${tablesEmitted !== 1 ? 's' : ''}, ${fieldsEmitted} field${fieldsEmitted !== 1 ? 's' : ''}`;
       setSyncStatus((prev) => ({
         ...prev,
-        schemaSync: {
-          state: 'done',
-          message: `Schema refreshed: ${baseCount} base${baseCount !== 1 ? 's' : ''}, ${tableCount} table${tableCount !== 1 ? 's' : ''}`,
-        },
+        schemaSync: { state: 'done', message: summary },
       }));
     } catch (e: any) {
       setSyncStatus((prev) => ({ ...prev, schemaSync: { state: 'error', message: e.message || 'Schema sync failed' } }));
@@ -578,14 +622,38 @@ export function AirtableSettingsSection({
       useAirtableStore.getState().incCycle();
       const customization = buildCustomization();
 
-      // Honour the "Refresh schema on each sync" setting in the manual paths
-      // too. Failure is non-fatal — fall through with the cached manifest.
+      // Honour the "Sync schema to EO-DB on each sync" setting: refresh the
+      // manifest from Airtable and persist base/table/field schema events to
+      // the store as EO operators for every selected table, before the record
+      // sync runs. emitHydrationSchema is idempotent (stable client_event_ids
+      // dedupe), so this is safe to call on every tick. Failure is non-fatal.
       if (useAirtableStore.getState().syncSettings.syncSchemaOnEachSync) {
         try {
           const manifest = await discoverSchema(client);
           useAirtableStore.getState().setManifest(manifest);
+          const preSyncListener = createImportProgressListener();
+          for (const base of manifest.bases) {
+            const selected = new Set(tableSelections[base.id] ?? []);
+            for (const table of base.tables) {
+              if (!selected.has(table.id)) continue;
+              await emitHydrationSchema(
+                store,
+                { id: base.id, name: base.name },
+                {
+                  id: table.id,
+                  name: table.name,
+                  primaryFieldId: table.primaryFieldId,
+                  fieldCount: table.fieldCount,
+                  fields: table.fields,
+                },
+                session.userId,
+                displayFieldSelections[table.id],
+                preSyncListener.onEvent,
+              );
+            }
+          }
         } catch (e) {
-          console.warn('[EO-DB] Pre-sync schema refresh failed:', e);
+          console.warn('[EO-DB] Pre-sync schema emission failed:', e);
         }
       }
 
@@ -1546,7 +1614,7 @@ export function AirtableSettingsSection({
                 onClick={handleSyncSchema}
                 disabled={!apiKey || syncStatus.schemaSync?.state === 'discovering' || syncStatus.discover?.state === 'discovering'}
                 style={s.actionBtn}
-                title="Re-fetch bases, tables, and field metadata from Airtable"
+                title="Re-fetch bases / tables / fields from Airtable and persist them to the EO-DB store as base / table / field DEF + INS events"
               >
                 Sync schema
               </button>
@@ -1736,7 +1804,7 @@ export function AirtableSettingsSection({
                   </span>
                 </div>
 
-                {/* Refresh schema on each sync toggle */}
+                {/* Sync schema to EO-DB on each sync toggle */}
                 <div style={s.preserveRow}>
                   <label style={s.checkLabel}>
                     <input
@@ -1747,12 +1815,12 @@ export function AirtableSettingsSection({
                         syncServiceRef.current?.saveSyncSettings({ syncSchemaOnEachSync: e.target.checked });
                       }}
                     />
-                    <span>Refresh Airtable schema on each sync</span>
+                    <span>Sync Airtable schema to EO-DB on each sync</span>
                   </label>
                   <span style={s.preserveHint}>
                     {syncSettings.syncSchemaOnEachSync
-                      ? 'Bases, tables, and fields are re-fetched from Airtable before every manual or continuous sync'
-                      : 'Schema is only refreshed when you click "Sync schema" or "Discover"'}
+                      ? 'Before every manual or continuous sync, bases / tables / fields are re-fetched from Airtable and persisted to the EO-DB store as base, table, and field DEF / INS events'
+                      : 'Schema is only persisted when you click "Sync schema" or as part of a hydration / update sync'}
                   </span>
                 </div>
 

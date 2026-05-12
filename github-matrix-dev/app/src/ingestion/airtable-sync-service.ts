@@ -25,6 +25,7 @@ import type { MatrixClient, MatrixEvent } from 'matrix-js-sdk';
 import type { EoStore } from '../db/encrypted-store';
 import {
   discoverSchema,
+  emitHydrationSchema,
   hydrationSync,
   seedCursorsFromMap,
   updateSync,
@@ -582,16 +583,40 @@ export class AirtableSyncService {
         recordLimit: syncSettings.recordLimit > 0 ? syncSettings.recordLimit : undefined,
       };
 
-      // When the user has opted in, refresh the cached schema manifest before
-      // each sync so newly-added bases / tables / fields show up without
-      // requiring a manual "Sync schema" click. A failure here is non-fatal:
-      // sync proceeds with the previously cached manifest.
+      // When the user has opted in, persist Airtable schema to the EO-DB
+      // store as EO operators (base/table/field DEF + INS events) before each
+      // sync. emitHydrationSchema is idempotent (stable client_event_ids
+      // dedupe), so unchanged schema produces no new events. Restricted to
+      // tables that already have cursors — i.e. the ones updateSync would
+      // touch anyway. Failure is non-fatal: sync proceeds with the previously
+      // cached manifest and any existing on-disk schema.
       if (syncSettings.syncSchemaOnEachSync) {
         try {
           const manifest = await discoverSchema(client);
           useAirtableStore.getState().setManifest(manifest);
+          const preSyncListener = createImportProgressListener();
+          for (const base of manifest.bases) {
+            const baseSyncedTables = new Set(syncedTableIds[base.id] ?? []);
+            for (const table of base.tables) {
+              if (!baseSyncedTables.has(table.id)) continue;
+              await emitHydrationSchema(
+                this.store,
+                { id: base.id, name: base.name },
+                {
+                  id: table.id,
+                  name: table.name,
+                  primaryFieldId: table.primaryFieldId,
+                  fieldCount: table.fieldCount,
+                  fields: table.fields,
+                },
+                this.agent,
+                undefined,
+                preSyncListener.onEvent,
+              );
+            }
+          }
         } catch (e) {
-          console.warn('[EO-DB] Pre-sync schema refresh failed:', e);
+          console.warn('[EO-DB] Pre-sync schema emission failed:', e);
         }
       }
 
