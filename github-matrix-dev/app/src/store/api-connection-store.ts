@@ -22,50 +22,16 @@ import type {
 import { normalizeTimestamp } from '../lib/api-adapters/types';
 import { AirtableAdapter } from '../lib/api-adapters/airtable';
 import { GenericRestAdapter } from '../lib/api-adapters/generic-rest';
-import { stableStringify, valuesEqual } from '../ingestion/value-extract';
-import { isDeleted, TOMBSTONE_KEY, type TombstoneMarker } from '../db/tombstone';
-import type { EoState } from '../db/types';
+import { isDeleted } from '../db/tombstone';
+import {
+  DEFAULT_INGEST_AGENT,
+  dispatchRemoteRecordTombstone,
+  dispatchRemoteRecordUpdate,
+  ingestRemoteRecord,
+} from '../ingestion/event-sourced-ingest';
 
-const RECORD_AGENT = '@local:localhost';
+const RECORD_AGENT = DEFAULT_INGEST_AGENT;
 const RECORD_TARGET_PREFIX = 'api.records.';
-
-function recordTarget(connectionId: string, recordId: string): string {
-  return `${RECORD_TARGET_PREFIX}${connectionId}.${recordId}`;
-}
-
-function insEventId(connectionId: string, recordId: string): string {
-  return `at-conn:ins:${connectionId}:${recordId}`;
-}
-
-function defEventId(connectionId: string, recordId: string, contentKey: string): string {
-  return `at-conn:def:${connectionId}:${recordId}:${contentKey}`;
-}
-
-function tombstoneEventId(connectionId: string, recordId: string, at: string): string {
-  return `at-conn:del:${connectionId}:${recordId}:${at}`;
-}
-
-/**
- * Field-level diff used to gate DEF emission. Returns only fields that
- * actually changed; for new records, returns every non-null field.
- * Mirrors `computeFieldDiff` in ingestion/airtable-sync.ts.
- */
-function computeFieldDiff(
-  incoming: Record<string, unknown>,
-  existing: Record<string, unknown> | undefined,
-): Record<string, unknown> {
-  const diff: Record<string, unknown> = {};
-  if (!existing) {
-    for (const [k, v] of Object.entries(incoming)) {
-      if (v !== null && v !== undefined) diff[k] = v;
-    }
-    return diff;
-  }
-  for (const [k, v] of Object.entries(incoming)) {
-    if (!valuesEqual(v, existing[k])) diff[k] = v;
-  }
-  return diff;
-}
 
 // ─── Record cache ─────────────────────────────────────────────────────────────
 
@@ -426,63 +392,16 @@ export const useApiConnectionStore = create<ApiConnectionState>((set, get) => ({
 
       // Event-source each record into the EO log so it survives reloads,
       // peer-syncs to other devices in the room, and dedupes on replay.
-      // Mirrors the proven pattern in ingestion/airtable-sync.ts:631-810.
-      const { dispatch, getState } = useEoStore.getState();
+      // The helper handles the INS/DEF emission and idempotency contract
+      // shared with the upcoming generic-rest-sync service (Phase 4).
       for (const rec of translatedRecords) {
-        const target = recordTarget(connectionId, rec.id);
-        const existing: EoState | null = await getState(target);
-        // Skip records that are tombstoned locally — a delete on this device
-        // should not be resurrected by a sync that still sees the row remote-side.
-        if (isDeleted(existing)) continue;
-        const existingFields = (existing?.value as { fields?: Record<string, unknown> } | undefined)?.fields;
-        const diff = computeFieldDiff(rec.fields, existingFields);
-
-        const nowIso = new Date().toISOString();
-        if (!existing) {
-          try {
-            await dispatch({
-              op: 'INS',
-              target,
-              operand: {
-                _source: {
-                  connectionId,
-                  remoteRecordId: rec.id,
-                },
-              },
-              agent: RECORD_AGENT,
-              ts: nowIso,
-              acquired_ts: nowIso,
-              client_event_id: insEventId(connectionId, rec.id),
-            });
-          } catch {
-            // Idempotent INS — already in the log on this device or a peer's.
-          }
-        }
-
-        if (Object.keys(diff).length === 0) continue;
-
-        try {
-          await dispatch({
-            op: 'DEF',
-            target,
-            operand: {
-              fields: diff,
-              _source: {
-                connectionId,
-                remoteRecordId: rec.id,
-                lastModifiedAt: rec.lastModifiedAt,
-              },
-            },
-            agent: RECORD_AGENT,
-            ts: nowIso,
-            acquired_ts: nowIso,
-            client_event_id: defEventId(connectionId, rec.id, stableStringify(diff)),
-          });
-        } catch (defErr: unknown) {
-          // Idempotent replay — same content already folded. Continue.
-          const msg = defErr instanceof Error ? defErr.message : '';
-          if (!msg.includes('already') && !msg.includes('duplicate')) throw defErr;
-        }
+        await ingestRemoteRecord({
+          connectionId,
+          recordId: rec.id,
+          fields: rec.fields,
+          lastModifiedAt: rec.lastModifiedAt,
+          agent: RECORD_AGENT,
+        });
       }
 
       // Merge with existing cache for the UI to consume.
@@ -506,6 +425,7 @@ export const useApiConnectionStore = create<ApiConnectionState>((set, get) => ({
         syncCursor: nextCursor,
         lastSyncAt: now,
       };
+      const { dispatch } = useEoStore.getState();
       await dispatch({
         op: 'DEF',
         target: `api.connections.${connectionId}`,
@@ -537,33 +457,16 @@ export const useApiConnectionStore = create<ApiConnectionState>((set, get) => ({
     // local edits on a read-only source."
     await adapter.updateRecord(recordId, remoteFields);
 
-    const nowIso = new Date().toISOString();
-    const target = recordTarget(connectionId, recordId);
-    const { dispatch } = useEoStore.getState();
-    try {
-      await dispatch({
-        op: 'DEF',
-        target,
-        operand: {
-          fields: internalFields,
-          _source: {
-            connectionId,
-            remoteRecordId: recordId,
-            lastModifiedAt: nowIso,
-          },
-        },
-        agent: RECORD_AGENT,
-        ts: nowIso,
-        acquired_ts: nowIso,
-        client_event_id: defEventId(connectionId, recordId, stableStringify(internalFields) + ':' + nowIso),
-      });
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : '';
-      if (!msg.includes('already') && !msg.includes('duplicate')) throw e;
-    }
+    await dispatchRemoteRecordUpdate({
+      connectionId,
+      recordId,
+      fields: internalFields,
+      agent: RECORD_AGENT,
+    });
 
     // Optimistic cache update — keeps the UI row in sync without a re-render
     // round-trip through getStateByPrefix.
+    const nowIso = new Date().toISOString();
     set((state) => {
       const cache = state.recordsCache[connectionId];
       if (!cache) return state;
@@ -591,32 +494,12 @@ export const useApiConnectionStore = create<ApiConnectionState>((set, get) => ({
     const adapter = buildAdapterForConnection(config);
     await adapter.deleteRecord(recordId);
 
-    // Emit a tombstone DEF so the delete survives reloads and propagates
-    // to other devices in the room. Uses the convention from db/tombstone.ts
-    // (DEF with `value._deleted = { at, by }`) rather than introducing a new
-    // operator.
-    const nowIso = new Date().toISOString();
-    const target = recordTarget(connectionId, recordId);
-    const marker: TombstoneMarker = {
-      at: nowIso,
-      by: RECORD_AGENT,
+    await dispatchRemoteRecordTombstone({
+      connectionId,
+      recordId,
+      agent: RECORD_AGENT,
       source: 'api-connection-delete',
-    };
-    const { dispatch } = useEoStore.getState();
-    try {
-      await dispatch({
-        op: 'DEF',
-        target,
-        operand: { [TOMBSTONE_KEY]: marker },
-        agent: RECORD_AGENT,
-        ts: nowIso,
-        acquired_ts: nowIso,
-        client_event_id: tombstoneEventId(connectionId, recordId, nowIso),
-      });
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : '';
-      if (!msg.includes('already') && !msg.includes('duplicate')) throw e;
-    }
+    });
 
     set((state) => {
       const cache = state.recordsCache[connectionId];
