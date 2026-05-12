@@ -22,7 +22,9 @@
  */
 
 import type { MatrixClient, MatrixEvent } from 'matrix-js-sdk';
+import type { EoEventInput } from '../db/types';
 import type { EoStore } from '../db/encrypted-store';
+import { publishEoEventBatch } from '../sync/publish-events';
 import {
   discoverSchema,
   emitHydrationSchema,
@@ -599,6 +601,7 @@ export class AirtableSyncService {
             const baseSyncedTables = new Set(syncedTableIds[base.id] ?? []);
             for (const table of base.tables) {
               if (!baseSyncedTables.has(table.id)) continue;
+              const inputs: EoEventInput[] = [];
               await emitHydrationSchema(
                 this.store,
                 { id: base.id, name: base.name },
@@ -611,8 +614,20 @@ export class AirtableSyncService {
                 },
                 this.agent,
                 undefined,
-                preSyncListener.onEvent,
+                (event) => {
+                  preSyncListener.onEvent(event);
+                  const { seq: _seq, ...input } = event;
+                  void _seq;
+                  inputs.push(input as EoEventInput);
+                },
               );
+              if (inputs.length > 0) {
+                try {
+                  await publishEoEventBatch(this.matrixClient, this.roomId, inputs);
+                } catch (e) {
+                  console.warn(`[EO-DB] Publish pre-sync schema to room failed for ${base.name}/${table.name}:`, e);
+                }
+              }
             }
           }
         } catch (e) {
