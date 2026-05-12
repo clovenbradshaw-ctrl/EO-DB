@@ -358,25 +358,51 @@ export interface AirtableSyncState {
 }
 
 /**
+ * Connection ID for the legacy single-PAT Amino flow. Every existing
+ * callsite that uses `useAirtableStore`'s singleton credentials is
+ * conceptually operating on connection `"amino-default"`. Phase 4 adds
+ * additional connection IDs (one per BYOPAT entry in ApiConnectionsView)
+ * that read their credentials from `api-connection-store` instead of this
+ * Zustand store.
+ */
+export const AMINO_CONNECTION_ID = 'amino-default';
+
+/**
  * Build an `AirtableClient` that matches the current connection mode
- * (amino proxy vs direct PAT). Throws if the store isn't connected.
+ * (amino proxy vs direct PAT). Throws if no credentials are available.
  *
- * Centralising construction ensures every consumer — continuous sync,
- * manual discovery, snapshot download, writeback — picks up the
- * `viaAminoProxy` flag from the store instead of each caller having to
- * remember to forward it.
+ * Defaults: reads `apiKey` and `viaAminoProxy` from the singleton store,
+ * keeping the existing single-connection flow (Amino-room sync,
+ * AirtableSettings.tsx, sync-service tick) working unchanged. Callers
+ * that manage their own credentials — e.g. the multi-connection
+ * ApiConnectionsView in Phase 4 of the consolidation — can override by
+ * passing `apiKey` / `viaAminoProxy` / `aminoBaseId` explicitly. This is
+ * the seam that lets multiple connections share one client implementation
+ * without each carrying its own singleton store.
  */
 export function createAirtableClient(
-  opts: { onResponse?: AirtableResponseHook; ratePerSec?: number } = {},
+  opts: {
+    onResponse?: AirtableResponseHook;
+    ratePerSec?: number;
+    /** Explicit PAT or Matrix access token; falls back to the singleton store. */
+    apiKey?: string;
+    /** When set, routes through the Amino n8n proxy; falls back to the store. */
+    viaAminoProxy?: boolean;
+    /** Required when viaAminoProxy is true and the caller wants a non-default base. */
+    aminoBaseId?: string;
+  } = {},
 ): AirtableClient {
-  const { apiKey, viaAminoProxy } = useAirtableStore.getState();
+  const store = useAirtableStore.getState();
+  const apiKey = opts.apiKey ?? store.apiKey;
   if (!apiKey) {
     throw new Error('Airtable store is not connected — call connectFromWebhook or connectWithKey first');
   }
+  const viaAminoProxy = opts.viaAminoProxy ?? store.viaAminoProxy;
+  const aminoBaseId = opts.aminoBaseId ?? AMINO_AIRTABLE_BASE_ID;
   return new AirtableClient(apiKey, opts.ratePerSec ?? 4, {
     onResponse: opts.onResponse,
     viaAminoProxy,
-    ...(viaAminoProxy ? { aminoBaseId: AMINO_AIRTABLE_BASE_ID } : {}),
+    ...(viaAminoProxy ? { aminoBaseId } : {}),
   });
 }
 

@@ -17,14 +17,18 @@
  *     Airtable rate budget.
  *
  * The contract:
- *   - `runAirtableSync(label, fn)` runs `fn` if no other sync is active,
- *     or rejects with a `BUSY` `SyncBusyError` if one is.
- *   - `awaitCurrentSync()` resolves once the active run (if any) finishes,
- *     letting passive surfaces (like the continuous tick) defer instead
- *     of throwing.
+ *   - `runAirtableSync(label, fn, opts?)` runs `fn` if no other sync is
+ *     active *for the same connection*, or rejects with a `BUSY`
+ *     `SyncBusyError` if one is. The gate is keyed on connection id so
+ *     two BYOPAT connections can sync in parallel without colliding.
+ *   - `awaitCurrentSync(opts?)` resolves once the active run for that
+ *     connection finishes, letting passive surfaces (like the continuous
+ *     tick) defer instead of throwing.
  *   - The gate is local to the JS realm. It does NOT replace the existing
  *     cross-device locks — those still apply on top.
  */
+
+import { AMINO_CONNECTION_ID } from './airtable-store';
 
 export class SyncBusyError extends Error {
   readonly code = 'BUSY' as const;
@@ -40,47 +44,64 @@ interface ActiveSync {
   promise: Promise<unknown>;
 }
 
-let active: ActiveSync | null = null;
+const active = new Map<string, ActiveSync>();
 
 /**
  * Acquire the gate, run `fn`, release the gate. Rejects synchronously with
- * `SyncBusyError` if another sync is already active.
+ * `SyncBusyError` if another sync is already active *for the same
+ * connection*. Different connections can run concurrently.
  *
  * `label` is a short identifier for diagnostics ("continuous-tick",
  * "manual-hydrate", "resumable-hydrate", etc.) and shows up in the error
  * message when a second caller is rejected.
+ *
+ * `opts.connectionId` defaults to `AMINO_CONNECTION_ID` — every existing
+ * call site without an explicit connection operates on the singleton
+ * Amino flow exactly as before. Phase 4's ApiConnectionsView routing
+ * will pass per-connection ids explicitly.
  */
 export async function runAirtableSync<T>(
   label: string,
   fn: () => Promise<T>,
+  opts: { connectionId?: string } = {},
 ): Promise<T> {
-  if (active) {
-    throw new SyncBusyError(active.label, label);
+  const cid = opts.connectionId ?? AMINO_CONNECTION_ID;
+  const existing = active.get(cid);
+  if (existing) {
+    throw new SyncBusyError(existing.label, label);
   }
   // Reserve the slot before invoking `fn` so a synchronous re-entrant call
   // (during e.g. a synchronous progress callback) sees the gate closed.
   let resolveDone: () => void = () => {};
   const done = new Promise<void>((r) => { resolveDone = r; });
-  active = { label, startedAt: Date.now(), promise: done };
+  active.set(cid, { label, startedAt: Date.now(), promise: done });
   try {
     return await fn();
   } finally {
-    active = null;
+    active.delete(cid);
     resolveDone();
   }
 }
 
 /**
- * If a sync is in flight, return its completion promise (success-or-fail).
- * Otherwise resolve immediately. Use this from passive surfaces that want
- * to defer rather than fail when the gate is held.
+ * If a sync is in flight for the given connection, return its completion
+ * promise (success-or-fail). Otherwise resolve immediately. Use this from
+ * passive surfaces that want to defer rather than fail when the gate is
+ * held.
  */
-export function awaitCurrentSync(): Promise<void> {
-  if (!active) return Promise.resolve();
-  return active.promise.then(() => {}, () => {});
+export function awaitCurrentSync(
+  opts: { connectionId?: string } = {},
+): Promise<void> {
+  const cid = opts.connectionId ?? AMINO_CONNECTION_ID;
+  const existing = active.get(cid);
+  if (!existing) return Promise.resolve();
+  return existing.promise.then(() => {}, () => {});
 }
 
-/** Diagnostic: which run currently holds the gate, if any. */
-export function activeSyncLabel(): string | null {
-  return active ? active.label : null;
+/** Diagnostic: which run currently holds the gate for this connection, if any. */
+export function activeSyncLabel(
+  opts: { connectionId?: string } = {},
+): string | null {
+  const cid = opts.connectionId ?? AMINO_CONNECTION_ID;
+  return active.get(cid)?.label ?? null;
 }

@@ -936,9 +936,20 @@ function ApiDataView({
         <div style={s.empty}>Loading records…</div>
       )}
 
-      {/* Empty state */}
-      {!loading && !error && records.length === 0 && cache && (
-        <div style={s.empty}>No records found.</div>
+      {/* Empty states — distinguish never-synced vs synced-empty vs failed.
+          The blanket "No records found" used to hide silent persistence
+          failures across multiple sync attempts. */}
+      {!loading && !error && records.length === 0 && !config.lastSyncAt && (
+        <div style={s.empty}>
+          Not yet synced. Click <strong>Sync Now</strong> to fetch records from{' '}
+          {config.credentials.sourceType === 'airtable' ? 'Airtable' : 'this source'}.
+        </div>
+      )}
+      {!loading && !error && records.length === 0 && config.lastSyncAt && (
+        <div style={s.empty}>
+          Source returned 0 records. Last synced{' '}
+          {new Date(config.lastSyncAt).toLocaleString()}.
+        </div>
       )}
 
       {/* Table */}
