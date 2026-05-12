@@ -24,6 +24,7 @@
 import type { MatrixClient, MatrixEvent } from 'matrix-js-sdk';
 import type { EoStore } from '../db/encrypted-store';
 import {
+  discoverSchema,
   hydrationSync,
   seedCursorsFromMap,
   updateSync,
@@ -282,6 +283,9 @@ export class AirtableSyncService {
         }
         if (typeof content.recordLimit === 'number') {
           partial.recordLimit = Math.max(0, content.recordLimit);
+        }
+        if (typeof content.syncSchemaOnEachSync === 'boolean') {
+          partial.syncSchemaOnEachSync = content.syncSchemaOnEachSync;
         }
         useAirtableStore.getState().setSyncSettings(partial);
       }
@@ -577,6 +581,19 @@ export class AirtableSyncService {
         preserveExisting: syncSettings.preserveExisting,
         recordLimit: syncSettings.recordLimit > 0 ? syncSettings.recordLimit : undefined,
       };
+
+      // When the user has opted in, refresh the cached schema manifest before
+      // each sync so newly-added bases / tables / fields show up without
+      // requiring a manual "Sync schema" click. A failure here is non-fatal:
+      // sync proceeds with the previously cached manifest.
+      if (syncSettings.syncSchemaOnEachSync) {
+        try {
+          const manifest = await discoverSchema(client);
+          useAirtableStore.getState().setManifest(manifest);
+        } catch (e) {
+          console.warn('[EO-DB] Pre-sync schema refresh failed:', e);
+        }
+      }
 
       const plannedStrategy: 'hydration' | 'lastModified' =
         needsHydration ? 'hydration' : 'lastModified';

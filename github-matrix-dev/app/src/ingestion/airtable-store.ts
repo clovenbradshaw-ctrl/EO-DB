@@ -246,12 +246,19 @@ export interface AirtableSyncSettings {
   preserveExisting: boolean;
   /** Maximum records per table per sync (0 = no limit). */
   recordLimit: number;
+  /**
+   * When true, refresh the Airtable schema manifest (bases → tables → fields)
+   * before each sync run (both manual and continuous). When false, sync uses
+   * the last discovered manifest and only records are fetched.
+   */
+  syncSchemaOnEachSync: boolean;
 }
 
 export const DEFAULT_SYNC_SETTINGS: AirtableSyncSettings = {
   syncIntervalSec: 30,
   preserveExisting: false,
   recordLimit: 0,
+  syncSchemaOnEachSync: false,
 };
 
 export interface AirtableSyncState {
