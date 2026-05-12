@@ -30,6 +30,11 @@ import {
   ingestConnectionSchema,
   ingestRemoteRecord,
 } from '../ingestion/event-sourced-ingest';
+import { parseByName } from '../lib/file-import/parse';
+import {
+  importRecordsIntoConnection,
+  type ImportRecordsResult,
+} from '../lib/file-import/import-records';
 
 const RECORD_AGENT = DEFAULT_INGEST_AGENT;
 const RECORD_TARGET_PREFIX = 'api.records.';
@@ -97,6 +102,18 @@ interface ApiConnectionState {
   ) => Promise<void>;
 
   deleteRecord: (connectionId: string, recordId: string) => Promise<void>;
+
+  /**
+   * Import rows from a CSV / JSON file into a target connection's
+   * table. The target schema must already be persisted (the schema
+   * events emitted by saveConnection / first sync). Returns an
+   * `ImportRecordsResult` so the UI can surface column-mapping
+   * mismatches, fallback-id counts, and per-outcome record tallies.
+   */
+  importRecordsFromFile: (
+    connectionId: string,
+    file: File,
+  ) => Promise<ImportRecordsResult>;
 
   clearError: (connectionId: string) => void;
 
@@ -551,6 +568,68 @@ export const useApiConnectionStore = create<ApiConnectionState>((set, get) => ({
         },
       };
     });
+  },
+
+  async importRecordsFromFile(connectionId, file) {
+    const config = get().connections[connectionId];
+    if (!config) throw new Error(`Connection ${connectionId} not loaded`);
+
+    const text = await file.text();
+    const parsed = parseByName(text, file.name);
+    if (parsed.rows.length === 0) {
+      throw new Error('File contains no data rows.');
+    }
+
+    set((state) => ({
+      recordsLoading: { ...state.recordsLoading, [connectionId]: true },
+      errors: { ...state.errors, [connectionId]: '' },
+    }));
+
+    try {
+      const result = await importRecordsIntoConnection(config, parsed, {
+        agent: RECORD_AGENT,
+      });
+
+      // Refresh the in-memory cache from EO state so the data grid
+      // reflects the newly-imported rows. Cheap — the events were just
+      // emitted, so the EO state is hot in the fold cache.
+      const { getStateByPrefix } = useEoStore.getState();
+      const recordStates = await getStateByPrefix(`${RECORD_TARGET_PREFIX}${connectionId}.`);
+      const records: RemoteRecord[] = [];
+      for (const st of recordStates) {
+        if (isDeleted(st)) continue;
+        const value = st.value as
+          | { fields?: Record<string, unknown>; _source?: { remoteRecordId?: string; lastModifiedAt?: string | null } }
+          | null
+          | undefined;
+        if (!value || typeof value !== 'object') continue;
+        const recordId =
+          value._source?.remoteRecordId ?? st.target.slice(`${RECORD_TARGET_PREFIX}${connectionId}.`.length);
+        if (!recordId) continue;
+        records.push({
+          id: recordId,
+          fields: value.fields ?? {},
+          lastModifiedAt: value._source?.lastModifiedAt ?? null,
+        });
+      }
+
+      set((state) => ({
+        recordsLoading: { ...state.recordsLoading, [connectionId]: false },
+        recordsCache: {
+          ...state.recordsCache,
+          [connectionId]: { records, loadedAt: new Date().toISOString() },
+        },
+      }));
+
+      return result;
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      set((state) => ({
+        recordsLoading: { ...state.recordsLoading, [connectionId]: false },
+        errors: { ...state.errors, [connectionId]: msg },
+      }));
+      throw e;
+    }
   },
 
   clearError(connectionId) {
