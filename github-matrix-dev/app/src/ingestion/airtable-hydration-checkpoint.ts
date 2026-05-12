@@ -15,9 +15,28 @@
 
 import type { EoStore } from '../db/encrypted-store';
 import type { HydrationManifest, SyncCustomization } from './airtable-sync';
+import { AMINO_CONNECTION_ID } from './airtable-store';
 
-/** Keyspace for the single active hydration checkpoint. */
+/**
+ * Keyspace for the single-connection legacy Amino hydration checkpoint.
+ * Kept for backward compatibility — on-disk data written before the
+ * multi-connection refactor uses this exact key. New code paths read/write
+ * through `checkpointKey(cid)`, which returns this same string when
+ * `cid === AMINO_CONNECTION_ID`.
+ */
 export const HYDRATION_CHECKPOINT_KEY = 'meta:at_hydration_checkpoint';
+
+/**
+ * Per-connection checkpoint key. The Amino flow stays on the legacy
+ * (unprefixed) key so existing on-disk checkpoints continue to load
+ * without migration; any other connection id gets a cid-suffixed key
+ * so two BYOPAT hydrations can run side-by-side without collision.
+ */
+function checkpointKey(connectionId: string): string {
+  return connectionId === AMINO_CONNECTION_ID
+    ? HYDRATION_CHECKPOINT_KEY
+    : `${HYDRATION_CHECKPOINT_KEY}:${connectionId}`;
+}
 
 export type HydrationPhase =
   | 'fetching'
@@ -121,9 +140,11 @@ function normalizeSelectedTables(
 
 export async function loadCheckpoint(
   store: EoStore,
+  opts: { connectionId?: string } = {},
 ): Promise<HydrationCheckpoint | null> {
+  const cid = opts.connectionId ?? AMINO_CONNECTION_ID;
   try {
-    const raw = await store.get(HYDRATION_CHECKPOINT_KEY);
+    const raw = await store.get(checkpointKey(cid));
     if (!raw) return null;
     const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
     if (!parsed || typeof parsed !== 'object') return null;
@@ -138,18 +159,24 @@ export async function loadCheckpoint(
 export async function saveCheckpoint(
   store: EoStore,
   checkpoint: HydrationCheckpoint,
+  opts: { connectionId?: string } = {},
 ): Promise<void> {
+  const cid = opts.connectionId ?? AMINO_CONNECTION_ID;
   checkpoint.updatedAt = Date.now();
   try {
-    await store.put(HYDRATION_CHECKPOINT_KEY, JSON.stringify(checkpoint));
+    await store.put(checkpointKey(cid), JSON.stringify(checkpoint));
   } catch {
     /* best-effort — an ephemeral write failure shouldn't abort the run */
   }
 }
 
-export async function clearCheckpoint(store: EoStore): Promise<void> {
+export async function clearCheckpoint(
+  store: EoStore,
+  opts: { connectionId?: string } = {},
+): Promise<void> {
+  const cid = opts.connectionId ?? AMINO_CONNECTION_ID;
   try {
-    await store.del(HYDRATION_CHECKPOINT_KEY);
+    await store.del(checkpointKey(cid));
   } catch {
     /* best-effort */
   }
