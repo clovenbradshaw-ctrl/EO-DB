@@ -16,8 +16,14 @@ import { describe, it, expect } from 'vitest';
 import {
   computeFieldDiff,
   defEventId,
+  fieldDefEventId,
+  fieldInsEventId,
+  fieldSchemaTarget,
   insEventId,
   recordTarget,
+  schemaDefEventId,
+  schemaInsEventId,
+  schemaTarget,
   tombstoneEventId,
 } from '../event-sourced-ingest';
 
@@ -100,6 +106,71 @@ describe('defEventId', () => {
 });
 
 // ─── tombstoneEventId ──────────────────────────────────────────────────────
+
+// ─── schemaTarget / fieldSchemaTarget ──────────────────────────────────────
+
+describe('schemaTarget', () => {
+  it('uses api.schema.{cid} so a per-connection scan separates schemas', () => {
+    expect(schemaTarget('conn-1')).toBe('api.schema.conn-1');
+  });
+
+  it('separates two connections', () => {
+    expect(schemaTarget('conn-1')).not.toBe(schemaTarget('conn-2'));
+  });
+});
+
+describe('fieldSchemaTarget', () => {
+  it('nests under the connection schema target', () => {
+    expect(fieldSchemaTarget('c', 'fldX')).toBe('api.schema.c.field.fldX');
+  });
+
+  it('shares the schema prefix so getStateByPrefix can enumerate all fields', () => {
+    expect(fieldSchemaTarget('c', 'fldX').startsWith(schemaTarget('c') + '.')).toBe(true);
+  });
+});
+
+// ─── schemaInsEventId / schemaDefEventId ───────────────────────────────────
+
+describe('schemaInsEventId', () => {
+  it('is deterministic and distinguishes connections', () => {
+    expect(schemaInsEventId('c')).toBe(schemaInsEventId('c'));
+    expect(schemaInsEventId('c1')).not.toBe(schemaInsEventId('c2'));
+  });
+
+  it('uses the at-conn:schema:ins namespace', () => {
+    expect(schemaInsEventId('c')).toMatch(/^at-conn:schema:ins:/);
+  });
+});
+
+describe('schemaDefEventId', () => {
+  it('changes when the content key changes', () => {
+    expect(schemaDefEventId('c', 'k1')).not.toBe(schemaDefEventId('c', 'k2'));
+  });
+
+  it('stays stable for the same content key — a no-op re-emit dedups', () => {
+    expect(schemaDefEventId('c', 'k')).toBe(schemaDefEventId('c', 'k'));
+  });
+});
+
+// ─── fieldInsEventId / fieldDefEventId ─────────────────────────────────────
+
+describe('fieldInsEventId', () => {
+  it('distinguishes fields within the same connection', () => {
+    expect(fieldInsEventId('c', 'fldX')).not.toBe(fieldInsEventId('c', 'fldY'));
+  });
+
+  it('distinguishes the same field across connections', () => {
+    expect(fieldInsEventId('c1', 'fldX')).not.toBe(fieldInsEventId('c2', 'fldX'));
+  });
+});
+
+describe('fieldDefEventId', () => {
+  it('changes when field metadata changes (e.g. linked-table id flips)', () => {
+    const a = fieldDefEventId('c', 'fldX', '{"linkedTableId":"tblA"}');
+    const b = fieldDefEventId('c', 'fldX', '{"linkedTableId":"tblB"}');
+    expect(a).not.toBe(b);
+  });
+});
 
 describe('tombstoneEventId', () => {
   it('distinguishes deletes at different timestamps so a delete-undelete-redelete cycle does not dedup', () => {

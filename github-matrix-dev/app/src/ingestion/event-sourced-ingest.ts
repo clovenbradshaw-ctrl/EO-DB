@@ -29,6 +29,7 @@ import { useEoStore } from '../store/eo-store';
 import { stableStringify, valuesEqual } from './value-extract';
 import { isDeleted, TOMBSTONE_KEY, type TombstoneMarker } from '../db/tombstone';
 import type { EoState } from '../db/types';
+import type { RemoteField, RemoteSchema } from '../lib/api-adapters/types';
 
 /**
  * Default agent used for events emitted via the API-connection / generic
@@ -84,6 +85,34 @@ export function defEventId(connectionId: string, recordId: string, contentKey: s
 /** Idempotent client_event_id for a tombstone DEF. */
 export function tombstoneEventId(connectionId: string, recordId: string, at: string): string {
   return `${ID_PREFIX}:del:${connectionId}:${recordId}:${at}`;
+}
+
+// ─── Schema target + event-id helpers ──────────────────────────────────────
+
+/** Stable target for the per-connection schema header (base + table info). */
+export function schemaTarget(connectionId: string): string {
+  return `api.schema.${connectionId}`;
+}
+
+/** Stable target for a per-field schema event under the connection. */
+export function fieldSchemaTarget(connectionId: string, fieldId: string): string {
+  return `${schemaTarget(connectionId)}.field.${fieldId}`;
+}
+
+export function schemaInsEventId(connectionId: string): string {
+  return `${ID_PREFIX}:schema:ins:${connectionId}`;
+}
+
+export function schemaDefEventId(connectionId: string, contentKey: string): string {
+  return `${ID_PREFIX}:schema:def:${connectionId}:${contentKey}`;
+}
+
+export function fieldInsEventId(connectionId: string, fieldId: string): string {
+  return `${ID_PREFIX}:field:ins:${connectionId}:${fieldId}`;
+}
+
+export function fieldDefEventId(connectionId: string, fieldId: string, contentKey: string): string {
+  return `${ID_PREFIX}:field:def:${connectionId}:${fieldId}:${contentKey}`;
 }
 
 // ─── INS / DEF / tombstone emission ────────────────────────────────────────
@@ -215,6 +244,169 @@ export async function dispatchRemoteRecordTombstone(
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : '';
     if (!msg.includes('already') && !msg.includes('duplicate')) throw e;
+  }
+}
+
+// ─── Schema emission ───────────────────────────────────────────────────────
+
+export interface IngestConnectionSchemaParams {
+  /** Stable id for the API connection this schema describes. */
+  connectionId: string;
+  /** Schema as returned by `ApiAdapter.discoverSchema()`. */
+  schema: RemoteSchema;
+  agent?: string;
+}
+
+/** Outcome rollup for caller tallies / UI status. */
+export interface IngestSchemaOutcome {
+  /** Header (`api.schema.{cid}`) was newly emitted (INS+DEF) on this call. */
+  headerEmitted: boolean;
+  /** Number of field schema events that emitted INS this call. */
+  fieldsInserted: number;
+  /** Number of field schema events that emitted DEF (content changed) this call. */
+  fieldsUpdated: number;
+  /** Total fields in the schema (= fieldsInserted + fieldsUpdated + no-changes). */
+  fieldsTotal: number;
+}
+
+/**
+ * Persist the schema of a remote source into the EO event log so the table
+ * structure exists before any records land. Idempotent — re-running with
+ * identical schema emits no new events; re-running with a changed schema
+ * emits diff DEFs only for the fields that actually changed.
+ *
+ * Event layout:
+ *   api.schema.{cid}                         — table header (baseName, tableName, ...)
+ *   api.schema.{cid}.field.{fieldId}         — per-field metadata, including
+ *                                              source-native `options` so
+ *                                              linked-table refs, formula
+ *                                              expressions, and choice lists
+ *                                              survive into the log.
+ */
+export async function ingestConnectionSchema(
+  params: IngestConnectionSchemaParams,
+): Promise<IngestSchemaOutcome> {
+  const { connectionId, schema } = params;
+  const agent = params.agent ?? DEFAULT_INGEST_AGENT;
+  const { dispatch, getState } = useEoStore.getState();
+  const nowIso = new Date().toISOString();
+
+  const headerOperand = {
+    baseName: schema.baseName,
+    tableName: schema.tableName,
+    tableId: schema.tableId,
+    fieldCount: schema.fields.length,
+    _source: { connectionId, kind: 'schema-header' as const },
+  };
+  const headerTarget = schemaTarget(connectionId);
+  const headerExisting = await getState(headerTarget);
+  let headerEmitted = false;
+
+  if (!headerExisting) {
+    try {
+      await dispatch({
+        op: 'INS',
+        target: headerTarget,
+        operand: { _source: { connectionId, kind: 'schema-header' } },
+        agent,
+        ts: nowIso,
+        acquired_ts: nowIso,
+        client_event_id: schemaInsEventId(connectionId),
+      });
+      headerEmitted = true;
+    } catch { /* idempotent INS */ }
+  }
+
+  const headerExistingValue = headerExisting?.value as Record<string, unknown> | undefined;
+  if (!headerExistingValue || !valuesEqual(headerOperand, headerExistingValue)) {
+    try {
+      await dispatch({
+        op: 'DEF',
+        target: headerTarget,
+        operand: headerOperand,
+        agent,
+        ts: nowIso,
+        acquired_ts: nowIso,
+        client_event_id: schemaDefEventId(connectionId, stableStringify(headerOperand)),
+      });
+      headerEmitted = true;
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : '';
+      if (!msg.includes('already') && !msg.includes('duplicate')) throw e;
+    }
+  }
+
+  let fieldsInserted = 0;
+  let fieldsUpdated = 0;
+  for (const field of schema.fields) {
+    const result = await ingestFieldSchema({ connectionId, field, agent, ts: nowIso });
+    if (result === 'ins') fieldsInserted++;
+    if (result === 'def') fieldsUpdated++;
+  }
+
+  return {
+    headerEmitted,
+    fieldsInserted,
+    fieldsUpdated,
+    fieldsTotal: schema.fields.length,
+  };
+}
+
+async function ingestFieldSchema(args: {
+  connectionId: string;
+  field: RemoteField;
+  agent: string;
+  ts: string;
+}): Promise<'ins' | 'def' | 'no_change'> {
+  const { connectionId, field, agent, ts } = args;
+  const { dispatch, getState } = useEoStore.getState();
+  const target = fieldSchemaTarget(connectionId, field.id);
+  const operand = {
+    fieldId: field.id,
+    name: field.name,
+    type: field.type,
+    ...(field.options ? { options: field.options } : {}),
+    _source: { connectionId, kind: 'schema-field' as const, fieldId: field.id },
+  };
+
+  const existing = await getState(target);
+  let didIns = false;
+
+  if (!existing) {
+    try {
+      await dispatch({
+        op: 'INS',
+        target,
+        operand: { _source: { connectionId, kind: 'schema-field', fieldId: field.id } },
+        agent,
+        ts,
+        acquired_ts: ts,
+        client_event_id: fieldInsEventId(connectionId, field.id),
+      });
+      didIns = true;
+    } catch { /* idempotent INS */ }
+  }
+
+  const existingValue = existing?.value as Record<string, unknown> | undefined;
+  if (existingValue && valuesEqual(operand, existingValue)) {
+    return didIns ? 'ins' : 'no_change';
+  }
+
+  try {
+    await dispatch({
+      op: 'DEF',
+      target,
+      operand,
+      agent,
+      ts,
+      acquired_ts: ts,
+      client_event_id: fieldDefEventId(connectionId, field.id, stableStringify(operand)),
+    });
+    return 'def';
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : '';
+    if (!msg.includes('already') && !msg.includes('duplicate')) throw e;
+    return didIns ? 'ins' : 'no_change';
   }
 }
 

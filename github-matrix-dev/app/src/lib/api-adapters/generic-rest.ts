@@ -1,4 +1,4 @@
-import type { ApiAdapter, RemoteField, RemoteRecord, GenericRestCredentials } from './types';
+import type { ApiAdapter, RemoteField, RemoteRecord, RemoteSchema, GenericRestCredentials } from './types';
 import { normalizeTimestamp } from './types';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -92,6 +92,19 @@ export class GenericRestAdapter implements ApiAdapter {
       name: key,
       type: 'string',
     }));
+  }
+
+  async discoverSchema(): Promise<RemoteSchema> {
+    const fields = await this.discoverFields();
+    // Generic-REST has no first-class notion of base or table; surface the
+    // URL and recordsPath as the closest analogues so the schema event has
+    // something human-readable.
+    return {
+      baseName: this.creds.baseUrl,
+      tableName: this.creds.recordsPath || '(root)',
+      tableId: this.creds.recordsPath || 'root',
+      fields,
+    };
   }
 
   async fetchRecords(opts: {
