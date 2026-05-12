@@ -510,6 +510,44 @@ export function AirtableSettingsSection({
     }
   }
 
+  // ── Explicitly sync the Airtable schema ──
+  // Re-fetches bases/tables/fields from Airtable and updates the cached
+  // manifest without touching record data or table selections. Surfaced as
+  // a dedicated button so the user can refresh metadata (e.g. after adding
+  // a new field in Airtable) without re-running a full data sync.
+  async function handleSyncSchema() {
+    if (!apiKey) return;
+    setSyncStatus((prev) => ({ ...prev, schemaSync: { state: 'discovering', message: 'Refreshing Airtable schema…' } }));
+
+    try {
+      const client = createAirtableClient();
+      const disc = await discoverSchema(client);
+      useAirtableStore.getState().setManifest(disc);
+
+      // Preserve the user's existing table selections; add newly-discovered
+      // tables as unselected so we don't suddenly start syncing them.
+      setTableSelections((prev) => {
+        const next: Record<string, string[]> = { ...prev };
+        for (const base of disc.bases) {
+          if (!(base.id in next)) next[base.id] = [];
+        }
+        return next;
+      });
+
+      const baseCount = disc.bases.length;
+      const tableCount = disc.bases.reduce((t, b) => t + b.tables.length, 0);
+      setSyncStatus((prev) => ({
+        ...prev,
+        schemaSync: {
+          state: 'done',
+          message: `Schema refreshed: ${baseCount} base${baseCount !== 1 ? 's' : ''}, ${tableCount} table${tableCount !== 1 ? 's' : ''}`,
+        },
+      }));
+    } catch (e: any) {
+      setSyncStatus((prev) => ({ ...prev, schemaSync: { state: 'error', message: e.message || 'Schema sync failed' } }));
+    }
+  }
+
   // ── Trigger one-shot sync ──
   async function handleSync(mode: 'hydrate' | 'sync') {
     if (!apiKey || !store) return;
@@ -539,6 +577,17 @@ export function AirtableSettingsSection({
       // Manual sync clicks also count toward the session cycle counter.
       useAirtableStore.getState().incCycle();
       const customization = buildCustomization();
+
+      // Honour the "Refresh schema on each sync" setting in the manual paths
+      // too. Failure is non-fatal — fall through with the cached manifest.
+      if (useAirtableStore.getState().syncSettings.syncSchemaOnEachSync) {
+        try {
+          const manifest = await discoverSchema(client);
+          useAirtableStore.getState().setManifest(manifest);
+        } catch (e) {
+          console.warn('[EO-DB] Pre-sync schema refresh failed:', e);
+        }
+      }
 
       // Seed the live snapshot so the status card / global badge / toast
       // can show "preparing" immediately, before any network I/O starts.
@@ -1493,11 +1542,34 @@ export function AirtableSettingsSection({
               >
                 Discover
               </button>
+              <button
+                onClick={handleSyncSchema}
+                disabled={!apiKey || syncStatus.schemaSync?.state === 'discovering' || syncStatus.discover?.state === 'discovering'}
+                style={s.actionBtn}
+                title="Re-fetch bases, tables, and field metadata from Airtable"
+              >
+                Sync schema
+              </button>
             </div>
 
             {/* Discovery status */}
             {(() => {
               const status = syncStatus.discover;
+              if (!status || status.state === 'idle') return null;
+              return (
+                <div style={{
+                  ...s.statusMsg,
+                  color: status.state === 'error' ? theme.dangerText : status.state === 'done' ? theme.successText : theme.textSecondary,
+                }}>
+                  {status.state === 'discovering' && <span style={s.spinner} />}
+                  {status.message}
+                </div>
+              );
+            })()}
+
+            {/* Schema sync status */}
+            {(() => {
+              const status = syncStatus.schemaSync;
               if (!status || status.state === 'idle') return null;
               return (
                 <div style={{
@@ -1661,6 +1733,26 @@ export function AirtableSettingsSection({
                     {preserveExisting
                       ? 'Airtable only fills new records and empty fields; existing EO-DB values are kept'
                       : 'Airtable values overwrite EO-DB values on every sync'}
+                  </span>
+                </div>
+
+                {/* Refresh schema on each sync toggle */}
+                <div style={s.preserveRow}>
+                  <label style={s.checkLabel}>
+                    <input
+                      type="checkbox"
+                      checked={syncSettings.syncSchemaOnEachSync}
+                      onChange={(e) => {
+                        useAirtableStore.getState().setSyncSettings({ syncSchemaOnEachSync: e.target.checked });
+                        syncServiceRef.current?.saveSyncSettings({ syncSchemaOnEachSync: e.target.checked });
+                      }}
+                    />
+                    <span>Refresh Airtable schema on each sync</span>
+                  </label>
+                  <span style={s.preserveHint}>
+                    {syncSettings.syncSchemaOnEachSync
+                      ? 'Bases, tables, and fields are re-fetched from Airtable before every manual or continuous sync'
+                      : 'Schema is only refreshed when you click "Sync schema" or "Discover"'}
                   </span>
                 </div>
 
