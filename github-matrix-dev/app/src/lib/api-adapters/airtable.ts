@@ -1,5 +1,5 @@
 import { AirtableClient } from '../../ingestion/airtable-client';
-import type { ApiAdapter, RemoteField, RemoteRecord } from './types';
+import type { ApiAdapter, RemoteField, RemoteRecord, RemoteSchema } from './types';
 import { normalizeTimestamp } from './types';
 
 /**
@@ -41,6 +41,21 @@ export class AirtableAdapter implements ApiAdapter {
   }
 
   async discoverFields(): Promise<RemoteField[]> {
+    const schema = await this.discoverSchema();
+    return schema.fields;
+  }
+
+  async discoverSchema(): Promise<RemoteSchema> {
+    // The base-list endpoint is needed to surface the human base name,
+    // which is otherwise unavailable from getBaseSchema. Failure to look
+    // it up is non-fatal — we fall back to the baseId itself.
+    let baseName = this.baseId;
+    try {
+      const bases = await this.client.listBases();
+      const found = bases.find((b) => b.id === this.baseId);
+      if (found?.name) baseName = found.name;
+    } catch { /* best-effort */ }
+
     const tables = await this.client.getBaseSchema(this.baseId);
     const table = tables.find(
       (t) => t.id === this.tableId || t.name === this.tableId,
@@ -48,11 +63,20 @@ export class AirtableAdapter implements ApiAdapter {
     if (!table) {
       throw new Error(`Table "${this.tableId}" not found in base "${this.baseId}"`);
     }
-    return table.fields.map((f) => ({
+    const fields: RemoteField[] = table.fields.map((f) => ({
       id: f.id,
       name: f.name,
       type: f.type,
+      // Preserve linked-table refs, formula expressions, choice lists, etc.
+      // so they survive into the EO log schema event.
+      ...(f.options ? { options: f.options } : {}),
     }));
+    return {
+      baseName,
+      tableName: table.name,
+      tableId: table.id,
+      fields,
+    };
   }
 
   async fetchRecords(opts: {

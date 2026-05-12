@@ -23,6 +23,31 @@ export interface RemoteField {
   id: string;    // stable source field ID (Airtable: "fldXYZ")
   name: string;  // human display name from source
   type: string;  // source-native type string (e.g. "singleLineText", "lastModifiedTime")
+  /**
+   * Source-native options block when available. For Airtable this is the
+   * raw `options` object the schema API returns — it carries linked-table
+   * references (`linkedTableId`, `prefersSingleRecordLink`), formula
+   * expressions (`formula`, `referencedFieldIds`), choice lists for
+   * single/multi-selects, currency/percent precision, etc. Stored on the
+   * schema event so a future formula engine, link resolver, or import-into
+   * UI can re-derive the original behavior from EO-DB alone.
+   *
+   * `undefined` when the source doesn't expose typed options
+   * (e.g. generic-REST: every field is treated as `string`).
+   */
+  options?: Record<string, unknown>;
+}
+
+/** Coarse summary of a source's schema for one connection. */
+export interface RemoteSchema {
+  /** Display name of the containing dataset (Airtable base, REST endpoint). */
+  baseName: string;
+  /** Display name of the specific table / collection / array. */
+  tableName: string;
+  /** Source-native id of the table when one exists; else equal to tableName. */
+  tableId: string;
+  /** All fields on the table, including types and source-native options. */
+  fields: RemoteField[];
 }
 
 // ─── Records ──────────────────────────────────────────────────────────────────
@@ -88,6 +113,13 @@ export interface ApiAdapter {
 
   /** Return all fields available on the configured source table/endpoint. */
   discoverFields(): Promise<RemoteField[]>;
+
+  /**
+   * Return the full schema (base name, table name, fields with options).
+   * Used by the connection-save flow to emit schema events into the EO
+   * log so the table structure is event-sourced before any records land.
+   */
+  discoverSchema(): Promise<RemoteSchema>;
 
   /**
    * Fetch records from the source.

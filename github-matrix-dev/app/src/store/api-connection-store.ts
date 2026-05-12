@@ -27,6 +27,7 @@ import {
   DEFAULT_INGEST_AGENT,
   dispatchRemoteRecordTombstone,
   dispatchRemoteRecordUpdate,
+  ingestConnectionSchema,
   ingestRemoteRecord,
 } from '../ingestion/event-sourced-ingest';
 
@@ -313,6 +314,22 @@ export const useApiConnectionStore = create<ApiConnectionState>((set, get) => ({
       connections: { ...state.connections, [connectionId]: config },
     }));
 
+    // Persist the source's schema (base name, table name, per-field types
+    // and source-native options) so the table structure is event-sourced
+    // before any records land. Best-effort: a failure to discover the
+    // schema (e.g. transient network) must not block the connection save.
+    try {
+      const adapter = buildAdapterForConnection(config);
+      const schema = await adapter.discoverSchema();
+      await ingestConnectionSchema({
+        connectionId,
+        schema,
+        agent: RECORD_AGENT,
+      });
+    } catch {
+      /* best-effort — schema events will retry on next sync */
+    }
+
     return connectionId;
   },
 
@@ -382,6 +399,26 @@ export const useApiConnectionStore = create<ApiConnectionState>((set, get) => ({
 
     try {
       const adapter = buildAdapterForConnection(config);
+
+      // If saveConnection's best-effort schema ingest failed (e.g. transient
+      // network at create time), back-fill it on the first sync. Skipping the
+      // discoverSchema HTTP round-trip once the header exists keeps the
+      // steady-state sync cheap.
+      const { getState: peekEoState } = useEoStore.getState();
+      const headerExisting = await peekEoState(`api.schema.${connectionId}`);
+      if (!headerExisting) {
+        try {
+          const schema = await adapter.discoverSchema();
+          await ingestConnectionSchema({
+            connectionId,
+            schema,
+            agent: RECORD_AGENT,
+          });
+        } catch {
+          /* best-effort — next sync retries */
+        }
+      }
+
       const cursor = fullRefresh ? null : (config.syncCursor ?? null);
       const { records: rawRecords, nextCursor } = await adapter.fetchRecords({ cursor });
 
