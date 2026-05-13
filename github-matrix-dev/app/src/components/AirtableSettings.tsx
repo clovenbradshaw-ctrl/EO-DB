@@ -22,7 +22,7 @@ import {
   emitHydrationSchema,
   getSyncedTableIds,
   hydrationSync,
-  updateSync,
+  smartSync,
   type HydrationManifest,
   type HydrationTableSchema,
   type SyncCustomization,
@@ -880,7 +880,11 @@ export function AirtableSettingsSection({
                 onEvent: progressListener.onEvent,
                 customization,
               })
-            : updateSync(store, client, session.userId, {
+            // "Update Sync" is now smartSync: per-table hydrate-or-incremental,
+            // so a newly-selected table that's never been hydrated gets its
+            // baseline pulled on the same click instead of sitting blank until
+            // the user finds and presses "Full Sync".
+            : smartSync(store, client, session.userId, {
               onProgress,
               onEvent: progressListener.onEvent,
               customization,

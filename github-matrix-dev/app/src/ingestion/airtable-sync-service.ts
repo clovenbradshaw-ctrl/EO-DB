@@ -28,13 +28,11 @@ import { publishEoEventBatch } from '../sync/publish-events';
 import {
   discoverSchema,
   emitHydrationSchema,
-  hydrationSync,
   seedCursorsFromMap,
-  updateSync,
+  smartSync,
   getSyncedTableIds,
   type SyncCustomization,
   type SyncProgress,
-  type HydrationResult,
   type UpdateSyncResult,
 } from './airtable-sync';
 import {
@@ -672,7 +670,7 @@ export class AirtableSyncService {
       // what happened without recomputing from sync_results.
       const onProgress = (p: SyncProgress) => this.applyProgress(p);
 
-      let result: HydrationResult | UpdateSyncResult;
+      let result: UpdateSyncResult;
 
       // Bridge per-event fold output into Zustand so subscribers like
       // TableView (which re-fetches on `lastSeq` change) refresh as the
@@ -680,50 +678,45 @@ export class AirtableSyncService {
       // the MemoryStore + OPFS log but the UI never repaints until reload.
       const progressListener = createImportProgressListener();
       try {
-        if (needsHydration) {
-          // TODO: reinstate snapshot bootstrap via n8n blob store so fresh
-          // devices can skip a 20k+ record Airtable scan.
-          result = await hydrationSync(this.store, client, this.agent, {
-            customization: effectiveCustomization,
-            onEvent: progressListener.onEvent,
-            onProgress,
-          });
-        } else {
-          result = await updateSync(this.store, client, this.agent, {
-            customization: effectiveCustomization,
-            onEvent: progressListener.onEvent,
-            onProgress,
-            onCursorAdvance: (baseId, tableId, cursor) =>
-              this.writeCursorToRoom(baseId, tableId, cursor),
-            // Surface per-record diffs to the "Recent changes" UI panel.
-            // ingestRecord only fires this for actual mutations (not
-            // skip-no-change), so the buffer reflects real edits.
-            onChange: (report) => {
-              useAirtableStore.getState().addRecentChange({
-                ts: Date.now(),
-                baseId: report.baseId,
-                tableId: report.tableId,
-                tableName: report.tableName ?? report.tableId,
-                recordId: report.recordId,
-                recordLabel: report.recordLabel,
-                diffs: report.diffs,
-              });
-              useAirtableStore.getState().addSyncLogEntry({
-                ts: Date.now(),
-                type: 'change_detected',
-                source: 'local',
-                syncer: this.agent,
-                device: this.deviceId,
-                detail: `${report.diffs.length} field${report.diffs.length === 1 ? '' : 's'}: ${report.diffs.map((d) => d.field).join(', ')}`,
-                baseId: report.baseId,
-                tableName: report.tableName,
-                recordId: report.recordId,
-                diffs: report.diffs,
-                recordsChanged: 1,
-              });
-            },
-          });
-        }
+        // smartSync routes per table: hydrates ones without a cursor,
+        // runs incremental LAST_MODIFIED_TIME() on the rest. A single tick
+        // therefore handles a fresh device, a newly-selected table mixed
+        // with already-hydrated ones, and the steady state — without the
+        // caller needing to pick a strategy up front.
+        result = await smartSync(this.store, client, this.agent, {
+          customization: effectiveCustomization,
+          onEvent: progressListener.onEvent,
+          onProgress,
+          onCursorAdvance: (baseId, tableId, cursor) =>
+            this.writeCursorToRoom(baseId, tableId, cursor),
+          // Surface per-record diffs to the "Recent changes" UI panel.
+          // ingestRecord only fires this for actual mutations (not
+          // skip-no-change), so the buffer reflects real edits.
+          onChange: (report) => {
+            useAirtableStore.getState().addRecentChange({
+              ts: Date.now(),
+              baseId: report.baseId,
+              tableId: report.tableId,
+              tableName: report.tableName ?? report.tableId,
+              recordId: report.recordId,
+              recordLabel: report.recordLabel,
+              diffs: report.diffs,
+            });
+            useAirtableStore.getState().addSyncLogEntry({
+              ts: Date.now(),
+              type: 'change_detected',
+              source: 'local',
+              syncer: this.agent,
+              device: this.deviceId,
+              detail: `${report.diffs.length} field${report.diffs.length === 1 ? '' : 's'}: ${report.diffs.map((d) => d.field).join(', ')}`,
+              baseId: report.baseId,
+              tableName: report.tableName,
+              recordId: report.recordId,
+              diffs: report.diffs,
+              recordsChanged: 1,
+            });
+          },
+        });
       } finally {
         // Flush any pending throttled Zustand update so the UI sees the
         // final lastSeq even if the sync ended on an in-flight timer.
@@ -890,7 +883,7 @@ export class AirtableSyncService {
   }
 
   private async signalCompletion(
-    result: HydrationResult | UpdateSyncResult,
+    result: UpdateSyncResult,
     wasHydration: boolean,
     strategy: 'hydration' | 'lastModified',
   ): Promise<void> {
