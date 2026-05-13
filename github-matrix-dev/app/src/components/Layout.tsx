@@ -652,6 +652,18 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   const syncManager = useEoStore((s) => s.syncManager);
   const [syncToastStatus, syncToastSeq, onSyncStatus] = useSyncToast();
   const [matrixReady, setMatrixReady] = useState(false);
+  // Ref mirror of matrixReady so async code inside setupSpaceStore can branch
+  // on the latest value without making matrixReady a dependency of the effect
+  // (which previously caused the effect to re-fire mid-init and race the
+  // worker setup). Updated by the effect below.
+  const matrixReadyRef = useRef(false);
+  useEffect(() => { matrixReadyRef.current = matrixReady; }, [matrixReady]);
+  // Separate "initial sync caught up" flag. matrixReady now flips as soon as
+  // `startClient()` resolves (so local data renders immediately); this flag
+  // tracks the slower 'PREPARED' state for things that genuinely need a
+  // fresh sync (e.g. discovering rooms that haven't been seen yet).
+  const [syncCaughtUp, setSyncCaughtUp] = useState(false);
+  void syncCaughtUp;
   const [presence, setPresence] = useState<Presence | null>(null);
   const [presencePeers, setPresencePeers] = useState<PresenceUser[]>([]);
   const [presencePrefs] = usePresencePrefs();
@@ -1190,67 +1202,63 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
 
         await client.startClient({ initialSyncLimit: 20 });
 
-        // Wait for initial sync with a 30s timeout to avoid hanging forever.
-        // Also reject immediately on ERROR (e.g. 401 auth) instead of waiting
-        // the full 30s — the onSync listener above will have already set
-        // connectionError, but we need the await to throw so startMatrix()
-        // enters its catch block.
-        await Promise.race([
-          new Promise<void>((resolve, reject) => {
-            if (client!.isInitialSyncComplete()) {
-              resolve();
-            } else {
-              const onInitSync = (state: string, _prev: string | null, data?: any) => {
-                if (state === 'PREPARED') {
-                  client!.removeListener('sync' as any, onInitSync);
-                  resolve();
-                } else if (state === 'ERROR') {
-                  client!.removeListener('sync' as any, onInitSync);
-                  const described = describeMatrixError(data?.error);
-                  reject(new Error(described.message));
-                }
-              };
-              client!.on('sync' as any, onInitSync);
-            }
-          }),
-          new Promise<void>((_, reject) =>
-            setTimeout(() => reject(new Error('Initial sync timeout after 30s')), 30_000),
-          ),
-        ]);
-
         if (!mounted) { client.stopClient(); return; }
 
-        // Auto-join any rooms where we have a pending invite. Invited rooms
-        // only expose stripped state — custom state events like
-        // com.eo-db.space.config are not readable until the user joins.
-        // Without this, the second user can never discover the space room.
-        for (const room of client.getRooms()) {
-          if (room.getMyMembership?.() === 'invite') {
-            try {
-              await (client as any).joinRoom(room.roomId);
-            } catch (e) {
-              console.warn('[EO-DB] Auto-join invited room failed:', room.roomId, e);
-            }
-          }
-        }
-
-        // MatrixRTC (VoIP/calls) is not used by EO-DB. Stop it *after* initial
-        // sync — stopping before startClient() is ineffective because the sync
-        // loop re-registers its listeners during processSyncResponse.
-        try {
-          client.matrixRTC?.stop();
-        } catch { /* older SDK — safe to ignore */ }
-
-        // Room resolution is best-effort — app works without it
-        try {
-          roomIdRef.current = await resolveDataRoom(client);
-        } catch (e) {
-          // Expected when no root data room exists — per-space rooms are used instead.
-          // Debug-level only to avoid console noise on every startup.
-        }
-
+        // Unblock the UI as soon as the SDK is running. Local OPFS data is
+        // already decrypted and ready to render — we should not wait for the
+        // initial /sync round-trip ('PREPARED' state) before flipping
+        // matrixReady. Anything that genuinely needs fresh sync data (e.g.
+        // discovering a brand-new space, creating rooms) gates on the
+        // syncCaughtUp flag set by the listener below.
         setConnectionError(null);
         setConnectionDetail(null);
+        setMatrixReady(true);
+
+        // Background: when initial sync (PREPARED) completes, flip the
+        // syncCaughtUp flag and run the post-sync housekeeping that used to
+        // block the boot path. Fail open — any error here is non-fatal for
+        // local rendering.
+        const finishInitialSync = async () => {
+          if (!mounted) return;
+          // Auto-join any rooms where we have a pending invite. Invited rooms
+          // only expose stripped state — custom state events like
+          // com.eo-db.space.config are not readable until the user joins.
+          for (const room of client.getRooms()) {
+            if (room.getMyMembership?.() === 'invite') {
+              try {
+                await (client as any).joinRoom(room.roomId);
+              } catch (e) {
+                console.warn('[EO-DB] Auto-join invited room failed:', room.roomId, e);
+              }
+            }
+          }
+          // MatrixRTC (VoIP/calls) is not used by EO-DB. Stop it *after* initial
+          // sync — stopping before startClient() is ineffective because the
+          // sync loop re-registers its listeners during processSyncResponse.
+          try { client.matrixRTC?.stop(); } catch { /* older SDK — safe */ }
+          // Root data-room resolution is best-effort; fire-and-forget.
+          try { roomIdRef.current = await resolveDataRoom(client); } catch { /* per-space rooms */ }
+          if (!mounted) return;
+          setSyncCaughtUp(true);
+        };
+
+        if (client.isInitialSyncComplete()) {
+          void finishInitialSync();
+        } else {
+          const onInitSync = (state: string) => {
+            if (state === 'PREPARED') {
+              client.removeListener('sync' as any, onInitSync);
+              void finishInitialSync();
+            } else if (state === 'ERROR') {
+              // ERROR after startClient() resolved means the sync loop is
+              // failing (network, token). Leave matrixReady=true so the UI
+              // stays interactive on cached data; the onSync handler above
+              // already surfaces the error in connectionError.
+              client.removeListener('sync' as any, onInitSync);
+            }
+          };
+          client.on('sync' as any, onInitSync);
+        }
 
         // Re-run space discovery whenever a space config state event changes so
         // all connected clients reflect archive/unarchive/delete actions immediately.
@@ -1262,8 +1270,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           } catch { /* best effort */ }
         };
         client.on('RoomState.events' as any, onSpaceConfigChange);
-
-        setMatrixReady(true);
       } catch (e) {
         console.warn('[EO-DB] startMatrix failed:', e);
         if (!mounted) return;
@@ -1577,7 +1583,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       //     The SDK's PREPARED state doesn't guarantee all room state is loaded.
       //     Wait for the next sync cycle to complete, then re-scan before
       //     concluding the room doesn't exist and creating a new one.
-      if (matrixReady && matrixClientRef.current) {
+      if (matrixReadyRef.current && matrixClientRef.current) {
         const client = matrixClientRef.current;
         await new Promise<void>((resolve) => {
           const timeout = setTimeout(() => {
@@ -1677,7 +1683,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       }
 
       // 3. Room genuinely doesn't exist — create it (with canonical alias).
-      if (matrixReady && matrixClientRef.current) {
+      if (matrixReadyRef.current && matrixClientRef.current) {
         const displayName = formatSpaceName(selectedSpace!.replace(/^space_/, ''));
         const result = await createSpaceRoom(
           matrixClientRef.current, displayName, session.userId,
@@ -1979,7 +1985,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       // Only show this when matrixReady=true — if Matrix hasn't connected yet,
       // the sync-phase error from startMatrix() is already displayed and the
       // room error would be misleading and overwrite the real cause.
-      if (MATRIX_ENABLED && !spaceRoomId && matrixClientRef.current && matrixReady) {
+      if (MATRIX_ENABLED && !spaceRoomId && matrixClientRef.current && matrixReadyRef.current) {
         console.warn('[EO-DB] No room for space', selectedSpace, '— cannot start PeerSync.');
         setConnectionError({
           phase: 'room',
@@ -2112,8 +2118,134 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     // mergedEntries is intentionally NOT in the dep array — it is read via
     // mergedEntriesRef (always current) to avoid re-running the full store init
     // every time onSpaceConfigChange fires during background Matrix sync.
+    // matrixReady is intentionally NOT in the dep array — local OPFS data must
+    // load and `ready: true` must fire independently of any Matrix round-trip.
+    // The body branches on matrixReadyRef.current for Matrix-dependent paths,
+    // and a separate effect (below) attaches PeerSync/Presence/room-resolution
+    // once Matrix actually becomes available.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedSpace, session, init, matrixReady]);
+  }, [selectedSpace, session, init]);
+
+  // --- Late Matrix-attach effect ---
+  // setupSpaceStore (above) deliberately runs without waiting for matrixReady
+  // so local OPFS data renders immediately. When Matrix subsequently becomes
+  // ready (cold boot raced ahead of /sync, or we recovered from offline),
+  // attach the Matrix-dependent services to the already-loaded space: resolve
+  // the room, start PeerSync + WebRTC + Presence, and wire the block-chain
+  // hydration listener. Skipped if these services were already started
+  // (peerSync !== null) or if there's no cached entry for the current space.
+  useEffect(() => {
+    if (!MATRIX_ENABLED || localMode) return;
+    if (!matrixReady || !matrixClientRef.current) return;
+    if (!selectedSpace) return;
+    const cached = spaceCacheRef.current.get(selectedSpace);
+    if (!cached) return;
+    if (cached.peerSync || cached.presence) return; // already attached
+
+    let cancelled = false;
+    const cleanupFns: (() => void)[] = [];
+    (async () => {
+      try {
+        // Resolve the room now that Matrix is available. Mirrors a subset of
+        // resolveOrCreateRoom() but only the read paths — we don't auto-create
+        // here, the user can retry the space from SpaceBrowser if needed.
+        const client = matrixClientRef.current!;
+        let roomId: string | null = cached.mainRoomId ?? null;
+        if (!roomId) {
+          const entry = mergedEntriesRef.current.find(e => e.spaceTarget === selectedSpace);
+          roomId = entry?.mainRoomId ?? null;
+        }
+        if (!roomId) {
+          const scan = findSpaceRoomByDirectScan(client, selectedSpace);
+          if (scan) { roomId = scan.mainRoomId; cached.spaceRooms = scan.rooms; }
+        }
+        if (!roomId) {
+          const meta = cachedSpaceMetas.get(selectedSpace);
+          if (meta?.mainRoomId) roomId = meta.mainRoomId;
+        }
+        if (cancelled || !roomId) return;
+
+        cached.mainRoomId = roomId;
+        setSpaceRoomId(roomId);
+        setSpaceRooms(cached.spaceRooms ?? null);
+        setConnectionError(prev => prev?.phase === 'room' ? null : prev);
+        persistSpaceMeta({ spaceId: selectedSpace, mainRoomId: roomId })
+          .catch(e => console.warn('[EO-DB] Failed to persist room ID (late attach):', e));
+
+        const store = useEoStore.getState().store;
+        if (!store) return;
+
+        // PeerSync + WebRTC
+        const onFoldEvent = (event: any) => {
+          useEoStore.setState((st) => ({
+            recentEvents: [...st.recentEvents.slice(-99), event],
+            lastSeq: event.seq,
+          }));
+        };
+        const wrtc = new WebRTCPeer(client, roomId, store, onFoldEvent);
+        wrtc.start();
+        const psMirror = buildBlockMirror(client, roomId);
+        const psChainSeg = () =>
+          useEoStore.getState().runChainHydrate(() =>
+            hydrateBlocksIfStale(client, roomId, store, {
+              bulkApply: (events) => useEoStore.getState().batchImport(events),
+              mirror: psMirror,
+            }).then((r) => {
+              if (r) return useEoStore.getState().flushToOpfs(r.latestBlockEventId);
+            }),
+          );
+        const ps = new PeerSync(
+          client, roomId, store, onFoldEvent, undefined,
+          (events) => useEoStore.getState().batchImport(events),
+          psChainSeg,
+        );
+        ps.setWebRTCPeer(wrtc);
+        await ps.start();
+        if (cancelled) { ps.stop(); wrtc.stop(); return; }
+        cached.peerSync = ps;
+        cached.webrtcPeer = wrtc;
+        useEoStore.getState().setSyncManager(ps as any);
+        cleanupFns.push(() => { ps.stop(); wrtc.stop(); });
+
+        // Presence
+        const presenceInstance = new Presence(client, roomId);
+        await presenceInstance.start();
+        if (cancelled) { presenceInstance.stop(); return; }
+        cached.presence = presenceInstance;
+        setPresence(presenceInstance);
+        cleanupFns.push(() => { presenceInstance.stop(); setPresence(null); });
+
+        // Auto-ingest chain updates
+        let ingestInFlight = false;
+        const stopListening = listenForChainUpdates(client, roomId, () => {
+          if (!isAutoIngestEnabled(roomId)) return;
+          if (ingestInFlight) return;
+          const liveStore = useEoStore.getState().store;
+          if (!liveStore) return;
+          ingestInFlight = true;
+          useEoStore.getState().runChainHydrate(() =>
+            hydrateBlocksIfStale(client, roomId, liveStore, {
+              bulkApply: (events) => useEoStore.getState().batchImport(events),
+              mirror: psMirror,
+            }),
+          )
+            .then((r) => {
+              if (r) return useEoStore.getState().flushToOpfs(r.latestBlockEventId);
+            })
+            .catch((e) => console.warn('[EO-DB] auto-ingest fold failed:', e))
+            .finally(() => { ingestInFlight = false; });
+        });
+        cleanupFns.push(stopListening);
+      } catch (e) {
+        console.warn('[EO-DB] Late Matrix attach failed for', selectedSpace, e);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      cleanupFns.forEach(fn => fn());
+    };
+  }, [matrixReady, selectedSpace, localMode, cachedSpaceMetas]);
 
   async function handleLogout() {
     // Save snapshots for ALL cached spaces before clearing state
