@@ -2540,3 +2540,104 @@ export async function updateSync(
     duration_ms: Date.now() - start,
   };
 }
+
+// ─── Smart sync ────────────────────────────────────────────────────────────
+//
+// Per-table routing: hydrate tables with no cursor, incremental-update the
+// rest. Solves two long-standing rough edges:
+//   1. A newly-selected table after the initial hydration sat blank forever,
+//      because `updateSync` skips never-hydrated tables (no cursor → nothing
+//      to compare LAST_MODIFIED_TIME() against).
+//   2. Continuous-tick's global "needsHydration" check (any cursor anywhere
+//      → incremental) re-pulled nothing for the new table.
+//
+// Implementation is intentionally thin: split the selection into two sets by
+// cursor presence and dispatch each to the existing hydrationSync /
+// updateSync. No new fold path, no new persistence — just better routing.
+
+export async function smartSync(
+  store: EoStore,
+  client: AirtableClient,
+  agent: string,
+  opts?: {
+    onProgress?: (progress: SyncProgress) => void;
+    onEvent?: (event: any) => void;
+    onTableComplete?: (result: SyncResult) => void;
+    customization?: SyncCustomization;
+    onChange?: RecordChangeListener;
+    onCursorAdvance?: (baseId: string, tableId: string, cursor: string) => Promise<void>;
+  },
+): Promise<UpdateSyncResult> {
+  const start = Date.now();
+  const userSelection = opts?.customization?.selectedTables;
+
+  // Determine the universe of (base, table) pairs to consider. When the
+  // caller passes selectedTables we trust it; when not, ask Airtable so we
+  // can still split correctly. The schema fetch is cheap (one call per base)
+  // and matches what updateSync would do anyway.
+  let universe: Record<string, string[]>;
+  if (userSelection && Object.keys(userSelection).length > 0) {
+    universe = userSelection;
+  } else {
+    universe = {};
+    const bases = await client.listBases();
+    for (const base of bases) {
+      const tables = await client.getBaseSchema(base.id);
+      universe[base.id] = tables.map((t) => t.id);
+    }
+  }
+
+  const synced = await getSyncedTableIds(store);
+  const toHydrate: Record<string, string[]> = {};
+  const toUpdate: Record<string, string[]> = {};
+  for (const [baseId, tableIds] of Object.entries(universe)) {
+    const cursored = new Set(synced[baseId] ?? []);
+    const hyd: string[] = [];
+    const upd: string[] = [];
+    for (const tid of tableIds) {
+      if (cursored.has(tid)) upd.push(tid);
+      else hyd.push(tid);
+    }
+    if (hyd.length) toHydrate[baseId] = hyd;
+    if (upd.length) toUpdate[baseId] = upd;
+  }
+
+  const allResults: SyncResult[] = [];
+
+  if (Object.keys(toHydrate).length > 0) {
+    const hydResult = await hydrationSync(store, client, agent, {
+      onProgress: opts?.onProgress,
+      onEvent: opts?.onEvent,
+      onTableComplete: opts?.onTableComplete,
+      customization: { ...opts?.customization, selectedTables: toHydrate },
+    });
+    allResults.push(...hydResult.sync_results);
+  }
+
+  if (Object.keys(toUpdate).length > 0) {
+    const updResult = await updateSync(store, client, agent, {
+      onProgress: opts?.onProgress,
+      onEvent: opts?.onEvent,
+      onTableComplete: opts?.onTableComplete,
+      onChange: opts?.onChange,
+      onCursorAdvance: opts?.onCursorAdvance,
+      customization: { ...opts?.customization, selectedTables: toUpdate },
+    });
+    allResults.push(...updResult.sync_results);
+  }
+
+  const totalIngested = allResults.reduce((s, r) => s + r.records_ingested, 0);
+  const totalOverwritten = allResults.reduce((s, r) => s + r.records_overwritten, 0);
+  const totalSkipped = allResults.reduce(
+    (s, r) => s + r.records_skipped_no_change + r.records_skipped_duplicate,
+    0,
+  );
+
+  return {
+    sync_results: allResults,
+    total_records_ingested: totalIngested,
+    total_records_overwritten: totalOverwritten,
+    total_records_skipped: totalSkipped,
+    duration_ms: Date.now() - start,
+  };
+}
