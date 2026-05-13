@@ -37,6 +37,7 @@ import { classifyFieldType, type FieldClassification } from './field-rules.js';
 import { mapAirtableTypeOrNull } from './airtable-type-map.js';
 import { extractValue, valuesEqual, stableStringify } from './value-extract.js';
 import { isExcluded, EMPTY_EXCLUSIONS, type SyncExclusions } from './exclusions.js';
+import { getPendingFieldsFor } from './airtable-writeback.js';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -558,6 +559,17 @@ async function ingestRecord(
 
   // 3. Compute field-level diff — only fields that actually changed
   let diffFields = computeFieldDiff(storableFields, existingFields);
+
+  // 3a. Conflict shield: if a local writeback is pending for this record,
+  // drop any fields in the incoming diff that overlap with the pending set.
+  // Local-wins-while-pending; once the writeback drains, the next pull is
+  // authoritative again.
+  const pendingFields = await getPendingFieldsFor(db, baseId, tableId, record.id);
+  if (pendingFields.size > 0) {
+    for (const key of Object.keys(diffFields)) {
+      if (pendingFields.has(key)) delete diffFields[key];
+    }
+  }
 
   // 4. If preserveExisting, further filter to only fields where existing is null/undefined
   if (preserveExisting && existingFields) {
