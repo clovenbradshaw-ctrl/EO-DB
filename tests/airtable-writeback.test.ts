@@ -14,8 +14,14 @@ import {
   getPendingWriteback,
   listPendingWritebacks,
   isWritableFieldType,
+  supersedePendingFields,
   EDIT_SOURCE,
 } from '../src/ingestion/airtable-writeback.js';
+import {
+  LOCAL_REPLICA_ID,
+  readFieldClocksFromState,
+  _resetLocalHlcForTests,
+} from '../src/ingestion/airtable-clocks.js';
 import type { AirtableClient, AirtableRecord } from '../src/ingestion/airtable-client.js';
 
 const BASE = 'appTest';
@@ -33,6 +39,7 @@ beforeEach(async () => {
   db = createDb(dbPath);
   await db.open();
   feed = new Feed();
+  _resetLocalHlcForTests();
 });
 
 afterEach(async () => {
@@ -180,6 +187,108 @@ describe('applyLocalEdit', () => {
         fields: {}, agent: AGENT,
       }),
     ).rejects.toThrow(/empty fields/);
+  });
+});
+
+describe('applyLocalEdit clock stamping', () => {
+  it('stamps each edited field with a local-replica clock', async () => {
+    await seedRecord({ fldName: 'Alice' });
+    await applyLocalEdit(db, feed, {
+      baseId: BASE, tableId: TABLE, recordId: RECORD,
+      fields: { fldName: 'Alicia', fldEmail: 'a@x.com' }, agent: AGENT,
+    });
+    const state = await getState(db, TARGET);
+    const clocks = readFieldClocksFromState(state);
+    expect(clocks.fldName).toBeDefined();
+    expect(clocks.fldEmail).toBeDefined();
+    expect(clocks.fldName.replica).toBe(LOCAL_REPLICA_ID);
+    expect(clocks.fldEmail.replica).toBe(LOCAL_REPLICA_ID);
+  });
+
+  it('advances clocks on successive edits to the same field', async () => {
+    await seedRecord({ fldName: 'Alice' });
+    await applyLocalEdit(db, feed, {
+      baseId: BASE, tableId: TABLE, recordId: RECORD,
+      fields: { fldName: 'Alicia' }, agent: AGENT,
+    });
+    const c1 = readFieldClocksFromState(await getState(db, TARGET)).fldName;
+
+    await applyLocalEdit(db, feed, {
+      baseId: BASE, tableId: TABLE, recordId: RECORD,
+      fields: { fldName: 'Alicia G.' }, agent: AGENT,
+    });
+    const c2 = readFieldClocksFromState(await getState(db, TARGET)).fldName;
+
+    expect(
+      c2.hlc.wall_ms > c1.hlc.wall_ms ||
+      (c2.hlc.wall_ms === c1.hlc.wall_ms && c2.hlc.logical > c1.hlc.logical),
+    ).toBe(true);
+  });
+
+  it('preserves clocks for fields not touched by the new edit', async () => {
+    await seedRecord({ fldA: 1, fldB: 2 });
+    await applyLocalEdit(db, feed, {
+      baseId: BASE, tableId: TABLE, recordId: RECORD,
+      fields: { fldA: 10 }, agent: AGENT,
+    });
+    const afterFirst = readFieldClocksFromState(await getState(db, TARGET));
+    const fldAClock1 = afterFirst.fldA;
+    expect(afterFirst.fldB).toBeUndefined(); // fldB never edited locally
+
+    await applyLocalEdit(db, feed, {
+      baseId: BASE, tableId: TABLE, recordId: RECORD,
+      fields: { fldB: 20 }, agent: AGENT,
+    });
+    const afterSecond = readFieldClocksFromState(await getState(db, TARGET));
+    expect(afterSecond.fldA).toEqual(fldAClock1);
+    expect(afterSecond.fldB.replica).toBe(LOCAL_REPLICA_ID);
+  });
+});
+
+describe('supersedePendingFields', () => {
+  it('returns null when no pending entry exists', async () => {
+    const result = await supersedePendingFields(db, BASE, TABLE, RECORD, ['fldA']);
+    expect(result).toBeNull();
+  });
+
+  it('removes the listed fields and leaves the rest', async () => {
+    await seedRecord();
+    await applyLocalEdit(db, feed, {
+      baseId: BASE, tableId: TABLE, recordId: RECORD,
+      fields: { fldA: 1, fldB: 2, fldC: 3 }, agent: AGENT,
+    });
+
+    const result = await supersedePendingFields(db, BASE, TABLE, RECORD, ['fldB']);
+    expect(result).toEqual({ removed: 1, remaining: 2 });
+
+    const entry = await getPendingWriteback(db, BASE, TABLE, RECORD);
+    expect(entry).not.toBeNull();
+    expect(Object.keys(entry!.fields).sort()).toEqual(['fldA', 'fldC']);
+  });
+
+  it('deletes the entry entirely when all fields are superseded', async () => {
+    await seedRecord();
+    await applyLocalEdit(db, feed, {
+      baseId: BASE, tableId: TABLE, recordId: RECORD,
+      fields: { fldA: 1, fldB: 2 }, agent: AGENT,
+    });
+
+    const result = await supersedePendingFields(db, BASE, TABLE, RECORD, ['fldA', 'fldB']);
+    expect(result).toEqual({ removed: 2, remaining: 0 });
+    expect(await getPendingWriteback(db, BASE, TABLE, RECORD)).toBeNull();
+  });
+
+  it('no-ops on fields that were not pending', async () => {
+    await seedRecord();
+    await applyLocalEdit(db, feed, {
+      baseId: BASE, tableId: TABLE, recordId: RECORD,
+      fields: { fldA: 1 }, agent: AGENT,
+    });
+
+    const result = await supersedePendingFields(db, BASE, TABLE, RECORD, ['fldZ', 'fldQ']);
+    expect(result).toEqual({ removed: 0, remaining: 1 });
+    const entry = await getPendingWriteback(db, BASE, TABLE, RECORD);
+    expect(entry!.fields).toEqual({ fldA: 1 });
   });
 });
 

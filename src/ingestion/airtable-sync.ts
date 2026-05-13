@@ -37,7 +37,13 @@ import { classifyFieldType, type FieldClassification } from './field-rules.js';
 import { mapAirtableTypeOrNull } from './airtable-type-map.js';
 import { extractValue, valuesEqual, stableStringify } from './value-extract.js';
 import { isExcluded, EMPTY_EXCLUSIONS, type SyncExclusions } from './exclusions.js';
-import { getPendingFieldsFor } from './airtable-writeback.js';
+import { supersedePendingFields } from './airtable-writeback.js';
+import {
+  airtableClock,
+  readFieldClocksFromState,
+  pickIncomingWinners,
+  mergeFieldClocks,
+} from './airtable-clocks.js';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -359,6 +365,26 @@ async function getTableFieldMeta(
   return buildFieldMetaMap(state?.value?.fields);
 }
 
+// ─── Last-modified-time extraction (for HLC derivation) ───────────────────
+
+/**
+ * Find the ISO timestamp of the most recent change on a record. Looks for
+ * any field whose schema type is `lastModifiedTime`; returns undefined if no
+ * such field exists on the table (caller falls back to `record.createdTime`).
+ */
+function findLastModifiedTime(
+  rawFields: Record<string, any>,
+  fieldMeta: Map<string, FieldMeta>,
+): string | undefined {
+  for (const meta of fieldMeta.values()) {
+    if (meta.type === 'lastModifiedTime') {
+      const raw = rawFields[meta.id] ?? rawFields[meta.name];
+      if (typeof raw === 'string' && raw.length > 0) return raw;
+    }
+  }
+  return undefined;
+}
+
 // ─── Non-transformation detection ───────────────────────────────────────────
 
 // ─── Constraint emission from Airtable field options ──────────────────────
@@ -560,16 +586,22 @@ async function ingestRecord(
   // 3. Compute field-level diff — only fields that actually changed
   let diffFields = computeFieldDiff(storableFields, existingFields);
 
-  // 3a. Conflict shield: if a local writeback is pending for this record,
-  // drop any fields in the incoming diff that overlap with the pending set.
-  // Local-wins-while-pending; once the writeback drains, the next pull is
-  // authoritative again.
-  const pendingFields = await getPendingFieldsFor(db, baseId, tableId, record.id);
-  if (pendingFields.size > 0) {
-    for (const key of Object.keys(diffFields)) {
-      if (pendingFields.has(key)) delete diffFields[key];
-    }
+  // 3a. Conflict shield via per-field HLCs (LWW-Register semantics).
+  // Each field on the record carries an HLC at _airtable.fieldClocks; we
+  // derive the incoming clock from Airtable's lastModifiedTime and drop
+  // any field whose current local clock beats it. Surviving incoming
+  // fields supersede any pending writeback for the same field, so the
+  // drain doesn't PATCH a now-stale value.
+  const existingClocks = readFieldClocksFromState(existing);
+  const incomingLastModified = findLastModifiedTime(record.fields, fieldMeta);
+  const incomingClock = airtableClock(baseId, incomingLastModified, record.createdTime);
+  const { winners, newClocks } = pickIncomingWinners(existingClocks, diffFields, incomingClock);
+  const supersededByIncoming = Object.keys(winners);
+  if (supersededByIncoming.length > 0) {
+    await supersedePendingFields(db, baseId, tableId, record.id, supersededByIncoming);
   }
+  diffFields = winners;
+  const mergedClocks = mergeFieldClocks(existingClocks, newClocks);
 
   // 4. If preserveExisting, further filter to only fields where existing is null/undefined
   if (preserveExisting && existingFields) {
@@ -629,6 +661,7 @@ async function ingestRecord(
           base_id: baseId,
           table_id: tableId,
           created_time: record.createdTime,
+          fieldClocks: mergedClocks,
         },
       },
       agent,

@@ -27,6 +27,12 @@ import { processEvent } from '../db/fold.js';
 import { getState } from '../db/state.js';
 import { stableStringify } from './value-extract.js';
 import { COMPUTED_TYPES } from './field-rules.js';
+import {
+  tickLocalReplica,
+  readFieldClocksFromState,
+  mergeFieldClocks,
+  type FieldClock,
+} from './airtable-clocks.js';
 import type { AirtableClient } from './airtable-client.js';
 
 // ─── Constants ─────────────────────────────────────────────────────────────
@@ -212,6 +218,17 @@ export async function applyLocalEdit(
   const contentKey = stableStringify(fields);
   const clientEventId = `at-edit:${baseId}:${tableId}:${recordId}:${contentKey}`;
 
+  // Stamp each edited field with a freshly-ticked local HLC and merge into
+  // the record's current per-field clock map. Future pulls compare against
+  // these clocks to decide if Airtable's value should overwrite ours.
+  const editClock = tickLocalReplica();
+  const incomingClocks: Record<string, FieldClock> = {};
+  for (const key of Object.keys(fields)) incomingClocks[key] = editClock;
+  const mergedClocks = mergeFieldClocks(
+    readFieldClocksFromState(existing),
+    incomingClocks,
+  );
+
   const event: EoEventInput = {
     op: 'DEF',
     target,
@@ -221,6 +238,7 @@ export async function applyLocalEdit(
         record_id: recordId,
         base_id: baseId,
         table_id: tableId,
+        fieldClocks: mergedClocks,
       },
     },
     agent,
@@ -228,6 +246,8 @@ export async function applyLocalEdit(
     acquired_ts: now,
     client_event_id: clientEventId,
     source: EDIT_SOURCE,
+    hlc: editClock.hlc,
+    replica_id: editClock.replica,
   };
 
   let seq: number;
@@ -261,6 +281,42 @@ export async function applyLocalEdit(
   await persistEntry(db, merged);
 
   return { seq, pending_field_count: Object.keys(merged.fields).length };
+}
+
+/**
+ * Drop `fields` from a pending writeback because they were superseded by a
+ * remote write (incoming pull beat the local clock). If no fields remain
+ * after removal, the queue entry is deleted entirely.
+ *
+ * Called by the pull path when clock comparison says the incoming record
+ * wins for some field the user had locally edited.
+ */
+export async function supersedePendingFields(
+  db: EoDb,
+  baseId: string,
+  tableId: string,
+  recordId: string,
+  fields: string[],
+): Promise<{ removed: number; remaining: number } | null> {
+  if (fields.length === 0) return null;
+  const entry = await readEntry(db, baseId, tableId, recordId);
+  if (!entry) return null;
+  const remaining: Record<string, unknown> = {};
+  let removed = 0;
+  for (const [field, val] of Object.entries(entry.fields)) {
+    if (fields.includes(field)) {
+      removed++;
+    } else {
+      remaining[field] = val;
+    }
+  }
+  if (removed === 0) return { removed: 0, remaining: Object.keys(entry.fields).length };
+  if (Object.keys(remaining).length === 0) {
+    await removeEntry(db, baseId, tableId, recordId);
+    return { removed, remaining: 0 };
+  }
+  await persistEntry(db, { ...entry, fields: remaining });
+  return { removed, remaining: Object.keys(remaining).length };
 }
 
 /**
