@@ -11,10 +11,12 @@ import {
   backendForUri,
   fetchBlobByUri,
   fetchBlobFromMatrixMedia,
+  readEoBlob,
   storeBlobToMatrixMedia,
   type BlobUploadMeta,
   type MatrixMediaClient,
 } from '../eodb-blob-endpoint';
+import { bufferToBase64, base64ToBuffer } from '../../crypto/segment-keys';
 
 function makeMockMediaClient() {
   const stored = new Map<string, Blob>();
@@ -149,5 +151,166 @@ describe('fetchBlobByUri dispatcher', () => {
       'unknown://x',
     );
     expect(result).toBeNull();
+  });
+});
+
+/**
+ * Helper that builds a real AES-GCM envelope from plaintext bytes and uploads
+ * it through the Matrix-media path. Returns the URI, the in-memory blob
+ * (for fetch interception), and the CryptoKey used so tests can pass it in
+ * via resolveKey.
+ */
+async function uploadEncrypted(
+  plaintext: Uint8Array,
+  opts: { keyId?: string; corruptCtHash?: boolean } = {},
+): Promise<{
+  mock: ReturnType<typeof makeMockMediaClient>;
+  uri: string;
+  blobBody: string;
+  key: CryptoKey;
+  keyId: string;
+}> {
+  const keyId = opts.keyId ?? 'space.editor';
+  const key = await crypto.subtle.generateKey(
+    { name: 'AES-GCM', length: 256 },
+    true,
+    ['encrypt', 'decrypt'],
+  );
+
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ctBuf = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv },
+    key,
+    plaintext as unknown as ArrayBuffer,
+  );
+  const ciphertext = new Uint8Array(ctBuf);
+
+  const hashBytes = new Uint8Array(
+    await crypto.subtle.digest('SHA-256', plaintext as unknown as BufferSource),
+  );
+  let contentHash = '';
+  for (let i = 0; i < hashBytes.length; i++) {
+    contentHash += hashBytes[i].toString(16).padStart(2, '0');
+  }
+  if (opts.corruptCtHash) {
+    contentHash = contentHash.replace(/^./, c => (c === '0' ? '1' : '0'));
+  }
+
+  const meta: BlobUploadMeta = {
+    v: 2,
+    iv: bufferToBase64(iv),
+    content_hash: contentHash,
+    key_id: keyId,
+    plaintext_size: plaintext.byteLength,
+    compression: 'none',
+  };
+
+  const mock = makeMockMediaClient();
+  const stored = await storeBlobToMatrixMedia(mock.client, meta, ciphertext);
+  const blob = mock.stored.get(stored.uri.replace('mxc://test.server/', ''));
+  if (!blob) throw new Error('test setup: stored blob not found in mock');
+  const blobBody = await blob.text();
+
+  return { mock, uri: stored.uri, blobBody, key, keyId };
+}
+
+describe('readEoBlob', () => {
+  it('round-trips plaintext through the matrix-media backend', async () => {
+    const plaintext = new TextEncoder().encode('hello eo-db');
+    const { mock, uri, blobBody, key, keyId } = await uploadEncrypted(plaintext);
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      return new Response(blobBody, {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    try {
+      const out = await readEoBlob(
+        {
+          matrixToken: 'tok',
+          spaceRoomId: 'room1',
+          mediaClient: mock.client,
+          resolveKey: async (id) => (id === keyId ? key : null),
+        },
+        uri,
+      );
+      expect(out).not.toBeNull();
+      expect(Array.from(out!)).toEqual(Array.from(plaintext));
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('throws when resolveKey cannot supply the envelope key_id', async () => {
+    const plaintext = new TextEncoder().encode('payload');
+    const { mock, uri, blobBody } = await uploadEncrypted(plaintext, { keyId: 'space.viewer' });
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(blobBody, { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    );
+
+    try {
+      await expect(
+        readEoBlob(
+          {
+            matrixToken: 'tok',
+            spaceRoomId: null,
+            mediaClient: mock.client,
+            resolveKey: async () => null,
+          },
+          uri,
+        ),
+      ).rejects.toThrow(/no key in keyring/);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('throws on content_hash mismatch', async () => {
+    const plaintext = new TextEncoder().encode('payload');
+    const { mock, uri, blobBody, key, keyId } = await uploadEncrypted(plaintext, {
+      corruptCtHash: true,
+    });
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(blobBody, { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    );
+
+    try {
+      await expect(
+        readEoBlob(
+          {
+            matrixToken: 'tok',
+            spaceRoomId: null,
+            mediaClient: mock.client,
+            resolveKey: async (id) => (id === keyId ? key : null),
+          },
+          uri,
+        ),
+      ).rejects.toThrow(/content_hash mismatch/);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('returns null when the URI scheme is unrecognized', async () => {
+    const result = await readEoBlob(
+      {
+        matrixToken: 'tok',
+        spaceRoomId: null,
+        resolveKey: async () => null,
+      },
+      'unknown://abc',
+    );
+    expect(result).toBeNull();
+  });
+
+  // base64ToBuffer is exercised indirectly by the round-trip path; this guards
+  // against accidental signature changes that would break readEoBlob's import.
+  it('uses base64ToBuffer for envelope decoding', () => {
+    const round = base64ToBuffer(bufferToBase64(new Uint8Array([9, 8, 7])));
+    expect(Array.from(round)).toEqual([9, 8, 7]);
   });
 });

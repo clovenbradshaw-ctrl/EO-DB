@@ -13,7 +13,7 @@
  * a backend per write and dispatch on URI scheme for reads.
  */
 
-import { bufferToBase64 } from '../crypto/segment-keys';
+import { base64ToBuffer, bufferToBase64 } from '../crypto/segment-keys';
 
 export const EO_STORE_WEBHOOK = 'https://n8n.intelechia.com/webhook/eo-store';
 
@@ -392,6 +392,63 @@ export async function fetchBlobByUri(
     return fetchBlobFromDrive(opts.matrixToken, opts.dataId, opts.spaceRoomId);
   }
   return null;
+}
+
+/**
+ * Read + decrypt + verify a stored blob by URI, dispatching by scheme.
+ *
+ * Single canonical reader so any code path that holds a URI (from a snapshot
+ * state event, a block manifest, an airtable bundle, etc.) doesn't have to
+ * know which backend the bytes live in. Encapsulates the full envelope path:
+ *   fetch → AES-GCM decrypt → optional gunzip → SHA-256 verify.
+ *
+ * Returns `null` if the blob is missing or the URI scheme is unrecognized.
+ * Throws if decryption fails, the content_hash mismatches, or the caller's
+ * `resolveKey` cannot find the envelope's `key_id`.
+ */
+export async function readEoBlob(
+  opts: {
+    matrixToken: string;
+    spaceRoomId: string | null;
+    mediaClient?: MatrixMediaClient;
+    dataId?: string;
+    resolveKey: (keyId: string) => Promise<CryptoKey | null>;
+  },
+  uri: string,
+): Promise<Uint8Array | null> {
+  const fetched = await fetchBlobByUri(opts, uri);
+  if (!fetched) return null;
+
+  const envelope = fetched.envelope;
+  const key = await opts.resolveKey(envelope.key_id);
+  if (!key) {
+    throw new Error(`readEoBlob: no key in keyring for key_id "${envelope.key_id}"`);
+  }
+
+  const iv = base64ToBuffer(envelope.iv);
+  const ct = base64ToBuffer(envelope.ct);
+  const plainBuf = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: iv as unknown as BufferSource },
+    key,
+    ct as unknown as ArrayBuffer,
+  );
+  const decrypted = new Uint8Array(plainBuf);
+  const plaintext = envelope.compression === 'gzip'
+    ? await gunzipBytes(decrypted)
+    : decrypted;
+
+  const hash = new Uint8Array(
+    await crypto.subtle.digest('SHA-256', plaintext as unknown as BufferSource),
+  );
+  let observed = '';
+  for (let i = 0; i < hash.length; i++) observed += hash[i].toString(16).padStart(2, '0');
+  if (observed !== envelope.content_hash) {
+    throw new Error(
+      `readEoBlob: content_hash mismatch (envelope=${envelope.content_hash} observed=${observed})`,
+    );
+  }
+
+  return plaintext;
 }
 
 export async function pingDriveProxy(
