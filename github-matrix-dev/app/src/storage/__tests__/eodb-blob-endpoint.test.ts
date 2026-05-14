@@ -12,10 +12,13 @@ import {
   fetchBlobByUri,
   fetchBlobFromMatrixMedia,
   readEoBlob,
+  readEoBlobStatePointer,
   storeBlobToMatrixMedia,
   type BlobUploadMeta,
+  type EoBlobStateReader,
   type MatrixMediaClient,
 } from '../eodb-blob-endpoint';
+import { EO_SNAPSHOT_STATE_TYPE } from '../../matrix/event-bridge';
 import { bufferToBase64, base64ToBuffer } from '../../crypto/segment-keys';
 
 function makeMockMediaClient() {
@@ -312,5 +315,87 @@ describe('readEoBlob', () => {
   it('uses base64ToBuffer for envelope decoding', () => {
     const round = base64ToBuffer(bufferToBase64(new Uint8Array([9, 8, 7])));
     expect(Array.from(round)).toEqual([9, 8, 7]);
+  });
+});
+
+function makeStateReader(
+  events: Record<string, Record<string, unknown> | null>,
+): EoBlobStateReader {
+  return {
+    getRoom: (roomId: string) => {
+      const room = events[roomId];
+      if (room === undefined) return null;
+      return {
+        currentState: {
+          getStateEvents: (type: string, stateKey: string) => {
+            if (room === null) return null;
+            const key = `${type}::${stateKey}`;
+            const content = room[key];
+            if (content === undefined) return null;
+            return { getContent: () => content };
+          },
+        },
+      };
+    },
+  };
+}
+
+describe('readEoBlobStatePointer', () => {
+  const k = `${EO_SNAPSHOT_STATE_TYPE}::`;
+
+  it('returns the pointer with mxc:// uri + seq + keyId', () => {
+    const reader = makeStateReader({
+      room1: {
+        [k]: { mxc: 'mxc://test.server/abc', seq: 42, key_id: 'space.editor', ts: '2026-05-14T00:00:00Z' },
+      },
+    });
+    expect(readEoBlobStatePointer(reader, 'room1')).toEqual({
+      uri: 'mxc://test.server/abc',
+      seq: 42,
+      keyId: 'space.editor',
+      ts: '2026-05-14T00:00:00Z',
+    });
+  });
+
+  it('returns the pointer for a gdrive:// uri', () => {
+    const reader = makeStateReader({
+      room1: { [k]: { mxc: 'gdrive://fileId', seq: 7 } },
+    });
+    expect(readEoBlobStatePointer(reader, 'room1')).toEqual({
+      uri: 'gdrive://fileId',
+      seq: 7,
+    });
+  });
+
+  it('returns null when the room is not joined', () => {
+    const reader = makeStateReader({});
+    expect(readEoBlobStatePointer(reader, 'room1')).toBeNull();
+  });
+
+  it('returns null when no state event is set', () => {
+    const reader = makeStateReader({ room1: {} });
+    expect(readEoBlobStatePointer(reader, 'room1')).toBeNull();
+  });
+
+  it('returns null when content is missing required fields', () => {
+    const reader = makeStateReader({
+      room1: { [k]: { seq: 1 } }, // missing mxc
+    });
+    expect(readEoBlobStatePointer(reader, 'room1')).toBeNull();
+
+    const reader2 = makeStateReader({
+      room1: { [k]: { mxc: 'mxc://x/y' } }, // missing seq
+    });
+    expect(readEoBlobStatePointer(reader2, 'room1')).toBeNull();
+  });
+
+  it('drops keyId when its type is wrong', () => {
+    const reader = makeStateReader({
+      room1: { [k]: { mxc: 'mxc://x/y', seq: 1, key_id: 123 as unknown as string } },
+    });
+    expect(readEoBlobStatePointer(reader, 'room1')).toEqual({
+      uri: 'mxc://x/y',
+      seq: 1,
+    });
   });
 });

@@ -14,6 +14,7 @@
  */
 
 import { base64ToBuffer, bufferToBase64 } from '../crypto/segment-keys';
+import { EO_SNAPSHOT_STATE_TYPE } from '../matrix/event-bridge';
 
 export const EO_STORE_WEBHOOK = 'https://n8n.intelechia.com/webhook/eo-store';
 
@@ -449,6 +450,61 @@ export async function readEoBlob(
   }
 
   return plaintext;
+}
+
+/* ── State-event pointer ──────────────────────────────────────────── */
+
+/**
+ * Narrow subset of MatrixClient used to read EO_SNAPSHOT_STATE_TYPE off a
+ * room's current state. Wider than MatrixMediaClient, narrower than the
+ * full SDK client, so tests can stub a single getRoom call.
+ */
+export interface EoBlobStateReader {
+  getRoom(roomId: string): {
+    currentState: {
+      getStateEvents(type: string, stateKey: string): { getContent(): unknown } | null | undefined;
+    };
+  } | null;
+}
+
+/** Latest stored-blob pointer recorded in EO_SNAPSHOT_STATE_TYPE. */
+export interface EoBlobPointer {
+  uri: string;
+  seq: number;
+  keyId?: string;
+  ts?: string;
+}
+
+/**
+ * Read the latest stored-blob pointer off a room's state. Scheme-agnostic
+ * — the returned `uri` may be `mxc://` or `gdrive://` depending on which
+ * backend last wrote. Pair with `readEoBlob` for the full fetch.
+ *
+ * Returns null if the room isn't joined yet, no state event is present, or
+ * the state event content is missing required fields.
+ */
+export function readEoBlobStatePointer(
+  client: EoBlobStateReader,
+  roomId: string,
+): EoBlobPointer | null {
+  const room = client.getRoom(roomId);
+  if (!room) return null;
+  const stateEvent = room.currentState.getStateEvents(EO_SNAPSHOT_STATE_TYPE, '');
+  if (!stateEvent) return null;
+
+  const content = stateEvent.getContent() as
+    | { mxc?: unknown; seq?: unknown; key_id?: unknown; ts?: unknown }
+    | null
+    | undefined;
+  if (!content) return null;
+  if (typeof content.mxc !== 'string' || typeof content.seq !== 'number') return null;
+
+  return {
+    uri: content.mxc,
+    seq: content.seq,
+    ...(typeof content.key_id === 'string' ? { keyId: content.key_id } : {}),
+    ...(typeof content.ts === 'string' ? { ts: content.ts } : {}),
+  };
 }
 
 export async function pingDriveProxy(
