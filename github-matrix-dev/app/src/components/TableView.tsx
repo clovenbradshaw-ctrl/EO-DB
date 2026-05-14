@@ -11,6 +11,10 @@ import { FilterBar } from './FilterBar';
 import { SortPanel, type SortRule } from './SortPanel';
 import type { ResolvedPermissions } from '../permissions/types';
 import { syncEditToAirtable } from '../ingestion/airtable-writeback';
+import { useAirtableStore, createAirtableClient } from '../ingestion/airtable-store';
+import { hydrationSync, type SyncCustomization } from '../ingestion/airtable-sync';
+import { runAirtableSync, SyncBusyError } from '../ingestion/airtable-sync-runner';
+import { createImportProgressListener } from '../store/eo-store';
 import { useSliceStore } from '../store/slice-store';
 import { defaultColumnWidth, MIN_COLUMN_WIDTH } from './slice-types';
 import { formatName } from './scope-picker-utils';
@@ -124,6 +128,100 @@ function formatScopeName(scope: string): string {
   let name = last.replace(/^(tbl|rec|fld)/, '');
   name = name.replace(/([a-z])([A-Z])/g, '$1 $2');
   return name || last;
+}
+
+type TableSyncPhase =
+  | { phase: 'idle' }
+  | { phase: 'syncing'; message: string }
+  | { phase: 'done'; message: string }
+  | { phase: 'error'; message: string };
+
+function AirtableSyncTableButton({
+  connected,
+  isSyncing,
+  syncState,
+  onSync,
+  isMobile,
+  theme,
+}: {
+  connected: boolean;
+  isSyncing: boolean;
+  syncState: TableSyncPhase;
+  onSync: () => void;
+  isMobile: boolean;
+  theme: Theme;
+}) {
+  const disabled = !connected || isSyncing;
+  const title = !connected
+    ? 'Connect Airtable in Settings to enable syncing'
+    : isSyncing
+      ? (syncState.phase === 'syncing' ? syncState.message : 'A sync is already running')
+      : syncState.phase === 'done'
+        ? `Last run: ${syncState.message} — click to sync again`
+        : syncState.phase === 'error'
+          ? `Last error: ${syncState.message} — click to retry`
+          : 'Pull fresh records from Airtable into this table';
+
+  const label = isSyncing
+    ? (isMobile ? 'Syncing' : 'Syncing…')
+    : (isMobile ? 'Sync' : 'Sync from Airtable');
+
+  const stateColor =
+    syncState.phase === 'error' ? (theme.dangerText ?? theme.danger ?? '#d04')
+    : syncState.phase === 'done' ? (theme.successText ?? theme.success ?? '#2a7')
+    : theme.textMuted;
+
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+      <button
+        type="button"
+        onClick={onSync}
+        disabled={disabled}
+        title={title}
+        aria-label="Sync from Airtable"
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 6,
+          height: 28,
+          padding: isMobile ? '0 10px' : '0 12px',
+          fontSize: isMobile ? 11 : 12,
+          fontWeight: 500,
+          border: `1px solid ${theme.border}`,
+          borderRadius: 6,
+          background: theme.bgCard ?? 'transparent',
+          color: disabled ? theme.textMuted : theme.text,
+          cursor: disabled ? 'not-allowed' : 'pointer',
+          whiteSpace: 'nowrap' as const,
+          opacity: disabled && !isSyncing ? 0.6 : 1,
+        }}
+      >
+        <span
+          aria-hidden
+          style={{
+            width: 8,
+            height: 8,
+            borderRadius: '50%',
+            background: isSyncing ? (theme.successText ?? theme.success ?? '#2a7') : stateColor,
+            animation: isSyncing ? 'eo-tableview-sync-pulse 1.2s infinite' : undefined,
+          }}
+        />
+        {label}
+      </button>
+      {!isMobile && syncState.phase !== 'idle' && !isSyncing && (
+        <span style={{ fontSize: 11, color: stateColor, maxWidth: 280, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {syncState.message}
+        </span>
+      )}
+      <style>{`
+        @keyframes eo-tableview-sync-pulse {
+          0%   { box-shadow: 0 0 0 0 rgba(42, 170, 120, 0.6); }
+          70%  { box-shadow: 0 0 0 5px rgba(42, 170, 120, 0); }
+          100% { box-shadow: 0 0 0 0 rgba(42, 170, 120, 0); }
+        }
+      `}</style>
+    </span>
+  );
 }
 
 // Absence — the field was never asserted. Render very quietly so the eye
@@ -563,6 +661,15 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   const scopeRoot = scope.split('.')[0];
   const idResolver = useIdResolver(scopeRoot);
 
+  // Airtable connection state — drives the visibility/enabled-state of the
+  // per-table "Sync from Airtable" toolbar button. `isSyncing` is global
+  // across all sync paths (continuous tick, AirtableSettings, this button),
+  // so any in-flight sync disables the control to avoid colliding with the
+  // runner gate.
+  const airtableConnected = useAirtableStore((st) => st.connected);
+  const airtableApiKey = useAirtableStore((st) => st.apiKey);
+  const airtableIsSyncing = useAirtableStore((st) => st.isSyncing);
+
   // --- Virtual scrolling constants ---
   const ROW_HEIGHT_PX: Record<string, number> = { compact: 32, default: 44, tall: 60 };
   const VIRTUAL_BUFFER = 8;
@@ -606,6 +713,16 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   const [fieldNameMap, setFieldNameMap] = useState<Map<string, string>>(new Map());
   const [scopeName, setScopeName] = useState<string | null>(null);
   const [auditableDisplayField, setAuditableDisplayField] = useState<string | null>(null);
+  // When this scope was imported from Airtable, the table's DEF event records
+  // { base_id, table_id } on `_airtable`. Presence drives the per-table
+  // "Sync from Airtable" toolbar button.
+  const [airtableSource, setAirtableSource] = useState<{ baseId: string; tableId: string } | null>(null);
+  const [tableSyncState, setTableSyncState] = useState<
+    | { phase: 'idle' }
+    | { phase: 'syncing'; message: string }
+    | { phase: 'done'; message: string }
+    | { phase: 'error'; message: string }
+  >({ phase: 'idle' });
   const [filterText, setFilterText] = useState('');
   // Debounced filter text — used for actual filtering so that typing remains
   // responsive when the record set is large.
@@ -922,6 +1039,12 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
         setScopeName(name);
       }
       setAuditableDisplayField(scopeState?.value?._displayField ?? null);
+      const at = scopeState?.value?._airtable;
+      if (at && typeof at === 'object' && at.type === 'table' && typeof at.base_id === 'string' && typeof at.table_id === 'string') {
+        setAirtableSource({ baseId: at.base_id, tableId: at.table_id });
+      } else {
+        setAirtableSource(null);
+      }
     });
   }, [ready, lastSeq, getStateByPrefix, getStateByPrefixPage, getState, scope, scopeDepth]);
 
@@ -1917,6 +2040,83 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
     } catch { /* ignore */ }
   }
 
+  // ── Per-table "Sync from Airtable" ──
+  //
+  // Runs a full hydration scoped to *just this table*. We intentionally use
+  // hydrationSync (not smartSync) so the button also catches records that
+  // were never previously synced — e.g. rows added in Airtable since the
+  // initial import, or rows that fell outside an earlier selective / limited
+  // pull. Incremental LAST_MODIFIED_TIME() syncs only see rows that changed
+  // since the cursor was last advanced, so they miss "missing but unchanged"
+  // records.
+  //
+  // hydrationSync emits stable client_event_ids per record, so re-running it
+  // is idempotent for unchanged rows. Updated fields still flow through DEF
+  // (and NUL where a field cleared) with source='airtable', giving us full
+  // per-field provenance in the event log — the standard EO change tracking.
+  //
+  // Gated through `runAirtableSync` so a manual click can't interleave with
+  // the continuous tick or another in-flight sync on the same tab.
+  async function handleSyncFromAirtable() {
+    if (!airtableSource) return;
+    const eoStore = useEoStore.getState().store;
+    if (!eoStore || !airtableApiKey) {
+      setTableSyncState({ phase: 'error', message: 'Airtable is not connected — open Settings to connect.' });
+      return;
+    }
+    const { baseId, tableId } = airtableSource;
+    setTableSyncState({ phase: 'syncing', message: 'Starting…' });
+    try {
+      const client = createAirtableClient();
+      const { syncSettings } = useAirtableStore.getState();
+      const customization: SyncCustomization = {
+        selectedTables: { [baseId]: [tableId] },
+        preserveExisting: syncSettings.preserveExisting,
+        recordLimit: syncSettings.recordLimit > 0 ? syncSettings.recordLimit : undefined,
+      };
+      const progressListener = createImportProgressListener();
+      let result;
+      try {
+        result = await runAirtableSync(
+          'manual-table-sync',
+          () => hydrationSync(eoStore, client, session.userId, {
+            customization,
+            onEvent: progressListener.onEvent,
+            onProgress: (p) => {
+              const tbl = p.table ?? scopeName ?? 'table';
+              const so = p.records_so_far ? ` (${p.records_so_far})` : '';
+              setTableSyncState({ phase: 'syncing', message: `Syncing ${tbl}${so}…` });
+            },
+          }),
+        );
+      } finally {
+        progressListener.finalize();
+      }
+      if (result.total_records_ingested > 0) {
+        try {
+          await useEoStore.getState().flushToOpfs();
+        } catch (e) {
+          console.warn('[EO-DB] post-sync flushToOpfs failed:', e);
+        }
+      }
+      const { total_records_ingested, total_records_overwritten, total_records_skipped, duration_ms } = result;
+      const dur = `${(duration_ms / 1000).toFixed(1)}s`;
+      const msg = total_records_overwritten > 0
+        ? `${total_records_ingested} synced, ${total_records_overwritten} updated, ${total_records_skipped} unchanged (${dur})`
+        : `${total_records_ingested} synced, ${total_records_skipped} unchanged (${dur})`;
+      setTableSyncState({ phase: 'done', message: msg });
+      useAirtableStore.getState().setLastSyncAt(new Date().toISOString());
+    } catch (e: any) {
+      const busy = e instanceof SyncBusyError;
+      setTableSyncState({
+        phase: 'error',
+        message: busy
+          ? `Another sync is running (${e.active}) — wait, then try again`
+          : (e?.message || 'Sync failed'),
+      });
+    }
+  }
+
   async function handleSaveSegment(name: string) {
     try {
       await dispatch({
@@ -2100,6 +2300,16 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
             }}>
               + New
             </button>
+          )}
+          {airtableSource && (
+            <AirtableSyncTableButton
+              connected={airtableConnected && !!airtableApiKey}
+              isSyncing={airtableIsSyncing || tableSyncState.phase === 'syncing'}
+              syncState={tableSyncState}
+              onSync={handleSyncFromAirtable}
+              isMobile={isMobile}
+              theme={theme}
+            />
           )}
         </div>
         <div style={s.toolbarRight}>
