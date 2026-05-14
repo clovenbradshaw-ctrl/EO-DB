@@ -24,6 +24,8 @@ import {
   eodbBlobDataIdForRoom,
   gzipBytes,
   storeBlobToDrive,
+  storeBlobToMatrixMedia,
+  type BlobBackend,
   type BlobUploadMeta,
 } from './eodb-blob-endpoint';
 
@@ -54,6 +56,13 @@ export interface BlobWriterDeps {
   store: EoStore;
   userId: string;
   deviceId: string;
+  /**
+   * Where uploaded ciphertext lands. Defaults to `'drive'` (the existing n8n
+   * proxy → Google Drive path). `'matrix-media'` uploads directly to the
+   * homeserver's content repo and emits an `mxc://` URI in the snapshot
+   * state event. Both backends share the same `BlobEnvelope` at-rest format.
+   */
+  backend?: BlobBackend;
 }
 
 interface EodbBlobPayload {
@@ -229,8 +238,17 @@ export class EodbBlobWriter {
       };
 
       const dataId = await eodbBlobDataIdForRoom(roomId);
-      const stored = await storeBlobToDrive(matrixToken, dataId, meta, ciphertext, roomId);
-      const uri = stored.uri;
+      const backend: BlobBackend = this.deps.backend ?? 'drive';
+      let uri: string;
+      if (backend === 'matrix-media') {
+        const stored = await storeBlobToMatrixMedia(client, meta, ciphertext, {
+          name: `${dataId}.json`,
+        });
+        uri = stored.uri;
+      } else {
+        const stored = await storeBlobToDrive(matrixToken, dataId, meta, ciphertext, roomId);
+        uri = stored.uri;
+      }
 
       await setSnapshotStateEvent(client, roomId, uri, currentSeq, keyId);
 
@@ -246,7 +264,7 @@ export class EodbBlobWriter {
       this.lastSaveAt = Date.now();
       this.lastError = null;
       this.lastDiagnostic =
-        `Saved ${events.length} events (${plaintextSize} B plain → ${compressed.byteLength} B gz → ${ciphertext.byteLength} B ct) as ${dataId}`;
+        `Saved ${events.length} events (${plaintextSize} B plain → ${compressed.byteLength} B gz → ${ciphertext.byteLength} B ct) via ${backend} as ${dataId}`;
       this.consecutiveFailures = 0;
       this.backoffUntil = null;
     } catch (err: unknown) {
@@ -290,7 +308,7 @@ async function sha256hex(data: Uint8Array): Promise<string> {
 function classifyError(err: unknown): string {
   if (err && typeof err === 'object') {
     const e = err as { name?: string; message?: string };
-    if (e.name === 'TimeoutError') return 'Drive proxy timed out';
+    if (e.name === 'TimeoutError') return 'Upload timed out';
     if (e.name === 'AbortError') return 'Aborted';
     if (e.name === 'TypeError') return `Network/CORS error: ${e.message ?? 'Failed to fetch'}`;
     if (typeof e.message === 'string' && e.message.length > 0) return e.message;

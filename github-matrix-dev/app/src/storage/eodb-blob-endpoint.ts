@@ -1,18 +1,19 @@
 /**
- * Encrypted-blob transport via the n8n Google Drive proxy
- * (`/webhook/eo-store`).
+ * Encrypted-blob transport.
  *
- * The proxy authenticates the caller against Matrix and then forwards the
- * request to Google Drive on the server-side OAuth credentials. We model
- * each room's encrypted log as a single Drive file named `{dataId}.json`
- * whose body is the AES-GCM envelope. Writes are find-or-create + media
- * PATCH; reads are find + alt=media GET; probe is a find-by-name HEAD-ish.
+ * Two parallel backends share the same `BlobEnvelope` at-rest format:
  *
- * Request shape understood by the proxy:
- *   { matrix_token, drive_url, drive_method, drive_body?, space_room_id? }
- * URLs containing `alt=media` are returned as a binary stream; otherwise the
- * proxy returns the parsed Drive JSON response with the upstream status code.
+ *   - `'drive'`     — n8n `/webhook/eo-store` proxy → Google Drive. URIs are
+ *                     `gdrive://{fileId}`. Pre-existing path.
+ *   - `'matrix-media'` — direct upload to the homeserver's content repo via
+ *                     `client.uploadContent`. URIs are `mxc://{server}/{id}`.
+ *                     Phase 1 of the Matrix-primary-storage plan.
+ *
+ * Both backends store the same JSON `BlobEnvelope` at rest. Callers can pick
+ * a backend per write and dispatch on URI scheme for reads.
  */
+
+import { bufferToBase64 } from '../crypto/segment-keys';
 
 export const EO_STORE_WEBHOOK = 'https://n8n.intelechia.com/webhook/eo-store';
 
@@ -284,6 +285,115 @@ export async function probeBlobExists(
  * mutating any Drive state. Returns the upstream HTTP status as observed by
  * the client.
  */
+/* ── Matrix-media backend ─────────────────────────────────────────── */
+
+export type BlobBackend = 'drive' | 'matrix-media';
+
+/** Inspect a stored-blob URI and report which backend can read it. */
+export function backendForUri(uri: string): BlobBackend | null {
+  if (uri.startsWith('mxc://')) return 'matrix-media';
+  if (uri.startsWith('gdrive://')) return 'drive';
+  return null;
+}
+
+export interface MatrixMediaStoreResult {
+  uri: string;       // mxc://{server}/{mediaId}
+  created: boolean;  // always true — Matrix media uploads always mint a new id
+}
+
+export interface MatrixMediaFetchResult {
+  uri: string;
+  envelope: BlobEnvelope;
+}
+
+/** Minimal subset of MatrixClient used by the Matrix-media backend. */
+export interface MatrixMediaClient {
+  uploadContent(
+    file: Blob,
+    opts?: { name?: string; type?: string },
+  ): Promise<{ content_uri: string }>;
+  mxcUrlToHttp(mxc: string): string | null;
+}
+
+/**
+ * Upload an encrypted blob to the homeserver's content repo. Body is the
+ * same JSON `BlobEnvelope` that the Drive backend stores at rest, so a
+ * reader doesn't care which backend wrote it.
+ */
+export async function storeBlobToMatrixMedia(
+  client: MatrixMediaClient,
+  meta: BlobUploadMeta,
+  ciphertext: Uint8Array,
+  opts: { name?: string } = {},
+): Promise<MatrixMediaStoreResult> {
+  const envelope: BlobEnvelope = {
+    v: meta.v,
+    iv: meta.iv,
+    ct: bufferToBase64(ciphertext),
+    content_hash: meta.content_hash,
+    key_id: meta.key_id,
+    plaintext_size: meta.plaintext_size,
+    compression: meta.compression,
+  };
+  const json = new TextEncoder().encode(JSON.stringify(envelope));
+  const body = new Blob([json as BlobPart], { type: 'application/json' });
+  const result = await client.uploadContent(body, {
+    name: opts.name ?? 'eo-blob.json',
+    type: 'application/json',
+  });
+  return { uri: result.content_uri, created: true };
+}
+
+/** Download and parse an mxc-stored blob envelope. */
+export async function fetchBlobFromMatrixMedia(
+  client: MatrixMediaClient,
+  mxcUri: string,
+): Promise<MatrixMediaFetchResult | null> {
+  const httpUrl = client.mxcUrlToHttp(mxcUri);
+  if (!httpUrl) return null;
+  const res = await fetch(httpUrl, {
+    signal: AbortSignal.timeout(PROXY_TIMEOUT_MS),
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`Matrix media fetch failed: HTTP ${res.status}`);
+  const text = await res.text();
+  if (!text) return null;
+  let envelope: BlobEnvelope;
+  try {
+    envelope = JSON.parse(text) as BlobEnvelope;
+  } catch (e) {
+    throw new Error(`Matrix media returned non-JSON body: ${(e as Error).message}`);
+  }
+  return { uri: mxcUri, envelope };
+}
+
+/**
+ * Unified reader. Dispatches by URI scheme — `gdrive://` → Drive proxy,
+ * `mxc://` → homeserver content repo. Returns null if the URI scheme is
+ * unrecognized or the blob is missing.
+ */
+export async function fetchBlobByUri(
+  opts: {
+    matrixToken: string;
+    spaceRoomId: string | null;
+    mediaClient?: MatrixMediaClient;
+    /** For `gdrive://` URIs we still need the dataId to find the file. */
+    dataId?: string;
+  },
+  uri: string,
+): Promise<{ uri: string; envelope: BlobEnvelope } | null> {
+  const backend = backendForUri(uri);
+  if (backend === 'matrix-media') {
+    if (!opts.mediaClient) throw new Error('fetchBlobByUri: mediaClient required for mxc:// URIs');
+    return fetchBlobFromMatrixMedia(opts.mediaClient, uri);
+  }
+  if (backend === 'drive') {
+    if (!opts.dataId) throw new Error('fetchBlobByUri: dataId required for gdrive:// URIs');
+    return fetchBlobFromDrive(opts.matrixToken, opts.dataId, opts.spaceRoomId);
+  }
+  return null;
+}
+
 export async function pingDriveProxy(
   matrixToken: string,
   spaceRoomId: string | null,
