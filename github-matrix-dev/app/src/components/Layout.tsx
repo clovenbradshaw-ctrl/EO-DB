@@ -1445,6 +1445,17 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   const deletedSpaceCount = getDeletedSpaces().length;
   const archivedSpaceCount = getArchivedSpaces().length;
 
+  // Auto-select a space after Matrix discovery if none is selected.
+  // Without this, a user who wiped local storage lands on "No space selected"
+  // and must manually click into a space before any data loads.
+  useEffect(() => {
+    if (localMode) return;
+    if (selectedSpace) return;
+    if (activeEntries.length === 0) return;
+    _doSelectSpace(activeEntries[0].spaceTarget);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedSpace, activeEntries, localMode]);
+
   // --- Reset stale state when switching spaces ---
   const prevSpaceRef = useRef(selectedSpace);
   useEffect(() => {
