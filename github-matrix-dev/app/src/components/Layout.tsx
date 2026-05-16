@@ -1706,6 +1706,19 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
 
       // 3. Room genuinely doesn't exist — create it (with canonical alias).
       if (matrixReadyRef.current && matrixClientRef.current) {
+        // Final guard against duplicate-room creation: steps 2d/2e issued
+        // network calls, during which a matching room may have synced in.
+        // Re-scan one last time before committing to createRoom. For Amino
+        // this is target-agnostic (single tenant → any space config wins).
+        const preCreateScan = findSpaceRoomByDirectScan(
+          matrixClientRef.current, isAmino ? null : selectedSpace!,
+        );
+        if (preCreateScan) {
+          console.log('[EO-DB] Pre-create re-scan found existing room for', selectedSpace, '→', preCreateScan.mainRoomId);
+          resolvedSpaceRooms = preCreateScan.rooms;
+          return preCreateScan.mainRoomId;
+        }
+
         const displayName = formatSpaceName(selectedSpace!.replace(/^space_/, ''));
         const result = await createSpaceRoom(
           matrixClientRef.current, displayName, session.userId,
