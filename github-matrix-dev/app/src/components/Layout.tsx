@@ -449,16 +449,26 @@ async function createSpaceRoom(
  * This is synchronous (reads from the SDK's in-memory room store) and
  * serves as a fallback when discoverSpacesFromMatrix() hasn't indexed
  * the space yet due to timing.
+ *
+ * When `spaceTarget` is null, ANY room carrying a valid space config
+ * matches. This is used for single-tenant Amino homeservers where there
+ * is exactly one space and the URL-derived `space_*` target may not match
+ * the config's derived target (e.g. the room is named "Amino Immigration"
+ * but the URL says `space_amino`).
  */
 function findSpaceRoomByDirectScan(
   client: ReturnType<typeof createMatrixClient>,
-  spaceTarget: string,
+  spaceTarget: string | null,
 ): { mainRoomId: string; rooms: SpaceConfig['rooms'] } | null {
   const rooms = (client as any).getRooms?.() ?? [];
   // When multiple rooms match (duplicate space creation), pick the one with
   // the lexicographically smallest mainRoomId so all clients converge.
   let best: { mainRoomId: string; rooms: SpaceConfig['rooms'] } | null = null;
   for (const room of rooms) {
+    // Only consider rooms the user is actually joined to — invited/left
+    // rooms expose stale or partial state that must not seed resolution.
+    if (room.getMyMembership?.() && room.getMyMembership() !== 'join') continue;
+
     const configEvent = room.currentState?.getStateEvents?.(EO_SPACE_CONFIG_TYPE, '');
     if (!configEvent) continue;
 
@@ -466,7 +476,7 @@ function findSpaceRoomByDirectScan(
     if (!config?.name || !config?.rooms?.main) continue;
 
     const target = `space_${config.name.toLowerCase().replace(/\s+/g, '_')}`;
-    if (target === spaceTarget) {
+    if (spaceTarget === null || target === spaceTarget) {
       if (!best || config.rooms.main < best.mainRoomId) {
         best = { mainRoomId: config.rooms.main, rooms: config.rooms };
       }
@@ -1682,6 +1692,22 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         }
       }
 
+      // 2f. Amino single-tenant fallback: the homeserver hosts exactly one
+      //     space, and the UI already collapses every entry into a unified
+      //     "Amino" space. The URL-derived target (`space_amino`) may not
+      //     match the config's derived target (e.g. a room named "Amino
+      //     Immigration" → `space_amino_immigration`), which would make the
+      //     exact-match scans above miss it and fall through to creating a
+      //     duplicate room. Match ANY joined room carrying a space config.
+      if (isAmino && matrixClientRef.current) {
+        const anyScan = findSpaceRoomByDirectScan(matrixClientRef.current, null);
+        if (anyScan) {
+          console.log('[EO-DB] Resolved Amino space room (target-agnostic) for', selectedSpace, '→', anyScan.mainRoomId);
+          resolvedSpaceRooms = anyScan.rooms;
+          return anyScan.mainRoomId;
+        }
+      }
+
       // 3. Room genuinely doesn't exist — create it (with canonical alias).
       if (matrixReadyRef.current && matrixClientRef.current) {
         const displayName = formatSpaceName(selectedSpace!.replace(/^space_/, ''));
@@ -1760,6 +1786,18 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         if (spaceRoomId && !existing.mainRoomId) {
           existing.mainRoomId = spaceRoomId;
           existing.spaceRooms = resolvedSpaceRooms;
+        }
+
+        // Surface a room-resolution failure on the cached path too. Without
+        // this, a null result leaves the UI stuck on "Resolving room..."
+        // forever with no error and no retry affordance (the cold-start
+        // branch below already does this).
+        if (MATRIX_ENABLED && !spaceRoomId && matrixClientRef.current && matrixReadyRef.current) {
+          console.warn('[EO-DB] No room for cached space', selectedSpace, '— cannot start PeerSync.');
+          setConnectionError({
+            phase: 'room',
+            message: 'Could not create or find a room for this space. The homeserver may restrict room creation — try logging out and back in.',
+          });
         }
 
         // SEG: check if the block chain has advanced past what we've
