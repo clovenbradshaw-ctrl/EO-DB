@@ -43,6 +43,15 @@ let index: LogIndex | null = null;
 let position: FoldPosition | null = null;
 let opfsDir: FileSystemDirectoryHandle | null = null;
 
+/**
+ * Serializes kv-snapshot writes. Two overlapping `saveKvSnapshot` requests
+ * (or a save racing the worker's own shutdown checkpoint) would otherwise
+ * both hold a writable on the same OPFS file, and the older tmp+move scheme
+ * failed with "FileSystemHandle cannot be moved while it is locked". Chaining
+ * every save behind the previous one guarantees a single writer at a time.
+ */
+let kvSnapshotChain: Promise<void> = Promise.resolve();
+
 /** SIG overrides: "target.field" → value. Cleared on Worker close. */
 const sigLayer = new Map<string, unknown>();
 
@@ -998,13 +1007,28 @@ function buildFoldEntry(target: string): FoldEntry {
           payload.byteOffset,
           payload.byteOffset + payload.byteLength,
         ) as ArrayBuffer;
-        const tmpHandle = await opfsDir.getFileHandle('kv-snapshot.tmp', { create: true });
-        const writable = await tmpHandle.createWritable();
-        await writable.write(new Blob([exactBuf]));
-        await writable.close();
-        await (tmpHandle as FileSystemFileHandle & {
-          move(dest: FileSystemDirectoryHandle, name: string): Promise<void>;
-        }).move(opfsDir, 'kv-snapshot.bin');
+        const dir = opfsDir;
+        // Write directly to the final file. `createWritable()` already
+        // commits atomically on `close()` (it buffers into a private swap
+        // file), so the previous explicit tmp-file + `move()` step was both
+        // redundant and the source of the "cannot be moved while locked"
+        // failure. Serialize behind `kvSnapshotChain` so overlapping saves
+        // never open two writables on the same handle.
+        const saveRun = kvSnapshotChain.then(async () => {
+          const fileHandle = await dir.getFileHandle('kv-snapshot.bin', { create: true });
+          const writable = await fileHandle.createWritable();
+          try {
+            await writable.write(new Blob([exactBuf]));
+            await writable.close();
+          } catch (e) {
+            try { await writable.abort(); } catch { /* already closed */ }
+            throw e;
+          }
+        });
+        // Keep the chain resolvable: a failed save must not poison every
+        // subsequent one. The current caller still sees the rejection.
+        kvSnapshotChain = saveRun.catch(() => {});
+        await saveRun;
         post({ id: req.id, type: 'result', value: null });
         break;
       }
