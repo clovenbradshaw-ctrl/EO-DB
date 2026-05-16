@@ -96,13 +96,9 @@ const CalendarView = lazyWithRetry(() => import('./CalendarView').then(m => ({ d
 const SettingsView = lazyWithRetry(() => import('./SettingsView').then(m => ({ default: m.SettingsView })));
 const SpaceMembers = lazyWithRetry(() => import('./SpaceMembers').then(m => ({ default: m.SpaceMembers })));
 const ImportView = lazyWithRetry(() => import('./ImportView').then(m => ({ default: m.ImportView })));
-const ApiConnectionsView = lazyWithRetry(() => import('./ApiConnectionsView').then(m => ({ default: m.ApiConnectionsView })));
 const BuilderView = lazyWithRetry(() => import('./builder/BuilderView').then(m => ({ default: m.BuilderView })));
-const MessagesView = lazyWithRetry(() => import('./MessagesView').then(m => ({ default: m.MessagesView })));
 const PeopleView = lazyWithRetry(() => import('./PeopleView').then(m => ({ default: m.PeopleView })));
 const RecordPageView = lazyWithRetry(() => import('./builder/RecordPageView').then(m => ({ default: m.RecordPageView })));
-const BranchExplorerPanel = lazyWithRetry(() => import('./branch/BranchExplorerPanel').then(m => ({ default: m.BranchExplorerPanel })));
-const NaturalLanguageView = lazyWithRetry(() => import('./NaturalLanguageView').then(m => ({ default: m.NaturalLanguageView })));
 import { PermissionBadge } from './PermissionBadge';
 import { ViewOnlyBanner } from './ViewOnlyBanner';
 import { HeadlineMetrics } from './HeadlineMetrics';
@@ -3052,7 +3048,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               };
             }
             // Configurable views (excludes records/multiuser which are special-cased)
-            const CONFIGURABLE_VIEWS: View[] = ['compose', 'import', 'api', 'people', 'messages', 'members', 'log', 'builder', 'settings'];
+            const CONFIGURABLE_VIEWS: View[] = ['compose', 'import', 'people', 'members', 'log', 'builder', 'settings'];
             const hiddenCount = activeTypeDef?.visible_views
               ? CONFIGURABLE_VIEWS.filter(v => !activeTypeDef.visible_views!.includes(v)).length
               : 0;
@@ -3069,15 +3065,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                 {view === 'compose' ? `+ ${term('compose')}` : term(view as TerminologyKey)}
               </button>
             ))}
-            {isNavViewVisible('api') && (
-              <button
-                onClick={() => openRouteAsTab({ view: 'api', space: selectedSpace }, { reuseByView: true })}
-                style={navItemStyle('api')}
-              >
-                <span style={s.navIcon}>{NAV_ICONS.api}</span>
-                API Connections
-              </button>
-            )}
             <div style={s.navGroupLabel}>Collaborate</div>
             {isNavViewVisible('people') && (
               <button
@@ -3086,15 +3073,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               >
                 <span style={s.navIcon}>{NAV_ICONS.people}</span>
                 {term('people')}
-              </button>
-            )}
-            {isNavViewVisible('messages') && (
-              <button
-                onClick={() => openRouteAsTab({ view: 'messages', space: selectedSpace }, { reuseByView: true })}
-                style={navItemStyle('messages')}
-              >
-                <span style={s.navIcon}>{NAV_ICONS.messages}</span>
-                {term('messages')}
               </button>
             )}
             {isNavViewVisible('members') && (
@@ -3134,22 +3112,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                 Settings
               </button>
             )}
-            <button
-              onClick={() => openRouteAsTab({ view: 'branch', space: selectedSpace }, { reuseByView: true })}
-              style={navItemStyle('branch')}
-            >
-              <span style={s.navIcon}>{NAV_ICONS.branch}</span>
-              Branches
-            </button>
-            <a
-              href={`${import.meta.env.BASE_URL}nl/natural_language.html`}
-              target="_blank"
-              rel="noopener noreferrer"
-              style={{ ...navItemStyle('nl'), textDecoration: 'none' }}
-            >
-              <span style={s.navIcon}>{NAV_ICONS.nl}</span>
-              Natural Language
-            </a>
             <div style={s.navGroupLabel}>Testing</div>
             <button
               onClick={() => openRouteAsTab({ view: 'multiuser', space: selectedSpace }, { reuseByView: true })}
@@ -3362,13 +3324,10 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               <ComposeView permissions={currentPermissions} />
             ) : activeView === 'builder' ? (
               <BuilderView />
-            ) : activeView === 'messages' ? (
-              <MessagesView scope={selectedScope} userId={session.userId} activeRoomId={route.query.roomId ?? null} matrixClient={matrixClientRef.current as any} />
             ) : activeView === 'people' ? (
               matrixClientRef.current ? (
                 <PeopleView
                   matrixClient={matrixClientRef.current as any}
-                  onOpenDirectMessage={(roomId) => navigate({ view: 'messages', query: { roomId } })}
                 />
               ) : (
                 <div style={s.empty}>
@@ -3417,12 +3376,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               <SettingsView session={session} matrixClient={matrixClientRef.current} roomId={spaceRoomId} spaceRooms={spaceRooms ?? null} onUnarchive={handleUnarchiveSpace} connectionState={connectionState} connectionError={connectionError} matrixReady={matrixReady} onRetry={retrySync} onLogout={handleLogout} />
             ) : activeView === 'multiuser' ? (
               <MultiUserTestView matrixClient={matrixClientRef.current} roomId={spaceRoomId} presence={presence} />
-            ) : activeView === 'api' ? (
-              <ApiConnectionsView />
-            ) : activeView === 'branch' ? (
-              <BranchExplorerPanel />
-            ) : activeView === 'nl' ? (
-              <NaturalLanguageView userId={session.userId} />
             ) : null}
             </Suspense>
           </ErrorBoundary>}
