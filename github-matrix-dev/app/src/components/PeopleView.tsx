@@ -20,7 +20,7 @@ import { findOrCreateDirectMessage } from '../matrix/dm';
 interface PeopleViewProps {
   matrixClient: MatrixClient;
   /** Called after a DM room is created/found so the caller can navigate to it. */
-  onOpenDirectMessage: (roomId: string, userId: string) => void;
+  onOpenDirectMessage?: (roomId: string, userId: string) => void;
 }
 
 export function PeopleView({ matrixClient, onOpenDirectMessage }: PeopleViewProps) {
@@ -81,7 +81,7 @@ export function PeopleView({ matrixClient, onOpenDirectMessage }: PeopleViewProp
     setError(null);
     try {
       const roomId = await findOrCreateDirectMessage(matrixClient, user.userId);
-      onOpenDirectMessage(roomId, user.userId);
+      onOpenDirectMessage?.(roomId, user.userId);
     } catch (e: any) {
       setError(`Failed to start conversation with ${user.displayName}: ${e?.message || e}`);
     } finally {

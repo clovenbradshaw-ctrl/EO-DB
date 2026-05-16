@@ -14,19 +14,6 @@ import { GCalendarSettingsSection } from './GCalendarSettings';
 import { SeedSpaceSection } from './SeedSpaceSection';
 import { BlockListSection } from './BlockListSection';
 import { isAminoHomeserver } from '../lib/matrix-domain';
-import { usePresencePrefs } from '../lib/presence-prefs';
-import { useNLPrefs } from '../lib/nl-prefs';
-import {
-  getClassifierStatus,
-  initClassifier,
-  subscribeClassifierStatus,
-  type ClassifierStatus,
-} from '../nl/eo-classifier';
-import {
-  downloadBundle,
-  downloadClassifiedClauses,
-  downloadUserCorrections,
-} from '../nl/nl-export';
 import { EO_STORE_WEBHOOK, pingDriveProxy } from '../storage/eodb-blob-endpoint';
 import type { BlobWriterStatus } from '../storage/eodb-blob-writer';
 import { buildSettingChangeEvent } from '../lib/settings-events';
@@ -103,7 +90,6 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
   const [showAllRooms, setShowAllRooms] = useState(false);
   const [showRoomsBySpaces, setShowRoomsBySpaces] = useState(false);
   const [showBlobStore, setShowBlobStore] = useState(false);
-  const [presencePrefs, setPresencePrefs] = usePresencePrefs();
   const s = styles(theme);
 
   const [eventCount, setEventCount] = useState<number | null>(null);
@@ -391,32 +377,6 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
           </div>
         </Section>
 
-        {/* Presence & Activity Indicators */}
-        <Section title="Presence" theme={theme}>
-          <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 10 }}>
-            <ToggleRow
-              theme={theme}
-              label="Show other users"
-              detail="Display who else is online and which tables they're viewing. When off, peer avatars and activity dots are hidden."
-              checked={presencePrefs.showPeers}
-              onChange={(v) => {
-                recordSettingChange('presence.showPeers', 'Show other users', presencePrefs.showPeers, v);
-                setPresencePrefs({ showPeers: v });
-              }}
-            />
-            <ToggleRow
-              theme={theme}
-              label="Share my activity"
-              detail="Broadcast which view and table you're looking at. When off, you stay online to peers but move discretely — nobody sees where you are."
-              checked={presencePrefs.shareLocation}
-              onChange={(v) => {
-                recordSettingChange('presence.shareLocation', 'Share my activity', presencePrefs.shareLocation, v);
-                setPresencePrefs({ shareLocation: v });
-              }}
-            />
-          </div>
-        </Section>
-
         {/* Settings Activity — audit timeline of toggles in this panel */}
         <Section title="Settings Activity" theme={theme}>
           <SettingsActivity events={recentEvents} theme={theme} />
@@ -621,11 +581,6 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
               </div>
             ))}
           </div>
-        </Section>
-
-        {/* Natural Language */}
-        <Section title="Natural Language" theme={theme}>
-          <NaturalLanguageSettingsSection theme={theme} onSettingChange={recordSettingChange} />
         </Section>
 
         {/* Danger Zone */}
@@ -839,166 +794,4 @@ function styles(t: Theme): Record<string, React.CSSProperties> {
       cursor: 'pointer',
     },
   };
-}
-
-// ─── Natural Language ─────────────────────────────────────────────────────
-
-function NaturalLanguageSettingsSection({ theme, onSettingChange }: {
-  theme: Theme;
-  onSettingChange: (setting: string, label: string, oldValue: unknown, newValue: unknown) => void;
-}) {
-  const [prefs, setPrefs] = useNLPrefs();
-  const [status, setStatus] = useState<ClassifierStatus>(getClassifierStatus);
-  const [exportMsg, setExportMsg] = useState<string | null>(null);
-  const s = styles(theme);
-
-  useEffect(() => subscribeClassifierStatus(setStatus), []);
-
-  const handleToggleEnable = useCallback(
-    (next: boolean) => {
-      onSettingChange('nl.enabled', 'Expose NL features', prefs.enabled, next);
-      setPrefs({ enabled: next });
-      if (next) void initClassifier();
-    },
-    [setPrefs, onSettingChange, prefs.enabled],
-  );
-
-  const centroidStatusText = useMemo(() => {
-    if (status.state === 'error' && status.message?.startsWith('centroids.json missing')) {
-      return status.message;
-    }
-    if (status.centroidCount > 0) return `${status.centroidCount}/27 cells loaded`;
-    if (status.state === 'idle') return 'not loaded';
-    return status.message ?? '—';
-  }, [status]);
-
-  const modelStatusText = useMemo(() => {
-    switch (status.state) {
-      case 'ready':
-        return `ready (${status.backend})`;
-      case 'loading':
-        return `${status.message ?? 'loading'} · ${Math.round(status.progress * 100)}%`;
-      case 'error':
-        return status.message ?? 'error';
-      default:
-        return prefs.enabled ? 'waiting' : 'disabled';
-    }
-  }, [status, prefs.enabled]);
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-      <ToggleRow
-        theme={theme}
-        label="Expose NL features"
-        detail="Adds a Natural Language nav item + document explorer for local classification."
-        checked={prefs.enabled}
-        onChange={handleToggleEnable}
-      />
-      <ToggleRow
-        theme={theme}
-        label="Auto-classify on upload"
-        detail="Start embedding immediately once a document is dropped."
-        checked={prefs.autoClassifyOnUpload}
-        onChange={(v) => {
-          onSettingChange('nl.autoClassifyOnUpload', 'Auto-classify on upload', prefs.autoClassifyOnUpload, v);
-          setPrefs({ autoClassifyOnUpload: v });
-        }}
-      />
-      <ToggleRow
-        theme={theme}
-        label="Clause↔clause similarity edges"
-        detail="Expensive: lazy top-k similarity graph edges. Off by default."
-        checked={prefs.emitSimilarityEdges}
-        onChange={(v) => {
-          onSettingChange('nl.emitSimilarityEdges', 'Clause↔clause similarity edges', prefs.emitSimilarityEdges, v);
-          setPrefs({ emitSimilarityEdges: v });
-        }}
-      />
-
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-        <Field label="Model" value={modelStatusText} theme={theme} />
-        <Field label="Centroids" value={centroidStatusText} theme={theme} />
-        <Field label="Backend" value={status.backend} theme={theme} />
-      </div>
-
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-        <div style={{
-          fontFamily: "'JetBrains Mono', monospace",
-          fontSize: 9,
-          fontWeight: 700,
-          letterSpacing: '0.08em',
-          textTransform: 'uppercase',
-          color: theme.textMuted,
-        }}>
-          Standalone tool
-        </div>
-        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-          <button
-            style={s.actionBtn}
-            onClick={() => window.open('./nl/natural_language.html', '_blank', 'noopener,noreferrer')}
-          >
-            Open Natural Language form
-          </button>
-        </div>
-      </div>
-
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-        <div style={{
-          fontFamily: "'JetBrains Mono', monospace",
-          fontSize: 9,
-          fontWeight: 700,
-          letterSpacing: '0.08em',
-          textTransform: 'uppercase',
-          color: theme.textMuted,
-        }}>
-          Export for /nl/ folder
-        </div>
-        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-          <button
-            style={s.actionBtn}
-            onClick={() => {
-              const n = downloadClassifiedClauses();
-              setExportMsg(`Exported ${n} classified clauses.`);
-            }}
-          >
-            Download clauses
-          </button>
-          <button
-            style={s.actionBtn}
-            onClick={() => {
-              const n = downloadUserCorrections();
-              setExportMsg(`Exported ${n} corrections.`);
-            }}
-          >
-            Download corrections
-          </button>
-          <button
-            style={s.actionBtn}
-            onClick={() => {
-              const r = downloadBundle();
-              setExportMsg(`Bundle: ${r.clauses} clauses, ${r.corrections} corrections.`);
-            }}
-          >
-            Download bundle
-          </button>
-        </div>
-        {exportMsg && (
-          <div style={{
-            fontFamily: "'JetBrains Mono', monospace",
-            fontSize: 10,
-            color: theme.textMuted,
-          }}>
-            {exportMsg}
-          </div>
-        )}
-        <div style={{
-          fontFamily: "'JetBrains Mono', monospace",
-          fontSize: 9,
-          color: theme.textMuted,
-        }}>
-          Drop the JSON into <code>nl/training_data/</code> and re-run <code>generate_centroids.py</code>.
-        </div>
-      </div>
-    </div>
-  );
 }
