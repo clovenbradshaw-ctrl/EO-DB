@@ -372,14 +372,9 @@ function renderCell(value: any, key: string, onNavigate: (t: string) => void, t:
     return <ClearedCell t={t} />;
   }
 
-  // Computed/EVA fields with no ingested value
-  if ((value === undefined || value === '') && (
-    colType === 'formula' || colType === 'rollup' || colType === 'lookup' || colType === 'count'
-  )) {
-    return <span style={{ color: t.textMuted, fontStyle: 'italic', fontSize: 11 }}>(computed)</span>;
-  }
-
   // Absence: undefined or empty string — never asserted. Show a faint em-dash.
+  // (Computed-typed fields with no ingested value render the same em-dash as
+  //  any other empty cell — the explicit "(computed)" placeholder was noisy.)
   if (value === undefined || value === '') {
     return <AbsentCell t={t} />;
   }
