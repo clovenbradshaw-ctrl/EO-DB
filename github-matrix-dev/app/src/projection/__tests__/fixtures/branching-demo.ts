@@ -320,3 +320,55 @@ export async function materializeFixture(
     buildBranch,
   };
 }
+
+/**
+ * Build fixture events with synthetic sequential seq numbers starting at
+ * `seqBase`, without touching any store. Used by the in-memory "counterfactual
+ * demo" overlay in the Branch Explorer — demo events never enter the real
+ * log but flow into the ProjectionEngine via `getExtraEvents`.
+ */
+export function buildDemoEvents(
+  fixture: BranchingFixture,
+  seqBase: number,
+): {
+  events: EoEvent[];
+  synSeq: number;
+  buildBranch: (world: WorldType, stance?: EvaStance | null) => BranchRecord;
+} {
+  const events: EoEvent[] = [];
+  let synSeq = -1;
+  fixture.events.forEach((input, i) => {
+    const seq = seqBase + i;
+    const full: EoEvent = { ...input, seq };
+    events.push(full);
+    if (full.op === 'SYN') synSeq = full.seq;
+  });
+
+  if (synSeq < 0) {
+    throw new Error(`Fixture "${fixture.label}" has no SYN event`);
+  }
+
+  const buildBranch = (
+    world: WorldType,
+    stance: EvaStance | null = null,
+  ): BranchRecord => ({
+    branch_id: `demo-${fixture.survivor}-${world}`,
+    subject: fixture.sources.join(','),
+    survivor_id: fixture.survivor,
+    policy: {
+      world,
+      stance: world === 'always-merged' ? stance ?? 'clearing' : null,
+      suppress_event_ids:
+        world === 'never-merged' ? [String(synSeq)] : [],
+      retroject_event_ids:
+        world === 'always-merged' ? [String(synSeq)] : [],
+      branch_point_ts: fixture.synTs,
+    },
+    epistemic_status: 'projection-sketch',
+    author: TEST_AGENT,
+    created_at: fixture.synTs,
+    label: `demo-${world}`,
+  });
+
+  return { events, synSeq, buildBranch };
+}

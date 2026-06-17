@@ -9,7 +9,11 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useEoStore } from '../../store/eo-store';
-import { useBranchStore, listSynEvents } from '../../store/branch-store';
+import {
+  useBranchStore,
+  listSynEvents,
+  isDemoSeq,
+} from '../../store/branch-store';
 import { useTheme, type Theme } from '../../theme';
 import { BranchExplorer } from './BranchExplorer';
 import type { EoEvent } from '../../db/types';
@@ -31,11 +35,15 @@ export function BranchExplorerPanel() {
   const createBranchSet = useBranchStore((s) => s.createBranchSet);
   const setActiveBranchSubject = useBranchStore((s) => s.setActiveBranchSubject);
 
+  const demoEnabled = useBranchStore((s) => s.demoEnabled);
+  const loadDemo = useBranchStore((s) => s.loadCounterfactualDemo);
+  const unloadDemo = useBranchStore((s) => s.unloadCounterfactualDemo);
+
   const [synEvents, setSynEvents] = useState<EoEvent[]>([]);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Refresh SYN events when the log changes.
+  // Refresh SYN events when the log changes or the demo overlay toggles.
   useEffect(() => {
     if (!ready) return;
     let cancelled = false;
@@ -49,7 +57,7 @@ export function BranchExplorerPanel() {
     return () => {
       cancelled = true;
     };
-  }, [ready, lastSeq]);
+  }, [ready, lastSeq, demoEnabled]);
 
   // Filter the loaded branches to those whose subject matches the active subject.
   const visibleBranches = useMemo(
@@ -69,6 +77,11 @@ export function BranchExplorerPanel() {
 
     setActiveBranchSubject(subject);
     await loadBranchesForSubject(subject);
+
+    // Demo SYNs already have synthesized branches — never dispatch INS+DEF
+    // for them, since the whole point of the overlay is that it stays out
+    // of the real log.
+    if (isDemoSeq(event.seq)) return;
 
     const after = useBranchStore.getState().branches.filter((b) => b.subject === subject);
     if (after.length === 0) {
@@ -142,6 +155,7 @@ export function BranchExplorerPanel() {
             const sources = Array.isArray(operand?.merge) ? operand.merge.map((x) => String(x)) : [];
             const subject = sources.join(',');
             const isActive = subject === activeBranchSubject;
+            const isDemo = isDemoSeq(event.seq);
             return (
               <button
                 key={event.seq}
@@ -162,7 +176,24 @@ export function BranchExplorerPanel() {
                   marginBottom: 2,
                 }}
               >
-                <div style={{ fontWeight: 500 }}>seq #{event.seq}</div>
+                <div style={{ fontWeight: 500, display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span>{isDemo ? 'demo SYN' : `seq #${event.seq}`}</span>
+                  {isDemo && (
+                    <span
+                      style={{
+                        fontSize: 9,
+                        padding: '1px 5px',
+                        borderRadius: 3,
+                        background: theme.bgMuted,
+                        color: theme.textMuted,
+                        letterSpacing: '0.04em',
+                        textTransform: 'uppercase',
+                      }}
+                    >
+                      sample
+                    </span>
+                  )}
+                </div>
                 <div style={{ fontSize: 10, color: theme.textSecondary }}>{subject || '(empty merge)'}</div>
                 <div style={{ fontSize: 9, color: theme.textMuted }}>
                   {new Date(event.ts).toLocaleString()}
@@ -188,6 +219,11 @@ export function BranchExplorerPanel() {
             <BranchExplorerIntro
               theme={theme}
               hasSynEvents={synEvents.length > 0}
+              demoEnabled={demoEnabled}
+              onToggleDemo={() => {
+                if (demoEnabled) unloadDemo();
+                else loadDemo();
+              }}
             />
           ) : (
             <BranchExplorer branches={visibleBranches} />
@@ -203,6 +239,8 @@ export function BranchExplorerPanel() {
 interface IntroProps {
   theme: Theme;
   hasSynEvents: boolean;
+  demoEnabled: boolean;
+  onToggleDemo: () => void;
 }
 
 /**
@@ -210,7 +248,12 @@ interface IntroProps {
  * worlds, shows a miniature schematic of the fork, and gives step-by-step
  * guidance for producing the SYN event that opens a branch set.
  */
-function BranchExplorerIntro({ theme, hasSynEvents }: IntroProps) {
+function BranchExplorerIntro({
+  theme,
+  hasSynEvents,
+  demoEnabled,
+  onToggleDemo,
+}: IntroProps) {
   const worlds: Array<{
     world: WorldType;
     title: string;
@@ -338,6 +381,13 @@ function BranchExplorerIntro({ theme, hasSynEvents }: IntroProps) {
         ))}
       </div>
 
+      {/* Sample counterfactual data toggle (ephemeral, not persisted) */}
+      <SampleDataToggle
+        theme={theme}
+        enabled={demoEnabled}
+        onToggle={onToggleDemo}
+      />
+
       {/* How to open a branch set */}
       <section
         style={{
@@ -412,6 +462,113 @@ function BranchExplorerIntro({ theme, hasSynEvents }: IntroProps) {
         read and cached in memory only.
       </div>
     </div>
+  );
+}
+
+/**
+ * Toggle that loads a ready-made counterfactual merge scenario into the
+ * Branch Explorer. The fixture events live in memory only — they never hit
+ * the Given-Log, never sync to peers, and vanish when the toggle is flipped
+ * off or the space is switched.
+ */
+function SampleDataToggle({
+  theme,
+  enabled,
+  onToggle,
+}: {
+  theme: Theme;
+  enabled: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <section
+      style={{
+        border: `0.5px solid ${enabled ? theme.successBorder : theme.borderLight}`,
+        background: enabled ? theme.successBg : 'transparent',
+        borderRadius: 6,
+        padding: '14px 18px',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 16,
+      }}
+    >
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div
+          style={{
+            fontSize: 10,
+            color: theme.textMuted,
+            textTransform: 'uppercase',
+            letterSpacing: '0.08em',
+            fontFamily: 'monospace',
+            marginBottom: 6,
+          }}
+        >
+          sample data — ephemeral
+        </div>
+        <div
+          style={{
+            fontSize: 12,
+            color: theme.textSecondary,
+            fontFamily: 'monospace',
+            lineHeight: 1.6,
+          }}
+        >
+          Load a CRM contact-merge scenario (<code>contact:jordan_w</code> +{' '}
+          <code>contact:j_walker_alt</code> → <code>contact:j_walker</code>) so
+          you can drag the scrubber and see the three worlds diverge in real
+          time. Events are held in memory only — nothing is written to the log
+          or synced to peers.
+        </div>
+      </div>
+      <label
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 8,
+          cursor: 'pointer',
+          userSelect: 'none',
+          fontFamily: 'monospace',
+          fontSize: 11,
+          color: theme.textSecondary,
+        }}
+      >
+        <input
+          type="checkbox"
+          checked={enabled}
+          onChange={onToggle}
+          style={{ display: 'none' }}
+        />
+        <span
+          aria-hidden="true"
+          style={{
+            display: 'inline-block',
+            position: 'relative',
+            width: 36,
+            height: 20,
+            borderRadius: 10,
+            background: enabled ? theme.success : theme.bgMuted,
+            border: `0.5px solid ${enabled ? theme.successBorder : theme.border}`,
+            transition: 'background 0.15s',
+          }}
+        >
+          <span
+            style={{
+              position: 'absolute',
+              top: 2,
+              left: 2,
+              width: 14,
+              height: 14,
+              borderRadius: '50%',
+              background: '#fff',
+              transform: enabled ? 'translateX(16px)' : 'translateX(0)',
+              transition: 'transform 0.15s',
+              boxShadow: '0 1px 2px rgba(0,0,0,0.2)',
+            }}
+          />
+        </span>
+        <span>{enabled ? 'on' : 'off'}</span>
+      </label>
+    </section>
   );
 }
 
